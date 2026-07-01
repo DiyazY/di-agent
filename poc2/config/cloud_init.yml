@@ -1,0 +1,35 @@
+#cloud-config
+# Set root password to "password" (change this!)
+chpasswd:
+  list: |
+     root:12345678
+  expire: false
+# Enable SSH password authentication
+ssh_pwauth: true
+
+# Install and enable SSH server
+packages:
+  - openssh-server
+
+# Optional: Add SSH public key for key-based auth (more secure)
+ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINUPgcNBHDvLePrFEcNf/gWhYqGFHOwCcwXX3YNBVLvG
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    # Password is "ubuntu123" - CHANGE THIS!
+    passwd: 12345678
+    lock_passwd: false
+    ssh_pwauth: true
+    chpasswd:
+      expire: false
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINUPgcNBHDvLePrFEcNf/gWhYqGFHOwCcwXX3YNBVLvG
+
+# Set timezone
+timezone: UTC
+
+# Final message on console
+final_message: "VM1 is ready! SSH: ssh root@<IP>"

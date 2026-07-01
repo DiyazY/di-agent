@@ -26,7 +26,8 @@ PRIORS="${PRIORS:-}"
 ALPHA="${ALPHA:-0.2}"
 CONVERGENCE="${CONVERGENCE:-500}"
 
-AGENT_BIN="/tmp/semantic-map-agent"
+# AGENT_BIN="/tmp/semantic-map-agent"
+AGENT_BIN="./cmd/agent/tmp/di-agent-poc"
 MAPCTL_BIN="/tmp/semantic-map-mapctl"
 REPLAY_BIN="/tmp/semantic-map-replay"
 LOG_FILE="/tmp/semantic-map-agent.log"
@@ -76,12 +77,12 @@ ensure_jq() {
 
 cmd_build() {
     step "go build -o $AGENT_BIN ./cmd/agent"
-    go build -o "$AGENT_BIN" ./cmd/agent
-    step "go build -o $MAPCTL_BIN ./cmd/mapctl"
-    go build -o "$MAPCTL_BIN" ./cmd/mapctl
-    step "go build -o $REPLAY_BIN ./cmd/replay"
-    go build -o "$REPLAY_BIN" ./cmd/replay
-    info "built: $AGENT_BIN, $MAPCTL_BIN, $REPLAY_BIN"
+    GOOS=linux GOARCH=amd64 go build -o "$AGENT_BIN" ./cmd/agent
+    # step "go build -o $MAPCTL_BIN ./cmd/mapctl"
+    # GOOS=linux GOARCH=arm64 go build -o "$MAPCTL_BIN" ./cmd/mapctl
+    # step "go build -o $REPLAY_BIN ./cmd/replay"
+    # GOOS=linux GOARCH=arm64 go build -o "$REPLAY_BIN" ./cmd/replay
+    # info "built: $AGENT_BIN, $MAPCTL_BIN, $REPLAY_BIN"
 }
 
 cmd_start() {
