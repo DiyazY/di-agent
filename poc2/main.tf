@@ -128,18 +128,18 @@ resource "libvirt_domain" "vm1" {
         model = { 
           type = "virtio" 
         }
-        source = {
-          network = {
-            network = "default"
-          }
-        }
-
-        // This is for bridge network
         # source = {
-        #   bridge = {
-        #     bridge = "nm-bridge"
+        #   network = {
+        #     network = "default"
         #   }
         # }
+
+        // This is for bridge network
+        source = {
+          bridge = {
+            bridge = "nm-bridge"
+          }
+        }
       }
     ]
 

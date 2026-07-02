@@ -7,6 +7,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# Useful for using network = "default"
+# get_vm_ip() {
+#     virsh domifaddr "$1" | awk '/ipv4/ {print $4}' | cut -d'/' -f1 | head -n1
+# }
+
 get_vm_ip() {
     local vm="$1"
     
@@ -99,7 +104,7 @@ main() {
 
         if [ "$first_vm" = true ]; then
             echo -e "${YELLOW}Running: uc machine init ubuntu@$vm_ip --no-dns${NC}"
-            uc machine init "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy --no-dns
+            uc machine init "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy --no-dns --public-ip none
             first_vm=false
         else
             echo -e "${YELLOW}Running: uc machine add ubuntu@$vm_ip --no-dns${NC}"

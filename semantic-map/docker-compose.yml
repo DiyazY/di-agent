@@ -13,8 +13,6 @@ services:
       - "9090:9090@host" 
     x-machines:
       - ubuntu-vm1
-      - ubuntu-vm2
-      - ubuntu-vm3
 
   mediamtx:
     image: bluenviron/mediamtx:latest-ffmpeg # Includes ffmpeg for any needed transcoding [citation:4]
@@ -35,5 +33,3 @@ services:
       - 8554:8554@host
     x-machines:
       - ubuntu-vm1
-      - ubuntu-vm2
-      - ubuntu-vm3
