@@ -22,10 +22,6 @@ $(eval $(call generate_vm_vars))
 # Create VM list for command arguments
 VM_ARGS := $(foreach i,$(shell seq 1 $(VM_COUNT)),$(VM$(i)))
 
-# Check if we have any VMs
-ifeq ($(VM_COUNT),0)
-$(error No VMs found. Please create VMs first.)
-endif
 
 SCRIPTS := ./scripts
 
@@ -62,13 +58,13 @@ demo:
 	@bash $(SCRIPTS)/coordinator.sh $(VM_ARGS)
 
 workload-heavy:
-	@bash $(SCRIPTS)/workload.sh $(VM1) heavy
+	@bash $(SCRIPTS)/workload.sh $(firstword $(VMS)) heavy
 
 workload-light:
-	@bash $(SCRIPTS)/workload.sh $(VM1) light
+	@bash $(SCRIPTS)/workload.sh $(firstword $(VMS)) light
 
 workload-stop:
-	@bash $(SCRIPTS)/workload.sh $(VM1) stop
+	@bash $(SCRIPTS)/workload.sh $(firstword $(VMS)) stop
 
 teardown:
 	@bash $(SCRIPTS)/teardown.sh $(VM_ARGS)

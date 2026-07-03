@@ -5,6 +5,27 @@
 
 set -e  # Exit on any error
 
+# ============================================
+# 1. Disable AppArmor for libvirt (if needed)
+# ============================================
+echo "🔍 Checking AppArmor profile for libvirt..."
+
+# Check if the profile is currently loaded
+if aa-status | grep -q "libvirtd"; then
+    echo "⚠️  AppArmor libvirt profile is loaded. Unloading it now (requires sudo)."
+    # Unload the profile and restart libvirtd
+    sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.libvirtd
+    sudo systemctl restart libvirtd
+    echo "✅ AppArmor profile unloaded and libvirtd restarted."
+else
+    echo "✅ AppArmor libvirt profile is already unloaded (or not present). Skipping."
+fi
+echo ""
+
+# ============================================
+# Continue with your existing Terraform steps
+# ============================================
+
 echo "🚀 Starting Terraform automation..."
 echo ""
 

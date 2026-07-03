@@ -1,8 +1,16 @@
+# Create the default storage pool
+resource "libvirt_pool" "pool_1" {
+  name = "pool_1"
+  type = "dir"
+  target = {
+    path = "/var/lib/libvirt/images"
+  }
+}
+
 # Download Ubuntu 22.04 (Jammy) cloud image
-# Ubuntu cloud images have excellent cloud-init support
 resource "libvirt_volume" "ubuntu_base" {
   name   = "ubuntu-jammy-base.qcow2"
-  pool   = "default"
+  pool   = libvirt_pool.pool_1.name
   target = {
     format = {
       type = "qcow2"
@@ -21,7 +29,7 @@ resource "libvirt_volume" "ubuntu_base" {
 resource "libvirt_volume" "vm_disk" {
   count  = var.vm_count
   name   = "vm${count.index + 1}-disk.index"
-  pool   = "default"
+  pool   = libvirt_pool.pool_1.name
   target = {
     format = {
       type = "qcow2"
@@ -54,7 +62,7 @@ resource "libvirt_cloudinit_disk" "vm_init" {
 resource "libvirt_volume" "vm_cloudinit" {
   count  = var.vm_count
   name = "vm${count.index + 1}-cloudinit.iso"
-  pool = "default"
+  pool = libvirt_pool.pool_1.name
   # Format will be auto-detected as "iso"
 
   create = {
@@ -71,7 +79,7 @@ resource "libvirt_domain" "vm1" {
   memory = 3 # 3 GB
   memory_unit = "GiB"
   vcpu   = 1
-  type   = "kvm"
+  type   = "qemu"
 
   # Boot configuration
   os = {
@@ -128,18 +136,18 @@ resource "libvirt_domain" "vm1" {
         model = { 
           type = "virtio" 
         }
-        # source = {
-        #   network = {
-        #     network = "default"
-        #   }
-        # }
-
-        // This is for bridge network
         source = {
-          bridge = {
-            bridge = "nm-bridge"
+          network = {
+            network = "default"
           }
         }
+
+        // This is for bridge network
+        # source = {
+        #   bridge = {
+        #     bridge = "nm-bridge"
+        #   }
+        # }
       }
     ]
 
