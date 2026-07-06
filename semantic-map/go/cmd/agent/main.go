@@ -80,7 +80,9 @@ func main() {
 	regime          := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
+	var useRuleBasedTuner bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
+	flag.BoolVar(&useRuleBasedTuner, "rule-based-tuner", true, "enable rule-based operator tuning (disable to turn off /agent/tune)")
 	flag.Parse()
 
 	if err := applyRegime(*regime, alpha, convergence); err != nil {
@@ -107,6 +109,7 @@ func main() {
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
 		UseProposer:          useProposer,
+		UseRuleBasedTuner:	  useRuleBasedTuner,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)
