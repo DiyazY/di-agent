@@ -21,7 +21,7 @@ cd "$SCRIPT_DIR"
 
 PORT="${PORT:-8080}"
 PROFILE="${PROFILE:-edge-minimal}"
-KD="${KD:-}"
+KD="${KD:-k0s}"
 PRIORS="${PRIORS:-}"
 ALPHA="${ALPHA:-0.2}"
 CONVERGENCE="${CONVERGENCE:-500}"
@@ -121,8 +121,27 @@ cmd_stop() {
         warn "no agent running on :$PORT"
         return 0
     fi
+    
+    # Kill the process
     step "kill -9 $pid"
     kill -9 "$pid" 2>/dev/null || true
+    
+    # Wait and check if it restarted
+    sleep 2
+    local new_pid
+    new_pid="$(running_pid)"
+    
+    if [[ -n "$new_pid" && "$new_pid" != "$pid" ]]; then
+        warn "process was restarted with new PID $new_pid"
+        # Try to find and stop the parent process
+        local parent_pid
+        parent_pid="$(ps -o ppid= -p "$new_pid" | tr -d ' ')"
+        if [[ -n "$parent_pid" && "$parent_pid" != "1" ]]; then
+            info "attempting to stop parent process $parent_pid"
+            kill -9 "$parent_pid" 2>/dev/null || true
+        fi
+    fi
+    
     sleep 1
     info "stopped"
 }
