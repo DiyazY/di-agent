@@ -1,16 +1,16 @@
 # Create the default storage pool
-resource "libvirt_pool" "pool_1" {
-  name = "pool_1"
+resource "libvirt_pool" "pool" {
+  name = var.pool_name
   type = "dir"
   target = {
-    path = "/var/lib/libvirt/images"
+    path = var.pool_path
   }
 }
 
 # Download Ubuntu 22.04 (Jammy) cloud image
 resource "libvirt_volume" "ubuntu_base" {
   name   = "ubuntu-jammy-base.qcow2"
-  pool   = libvirt_pool.pool_1.name
+  pool   = libvirt_pool.pool.name
   target = {
     format = {
       type = "qcow2"
@@ -29,14 +29,14 @@ resource "libvirt_volume" "ubuntu_base" {
 resource "libvirt_volume" "vm_disk" {
   count  = var.vm_count
   name   = "vm${count.index + 1}-disk.index"
-  pool   = libvirt_pool.pool_1.name
+  pool   = libvirt_pool.pool.name
   target = {
     format = {
       type = "qcow2"
     }
   }
 
-  capacity      = 20 
+  capacity      = 15 
   capacity_unit = "GiB"
 
   backing_store = {
@@ -62,7 +62,7 @@ resource "libvirt_cloudinit_disk" "vm_init" {
 resource "libvirt_volume" "vm_cloudinit" {
   count  = var.vm_count
   name = "vm${count.index + 1}-cloudinit.iso"
-  pool = libvirt_pool.pool_1.name
+  pool = libvirt_pool.pool.name
   # Format will be auto-detected as "iso"
 
   create = {
@@ -80,6 +80,7 @@ resource "libvirt_domain" "vm1" {
   memory_unit = "GiB"
   vcpu   = 1
   type   = "qemu"
+  # type = "kvm"
 
   # Boot configuration
   os = {

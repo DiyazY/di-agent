@@ -12,3 +12,13 @@ variable "vm_count" {
   description = "Number of VMs to create"
   default     = 1
 }
+
+variable "pool_name" {
+  description = "Name of the pool"
+  default     = "pool_1"
+}
+
+variable "pool_path" {
+  description = "Path of the pool"
+  default     = "/var/lib/libvirt/images/pool_1"
+}

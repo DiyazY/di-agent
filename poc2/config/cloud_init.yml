@@ -30,6 +30,3 @@ users:
 
 # Set timezone
 timezone: UTC
-
-# Final message on console
-final_message: "VM1 is ready! SSH: ssh root@<IP>"
