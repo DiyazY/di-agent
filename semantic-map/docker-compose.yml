@@ -11,25 +11,3 @@ services:
       mode: global
     x-ports:
       - "9090:9090@host" 
-    x-machines:
-      - ubuntu-vm1
-
-  mediamtx:
-    image: bluenviron/mediamtx:latest-ffmpeg # Includes ffmpeg for any needed transcoding [citation:4]
-    restart: unless-stopped
-    environment:
-      # HLS Configuration
-      MTX_HLS: "yes"
-      MTX_HLSADDRESS: ":8888"
-      MTX_HLSVARIANT: "mpegts" # Broad compatibility [citation:4]
-      
-      # Camera Source (Replace with your camera's RTSP URL)
-      # MTX_PATHS_CAMERA1_SOURCE: "rtsp://admin:PASSWORD@192.168.1.64:554/your/stream/path"
-
-      # Logging
-      MTX_LOGLEVEL: "info"
-    x-ports:
-      - 8888:8888@host  # HLS
-      - 8554:8554@host
-    x-machines:
-      - ubuntu-vm1

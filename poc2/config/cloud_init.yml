@@ -1,32 +1,28 @@
 #cloud-config
-# Set root password to "password" (change this!)
-chpasswd:
-  list: |
-     root:12345678
-  expire: false
-# Enable SSH password authentication
-ssh_pwauth: true
 
 # Install and enable SSH server
 packages:
   - openssh-server
+  - python3-pip
+  - build-essential
+  - cmake
 
-# Optional: Add SSH public key for key-based auth (more secure)
+# Required: Add SSH public key for key-based auth (more secure)
 ssh_authorized_keys:
-  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINUPgcNBHDvLePrFEcNf/gWhYqGFHOwCcwXX3YNBVLvG
+  - ssh-ed25519
 
 users:
   - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    # Password is "ubuntu123" - CHANGE THIS!
+    # Password is "12345678" - CHANGE THIS!
     passwd: 12345678
     lock_passwd: false
     ssh_pwauth: true
     chpasswd:
       expire: false
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINUPgcNBHDvLePrFEcNf/gWhYqGFHOwCcwXX3YNBVLvG
+      - ssh-ed25519
 
 # Set timezone
 timezone: UTC

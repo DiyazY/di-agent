@@ -1,4 +1,4 @@
-# Create the default storage pool
+# Create the storage pool
 resource "libvirt_pool" "pool" {
   name = var.pool_name
   type = "dir"
@@ -19,13 +19,12 @@ resource "libvirt_volume" "ubuntu_base" {
 
   create = {
     content = {
-      # Ubuntu 22.04 LTS (Jammy Jellyfish) cloud image
       url = var.ubuntu_22_img_url
     }
   }
 }
 
-# Create boot disk for VM1 (uses base image as backing store)
+# Create boot disk for VM (uses base image as backing store)
 resource "libvirt_volume" "vm_disk" {
   count  = var.vm_count
   name   = "vm${count.index + 1}-disk.index"
@@ -76,17 +75,20 @@ resource "libvirt_volume" "vm_cloudinit" {
 resource "libvirt_domain" "vm1" {
   count  = var.vm_count
   name   = "${var.vm_hostname}${count.index + 1}"
-  memory = 3 # 3 GB
+  memory = 3
   memory_unit = "GiB"
   vcpu   = 1
-  type   = "qemu"
-  # type = "kvm"
+  type = "kvm"
 
   # Boot configuration
   os = {
     type    = "hvm"
     type_arch    = "x86_64"
     type_machine = "q35"
+  }
+
+  cpu = {
+    mode = "host-passthrough"
   }
 
   # Attached disks
@@ -189,10 +191,6 @@ output "instructions" {
 
     Or check the DHCP leases:
       sudo virsh net-dhcp-leases default
-
-    To connect via SSH (once you know the IP):
-      ssh root@<IP-ADDRESS>
-      Password: password
 
     To view VM console:
       sudo virsh console ubuntu-vm1

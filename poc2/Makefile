@@ -9,18 +9,18 @@
 ## Auto-detects all VMs at runtime using virsh
 
 # Auto-detect VMs from virsh (only running VMs)
-VMS := $(shell virsh list --all --name 2>/dev/null | grep -v "^$$" | sort)
+VMS := $(virsh list --all --name 2>/dev/null | grep -v "^$$" | sort)
 VM_COUNT := $(words $(VMS))
 
 # Generate VM variables dynamically (VM1, VM2, VM3, ...)
 define generate_vm_vars
-$(foreach i,$(shell seq 1 $(VM_COUNT)),VM$(i) ?= $(word $(i),$(VMS))$(\n))
+$(foreach i,$(seq 1 $(VM_COUNT)),VM$(i) ?= $(word $(i),$(VMS))$(\n))
 endef
 
 $(eval $(call generate_vm_vars))
 
 # Create VM list for command arguments
-VM_ARGS := $(foreach i,$(shell seq 1 $(VM_COUNT)),$(VM$(i)))
+VM_ARGS := $(foreach i,$(seq 1 $(VM_COUNT)),$(VM$(i)))
 
 
 SCRIPTS := ./scripts
@@ -28,7 +28,7 @@ SCRIPTS := ./scripts
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
 
-all: provision uncloud netdata agent peers
+all: provision uncloud agent peers
 
 provision:
 	@bash $(SCRIPTS)/01-provision.sh
@@ -36,14 +36,11 @@ provision:
 uncloud:
 	@bash $(SCRIPTS)/02-uncloud.sh $(VM_ARGS)
 
-netdata:
-	@bash $(SCRIPTS)/03-netdata.sh $(VM_ARGS)
-
 agent:
-	@bash $(SCRIPTS)/04-agent.sh
+	@bash $(SCRIPTS)/03-agent.sh
 
 peers:
-	@bash $(SCRIPTS)/05-peers.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/04-peers.sh $(VM_ARGS)
 
 start-vms:
 	@bash $(SCRIPTS)/startVMS.sh $(VM_ARGS)
