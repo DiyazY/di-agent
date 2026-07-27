@@ -1103,6 +1103,14 @@ Two things live in a session:
 
 Whole-cache invalidation rather than per-key is deliberate: the graph is 7 nodes and 15 edges. Reasoning about which cached results a given mutation could have affected costs more, in code and in bug surface, than just refetching.
 
+Three properties of the transcript are load-bearing:
+
+- **Only successful turns are recorded.** A response that failed Gate 1 or was rejected by Gate 2 is returned to the caller but never enters session history. Persisting it would replay the model's own rejected output as an assistant message on the next turn — the model would treat its mistake as established context. That is exactly the circular self-confirmation the anchors in §8 exist to prevent, and it fails *silently*, because a bad answer in the transcript looks like history rather than like an error.
+- **Only the answer text is replayed**, not the serialized `ExplainResponse`. Replaying the full DTO would push `tool_trace`, `usage`, `plan`, and `critic_verdict` back into context — measured at ~16× the answer's size (813 bytes vs 49 for a typical response, ~4 000 tokens at a full 20-turn buffer). None of it is actionable for the model, and on a small-context local model it can evict the system prompt. The failure mode there presents as *"the model forgot its instructions"*, which is expensive to trace back to its cause.
+- **`Get` returns a defensive copy.** Two concurrent `/explain` calls may legitimately carry the same `session_id`; handing out the live `*Session` would race the turn slice against `AppendTurn`. Mutation goes exclusively through `AppendTurn` / `CacheTool` / `InvalidateOnMutation`, all of which take the store lock. `TestSessionStore_ConcurrentAccessIsRaceFree` exercises this under `-race`.
+
+Idle sessions are swept on `Create` rather than by a background ticker. `Create` is the only moment the store grows, so it is exactly when reclaiming dead entries matters, and a goroutine would need lifecycle management and leak tests to reclaim memory nobody is contending for.
+
 Sessions are **not persisted**. They carry no scientific role — P6 results come from the reasoner, not the Explainer — so crash-recovery machinery would be complexity without a customer. The durable substrate already exists: `/graph` and `/history`.
 
 An unknown `session_id` returns an error rather than silently minting a fresh session. A client that lost its ID should find out, not get an amnesiac conversation that looks like it worked.
@@ -1114,7 +1122,8 @@ An unknown `session_id` returns an error rather than silently minting a fresh se
 ```
 {"event":"session","session_id":"a3f2..."}
 {"event":"planning"}
-{"event":"plan","plan":{"approach":"...","steps":[...]}}
+{"event":"plan","plan":{"approach":"...","steps":[...]}}     ← plan always non-nil
+{"event":"plan_failed","error":"..."}                        ← the alternative; no plan field
 {"event":"tool_call","tool":"get_cost","args":{"node_id":"master"}}
 {"event":"tool_result","tool":"get_cost","digest":"cost node=master rc=0.0350"}
 {"event":"answering","iteration":1}

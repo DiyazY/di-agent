@@ -426,6 +426,61 @@ func TestExplain_SessionMintsIDAndPersistsTurn(t *testing.T) {
 	}
 }
 
+// A response that never cleared the gates must NOT enter session history.
+// Persisting it would replay the model's own rejected output as an assistant
+// message on the next turn — the circular self-confirmation the architecture
+// guards against.
+func TestExplain_FailedResponseIsNotPersistedToSession(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	// Every attempt cites a fabricated P99, so all 3 iterations fail Gate 1.
+	bad := assistantOnly(`{"answer":"P99 did it.","citations":[{"kind":"edge","id":"P99","ema_weight":0.42}],"confidence":"high"}`)
+	e, _, _ := newV2Explainer(t, []string{bad, bad, bad}, store)
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{Question: "Why?"})
+	if err == nil {
+		t.Fatal("expected the request to fail validation after MaxIterations")
+	}
+	if resp == nil || resp.SessionID == "" {
+		t.Fatalf("expected a partial response carrying the session id; got %+v", resp)
+	}
+	sess, gErr := store.Get(resp.SessionID)
+	if gErr != nil {
+		t.Fatalf("session should exist: %v", gErr)
+	}
+	if len(sess.Turns) != 0 {
+		t.Errorf("a failed response must not be recorded; found %d turn(s): %+v", len(sess.Turns), sess.Turns)
+	}
+}
+
+// The successful counterpart: a response clearing every gate IS persisted,
+// and only its answer text is kept — not the serialized DTO.
+func TestExplain_SucceededResponsePersistsAnswerTextOnly(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	e, sm, llm := newV2Explainer(t, []string{""}, store)
+	e0 := firstEdge(t, sm)
+	llm.responses[0] = groundedAnswer(e0, "Driven by "+e0.ID+".")
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{Question: "Why?"})
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	sess, err := store.Get(resp.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Turns) != 1 {
+		t.Fatalf("expected the successful turn recorded; got %d", len(sess.Turns))
+	}
+	got := sess.Turns[0].Answer
+	if got != resp.Answer {
+		t.Errorf("stored answer should match the response answer\n got: %q\nwant: %q", got, resp.Answer)
+	}
+	// The stored turn must be the answer, not a serialized response object.
+	if strings.Contains(got, "tool_trace") || strings.Contains(got, "schema_version") {
+		t.Errorf("stored turn leaked response metadata into the transcript: %q", got)
+	}
+}
+
 func TestExplain_UnknownSessionIDFailsLoudly(t *testing.T) {
 	store := explain.NewSessionStore(explain.SessionConfig{})
 	e, _, _ := newV2Explainer(t, []string{assistantOnly(`{"answer":"x","citations":[]}`)}, store)

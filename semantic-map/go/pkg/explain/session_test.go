@@ -2,6 +2,7 @@ package explain_test
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,8 +35,7 @@ func TestSessionStore_AppendTurnTrimsBuffer(t *testing.T) {
 	store := explain.NewSessionStore(explain.SessionConfig{MaxMessagesPerSes: 3})
 	s := store.Create()
 	for i := 0; i < 5; i++ {
-		body := []byte(`{"answer":"turn-` + string(rune('0'+i)) + `"}`)
-		if err := store.AppendTurn(s.ID, "q", json.RawMessage(body)); err != nil {
+		if err := store.AppendTurn(s.ID, "q", "turn-"+string(rune('0'+i))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -47,9 +47,96 @@ func TestSessionStore_AppendTurnTrimsBuffer(t *testing.T) {
 		t.Errorf("expected 3 turns (buffer trimmed to MaxMessagesPerSes); got %d", len(got.Turns))
 	}
 	// The three surviving turns must be the most recent three.
-	if !containsAnswer(got.Turns[0].Response, "turn-2") ||
-		!containsAnswer(got.Turns[2].Response, "turn-4") {
+	if got.Turns[0].Answer != "turn-2" || got.Turns[2].Answer != "turn-4" {
 		t.Errorf("expected surviving turns to be turn-2..turn-4; got %+v", got.Turns)
+	}
+}
+
+// Get must hand back a copy. Mutating it, or holding it across a concurrent
+// AppendTurn, must not touch stored state — this is the contract that makes
+// the unlocked read in explain() safe.
+func TestSessionStore_GetReturnsDefensiveCopy(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	s := store.Create()
+	if err := store.AppendTurn(s.ID, "q1", "a1"); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.Get(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mutate the copy.
+	first.Turns[0].Answer = "TAMPERED"
+	first.Turns = append(first.Turns, explain.SessionTurn{Question: "ghost", Answer: "ghost"})
+
+	second, err := store.Get(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Turns) != 1 {
+		t.Errorf("appending to a returned copy must not grow stored state; got %d turns", len(second.Turns))
+	}
+	if second.Turns[0].Answer != "a1" {
+		t.Errorf("mutating a returned copy must not alter stored state; got %q", second.Turns[0].Answer)
+	}
+}
+
+// The store is reachable from an HTTP handler, so every exported method must
+// be safe under concurrent use. Run with -race.
+func TestSessionStore_ConcurrentAccessIsRaceFree(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{MaxMessagesPerSes: 8})
+	s := store.Create()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				switch n % 4 {
+				case 0:
+					_ = store.AppendTurn(s.ID, "q", "a")
+				case 1:
+					// The pattern explain() uses: Get, then iterate the turns
+					// outside the lock while other goroutines append.
+					if got, err := store.Get(s.ID); err == nil {
+						for _, turn := range got.Turns {
+							_ = turn.Answer
+						}
+					}
+				case 2:
+					args := map[string]any{"k": n}
+					_ = store.CacheTool(s.ID, "get_peers", args, []byte(`[]`), "d")
+					store.CachedTool(s.ID, "get_peers", args)
+				case 3:
+					store.InvalidateOnMutation(s.ID, time.Now())
+					_ = store.Len()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// Idle sessions must be reclaimed, not merely ignored until LRU pressure.
+func TestSessionStore_SweepsIdleSessionsOnCreate(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{
+		MaxSessions:    50, // well above what we create, so LRU never fires
+		SessionIdleTTL: 20 * time.Millisecond,
+	})
+	for i := 0; i < 5; i++ {
+		store.Create()
+	}
+	if store.Len() != 5 {
+		t.Fatalf("expected 5 live sessions; got %d", store.Len())
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	// Creating one more should sweep the five now-expired entries.
+	store.Create()
+	if got := store.Len(); got != 1 {
+		t.Errorf("expected the 5 idle sessions to be swept, leaving 1; got %d", got)
 	}
 }
 
@@ -118,16 +205,4 @@ func TestSessionStore_TouchOnGetKeepsSessionAlive(t *testing.T) {
 	if _, err := store.Get(c.ID); err != nil {
 		t.Errorf("expected C to exist; err=%v", err)
 	}
-}
-
-// containsAnswer checks whether a raw JSON message has the given answer
-// string. Small helper used by TestSessionStore_AppendTurnTrimsBuffer.
-func containsAnswer(raw json.RawMessage, want string) bool {
-	var wrap struct {
-		Answer string `json:"answer"`
-	}
-	if err := json.Unmarshal(raw, &wrap); err != nil {
-		return false
-	}
-	return wrap.Answer == want
 }

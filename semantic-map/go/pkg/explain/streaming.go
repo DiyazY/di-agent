@@ -47,8 +47,13 @@ const (
 	EventSession EventKind = "session"
 	// EventPlanning fires when the planner turn starts.
 	EventPlanning EventKind = "planning"
-	// EventPlan carries the parsed plan once the planner returns.
+	// EventPlan carries the parsed plan once the planner returns. Its Plan
+	// field is always non-nil — a planner that failed emits EventPlanFailed
+	// instead, so a consumer switching on EventPlan can dereference safely.
 	EventPlan EventKind = "plan"
+	// EventPlanFailed reports that planning did not produce a usable plan.
+	// The request continues without one; Error carries the reason.
+	EventPlanFailed EventKind = "plan_failed"
 	// EventToolCall fires immediately before a tool is dispatched.
 	EventToolCall EventKind = "tool_call"
 	// EventToolResult fires after a tool returns, carrying its digest.

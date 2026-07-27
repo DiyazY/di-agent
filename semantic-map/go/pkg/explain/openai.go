@@ -202,6 +202,8 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 	// finish stamps every non-user-facing bookkeeping field on a candidate
 	// response so both the success and partial-failure paths report the same
 	// provenance shape. Called just before we return.
+	//
+	// Deliberately does NOT persist to the session — see persistTurn.
 	finish := func(resp *ExplainResponse, iter int) {
 		if resp == nil {
 			return
@@ -217,11 +219,23 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 		usage.ToolCalls = toolCallsSpent
 		usage.WallClockMs = time.Since(startedAt).Milliseconds()
 		resp.Usage = usage
-		if session != nil {
-			if raw, err := json.Marshal(resp); err == nil {
-				_ = e.cfg.Sessions.AppendTurn(session.ID, req.Question, raw)
-			}
+	}
+
+	// persistTurn records the exchange in the session. Called ONLY when a
+	// response cleared every gate that was enabled.
+	//
+	// A response that failed validation or was rejected by the critic must
+	// never enter the transcript: the next turn replays prior answers as
+	// assistant messages, so persisting a bad one would feed the model its
+	// own rejected output as established context. That is the circular
+	// self-confirmation the architecture guards against (§8) — the failure
+	// mode is silent, because the bad answer looks like history rather than
+	// like a mistake.
+	persistTurn := func(resp *ExplainResponse) {
+		if session == nil || resp == nil {
+			return
 		}
+		_ = e.cfg.Sessions.AppendTurn(session.ID, req.Question, resp.Answer)
 	}
 
 	// ── build the answering agent's opening context ───────────────────────
@@ -230,11 +244,15 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 	// Prior turns give the answering agent conversational continuity so the
 	// operator can ask follow-ups ("what about diag-2?") without restating
 	// context. Bounded by the session store's MaxMessagesPerSes.
+	// Only the answer text is replayed, not the serialized response. The
+	// tool_trace / usage / plan blocks are ~16x the answer's size and carry
+	// nothing the model can act on; replaying them crowds out the system
+	// prompt on small-context local models.
 	if session != nil {
 		for _, turn := range session.Turns {
 			messages = append(messages,
 				chatMessage{Role: "user", Content: turn.Question},
-				chatMessage{Role: "assistant", Content: string(turn.Response)},
+				chatMessage{Role: "assistant", Content: turn.Answer},
 			)
 		}
 	}
@@ -249,7 +267,7 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 			// A failed planner must not fail the request. Fall through to
 			// unplanned execution and tell the answering agent why its
 			// evidence bundle is missing.
-			emit(Event{Kind: EventPlan, Message: "planner failed, falling back to unplanned execution", Error: err.Error()})
+			emit(Event{Kind: EventPlanFailed, Message: "falling back to unplanned execution", Error: err.Error()})
 			messages = append(messages, chatMessage{
 				Role:    "user",
 				Content: "NOTE: the planning stage failed (" + err.Error() + "). Gather evidence with tool calls yourself.",
@@ -346,6 +364,7 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 							Issues:   []string{"critic unavailable: " + cErr.Error()},
 						}
 						finish(parsed, iter)
+						persistTurn(parsed)
 						return parsed, nil
 					}
 					lastVerdict = verdict
@@ -358,6 +377,7 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 				}
 
 				finish(parsed, iter)
+				persistTurn(parsed)
 				return parsed, nil
 			}
 

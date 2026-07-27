@@ -75,9 +75,17 @@ func NewSessionStore(cfg SessionConfig) *SessionStore {
 	}
 }
 
-// Session is the per-conversation state kept in memory. Access is protected by
-// the store's mutex when reached via Get/Put; direct field access is safe
-// only inside the store's critical sections.
+// Session is the per-conversation state kept in memory.
+//
+// Concurrency contract: the canonical Session lives inside the store and is
+// only ever touched while the store's mutex is held. Get returns a defensive
+// copy — callers may read it freely, but their copy will not observe later
+// writes, and mutating it has no effect on stored state. Mutations go through
+// AppendTurn / CacheTool / InvalidateOnMutation, which take the lock.
+//
+// This matters because two concurrent /explain calls can legitimately carry
+// the same session_id. Handing out the live pointer would race the turn slice
+// against AppendTurn.
 type Session struct {
 	ID        string
 	CreatedAt time.Time
@@ -90,6 +98,10 @@ type Session struct {
 	// ToolCache stores read-tool results for the current session. Keyed by
 	// (tool_name, canonical JSON of args). Invalidated on ontology history
 	// watermark change (see HistoryWatermark).
+	//
+	// Deliberately NOT populated on copies returned by Get — cache access is
+	// via CachedTool/CacheTool so every read is properly synchronised. A nil
+	// map here on a returned copy is correct, not a bug.
 	ToolCache map[string]cachedTool
 
 	// HistoryWatermark is the timestamp of the most-recent OntologyEvent we
@@ -98,11 +110,38 @@ type Session struct {
 	HistoryWatermark time.Time
 }
 
+// clone returns a defensive copy safe to hand outside the store's lock. Turns
+// is deep-copied (the slice header alone would still alias the backing array).
+// ToolCache is intentionally omitted; see the field comment.
+func (s *Session) clone() *Session {
+	if s == nil {
+		return nil
+	}
+	out := &Session{
+		ID:               s.ID,
+		CreatedAt:        s.CreatedAt,
+		UpdatedAt:        s.UpdatedAt,
+		HistoryWatermark: s.HistoryWatermark,
+	}
+	if len(s.Turns) > 0 {
+		out.Turns = make([]SessionTurn, len(s.Turns))
+		copy(out.Turns, s.Turns)
+	}
+	return out
+}
+
 // SessionTurn is one round-trip in a multi-turn conversation.
+//
+// Only the answer text is retained, not the full ExplainResponse. Replaying a
+// serialized response would push its tool_trace, usage, plan, and citation
+// blocks back into the model's context — measured at ~16x the size of the
+// answer alone, and none of it is information the model can act on. The
+// durable record of what happened lives in the ontology audit log and the
+// caller's own response, not here.
 type SessionTurn struct {
-	Question  string          `json:"question"`
-	Response  json.RawMessage `json:"response"` // full ExplainResponse serialised
-	Timestamp time.Time       `json:"timestamp"`
+	Question  string    `json:"question"`
+	Answer    string    `json:"answer"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 type cachedTool struct {
@@ -130,8 +169,11 @@ func NewSessionID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Get returns an existing session or ErrSessionNotFound. The returned pointer
-// is only safe to read; mutations must go through Put/AppendTurn.
+// Get returns a defensive copy of the session, or ErrSessionNotFound.
+//
+// The copy is safe to read without holding any lock. It will not observe
+// writes made after the call returns, and mutating it does nothing — use
+// AppendTurn / CacheTool / InvalidateOnMutation to change stored state.
 func (s *SessionStore) Get(id string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,14 +186,20 @@ func (s *SessionStore) Get(id string) (*Session, error) {
 		return nil, ErrSessionNotFound
 	}
 	s.touchLocked(id)
-	return sess, nil
+	return sess.clone(), nil
 }
 
-// Create mints a fresh session and inserts it. Evicts the LRU session when
-// the store is full. Returns the new session's ID.
+// Create mints a fresh session and inserts it. Sweeps idle-expired sessions
+// and evicts the LRU one when the store is full. Returns a copy of the new
+// session, consistent with Get.
 func (s *SessionStore) Create() *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Sweep here rather than on a background ticker: Create is the only
+	// moment the store grows, so it is exactly when reclaiming dead entries
+	// matters. A goroutine would need lifecycle management (Close, leak
+	// tests) to reclaim memory nobody is contending for.
+	s.sweepExpiredLocked()
 	id := NewSessionID()
 	sess := &Session{
 		ID:        id,
@@ -162,12 +210,17 @@ func (s *SessionStore) Create() *Session {
 	s.sessions[id] = sess
 	s.elems[id] = s.order.PushFront(id)
 	s.evictIfFullLocked()
-	return sess
+	return sess.clone()
 }
 
-// AppendTurn records a completed exchange to the session and trims the buffer
-// if it exceeds cfg.MaxMessagesPerSes.
-func (s *SessionStore) AppendTurn(id, question string, response json.RawMessage) error {
+// AppendTurn records a completed exchange and trims the buffer if it exceeds
+// cfg.MaxMessagesPerSes.
+//
+// Callers must only append turns that SUCCEEDED. Recording a response that
+// failed validation or was rejected by the critic would replay the model's
+// own bad output as established context on the next turn — the circular
+// self-confirmation the architecture explicitly guards against (§8).
+func (s *SessionStore) AppendTurn(id, question, answer string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
@@ -176,7 +229,7 @@ func (s *SessionStore) AppendTurn(id, question string, response json.RawMessage)
 	}
 	sess.Turns = append(sess.Turns, SessionTurn{
 		Question:  question,
-		Response:  response,
+		Answer:    answer,
 		Timestamp: time.Now(),
 	})
 	if excess := len(sess.Turns) - s.cfg.MaxMessagesPerSes; excess > 0 {
@@ -292,6 +345,30 @@ func (s *SessionStore) evictIfFullLocked() {
 			return
 		}
 		s.deleteLocked(back.Value.(string))
+	}
+}
+
+// sweepExpiredLocked drops every session past its idle TTL. Walks from the
+// LRU end and stops at the first live entry — since the list is maintained in
+// recency order, everything ahead of a live entry is also live.
+func (s *SessionStore) sweepExpiredLocked() {
+	for {
+		back := s.order.Back()
+		if back == nil {
+			return
+		}
+		id := back.Value.(string)
+		sess, ok := s.sessions[id]
+		if !ok {
+			// Index drift — drop the orphaned list node and keep going.
+			s.order.Remove(back)
+			delete(s.elems, id)
+			continue
+		}
+		if !s.isIdleExpired(sess) {
+			return
+		}
+		s.deleteLocked(id)
 	}
 }
 
