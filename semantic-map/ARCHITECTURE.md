@@ -416,6 +416,18 @@ No other file needs to change.
 3. Convergence study: how quickly does deployment evidence override generic priors?
 4. Propose-then-confirm loop: controlled automatic backbone extension with structural validation
 
+**Theoretical framing.** The architecture reported here can be read as a concrete instance of the *graph stage* in Andrew Ng's progression from single-loop to graph-based agentic workflows (Ng, *What's Next for AI Agentic Workflows*, Sequoia AI Ascent 2024; Schluntz & Zhang, *Building Effective Agents*, Anthropic 2024). Ng characterises the graph stage as one in which shared state is externalised into a durable, queryable structure that agents read from and write to via typed handoffs, rather than living in prompts and transcripts. A knowledge graph, in this framing, plays three complementary roles: shared memory for orchestrator–worker configurations, grounding layer for evaluator–optimiser loops, and persistent world model for reflective loops. The Semantic Map instantiates the latter two directly for the orchestration-selection domain.
+
+Both authors identify a further requirement — *anchors* — without which "even a graph of loops can become a circular system of mutual confirmation" (Ng, ibid.). Our architecture supplies three explicit anchors:
+
+| Anchor (Ng)          | Semantic Map implementation                                                                                             |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Real-world outcomes  | Netdata telemetry — only `MetricSample` observations update the EMA; no model-estimated evidence                        |
+| Frozen rules         | Di-Select's 15 propositions as an append-only backbone (constructs never removed; direction reversal disallowed)        |
+| Human judgment       | Operator tune, candidate confirm/reject, deprecate — every mutation stamped in the `OntologyEvent` audit log            |
+
+This design also satisfies Ng's reliable-agentic-system invariant — *every important output can be traced to a task, a plan, an artifact, a source, an evaluator decision, and a bounded execution record* — as an architectural property: `CostRequest`, `GraphPathUsed`, `ActionCost`, `EventID` provenance, `Rationale`, and `n_observations` correspond one-to-one to the six required trace elements. The distinction from most LLM-agent frameworks in this space is that the backbone is not an ad-hoc ontology invented by prompting an LLM: it is Di-Select's grounded-theory result [P3]. Any downstream LLM consumer of this graph sits on the *operator-facing surface* — the reasoning and ingestion paths remain deterministic Go code, and reproducibility of P6 results does not depend on any LLM's behaviour.
+
 ---
 
 ## 9. Control Surface
