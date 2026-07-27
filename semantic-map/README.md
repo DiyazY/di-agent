@@ -20,6 +20,7 @@ For design rationale, contract decisions, language strategy, and research connec
 - [5. Prior Initialization](#5-prior-initialization)
 - [6. Coordination](#6-coordination)
 - [7. PoC — Live Multi-VM Demo](#7-poc--live-multi-vm-demo)
+- [8. Natural-Language Explain (`/explain`)](#8-natural-language-explain-explain)
 
 ---
 
@@ -671,3 +672,66 @@ make -C poc teardown
 4. Rounds 5–8: recommendation flips to diag-3. Trust-weighted routing confirmed on live VMs.
 
 See [ARCHITECTURE.md §12](ARCHITECTURE.md#12-poc-deployment-poc) for the full design rationale.
+
+---
+
+## 8. Natural-Language Explain (`/explain`)
+
+The daemon ships a natural-language operator interface at `POST /explain`. It reads the live graph, calls tools to answer, and returns a **grounded, cited** English response with a deterministic citation validator behind it. Full design in [ARCHITECTURE.md §13](ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain).
+
+### Enable it
+
+The default is off (`-explain-provider=none`), so `POST /explain` returns 501 with instructions until you opt in. To enable, point the daemon at a local OpenAI-compatible backend — Ollama is the smallest starting point:
+
+```bash
+# 1. Install and start a local LLM (out of band, one-time)
+brew install ollama
+ollama serve &                       # runs on :11434 by default
+ollama pull qwen2.5:7b-instruct
+
+# 2. Start the daemon with -explain-provider=openai-compatible
+cd semantic-map/go
+go run ./cmd/agent \
+    -profile edge-minimal \
+    -addr :8080 \
+    -explain-provider openai-compatible \
+    -explain-url http://localhost:11434/v1 \
+    -explain-model qwen2.5:7b-instruct \
+    -explain-prompt cmd/agent/prompts/explain-v1.md &
+
+# 3. Ask a question
+curl -s -X POST http://localhost:8080/explain \
+    -H 'Content-Type: application/json' \
+    -d '{"question":"Which edges are driving my ResourceCost?"}' | jq
+```
+
+Any backend that speaks the OpenAI `/v1/chat/completions` surface works — `llama-server`, LM Studio, vLLM, or the hosted OpenAI API. Point `-explain-url` at its base and set the model name.
+
+### What you get back
+
+```json
+{
+  "answer": "P10 (PS→RC, direction −) dominates with effective 0.62 vs prior 0.645, followed by P8 (MU→RC, direction −) at effective 0.30. Both have 15 observations at confidence 0.60.",
+  "citations": [
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.60, "n_observations": 15},
+    {"kind": "edge", "id": "P8",  "ema_weight": 0.30, "prior_weight": 0.316, "confidence": 0.60, "n_observations": 15}
+  ],
+  "confidence": "high",
+  "proposal": null,
+  "tool_trace": [
+    {"name": "get_cost",  "arguments": {"node_id":"master","task_type":"pod-scheduling"}, "result_digest": "cost node=master task=pod-scheduling rc=0.6912 conf=0.600"},
+    {"name": "get_edges", "arguments": {"to":"RC"}, "result_digest": "edges from= to=RC count=5"}
+  ],
+  "model_name": "qwen2.5:7b-instruct",
+  "prompt_version": "a1b2c3d4e5f6",
+  "iterations": 1
+}
+```
+
+If the LLM asks *"should I…?"* it can also return a `proposal` — a suggested action + endpoint + payload the operator can invoke explicitly. The Explain layer itself **never mutates state**; every action stays a draft.
+
+### What the layer guarantees
+
+- **Groundedness.** Every value the LLM cites is checked against live graph state before the answer leaves the daemon. Fabricated proposition IDs, wrong EMA values, and references to deprecated edges are rejected — the LLM gets a critique and up to two more attempts. See [ARCHITECTURE.md §13](ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain) for the reflection-loop shape.
+- **Read-only.** The LLM's tool set is `get_cost`, `get_edges`, `get_history`, `get_peers`, `get_recommend`, `get_graph`. No mutation tool exists in the registry; the LLM literally cannot call `POST /agent/tune` or `POST /ontology/deprecate`. That preserves the human-judgment anchor from [ARCHITECTURE.md §8](ARCHITECTURE.md#8-connection-to-research).
+- **Determinism where it counts.** The reasoner, updater, and prior-init pipeline stay pure Go. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `-explain-provider=none`.

@@ -51,6 +51,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -65,11 +66,12 @@ import (
 // minimize diff. Every NEW endpoint added in this expansion uses
 // writeError to emit a JSON {"error":"..."} body, and every new POST
 // handler calls requireJSON at the top as a lightweight CSRF mitigation.
-func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
+func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
 	registerMutationRoutes(mux, sm)
 	registerPeerRoutes(mux, sm)
+	registerExplainRoute(mux, explainer)
 	registerStaticRoutes(mux)
 }
 
@@ -723,4 +725,54 @@ func decideOffload(sm *semmap.SemanticMap, req *OffloadHTTPRequest) OffloadHTTPR
 		ExpectedLatency:      cost.LatencyEstimate,
 		ExpectedResourceCost: cost.ResourceCost,
 	}
+}
+
+// registerExplainRoute wires POST /explain. The endpoint is always registered
+// so operators get a helpful 501 with remediation instructions when the
+// provider is disabled — better than a bare 404 they'd have to hunt down.
+func registerExplainRoute(mux *http.ServeMux, explainer explain.Explainer) {
+	mux.HandleFunc("POST /explain", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var req ExplainHTTPRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if strings.TrimSpace(req.Question) == "" {
+			writeError(w, http.StatusBadRequest, "question is required")
+			return
+		}
+		resp, err := explainer.Explain(r.Context(), explain.ExplainRequest{
+			Question: req.Question,
+			Budget: explain.ExplainBudget{
+				MaxIterations: req.MaxIterations,
+				MaxToolCalls:  req.MaxToolCalls,
+			},
+		})
+		if err != nil {
+			if errors.Is(err, explain.ErrNotEnabled) {
+				writeError(w, http.StatusNotImplemented, err.Error())
+				return
+			}
+			// Partial responses (validation failed after MaxIterations) come
+			// back with a non-nil resp AND an error — surface both so the
+			// operator sees why the LLM failed to ground its answer.
+			if resp != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error":    err.Error(),
+					"response": resp,
+				})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
 }

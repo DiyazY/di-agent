@@ -43,6 +43,8 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 )
@@ -81,6 +83,20 @@ func main() {
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
+
+	explainProvider := flag.String("explain-provider", "none",
+		"natural-language explain provider: none (disabled) or openai-compatible "+
+			"(routes to any OpenAI-compat backend — Ollama, llama-server, LM Studio, vLLM)")
+	explainURL := flag.String("explain-url", "http://localhost:11434/v1",
+		"base URL for the OpenAI-compatible backend (used when -explain-provider=openai-compatible)")
+	explainModel := flag.String("explain-model", "qwen2.5:7b-instruct",
+		"model name for the OpenAI-compatible backend")
+	explainPrompt := flag.String("explain-prompt", "",
+		"path to the system-prompt file for /explain (default: cmd/agent/prompts/explain-v1.md alongside the binary)")
+	explainAPIKey := flag.String("explain-api-key", "",
+		"optional bearer token for the OpenAI-compatible backend "+
+			"(env var EXPLAIN_API_KEY takes precedence when both are set)")
+
 	flag.Parse()
 
 	if err := applyRegime(*regime, alpha, convergence); err != nil {
@@ -117,8 +133,14 @@ func main() {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
+	explainer, err := buildExplainer(sm, *explainProvider, *explainURL, *explainModel, *explainPrompt, *explainAPIKey)
+	if err != nil {
+		log.Fatalf("failed to build explainer: %v", err)
+	}
+	defer explainer.Close()
+
 	mux := http.NewServeMux()
-	registerRoutes(mux, sm)
+	registerRoutes(mux, sm, explainer)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
 
@@ -265,3 +287,55 @@ func runCollectionLoop(
 		}
 	}
 }
+
+// buildExplainer constructs the /explain backend based on the -explain-provider
+// flag. Returns a DisabledExplainer when the operator hasn't opted in, so the
+// route handler can always safely call methods on the returned value.
+//
+// The bearer token comes from EXPLAIN_API_KEY (env) if set, otherwise from the
+// -explain-api-key flag. Env-first matches the standard secret-handling
+// convention: credentials don't live in shell history or systemd unit files
+// unless the operator explicitly opted in via the flag.
+func buildExplainer(
+	sm *semmap.SemanticMap,
+	provider, baseURL, model, promptPath, flagAPIKey string,
+) (explain.Explainer, error) {
+	if provider == "" || provider == "none" {
+		log.Printf("explain: provider=none (POST /explain will return 501)")
+		return explain.NewDisabled(), nil
+	}
+	if provider != "openai-compatible" {
+		return nil, fmt.Errorf("unknown -explain-provider %q (valid: none, openai-compatible)", provider)
+	}
+	if promptPath == "" {
+		promptPath = "cmd/agent/prompts/explain-v1.md"
+	}
+	prompt, err := explain.LoadPrompt(promptPath)
+	if err != nil {
+		return nil, fmt.Errorf("read prompt: %w", err)
+	}
+	apiKey := os.Getenv("EXPLAIN_API_KEY")
+	if apiKey == "" {
+		apiKey = flagAPIKey
+	}
+	e, err := explain.NewOpenAICompatible(explainReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL:      baseURL,
+		Model:        model,
+		APIKey:       apiKey,
+		SystemPrompt: prompt,
+		PromptFile:   promptPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("explain: provider=openai-compatible url=%s model=%s prompt=%s", baseURL, model, promptPath)
+	return e, nil
+}
+
+// explainReader adapts *semmap.SemanticMap to explain.SemanticMapReader. All
+// the methods already exist on SemanticMap; this shim only exists because Go
+// interfaces require an explicit adapter when one type implements an interface
+// declared in a package that would create an import cycle if imported directly.
+type explainReader struct{ *semmap.SemanticMap }
+
+func (r explainReader) Peers() *peers.Registry { return r.SemanticMap.Peers() }

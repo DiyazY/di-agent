@@ -757,3 +757,106 @@ make -C poc teardown                   # delete VMs and purge
 - **Independent single-node clusters**: each VM runs k0s `--single`, not a joined multi-node cluster. The PoC tests agent-level routing decisions, not k8s scheduling. Three separate clusters keep provisioning simple and failure-isolated.
 - **No auth**: same v1 stance as the coordination layer — lab network only.
 - **`-proposer=false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
+
+---
+
+## 13. Natural-Language Explain Layer (`pkg/explain`)
+
+`pkg/explain` adds an operator-facing surface that lets a human ask questions in natural language and get a grounded, cited answer. It exists to make the semantic map talk-to-able: *"Why is my ResourceCost higher than my peers?"*, *"Which propositions are driving the recommendation?"*, *"Should I deprecate P7?"*
+
+The design follows the framing in §8: our graph is the **world model** for an LLM operator agent, and every anchor property (real-world outcomes, frozen rules, human judgment) is preserved because the LLM is a **consumer** of the graph, never a mutator.
+
+### Position in the architecture
+
+```
+Operator → POST /explain (question)
+             │
+             ▼
+        pkg/explain (OpenAICompatibleExplainer)
+             │
+             │  (system prompt: cmd/agent/prompts/explain-v1.md)
+             │  (tool schemas: get_cost, get_edges, get_history,
+             │                 get_peers, get_recommend, get_graph)
+             │
+             ▼                              ┌────────────────────────────┐
+        OpenAI-compatible LLM   ◀───tool───▶│  SemanticMap (read-only)   │
+        (local: Ollama /                    │  All reads bypass HTTP:    │
+        llama-server /                      │  in-process Go calls to    │
+        LM Studio / vLLM)                   │  the facade methods.       │
+             │                              └────────────────────────────┘
+             ▼
+        Draft answer + citations
+             │
+             ▼
+        Deterministic citation validator
+             │  (every cited edge/proposition/peer exists?
+             │   values match live graph within Epsilon=1e-3?
+             │   answer mentions Pn ⇒ Pn is in citations?)
+             │
+             ├── valid ──▶ Return ExplainResponse to operator
+             │
+             └── invalid ─▶ Feed critique back to LLM (reflection loop, max 3)
+```
+
+### The two guarantees the layer ships
+
+1. **Groundedness.** Every value in the answer's `citations` array is checked against live graph state before the response leaves the daemon. A hallucinated proposition ID, wrong EMA value, or reference to a deprecated edge is rejected with a critique that goes back to the LLM. If the reflection loop can't produce a valid response within `MaxIterations`, the daemon returns HTTP 422 with both the error message and the partial response — no "confident lies" reach the operator.
+
+2. **No mutation.** The tool set is **read-only** by construction. The LLM cannot call `POST /agent/tune`, `POST /ontology/deprecate`, or any other mutation endpoint. When the operator asks *"what should I change?"* the LLM produces a structured `Proposal` in its response — a suggested endpoint + payload + rationale — that the operator invokes explicitly if they choose to act. The human-judgment anchor from §8 stays intact.
+
+### Provider
+
+v1 speaks the OpenAI `/v1/chat/completions` surface with function-tool semantics. This routes to any local backend that exposes that shape:
+
+| Backend         | Base URL                          |
+| --------------- | --------------------------------- |
+| Ollama          | `http://localhost:11434/v1`       |
+| llama-server    | `http://localhost:8080/v1`        |
+| LM Studio       | `http://localhost:1234/v1`        |
+| vLLM            | `http://localhost:8000/v1`        |
+| Hosted (OpenAI) | `https://api.openai.com/v1`       |
+
+Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary — install one out of band. `POST /explain` returns HTTP 501 with a clear remediation message when `-explain-provider=none` (the default).
+
+### Configuration flags
+
+```
+-explain-provider     none | openai-compatible          (default: none)
+-explain-url          http://localhost:11434/v1         (default)
+-explain-model        qwen2.5:7b-instruct               (default)
+-explain-prompt       cmd/agent/prompts/explain-v1.md   (default)
+-explain-api-key      ""                                (env EXPLAIN_API_KEY overrides)
+```
+
+### Prompt versioning
+
+The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](../go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+
+### Response shape
+
+```json
+{
+  "answer": "The dominant edge is P10 (PS→RC, prior 0.645, effective 0.62 at confidence 0.60).",
+  "citations": [
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.60, "n_observations": 15}
+  ],
+  "confidence": "high",
+  "proposal": null,
+  "tool_trace": [{"name": "get_edges", "arguments": {"from": "PS", "to": "RC"}, "result_digest": "edges from=PS to=RC count=1"}],
+  "model_name": "qwen2.5:7b-instruct",
+  "prompt_version": "a1b2c3d4e5f6",
+  "iterations": 1
+}
+```
+
+### Reproducibility stance
+
+`pkg/explain` is on the **operator-facing** surface, not on the ingestion or reasoning path. Every P6 result reported in `research-docs/` uses `-explain-provider=none`: the reasoner, updater, prior-init pipeline, and convergence measurements are pure Go and fully deterministic. The Explain layer is a demo asset and an operator convenience, not a load-bearing component of the scientific claims.
+
+### Tests
+
+- `pkg/explain/tools_test.go` — tool registry + citation validator against live SemanticMap.
+- `pkg/explain/openai_test.go` — reflection loop end-to-end against a scripted mock LLM. Covers happy path, tool-then-answer, and fabrication-then-fix.
+- `cmd/agent/explain_route_test.go` — route wiring: 501 when disabled, 400 on malformed input, 200 with grounded answer through a mock LLM.
+
+None of these require a real LLM to be running. `go test ./...` stays green on any machine.

@@ -331,3 +331,15 @@ func sampleRequestToTypes(req *MetricSampleRequest) (*types.MetricSample, error)
 		Labels:        req.Labels,
 	}, nil
 }
+
+// ExplainHTTPRequest is the body of POST /explain. Named with the HTTP
+// prefix to keep it distinct from pkg/explain.ExplainRequest which the route
+// handler translates into.
+//
+// MaxIterations and MaxToolCalls are optional operator overrides; zero values
+// fall back to package defaults (3 iterations, 10 tool calls).
+type ExplainHTTPRequest struct {
+	Question      string `json:"question"`
+	MaxIterations int    `json:"max_iterations,omitempty"`
+	MaxToolCalls  int    `json:"max_tool_calls,omitempty"`
+}
