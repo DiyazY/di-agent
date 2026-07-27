@@ -92,6 +92,8 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 	if strings.TrimSpace(req.Question) == "" {
 		return nil, errors.New("explain: question is empty")
 	}
+	startedAt := time.Now()
+	usage := Usage{}
 
 	messages := []chatMessage{
 		{Role: "system", Content: e.cfg.SystemPrompt},
@@ -105,6 +107,23 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 		lastResp       *ExplainResponse
 		lastIssues     []string
 	)
+
+	// finish stamps every non-user-facing bookkeeping field on a candidate
+	// response so both the success and partial-failure paths report the same
+	// provenance shape. Called just before we return.
+	finish := func(resp *ExplainResponse, iter int) {
+		if resp == nil {
+			return
+		}
+		resp.SchemaVersion = SchemaVersion
+		resp.ToolTrace = trace
+		resp.ModelName = e.cfg.Model
+		resp.PromptVersion = e.promptVersion
+		resp.Iterations = iter
+		usage.ToolCalls = toolCallsSpent
+		usage.WallClockMs = time.Since(startedAt).Milliseconds()
+		resp.Usage = usage
+	}
 
 	for iter := 1; iter <= budget.MaxIterations; iter++ {
 		// One full LLM turn: keep letting the model call tools until it
@@ -125,6 +144,10 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 			if len(resp.Choices) == 0 {
 				return nil, errors.New("explain: model returned no choices")
 			}
+			usage.LLMTurns++
+			usage.PromptTokens += resp.Usage.PromptTokens
+			usage.CompletionTokens += resp.Usage.CompletionTokens
+			usage.TotalTokens += resp.Usage.TotalTokens
 			msg := resp.Choices[0].Message
 			messages = append(messages, msg)
 
@@ -135,13 +158,9 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 					lastIssues = []string{fmt.Sprintf("could not parse response as JSON: %v", parseErr)}
 					break // fall through to revision path
 				}
-				parsed.ToolTrace = trace
-				parsed.ModelName = e.cfg.Model
-				parsed.PromptVersion = e.promptVersion
-				parsed.Iterations = iter
-
 				v := Validate(e.reader, parsed)
 				if v.IsValid {
+					finish(parsed, iter)
 					return parsed, nil
 				}
 				lastResp = parsed
@@ -190,8 +209,7 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 
 	// Reflection budget exhausted without a valid response.
 	if lastResp != nil {
-		lastResp.Iterations = budget.MaxIterations
-		lastResp.ToolTrace = trace
+		finish(lastResp, budget.MaxIterations)
 		return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s", budget.MaxIterations, strings.Join(lastIssues, "; "))
 	}
 	return nil, fmt.Errorf("explain: no parseable response after %d iterations", budget.MaxIterations)
@@ -230,6 +248,16 @@ type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+	Usage chatUsage `json:"usage"`
+}
+
+// chatUsage mirrors the OpenAI /v1/chat/completions usage block. Ollama's
+// OpenAI-compat endpoint reports these; llama-server / LM Studio / vLLM
+// generally do too. Zero when the backend does not populate them.
+type chatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 func buildToolsForOpenAI() []any {

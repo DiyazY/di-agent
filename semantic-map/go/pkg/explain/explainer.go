@@ -33,9 +33,33 @@ import (
 
 // ExplainRequest is the input to Explainer.Explain. Callers phrase a question
 // in natural language; the Explainer decides which tools to invoke.
+//
+// All fields beyond Question and Budget are v2 opt-in features. Leaving them
+// zero produces v1 behaviour (single answering turn + deterministic validator).
 type ExplainRequest struct {
 	Question string        `json:"question"`
 	Budget   ExplainBudget `json:"budget,omitempty"`
+
+	// SessionID opts into session memory. Pass "" to start a fresh
+	// conversation (the Explainer will mint a new ID and return it), or an
+	// existing ID to continue. Missing IDs return ErrSessionNotFound rather
+	// than silently minting — a misconfigured client should fail loudly.
+	SessionID string `json:"session_id,omitempty"`
+
+	// UsePlanner turns on Ng's planning stage: an extra LLM turn produces a
+	// structured Plan before tool execution. Costs one LLM turn; buys plan
+	// inspectability and better tool selection.
+	UsePlanner bool `json:"use_planner,omitempty"`
+
+	// UseCritic turns on the multi-agent critic: a second LLM instance
+	// reviews the primary agent's answer against the graph and the original
+	// question. Costs one LLM turn per reflection round.
+	UseCritic bool `json:"use_critic,omitempty"`
+
+	// Stream, when true, changes the HTTP response shape to NDJSON-over-
+	// chunked-encoding with per-event progress markers. See streaming.go
+	// for the event vocabulary.
+	Stream bool `json:"stream,omitempty"`
 }
 
 // ExplainBudget bounds an Explain call so a runaway loop can't burn tokens
@@ -64,6 +88,10 @@ func (b ExplainBudget) Defaults() ExplainBudget {
 // ExplainResponse carries the LLM's grounded answer plus everything a
 // reviewer needs to verify or reject that answer.
 type ExplainResponse struct {
+	// SchemaVersion pins the wire format. Bumped when fields are added or
+	// renamed in a way callers must branch on. See explain.SchemaVersion.
+	SchemaVersion string `json:"schema_version"`
+
 	// Answer is the natural-language response, ≤300 words by prompt policy.
 	Answer string `json:"answer"`
 
@@ -86,12 +114,85 @@ type ExplainResponse struct {
 	// Useful for debugging and for the audit-trail story in ARCHITECTURE.md.
 	ToolTrace []ToolInvocation `json:"tool_trace"`
 
+	// Plan is the structured pre-execution plan produced by the planner
+	// agent when Planning was enabled. Nil when the caller opted out of the
+	// planning stage.
+	Plan *Plan `json:"plan,omitempty"`
+
+	// CriticVerdict summarises the critic agent's review when Multi-agent
+	// verify was enabled. Nil when the caller opted out.
+	CriticVerdict *CriticVerdict `json:"critic_verdict,omitempty"`
+
+	// SessionID identifies the conversation this turn belongs to. Empty when
+	// the caller did not opt into session memory.
+	SessionID string `json:"session_id,omitempty"`
+
+	// Usage reports the resource cost of producing this response so callers
+	// can enforce budgets and the paper's replication package can report
+	// per-turn costs.
+	Usage Usage `json:"usage"`
+
 	// ModelName + PromptVersion + Iterations pin the response to a
 	// reproducible provenance triple. Callers can re-run against the same
 	// pair and see whether the model's behaviour has drifted.
 	ModelName     string `json:"model_name"`
 	PromptVersion string `json:"prompt_version"`
 	Iterations    int    `json:"iterations"`
+}
+
+// Usage accounts for the cost of producing an ExplainResponse. Token counts
+// come from the LLM backend's response headers when available; zero means the
+// backend did not report them (some local models do not).
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	// WallClockMs measures the /explain call end-to-end from server accept to
+	// response ready, including tool dispatch and validation.
+	WallClockMs int64 `json:"wall_clock_ms"`
+	// ToolCalls counts every tool invocation, including cache hits. A high
+	// ToolCalls with a low PromptTokens delta means the cache is working.
+	ToolCalls int `json:"tool_calls"`
+	// ToolCacheHits counts how many of ToolCalls were served from the
+	// session-scoped result cache. Reported separately so operators can see
+	// the cache's effect directly.
+	ToolCacheHits int `json:"tool_cache_hits"`
+	// LLMTurns counts distinct chat/completions round-trips (planner turns,
+	// answer turns, critic turns, revision turns all add up).
+	LLMTurns int `json:"llm_turns"`
+}
+
+// Plan is the structured pre-execution plan produced by the Planner agent.
+// Every step is either a Tool call (executed by the tool registry) or a
+// Synthesize marker (informational only — the answering agent uses the
+// preceding tool evidence to produce the final answer).
+type Plan struct {
+	Steps    []PlanStep `json:"steps"`
+	Approach string     `json:"approach,omitempty"` // one-line prose summary
+}
+
+// PlanStep is one entry in Plan.Steps. Exactly one of Tool or Synthesize
+// must be non-empty.
+type PlanStep struct {
+	Tool        string         `json:"tool,omitempty"`
+	Args        map[string]any `json:"args,omitempty"`
+	Synthesize  string         `json:"synthesize,omitempty"`
+	// Rationale records why the planner chose this step. Optional but
+	// operators find it useful when auditing why the plan was structured
+	// the way it was.
+	Rationale string `json:"rationale,omitempty"`
+}
+
+// CriticVerdict summarises the critic agent's review of a candidate answer.
+type CriticVerdict struct {
+	Approved bool     `json:"approved"`
+	Issues   []string `json:"issues,omitempty"`
+	// SuggestedRevision is a short imperative note the critic hands to the
+	// answering agent when Approved=false. Feeds directly into the reflection
+	// prompt on the next revision.
+	SuggestedRevision string `json:"suggested_revision,omitempty"`
+	// Round records which reflection round this verdict came from (1-indexed).
+	Round int `json:"round"`
 }
 
 // Citation identifies one live graph element the answer references. The
