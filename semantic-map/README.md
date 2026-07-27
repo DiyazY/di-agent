@@ -117,7 +117,19 @@ semantic-map/
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
-    │   ├── semmap/map.go       SemanticMap Go facade (includes peer registry + client)
+    │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
+    │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
+    │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
+    │   │   ├── tools.go        6 READ-ONLY tools over the facade + Dispatch()
+    │   │   ├── validator.go    Deterministic citation validator (Gate 1)
+    │   │   ├── planner.go      Plan parse / structural validate / deterministic execute
+    │   │   ├── critic.go       Critic verdict parse + prompt assembly (Gate 2)
+    │   │   ├── session.go      LRU session store + tool-result cache w/ TTL + invalidation
+    │   │   ├── streaming.go    NDJSON Event vocabulary + StreamingExplainer iface
+    │   │   └── openai.go       OpenAI-compatible client; planner→answer→critic loop
+    │   ├── semmap/
+    │   │   ├── map.go          SemanticMap Go facade (includes peer registry + client)
+    │   │   └── bridge.go       MetricType → construct routing (stateless, NOT a contract)
     │   └── profiles/           Profile factory
     │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
     │
@@ -158,6 +170,11 @@ semantic-map/
     │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
     │   ├── static.go           //go:embed all:static + staticHandler()
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
+    │   ├── explain_route_test.go  POST /explain: 501/400/200 + NDJSON streaming
+    │   ├── prompts/            Versioned LLM system prompts (loaded at startup)
+    │   │   ├── explain-v1.md   Answering agent — graph semantics, tools, response schema
+    │   │   ├── planner-v1.md   Planner agent — planning rules + worked examples
+    │   │   └── critic-v1.md    Critic agent — what Gate 1 already covers, what only it can catch
     │   └── static/             Embedded web UI assets
     │       ├── index.html      Cytoscape mount + side panel + <dialog> modal + toast region
     │       ├── app.js          Vanilla-JS controller; fetches /graph; POSTs mutations

@@ -7,14 +7,18 @@ Design rationale and decision record. Update this file when a contract, profile,
 ## Table of Contents
 
 - [1. Core Concept](#1-core-concept)
+  - [The agent at a glance](#the-agent-at-a-glance)
+  - [Component reference](#component-reference)
+  - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
   - [The six contracts](#the-six-contracts)
+  - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
 - [3. Deployment Profiles](#3-deployment-profiles)
 - [4. Language Strategy](#4-language-strategy)
 - [5. Telemetry Pipeline](#5-telemetry-pipeline)
-  - [CollectorContract](#collectorcont ract)
+  - [CollectorContract](#collectorcontract)
   - [MetricType catalogue](#metrictype-catalogue)
   - [The Bridge](#the-bridge)
   - [Planned collector implementations](#planned-collector-implementations)
@@ -24,6 +28,9 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [9. Control Surface](#9-control-surface)
 - [10. Coordination](#10-coordination)
 - [11. Operator Tuning Interface](#11-operator-tuning-interface)
+- [12. PoC Deployment (`poc/`)](#12-poc-deployment-poc)
+- [13. Natural-Language Explain Layer (`pkg/explain`)](#13-natural-language-explain-layer-pkgexplain)
+- [14. Explain v2 — Planning, Critic, Sessions, Streaming](#14-explain-v2--planning-critic-sessions-streaming)
 
 ---
 
@@ -60,6 +67,128 @@ At `confidence = 0.0` the agent uses the literature. At `confidence = 1.0` it us
 | Proposition magnitudes (edge weights) | No — learned from evidence                     |
 | New edges (P16+)                      | Possible — discovered by the Proposer contract |
 
+### The agent at a glance
+
+One daemon, four concentric layers. Everything outside the core is optional; the core is what makes the agent an agent.
+
+```
+                            ╔═══════════════════════════════════════════════════╗
+   HUMAN / SCRIPT ─────────▶║  LAYER 4 · OPERATOR SURFACE                       ║
+   "why is my cost high?"   ║                                                   ║
+                            ║   HTTP API  ·  mapctl CLI  ·  /ui/  ·  /explain   ║
+                            ║   ─────────────────────────────────────────────   ║
+                            ║   pkg/explain: planner → answer → critic          ║
+                            ║   (LLM CONSUMES the graph; never mutates it)      ║
+                            ╚════════════════════════╤══════════════════════════╝
+                                                     │ read-only tools
+                            ╔════════════════════════▼══════════════════════════╗
+   PEER AGENTS ────────────▶║  LAYER 3 · DECISION                               ║
+   GET /cost                ║                                                   ║
+   POST /offload            ║   SemanticMap facade                              ║
+                            ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
+                            ║   ┌──────────┬───────────┬──────────┬──────────┐  ║
+                            ║   │ Reasoner │ Ontology  │ Proposer │  Tuner   │  ║
+                            ║   └──────────┴───────────┴──────────┴──────────┘  ║
+                            ╚════════════════════════╤══════════════════════════╝
+                                                     │ reads / writes
+                            ╔════════════════════════▼══════════════════════════╗
+                            ║  LAYER 2 · STATE                                  ║
+                            ║                                                   ║
+                            ║   Storage (multigraph, keyed by from,to,propID)   ║
+                            ║   ┌─────────────────────────────────────────────┐ ║
+                            ║   │ Backbone: 7 constructs, 15 propositions     │ ║
+                            ║   │ Evidence: per-edge EMA + confidence + n_obs │ ║
+                            ║   │ Audit:    append-only OntologyEvent log     │ ║
+                            ║   └─────────────────────────────────────────────┘ ║
+                            ╚════════════════════════▲══════════════════════════╝
+                                                     │ update_edge()
+                            ╔════════════════════════╧══════════════════════════╗
+   /sys/fs/cgroup ─────────▶║  LAYER 1 · INGESTION                              ║
+   Netdata :19999           ║                                                   ║
+   parquet replay           ║   Collector ──samples──▶ Bridge ──▶ Updater (EMA) ║
+                            ║   (typed MetricSample)   (routes    (idempotent   ║
+                            ║                           to        per event_id) ║
+                            ║                           construct)              ║
+                            ╚═══════════════════════════════════════════════════╝
+```
+
+**Read the diagram bottom-up for data, top-down for questions.** Telemetry flows up from Layer 1 and settles into Layer 2. Questions arrive at Layer 4 or Layer 3 and read downward. The two directions meet at Storage, which is the only mutable state in the process.
+
+**The one-way rule.** Layer 4 can read everything and write nothing. The LLM in `pkg/explain` gets six read-only tools; it cannot call `Deprecate`, `Tune`, or `ResetEdge`. When it wants a mutation it emits a *draft proposal* that a human must POST themselves. This is what keeps the human-judgment anchor intact (§8) and what keeps P6's results reproducible without an LLM in the loop (§13).
+
+### Component reference
+
+What each piece is for, when it runs, and whether it is required.
+
+| Component | Package | Purpose | Runs when | Required? |
+|---|---|---|---|---|
+| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest` works without one |
+| **Bridge** | `pkg/semmap` | Route one `MetricSample` to its construct, then to every edge touching it | Every sample | Yes (stateless, not a contract) |
+| **Updater** | `internal/minimal` | Fold the observation into each edge's EMA; bump confidence | Every routed sample | Yes |
+| **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
+| **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
+| **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
+| **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`-proposer`) | Optional |
+| **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
+| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
+| **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`-explain-provider=none` default) |
+| **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup | Once, at boot | Yes |
+
+### The four request lifecycles
+
+Four distinct things can happen to this daemon. Each takes a different path.
+
+**① Telemetry arrives** — the loop that makes the agent learn.
+
+```
+Collector.Collect()
+  └─▶ []*MetricSample {NodeID, MetricType, Value, EventID}
+        └─▶ Bridge: MetricType → construct (e.g. cpu_utilization → RC)
+              └─▶ Ontology.Relationships(RC) → every proposition touching RC
+                    └─▶ Updater.UpdateEdge(from, to, value, eventID)  × each pair
+                          └─▶ Storage: ema += α(value − ema); n_obs++; confidence = n_obs/N
+```
+*Idempotent per `(edge, event_id)` — replaying the same sample changes nothing.*
+
+**② A decision is requested** — the loop that makes the agent useful.
+
+```
+GET /cost?task=pod-scheduling&node=master
+  └─▶ Reasoner.CostOfAction
+        ├─▶ Storage.AllEdges()          — current EMA, prior, confidence per edge
+        ├─▶ Ontology.Propositions()     — skip anything Deprecated
+        └─▶ for each RC-destination edge:
+              effective = (1−c)·prior + c·ema
+              ResourceCost += (effective − prior) · sign(direction)
+        └─▶ ActionCost {ResourceCost, Confidence, Rationale, GraphPathUsed}
+```
+*Pure read. No state changes. Always returns a rationale naming the edges used.*
+
+**③ The graph is mutated** — the loop that keeps the agent honest.
+
+```
+POST /ontology/deprecate {"proposition_id":"P7","reason":"..."}
+  └─▶ Ontology.Deprecate
+        ├─▶ mark Proposition.Deprecated = true      (soft delete — never removed)
+        ├─▶ sync EdgeDescriptor.Deprecated in Storage
+        └─▶ append OntologyEvent {actor, kind, target, timestamp}
+              └─▶ readable forever via GET /history
+```
+*Only four mutations exist: `SetPropositionStrength`, `AddConstruct`, `AddValidatedProposition`, `Deprecate`. Every one is audited. Construct removal and direction reversal are impossible by design.*
+
+**④ A human asks a question** — the loop that makes the agent legible.
+
+```
+POST /explain {"question":"why is my cost high?","use_planner":true,"use_critic":true}
+  └─▶ planner LLM (no tools)  → Plan{steps:[{tool:"get_cost"},…]}
+        └─▶ Go executes the plan  → evidence bundle
+              └─▶ answering LLM (read-only tools) → answer + citations
+                    ├─▶ GATE 1: deterministic validator — do the cited values match live state?
+                    └─▶ GATE 2: critic LLM — is the reasoning actually right?
+                          └─▶ ExplainResponse {answer, citations, plan, verdict, usage}
+```
+*Detailed in §13–§14. The LLM never writes; it only reads and drafts.*
+
 ---
 
 ## 2. Contract Architecture
@@ -77,13 +206,32 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
         ┌───────────────────────────────────────────┐
         │              SemanticMap facade            │
         │  cost_of_action()  recommend_peer()        │
-        │  simulate_outcome()                        │
-        └───┬───────┬──────────┬────────┬────────────┘
-            │       │          │        │
-        Storage  Ontology  Reasoner  Proposer
+        │  simulate_outcome()  tune()                │
+        └───┬───────┬──────────┬────────┬───────┬───┘
+            │       │          │        │       │
+        Storage  Ontology  Reasoner  Proposer  Tuner
+            ▲                                        
+            │ read-only                              
+   ┌────────┴──────────┬──────────────────┐          
+[peers]            [explain]         [control surface]
+ registry       planner·critic       HTTP · mapctl · /ui
+ + client       + validator          (§9)
+   (§10)          (§13–14)
 ```
 
-The Collector and Bridge live outside the SemanticMap facade — they feed it. The Bridge is not a contract; it is a thin, stateless mapper (see §5).
+The Collector and Bridge live outside the SemanticMap facade — they feed it. The Bridge is not a contract; it is a thin, stateless mapper (see §5). The three components below the facade are *consumers*: they read graph state and expose it, but only the facade's own mutation methods can change it.
+
+### What is deliberately not a contract
+
+The contract set has stayed at six since the first release. Three substantial components sit outside it on purpose:
+
+| Component | Why it is concrete, not a contract |
+|---|---|
+| **Bridge** (`pkg/semmap`) | Stateless pure function of `(MetricType, Ontology)`. There is nothing to swap — a second implementation would be the same code with a different routing table, and the routing table is already data. |
+| **Peers** (`pkg/peers`) | One implementation exists. Promoting it to a contract before a second one (SQLite-backed registry, gossip discovery) would be designing an interface against a sample size of one. |
+| **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `-explain-provider=none`. |
+
+The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
 
 ### The six contracts
 
