@@ -27,7 +27,7 @@ resource "libvirt_volume" "ubuntu_base" {
 # Create boot disk for VM (uses base image as backing store)
 resource "libvirt_volume" "vm_disk" {
   count  = var.vm_count
-  name   = "vm${count.index + 1}-disk.index"
+  name   = "vm${count.index + 1}-disk"
   pool   = libvirt_pool.pool.name
   target = {
     format = {
@@ -192,7 +192,7 @@ output "instructions" {
     Or check the DHCP leases:
       sudo virsh net-dhcp-leases default
 
-    To view VM console:
+    To view VM console (can't use for login, but can see boot messages):
       sudo virsh console ubuntu-vm1
       sudo virsh console ubuntu-vm2
       sudo virsh console ubuntu-vm3

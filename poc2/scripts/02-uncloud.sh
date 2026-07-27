@@ -6,6 +6,7 @@
     GREEN='\033[0;32m'
     YELLOW='\033[1;33m'
     NC='\033[0m'
+    CORROSION_IMAGE='ghcr.io/unlabs-dev/corrosion:2026.6.15'
 
     # Useful for using network = "default"
     get_vm_ip() {
@@ -103,12 +104,24 @@
             sleep 2
 
             if [ "$first_vm" = true ]; then
-                echo -e "${YELLOW}Running: uc machine init ubuntu@$vm_ip --name $vm_name -y --no-caddy --no-dns${NC} --public-ip none"
-                uc machine init "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy --no-dns --public-ip none
+                echo -e "${YELLOW}Pulling $CORROSION_IMAGE on ubuntu@$vm_ip before init...${NC}"
+                ssh -i ~/.ssh/id_ed25519_vms -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@$vm_ip" "sudo docker pull '$CORROSION_IMAGE'" || {
+                    echo -e "${RED}Failed to pull $CORROSION_IMAGE on $vm_name${NC}" >&2
+                    continue
+                }
+
+                echo -e "${YELLOW}Running: uc machine init ubuntu@$vm_ip --name $vm_name -y --no-caddy --no-dns${NC} --public-ip none -i ~/.ssh/id_ed25519_vms"
+                uc machine init "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy --no-dns --public-ip none -i ~/.ssh/id_ed25519_vms
                 first_vm=false
             else
-                echo -e "${YELLOW}Running: uc machine add ubuntu@$vm_ip --name $vm_name -y "
-                uc machine add "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy
+                echo -e "${YELLOW}Pulling $CORROSION_IMAGE on ubuntu@$vm_ip before add...${NC}"
+                ssh -i ~/.ssh/id_ed25519_vms -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@$vm_ip" "sudo docker pull '$CORROSION_IMAGE'" || {
+                    echo -e "${RED}Failed to pull $CORROSION_IMAGE on $vm_name${NC}" >&2
+                    continue
+                }
+
+                echo -e "${YELLOW}Running: uc machine add ubuntu@$vm_ip --name $vm_name -y --no-caddy -i ~/.ssh/id_ed25519_vms"
+                uc machine add "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy -i ~/.ssh/id_ed25519_vms
             fi
 
             if [ $? -eq 0 ]; then

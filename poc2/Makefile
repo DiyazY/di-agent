@@ -9,19 +9,16 @@
 ## Auto-detects all VMs at runtime using virsh
 
 # Auto-detect VMs from virsh (only running VMs)
-VMS := $(virsh list --all --name 2>/dev/null | grep -v "^$$" | sort)
+VMS := $(shell virsh list --all --name 2>/dev/null | grep -v '^$$' | sort)
 VM_COUNT := $(words $(VMS))
 
 # Generate VM variables dynamically (VM1, VM2, VM3, ...)
-define generate_vm_vars
-$(foreach i,$(seq 1 $(VM_COUNT)),VM$(i) ?= $(word $(i),$(VMS))$(\n))
+define VM_DEFS
+$(foreach i,$(shell seq 1 $(VM_COUNT)),VM$(i) ?= $(word $(i),$(VMS))
+)
 endef
 
-$(eval $(call generate_vm_vars))
-
-# Create VM list for command arguments
-VM_ARGS := $(foreach i,$(seq 1 $(VM_COUNT)),$(VM$(i)))
-
+$(eval $(VM_DEFS))
 
 SCRIPTS := ./scripts
 
@@ -34,25 +31,25 @@ provision:
 	@bash $(SCRIPTS)/01-provision.sh
 
 uncloud:
-	@bash $(SCRIPTS)/02-uncloud.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/02-uncloud.sh $(VMS)
 
 agent:
 	@bash $(SCRIPTS)/03-agent.sh
 
 peers:
-	@bash $(SCRIPTS)/04-peers.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/04-peers.sh $(VMS)
 
 start-vms:
-	@bash $(SCRIPTS)/startVMS.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/startVMS.sh $(VMS)
 
 stop-vms:
-	@bash $(SCRIPTS)/stopVMS.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/stopVMS.sh $(VMS)
 
 deploy: 
 	@bash $(SCRIPTS)/deploy.sh
 
 demo:
-	@bash $(SCRIPTS)/coordinator.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/coordinator.sh $(VMS)
 
 workload-heavy:
 	@bash $(SCRIPTS)/workload.sh $(firstword $(VMS)) heavy
@@ -64,7 +61,7 @@ workload-stop:
 	@bash $(SCRIPTS)/workload.sh $(firstword $(VMS)) stop
 
 teardown:
-	@bash $(SCRIPTS)/teardown.sh $(VM_ARGS)
+	@bash $(SCRIPTS)/teardown.sh
 
 # Dynamic status target that works with any number of VMs
 status:

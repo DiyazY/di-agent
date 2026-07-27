@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# 05-peers.sh — discover VM IPs and register each VM as a peer on the others
+# 04-peers.sh — discover VM IPs and register each VM as a peer on the others
 #
 # Peer topology (trust=0.8 for all pairs):
-#   diag-1 ← diag-2, diag-3
-#   diag-2 ← diag-1, diag-3
-#   diag-3 ← diag-1, diag-2
+#   each VM receives every other VM as a peer
 #
-# Usage: ./05-peers.sh [vm1 vm2 vm3]
+# Usage: ./04-peers.sh [vm1 vm2 vm3 ...]
 
 set -euo pipefail
 
@@ -62,23 +60,29 @@ register_peer() {
 
 # ── args ─────────────────────────────────────────────────────────────────────
 if [ "$#" -eq 0 ]; then
-    VMS=(ubuntu-vm1 ubuntu-vm2 ubuntu-vm3)
+    # Default: use all ubuntu-vm* machines known to uc.
+    VMS=()
+    while IFS= read -r vm; do
+        [ -n "$vm" ] && VMS+=("$vm")
+    done < <(uc machine ls | awk 'NR > 1 && $1 ~ /^ubuntu-vm/ {print $1}')
 else
     VMS=("$@")
 fi
 
-# ── discover IPs (no associative arrays — bash 3.x compat) ──────────────────
-IP1=$(vm_internal_ip "${VMS[0]}")
-IP2=$(vm_internal_ip "${VMS[1]}")
-IP3=$(vm_internal_ip "${VMS[2]}")
+if [ "${#VMS[@]}" -eq 0 ]; then
+    err "No VMs provided and none discovered from 'uc machine ls'."
+    exit 1
+fi
 
-for i in 1 2 3; do
-    vm="${VMS[$((i-1))]}"
-    eval "ip=\$IP$i"
+# ── discover IPs (bash 3.x compat — arrays only) ────────────────────────────
+IPS=()
+for vm in "${VMS[@]}"; do
+    ip=$(vm_internal_ip "$vm")
     if [ -z "$ip" ]; then
         err "Could not find IP for $vm — is it running?"
         exit 1
     fi
+    IPS+=("$ip")
     info "$vm → $ip"
 done
 
@@ -86,24 +90,27 @@ done
 info ""
 info "Registering peer relationships ..."
 
-register_peer "${VMS[0]}" "$IP1" "${VMS[1]}" "http://${IP2}:9090" 0.8
-register_peer "${VMS[0]}" "$IP1" "${VMS[2]}" "http://${IP3}:9090" 0.8
-
-register_peer "${VMS[1]}" "$IP2" "${VMS[0]}" "http://${IP1}:9090" 0.8
-register_peer "${VMS[1]}" "$IP2" "${VMS[2]}" "http://${IP3}:9090" 0.8
-
-register_peer "${VMS[2]}" "$IP3" "${VMS[0]}" "http://${IP1}:9090" 0.8
-register_peer "${VMS[2]}" "$IP3" "${VMS[1]}" "http://${IP2}:9090" 0.8
+for i in "${!VMS[@]}"; do
+    target_vm="${VMS[$i]}"
+    target_ip="${IPS[$i]}"
+    for j in "${!VMS[@]}"; do
+        [ "$i" -eq "$j" ] && continue
+        peer_vm="${VMS[$j]}"
+        peer_ip="${IPS[$j]}"
+        register_peer "$target_vm" "$target_ip" "$peer_vm" "http://${peer_ip}:9090" 0.8
+    done
+done
 
 # ── verify ────────────────────────────────────────────────────────────────────
 info ""
 info "Verifying peer lists ..."
-for ip in "$IP1" "$IP2" "$IP3"; do
-    vm="${VMS[$(( $(echo "$IP1 $IP2 $IP3" | tr ' ' '\n' | grep -n "^${ip}$" | cut -d: -f1) - 1 ))]}"
+for i in "${!VMS[@]}"; do
+    vm="${VMS[$i]}"
+    ip="${IPS[$i]}"
     peer_count=$(curl -sf "http://${ip}:9090/peers" 2>/dev/null \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>/dev/null \
         || echo "?")
-    ok "$ip: $peer_count peers registered"
+    ok "$vm ($ip): $peer_count peers registered"
 done
 
 echo ""

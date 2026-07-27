@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # coordinator.sh — trust-weighted peer routing demonstration
 #
-# Runs ROUNDS rounds against the three di-agent VMs, polling /cost on each,
+# Runs ROUNDS rounds against the di-agent VMs, polling /cost on each,
 # calling /recommend on the most-loaded node, and mid-way draining one peer's
 # trust to demonstrate trust-weighted rerouting.
 #
-# Usage: ./coordinator.sh [vm1 vm2 vm3]
+# Usage: ./coordinator.sh [vm1 vm2 ...]
 #   ROUNDS=8   — number of rounds (default 8)
 #   INTERVAL=10 — seconds between rounds (default 10)
 #
@@ -73,32 +73,32 @@ INTERVAL="${INTERVAL:-10}"
 DRAIN_ROUND=$(( ROUNDS / 2 ))   # halfway point: drain diag-2's trust on diag-1
 
 # ── discover IPs (bash 3.x compat — no associative arrays) ──────────────────
-IP1=$(vm_ip "${VMS[0]}")
-IP2=$(vm_ip "${VMS[1]}")
-IP3=$(vm_ip "${VMS[2]}")
-
-for i in 1 2 3; do
-    vm="${VMS[$((i-1))]}"
-    eval "ip=\$IP$i"
+IPS=()
+for idx in "${!VMS[@]}"; do
+    vm="${VMS[$idx]}"
+    ip="$(vm_ip "$vm")"
     if [ -z "$ip" ]; then
         err "Could not find IP for $vm — is it running?"
         exit 1
     fi
+    IPS+=("$ip")
 done
 
 # Helper: get IP for a VM by position in VMS array
 ip_for() {
-    case "$1" in
-        "${VMS[0]}") echo "$IP1" ;;
-        "${VMS[1]}") echo "$IP2" ;;
-        "${VMS[2]}") echo "$IP3" ;;
-    esac
+    local target="$1"
+    for idx in "${!VMS[@]}"; do
+        if [ "${VMS[$idx]}" = "$target" ]; then
+            echo "${IPS[$idx]}"
+            return 0
+        fi
+    done
 }
 
 info "VM map:"
-echo "  ${VMS[0]}  →  $IP1"
-echo "  ${VMS[1]}  →  $IP2"
-echo "  ${VMS[2]}  →  $IP3"
+for idx in "${!VMS[@]}"; do
+    echo "  ${VMS[$idx]}  →  ${IPS[$idx]}"
+done
 echo ""
 
 # ── main loop ─────────────────────────────────────────────────────────────────
@@ -114,16 +114,14 @@ for round in $(seq 1 "$ROUNDS"); do
     printf "  %-10s  %-18s  %-14s  %-12s\n" "----------" "------------------" "--------------" "------------"
 
     COST_ARGS=()
-    RC1="" RC2="" RC3=""
-    for i in 1 2 3; do
-        vm="${VMS[$((i-1))]}"
-        eval "ip=\$IP$i"
+    for idx in "${!VMS[@]}"; do
+        vm="${VMS[$idx]}"
+        ip="${IPS[$idx]}"
         raw=$(curl -sf "http://${ip}:9090/cost?taskType=pod-scheduling&nodeID=master" 2>/dev/null || echo "{}")
         rc=$(json_get "$raw" "ResourceCost")
         conf=$(json_get "$raw" "Confidence")
         rc="${rc:-0.000}"
         conf="${conf:-0.000}"
-        eval "RC$i=$rc"
         COST_ARGS+=("$vm" "$rc")
         printf "  %-10s  %-18s  %-14s  %-12s\n" "$vm" "$ip" "$rc" "$conf"
     done
@@ -162,6 +160,12 @@ for round in $(seq 1 "$ROUNDS"); do
 
     # ── 4. mid-point trust drain ──────────────────────────────────────────────
     if [ "$round" -eq "$DRAIN_ROUND" ] && [ "$DRAIN_DONE" = "false" ]; then
+        if [ "${#VMS[@]}" -lt 2 ]; then
+            info "Skipping trust drain: need at least 2 VMs"
+            DRAIN_DONE=true
+            continue
+        fi
+
         DRAIN_TARGET_VM="${VMS[1]}"  # diag-2 (second VM)
         DRAIN_HOST="${VMS[0]}"       # draining from diag-1 (first VM)
         drain_ip=$(ip_for "$DRAIN_HOST")
@@ -197,7 +201,11 @@ for p in peers:
             else
                 ok "  Trust drain applied: $DRAIN_TARGET_VM (id=$drain_peer_id) trust=0.15 on $DRAIN_HOST"
             fi
-            announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
+            if [ "${#VMS[@]}" -ge 3 ]; then
+                announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
+            else
+                announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect other eligible peers to win next rounds"
+            fi
         fi
         echo ""
         DRAIN_DONE=true

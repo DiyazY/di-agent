@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# teardown.sh — stop, delete, and purge the PoC Multipass VMs
+# teardown.sh — destroy all PoC infrastructure using Terraform
 #
-# Usage: ./teardown.sh [vm1 vm2 vm3]
-#   Defaults to diag-1 diag-2 diag-3
+# Usage: ./teardown.sh
+#   Destroys all resources defined in the Terraform configuration
 
 set -euo pipefail
 
@@ -16,27 +16,19 @@ info() { echo "${YELLOW}[teardown] $*${RESET}"; }
 ok()   { echo "${GREEN}[teardown] $*${RESET}"; }
 err()  { echo "${RED}[teardown] $*${RESET}" >&2; }
 
-# ── args ─────────────────────────────────────────────────────────────────────
-if [ "$#" -eq 0 ]; then
-    VMS=(diag-1 diag-2 diag-3)
-else
-    VMS=("$@")
+# ── terraform destroy ─────────────────────────────────────────────────────
+info "Destroying all Terraform-managed infrastructure ..."
+
+# Check if terraform is available
+if ! command -v terraform &> /dev/null; then
+    err "terraform command not found. Please install Terraform."
+    exit 1
 fi
 
-# ── stop ─────────────────────────────────────────────────────────────────────
-info "Stopping VMs: ${VMS[*]} ..."
-multipass stop "${VMS[@]}" 2>/dev/null || true
-ok "VMs stopped"
+# Run terraform destroy with auto-approve to skip confirmation
+terraform destroy -auto-approve
 
-# ── delete ───────────────────────────────────────────────────────────────────
-info "Deleting VMs: ${VMS[*]} ..."
-multipass delete "${VMS[@]}" 2>/dev/null || true
-ok "VMs deleted"
-
-# ── purge ────────────────────────────────────────────────────────────────────
-info "Purging deleted VMs and reclaiming disk ..."
-multipass purge
-ok "Purge complete"
+ok "Terraform destroy complete"
 
 echo ""
-ok "Teardown done — all PoC VMs removed."
+ok "Teardown done — all infrastructure destroyed."
