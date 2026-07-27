@@ -107,7 +107,11 @@ func executePlan(
 	remaining int,
 	cache toolCache,
 	sessionID string,
+	emit EmitFunc,
 ) planExecution {
+	if emit == nil {
+		emit = discardEmit
+	}
 	var (
 		b    strings.Builder
 		out  planExecution
@@ -139,6 +143,8 @@ func executePlan(
 			args = map[string]any{}
 		}
 
+		emit(Event{Kind: EventToolCall, Tool: step.Tool, Args: args})
+
 		inv := ToolInvocation{Name: step.Tool, Arguments: args}
 		var payload json.RawMessage
 
@@ -155,6 +161,7 @@ func executePlan(
 			if err != nil {
 				inv.Error = err.Error()
 				out.Trace = append(out.Trace, inv)
+				emit(Event{Kind: EventToolResult, Tool: step.Tool, Error: err.Error()})
 				fmt.Fprintf(&b, "[step %d] %s(%s) → ERROR: %s\n\n", i+1, step.Tool, compactArgs(args), err.Error())
 				continue
 			}
@@ -165,6 +172,7 @@ func executePlan(
 			}
 		}
 
+		emit(Event{Kind: EventToolResult, Tool: step.Tool, Digest: inv.ResultDigest})
 		out.Trace = append(out.Trace, inv)
 		fmt.Fprintf(&b, "[step %d] %s(%s) →\n%s\n\n", i+1, step.Tool, compactArgs(args), string(payload))
 	}

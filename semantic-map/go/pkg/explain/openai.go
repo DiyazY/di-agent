@@ -113,8 +113,35 @@ func LoadPrompt(path string) (string, error) {
 func (e *OpenAICompatibleExplainer) Close() error { return nil }
 
 // Explain runs the reflection loop: draft → validate against live graph →
-// revise until valid or budget exhausted.
+// revise until valid or budget exhausted. Progress is discarded; callers who
+// want it should use ExplainStream.
 func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequest) (*ExplainResponse, error) {
+	return e.explain(ctx, req, discardEmit)
+}
+
+// ExplainStream is Explain with progress reporting. Every phase transition,
+// tool dispatch, validation outcome, and critic verdict is emitted before the
+// final response. Satisfies StreamingExplainer.
+func (e *OpenAICompatibleExplainer) ExplainStream(ctx context.Context, req ExplainRequest, emit EmitFunc) (*ExplainResponse, error) {
+	if emit == nil {
+		emit = discardEmit
+	}
+	resp, err := e.explain(ctx, req, emit)
+	switch {
+	case err != nil && resp != nil:
+		// Partial result: emit both so the client sees the response that
+		// failed and the reason it failed.
+		emit(Event{Kind: EventFinal, Response: resp})
+		emit(Event{Kind: EventError, Error: err.Error()})
+	case err != nil:
+		emit(Event{Kind: EventError, Error: err.Error()})
+	default:
+		emit(Event{Kind: EventFinal, Response: resp})
+	}
+	return resp, err
+}
+
+func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequest, emit EmitFunc) (*ExplainResponse, error) {
 	budget := req.Budget.Defaults()
 	ctx, cancel := context.WithTimeout(ctx, budget.Timeout)
 	defer cancel()
@@ -147,6 +174,7 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 	sessionID := ""
 	if session != nil {
 		sessionID = session.ID
+		emit(Event{Kind: EventSession, SessionID: sessionID})
 	}
 
 	tools := buildToolsForOpenAI()
@@ -208,12 +236,14 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 
 	// ── planning stage (Ng Step 3) ────────────────────────────────────────
 	if req.UsePlanner {
-		p, exec, err := e.runPlanner(ctx, req.Question, budget.MaxToolCalls-toolCallsSpent, sessionID, &usage)
+		emit(Event{Kind: EventPlanning})
+		p, exec, err := e.runPlanner(ctx, req.Question, budget.MaxToolCalls-toolCallsSpent, sessionID, &usage, emit)
 		switch {
 		case err != nil:
 			// A failed planner must not fail the request. Fall through to
 			// unplanned execution and tell the answering agent why its
 			// evidence bundle is missing.
+			emit(Event{Kind: EventPlan, Message: "planner failed, falling back to unplanned execution", Error: err.Error()})
 			messages = append(messages, chatMessage{
 				Role:    "user",
 				Content: "NOTE: the planning stage failed (" + err.Error() + "). Gather evidence with tool calls yourself.",
@@ -229,6 +259,7 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 	}
 
 	for iter := 1; iter <= budget.MaxIterations; iter++ {
+		emit(Event{Kind: EventAnswering, Iteration: iter})
 		// One full LLM turn: keep letting the model call tools until it
 		// produces a final assistant message with no tool calls, or until we
 		// exceed the tool-call budget.
@@ -264,8 +295,10 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 				// Gate 1 — deterministic validator. Structural grounding is
 				// non-negotiable; a fabricated citation never reaches the
 				// critic, let alone the operator.
+				emit(Event{Kind: EventValidating, Iteration: iter})
 				v := Validate(e.reader, parsed)
 				if !v.IsValid {
+					emit(Event{Kind: EventValidationFailed, Iteration: iter, Issues: v.Issues})
 					lastResp = parsed
 					lastIssues = v.Issues
 					criticRejected = false
@@ -277,6 +310,7 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 				// reading, direction-sign mistakes, unsupported conclusions,
 				// miscalibrated confidence.
 				if req.UseCritic {
+					emit(Event{Kind: EventCritic, Iteration: iter})
 					verdict, cErr := e.runCritic(ctx, req.Question, parsed, evidence, iter, &usage)
 					if cErr != nil {
 						// A broken critic must not block a structurally valid
@@ -290,6 +324,7 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 						return parsed, nil
 					}
 					lastVerdict = verdict
+					emit(Event{Kind: EventCriticVerdict, Iteration: iter, Verdict: verdict})
 					if !verdict.Approved {
 						lastResp = parsed
 						criticRejected = true
@@ -311,16 +346,29 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 				if raw := tc.Function.Arguments; raw != "" {
 					_ = json.Unmarshal([]byte(raw), &args)
 				}
-				result, err := Dispatch(e.reader, tc.Function.Name, args)
+				emit(Event{Kind: EventToolCall, Tool: tc.Function.Name, Args: args, Iteration: iter})
+
 				inv := ToolInvocation{Name: tc.Function.Name, Arguments: args}
 				var content string
-				if err != nil {
+
+				// Session-scoped cache: an answering agent that re-asks for
+				// data the planner already fetched pays nothing.
+				if cached, ok := e.cachedTool(sessionID, tc.Function.Name, args); ok {
+					usage.ToolCacheHits++
+					inv.ResultDigest = cached.Digest + " (cached)"
+					content = string(cached.Payload)
+				} else if result, err := Dispatch(e.reader, tc.Function.Name, args); err != nil {
 					inv.Error = err.Error()
-					content = fmt.Sprintf(`{"error":%q}`, err.Error())
+					// Per-tool error feedback: the model sees what went wrong
+					// and can correct its arguments on the next call rather
+					// than abandoning the turn.
+					content = fmt.Sprintf(`{"error":%q,"hint":"check the tool's required arguments and retry"}`, err.Error())
 				} else {
 					inv.ResultDigest = result.Digest
 					content = string(result.Payload)
+					e.cacheTool(sessionID, tc.Function.Name, args, result)
 				}
+				emit(Event{Kind: EventToolResult, Tool: tc.Function.Name, Digest: inv.ResultDigest, Iteration: iter, Error: inv.Error})
 				trace = append(trace, inv)
 				messages = append(messages, chatMessage{
 					Role:       "tool",
@@ -371,6 +419,7 @@ func (e *OpenAICompatibleExplainer) runPlanner(
 	remainingToolCalls int,
 	sessionID string,
 	usage *Usage,
+	emit EmitFunc,
 ) (*Plan, planExecution, error) {
 	if strings.TrimSpace(e.cfg.PlannerPrompt) == "" {
 		return nil, planExecution{}, errors.New("planner prompt not configured")
@@ -401,13 +450,33 @@ func (e *OpenAICompatibleExplainer) runPlanner(
 	if issues := validatePlan(plan); len(issues) > 0 {
 		return nil, planExecution{}, fmt.Errorf("plan is structurally invalid: %s", strings.Join(issues, "; "))
 	}
+	emit(Event{Kind: EventPlan, Plan: plan})
 
 	var cache toolCache
 	if e.cfg.Sessions != nil {
 		cache = e.cfg.Sessions
 	}
-	exec := executePlan(e.reader, plan, remainingToolCalls, cache, sessionID)
+	exec := executePlan(e.reader, plan, remainingToolCalls, cache, sessionID, emit)
 	return plan, exec, nil
+}
+
+// cachedTool looks up a session-scoped tool result. Returns (nil, false) when
+// sessions are disabled or the entry is absent/expired.
+func (e *OpenAICompatibleExplainer) cachedTool(sessionID, name string, args map[string]any) (*ToolResult, bool) {
+	if e.cfg.Sessions == nil || sessionID == "" {
+		return nil, false
+	}
+	return e.cfg.Sessions.CachedTool(sessionID, name, args)
+}
+
+// cacheTool stores a tool result under the session. No-op when sessions are
+// disabled — the cache is a session-scoped optimisation, not a global one,
+// because a shared cache would leak one operator's view into another's.
+func (e *OpenAICompatibleExplainer) cacheTool(sessionID, name string, args map[string]any, result *ToolResult) {
+	if e.cfg.Sessions == nil || sessionID == "" || result == nil {
+		return
+	}
+	_ = e.cfg.Sessions.CacheTool(sessionID, name, args, result.Payload, result.Digest)
 }
 
 // runCritic executes one critic turn against a candidate answer. Like the

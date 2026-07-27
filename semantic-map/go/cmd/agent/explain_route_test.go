@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -152,5 +153,101 @@ func TestExplainRoute_EndToEnd_WithMockLLM(t *testing.T) {
 	}
 	if llmCalls.Load() != 1 {
 		t.Errorf("expected 1 LLM call; got %d", llmCalls.Load())
+	}
+}
+
+// TestExplainRoute_StreamingReturnsNDJSON drives POST /explain with
+// stream:true and asserts the response is line-delimited JSON terminating in
+// a single `final` event.
+func TestExplainRoute_StreamingReturnsNDJSON(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatalf("profiles.Build: %v", err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     fmt.Sprintf("Streamed answer about %s.", e0.PropositionID),
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "high",
+	})
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}]}`, string(answer))
+	}))
+	defer llmServer.Close()
+
+	explainer, err := explain.NewOpenAICompatible(explainerReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL:      llmServer.URL,
+		Model:        "mock",
+		SystemPrompt: "test prompt",
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	registerRoutes(mux, sm, explainer)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/explain", "application/json",
+		bytes.NewReader([]byte(`{"question":"Why?","stream":true}`)))
+	if err != nil {
+		t.Fatalf("POST /explain: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Content-Type"); got != "application/x-ndjson" {
+		t.Errorf("expected NDJSON content type; got %q", got)
+	}
+
+	// Every line must be a standalone JSON event.
+	var kinds []string
+	var finalSeen bool
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var ev explain.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line is not valid JSON: %q (%v)", line, err)
+		}
+		kinds = append(kinds, string(ev.Kind))
+		if ev.Kind == explain.EventFinal {
+			finalSeen = true
+			if ev.Response == nil || !strings.Contains(ev.Response.Answer, e0.PropositionID) {
+				t.Errorf("final event should carry the grounded answer; got %+v", ev.Response)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("reading stream: %v", err)
+	}
+	if !finalSeen {
+		t.Errorf("stream must terminate in a 'final' event; saw %v", kinds)
+	}
+	if len(kinds) < 2 {
+		t.Errorf("expected progress events before the final; saw %v", kinds)
+	}
+}
+
+// A streaming request against an Explainer that cannot stream must fail
+// clearly rather than silently degrading to a buffered response.
+func TestExplainRoute_StreamingAgainstDisabledReturns501(t *testing.T) {
+	base, _, cleanup := newExplainTestAgent(t, explain.NewDisabled())
+	defer cleanup()
+
+	resp, err := http.Post(base+"/explain", "application/json",
+		bytes.NewReader([]byte(`{"question":"Why?","stream":true}`)))
+	if err != nil {
+		t.Fatalf("POST /explain: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501; got %d", resp.StatusCode)
 	}
 }

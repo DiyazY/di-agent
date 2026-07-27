@@ -745,13 +745,31 @@ func registerExplainRoute(mux *http.ServeMux, explainer explain.Explainer) {
 			writeError(w, http.StatusBadRequest, "question is required")
 			return
 		}
-		resp, err := explainer.Explain(r.Context(), explain.ExplainRequest{
-			Question: req.Question,
+		explainReq := explain.ExplainRequest{
+			Question:   req.Question,
+			SessionID:  req.SessionID,
+			UsePlanner: req.UsePlanner,
+			UseCritic:  req.UseCritic,
+			Stream:     req.Stream,
 			Budget: explain.ExplainBudget{
 				MaxIterations: req.MaxIterations,
 				MaxToolCalls:  req.MaxToolCalls,
 			},
-		})
+		}
+
+		// Streaming path: NDJSON over chunked encoding. Requires both the
+		// caller to ask for it and the Explainer to support it.
+		if req.Stream {
+			streamer, ok := explainer.(explain.StreamingExplainer)
+			if !ok {
+				writeError(w, http.StatusNotImplemented, "this explainer does not support streaming")
+				return
+			}
+			serveExplainStream(w, r, streamer, explainReq)
+			return
+		}
+
+		resp, err := explainer.Explain(r.Context(), explainReq)
 		if err != nil {
 			if errors.Is(err, explain.ErrNotEnabled) {
 				writeError(w, http.StatusNotImplemented, err.Error())
@@ -775,4 +793,45 @@ func registerExplainRoute(mux *http.ServeMux, explainer explain.Explainer) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+}
+
+// serveExplainStream runs a streaming /explain call, writing one compact JSON
+// object per line (NDJSON) as progress arrives.
+//
+// Why NDJSON rather than SSE: the consumer here is a CLI or a script, not a
+// browser EventSource. NDJSON is trivially parseable with a line reader in
+// every language, needs no `data:` prefix stripping, and composes with `jq`
+// on the command line. SSE would buy browser auto-reconnect, which nothing in
+// this deployment wants.
+//
+// The stream always terminates in exactly one `final` or `error` event, so a
+// client can loop until it sees one of those two kinds.
+func serveExplainStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	streamer explain.StreamingExplainer,
+	req explain.ExplainRequest,
+) {
+	flusher, canFlush := w.(http.Flusher)
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	enc := json.NewEncoder(w)
+	emit := func(ev explain.Event) {
+		if err := enc.Encode(ev); err != nil {
+			// The client hung up. Nothing useful to do — the explain loop
+			// will notice via ctx cancellation on its next check.
+			return
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	// ExplainStream emits the terminal final/error event itself, so we do not
+	// write anything after it returns.
+	_, _ = streamer.ExplainStream(r.Context(), req, emit)
 }

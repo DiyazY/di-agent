@@ -99,7 +99,7 @@ func TestExecutePlan_CollectsEvidenceAndTrace(t *testing.T) {
 			{Synthesize: "rank by deviation"},
 		},
 	}
-	exec := executePlan(r, plan, 10, nil, "")
+	exec := executePlan(r, plan, 10, nil, "", nil)
 	if exec.ToolCalls != 2 {
 		t.Errorf("expected 2 tool calls (synthesize is free); got %d", exec.ToolCalls)
 	}
@@ -124,7 +124,7 @@ func TestExecutePlan_ContinuesPastToolError(t *testing.T) {
 		{Tool: "get_cost", Args: map[string]any{}},
 		{Tool: "get_peers", Args: map[string]any{}},
 	}}
-	exec := executePlan(r, plan, 10, nil, "")
+	exec := executePlan(r, plan, 10, nil, "", nil)
 	if len(exec.Trace) != 2 {
 		t.Fatalf("expected both steps traced; got %d", len(exec.Trace))
 	}
@@ -146,7 +146,7 @@ func TestExecutePlan_RespectsRemainingBudget(t *testing.T) {
 		{Tool: "get_peers", Args: map[string]any{}},
 		{Tool: "get_peers", Args: map[string]any{}},
 	}}
-	exec := executePlan(r, plan, 2, nil, "")
+	exec := executePlan(r, plan, 2, nil, "", nil)
 	if exec.ToolCalls != 2 {
 		t.Errorf("expected budget to cap execution at 2; got %d", exec.ToolCalls)
 	}
@@ -162,11 +162,11 @@ func TestExecutePlan_UsesSessionCacheOnRepeatCall(t *testing.T) {
 
 	plan := &Plan{Steps: []PlanStep{{Tool: "get_peers", Args: map[string]any{}}}}
 
-	first := executePlan(r, plan, 10, store, sess.ID)
+	first := executePlan(r, plan, 10, store, sess.ID, nil)
 	if first.CacheHits != 0 {
 		t.Errorf("first run should be a cache miss; got %d hits", first.CacheHits)
 	}
-	second := executePlan(r, plan, 10, store, sess.ID)
+	second := executePlan(r, plan, 10, store, sess.ID, nil)
 	if second.CacheHits != 1 {
 		t.Errorf("second run should hit the cache; got %d hits", second.CacheHits)
 	}

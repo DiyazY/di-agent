@@ -342,4 +342,10 @@ type ExplainHTTPRequest struct {
 	Question      string `json:"question"`
 	MaxIterations int    `json:"max_iterations,omitempty"`
 	MaxToolCalls  int    `json:"max_tool_calls,omitempty"`
+
+	// v2 opt-ins. Omitting all of these reproduces v1 behaviour exactly.
+	SessionID  string `json:"session_id,omitempty"`
+	UsePlanner bool   `json:"use_planner,omitempty"`
+	UseCritic  bool   `json:"use_critic,omitempty"`
+	Stream     bool   `json:"stream,omitempty"`
 }
