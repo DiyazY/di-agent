@@ -27,6 +27,32 @@ type OpenAICompatibleConfig struct {
 	SystemPrompt string        // full text of explain-v1.md (or newer)
 	PromptFile   string        // path used, kept for provenance in the response
 	HTTPTimeout  time.Duration // per-request timeout; default 60s
+
+	// PlannerPrompt is the system prompt for the planning stage. When empty,
+	// UsePlanner requests fall back to unplanned execution with a note in the
+	// response — a missing optional prompt degrades the feature rather than
+	// failing the request.
+	PlannerPrompt string
+
+	// CriticPrompt is the system prompt for the multi-agent critic. Same
+	// fallback semantics as PlannerPrompt.
+	CriticPrompt string
+
+	// KeepAlive is passed to Ollama-style backends as the `keep_alive` field
+	// so the model stays resident between calls. Empty means "don't send the
+	// field" — backends that don't understand it are unaffected either way.
+	KeepAlive string
+
+	// DisableStructuredDecoding turns OFF the token-level JSON constraint we
+	// otherwise request from backends that support it (Ollama `format`, vLLM
+	// guided decoding). Named negatively so the zero value keeps the good
+	// default (constrained decoding on) without a pointer or sentinel.
+	DisableStructuredDecoding bool
+
+	// Sessions is the store backing multi-turn conversations and the tool
+	// result cache. Nil disables session support — requests carrying a
+	// SessionID then fail with ErrSessionNotFound.
+	Sessions *SessionStore
 }
 
 // OpenAICompatibleExplainer speaks the OpenAI /v1/chat/completions surface
@@ -36,8 +62,12 @@ type OpenAICompatibleExplainer struct {
 	cfg           OpenAICompatibleConfig
 	http          *http.Client
 	reader        SemanticMapReader
-	promptVersion string // sha256[:12] of the system prompt for provenance
+	promptVersion string // sha256[:12] of the answering system prompt
 }
+
+// Sessions exposes the configured session store so the HTTP layer can mint
+// IDs before delegating. Returns nil when session support is disabled.
+func (e *OpenAICompatibleExplainer) Sessions() *SessionStore { return e.cfg.Sessions }
 
 // NewOpenAICompatible builds an Explainer against the given reader. The
 // SystemPrompt is loaded from disk once at construction time — callers must
@@ -95,10 +125,30 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 	startedAt := time.Now()
 	usage := Usage{}
 
-	messages := []chatMessage{
-		{Role: "system", Content: e.cfg.SystemPrompt},
-		{Role: "user", Content: req.Question},
+	// ── session resolution ───────────────────────────────────────────────
+	// An empty SessionID with a configured store mints a fresh session; a
+	// non-empty ID must resolve or the request fails (silently minting would
+	// hide a client bug behind an amnesiac conversation).
+	var session *Session
+	if e.cfg.Sessions != nil {
+		if req.SessionID == "" {
+			session = e.cfg.Sessions.Create()
+		} else {
+			s, err := e.cfg.Sessions.Get(req.SessionID)
+			if err != nil {
+				return nil, fmt.Errorf("explain: %w (id=%s)", err, req.SessionID)
+			}
+			session = s
+		}
+		e.invalidateStaleCache(session)
+	} else if req.SessionID != "" {
+		return nil, errors.New("explain: session_id supplied but session support is disabled on this daemon")
 	}
+	sessionID := ""
+	if session != nil {
+		sessionID = session.ID
+	}
+
 	tools := buildToolsForOpenAI()
 
 	var (
@@ -106,6 +156,8 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 		toolCallsSpent int
 		lastResp       *ExplainResponse
 		lastIssues     []string
+		plan           *Plan
+		lastVerdict    *CriticVerdict
 	)
 
 	// finish stamps every non-user-facing bookkeeping field on a candidate
@@ -120,9 +172,54 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 		resp.ModelName = e.cfg.Model
 		resp.PromptVersion = e.promptVersion
 		resp.Iterations = iter
+		resp.Plan = plan
+		resp.CriticVerdict = lastVerdict
+		resp.SessionID = sessionID
 		usage.ToolCalls = toolCallsSpent
 		usage.WallClockMs = time.Since(startedAt).Milliseconds()
 		resp.Usage = usage
+		if session != nil {
+			if raw, err := json.Marshal(resp); err == nil {
+				_ = e.cfg.Sessions.AppendTurn(session.ID, req.Question, raw)
+			}
+		}
+	}
+
+	// ── build the answering agent's opening context ───────────────────────
+	messages := []chatMessage{{Role: "system", Content: e.cfg.SystemPrompt}}
+
+	// Prior turns give the answering agent conversational continuity so the
+	// operator can ask follow-ups ("what about diag-2?") without restating
+	// context. Bounded by the session store's MaxMessagesPerSes.
+	if session != nil {
+		for _, turn := range session.Turns {
+			messages = append(messages,
+				chatMessage{Role: "user", Content: turn.Question},
+				chatMessage{Role: "assistant", Content: string(turn.Response)},
+			)
+		}
+	}
+	messages = append(messages, chatMessage{Role: "user", Content: req.Question})
+
+	// ── planning stage (Ng Step 3) ────────────────────────────────────────
+	if req.UsePlanner {
+		p, exec, err := e.runPlanner(ctx, req.Question, budget.MaxToolCalls-toolCallsSpent, sessionID, &usage)
+		switch {
+		case err != nil:
+			// A failed planner must not fail the request. Fall through to
+			// unplanned execution and tell the answering agent why its
+			// evidence bundle is missing.
+			messages = append(messages, chatMessage{
+				Role:    "user",
+				Content: "NOTE: the planning stage failed (" + err.Error() + "). Gather evidence with tool calls yourself.",
+			})
+		default:
+			plan = p
+			trace = append(trace, exec.Trace...)
+			toolCallsSpent += exec.ToolCalls
+			usage.ToolCacheHits += exec.CacheHits
+			messages = append(messages, chatMessage{Role: "user", Content: exec.Evidence})
+		}
 	}
 
 	for iter := 1; iter <= budget.MaxIterations; iter++ {
@@ -215,6 +312,85 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 	return nil, fmt.Errorf("explain: no parseable response after %d iterations", budget.MaxIterations)
 }
 
+// runPlanner executes the planning stage: one LLM turn with the planner
+// system prompt, then deterministic execution of the resulting plan's tool
+// steps. Returns the plan and its execution result.
+//
+// The planner turn is given NO tools — it emits a plan as JSON rather than
+// calling anything itself. That separation is what makes the plan auditable:
+// the tools that run are exactly the ones the plan named, executed by Go, not
+// by the model.
+func (e *OpenAICompatibleExplainer) runPlanner(
+	ctx context.Context,
+	question string,
+	remainingToolCalls int,
+	sessionID string,
+	usage *Usage,
+) (*Plan, planExecution, error) {
+	if strings.TrimSpace(e.cfg.PlannerPrompt) == "" {
+		return nil, planExecution{}, errors.New("planner prompt not configured")
+	}
+	if remainingToolCalls <= 0 {
+		return nil, planExecution{}, errors.New("no tool-call budget remains for planning")
+	}
+
+	resp, err := e.chat(ctx, []chatMessage{
+		{Role: "system", Content: e.cfg.PlannerPrompt},
+		{Role: "user", Content: question},
+	}, nil) // nil tools — the planner writes a plan, it does not call tools
+	if err != nil {
+		return nil, planExecution{}, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, planExecution{}, errors.New("planner returned no choices")
+	}
+	usage.LLMTurns++
+	usage.PromptTokens += resp.Usage.PromptTokens
+	usage.CompletionTokens += resp.Usage.CompletionTokens
+	usage.TotalTokens += resp.Usage.TotalTokens
+
+	plan, err := parsePlan(resp.Choices[0].Message.Content)
+	if err != nil {
+		return nil, planExecution{}, err
+	}
+	if issues := validatePlan(plan); len(issues) > 0 {
+		return nil, planExecution{}, fmt.Errorf("plan is structurally invalid: %s", strings.Join(issues, "; "))
+	}
+
+	var cache toolCache
+	if e.cfg.Sessions != nil {
+		cache = e.cfg.Sessions
+	}
+	exec := executePlan(e.reader, plan, remainingToolCalls, cache, sessionID)
+	return plan, exec, nil
+}
+
+// invalidateStaleCache drops a session's tool-result cache when the ontology
+// has changed since the cache was populated. The watermark is the timestamp
+// of the newest OntologyEvent; any mutation (tune, deprecate, strength set,
+// construct/proposition added) advances it.
+//
+// Rationale for whole-cache invalidation over per-key: the graph is 7 nodes
+// and 15 edges. Reasoning about which cached tool results a given mutation
+// could have affected costs more (in code and in bug surface) than just
+// refetching. If the graph grows by orders of magnitude, revisit.
+func (e *OpenAICompatibleExplainer) invalidateStaleCache(session *Session) {
+	if session == nil || e.cfg.Sessions == nil {
+		return
+	}
+	events, err := e.reader.History(time.Time{})
+	if err != nil || len(events) == 0 {
+		return
+	}
+	newest := events[0].Timestamp
+	for _, ev := range events[1:] {
+		if ev.Timestamp.After(newest) {
+			newest = ev.Timestamp
+		}
+	}
+	e.cfg.Sessions.InvalidateOnMutation(session.ID, newest)
+}
+
 // ── OpenAI-compatible wire types ────────────────────────────────────────────
 
 type chatMessage struct {
@@ -242,6 +418,10 @@ type chatRequest struct {
 	ResponseFormat any           `json:"response_format,omitempty"`
 	Temperature    float64       `json:"temperature"`
 	Stream         bool          `json:"stream"`
+	// KeepAlive is an Ollama extension: how long to keep the model resident
+	// after this request. Omitted when empty so strict OpenAI backends that
+	// reject unknown fields are unaffected.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 type chatResponse struct {
@@ -282,9 +462,15 @@ func (e *OpenAICompatibleExplainer) chat(ctx context.Context, messages []chatMes
 		Tools:       tools,
 		Temperature: 0, // deterministic decoding when the backend honors it
 		Stream:      false,
-		// Ask for JSON output when the backend supports it. Many local
-		// backends ignore this hint; the prompt itself is the real guard.
-		ResponseFormat: map[string]string{"type": "json_object"},
+		KeepAlive:   e.cfg.KeepAlive,
+	}
+	// Token-level JSON constraint where the backend supports it. When tools
+	// are in play we must NOT constrain output to a JSON object — the model
+	// needs to be free to emit a tool_calls message instead. Structured
+	// decoding therefore applies only to tool-free turns (planner, critic,
+	// and the final answering turn once evidence is gathered).
+	if !e.cfg.DisableStructuredDecoding && len(tools) == 0 {
+		body.ResponseFormat = map[string]string{"type": "json_object"}
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -320,25 +506,9 @@ func (e *OpenAICompatibleExplainer) chat(ctx context.Context, messages []chatMes
 // prose, both of which some local models emit despite the prompt asking for
 // pure JSON.
 func parseExplainResponse(content string) (*ExplainResponse, error) {
-	content = strings.TrimSpace(content)
+	content = stripJSONEnvelope(content)
 	if content == "" {
 		return nil, errors.New("assistant message is empty")
-	}
-	// Strip ``` fences if present.
-	if strings.HasPrefix(content, "```") {
-		if idx := strings.Index(content, "\n"); idx >= 0 {
-			content = content[idx+1:]
-		}
-		content = strings.TrimSuffix(content, "```")
-		content = strings.TrimSpace(content)
-	}
-	// Trim any leading non-JSON prose.
-	if i := strings.Index(content, "{"); i > 0 {
-		content = content[i:]
-	}
-	// Trim trailing prose.
-	if i := strings.LastIndex(content, "}"); i >= 0 && i < len(content)-1 {
-		content = content[:i+1]
 	}
 	var out ExplainResponse
 	if err := json.Unmarshal([]byte(content), &out); err != nil {
