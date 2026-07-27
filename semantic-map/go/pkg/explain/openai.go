@@ -158,6 +158,11 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 		lastIssues     []string
 		plan           *Plan
 		lastVerdict    *CriticVerdict
+		evidence       string
+		// criticRejected routes the revision prompt: when the critic (not the
+		// deterministic validator) is what failed the round, the answering
+		// agent should see the critic's reasoning, not a citation diff.
+		criticRejected bool
 	)
 
 	// finish stamps every non-user-facing bookkeeping field on a candidate
@@ -218,6 +223,7 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 			trace = append(trace, exec.Trace...)
 			toolCallsSpent += exec.ToolCalls
 			usage.ToolCacheHits += exec.CacheHits
+			evidence = exec.Evidence
 			messages = append(messages, chatMessage{Role: "user", Content: exec.Evidence})
 		}
 	}
@@ -255,14 +261,44 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 					lastIssues = []string{fmt.Sprintf("could not parse response as JSON: %v", parseErr)}
 					break // fall through to revision path
 				}
+				// Gate 1 — deterministic validator. Structural grounding is
+				// non-negotiable; a fabricated citation never reaches the
+				// critic, let alone the operator.
 				v := Validate(e.reader, parsed)
-				if v.IsValid {
-					finish(parsed, iter)
-					return parsed, nil
+				if !v.IsValid {
+					lastResp = parsed
+					lastIssues = v.Issues
+					criticRejected = false
+					break // enter revision path
 				}
-				lastResp = parsed
-				lastIssues = v.Issues
-				break // enter revision path
+
+				// Gate 2 — multi-agent critic (Ng Step 4). Catches semantic
+				// errors that survive structural validation: wrong causal
+				// reading, direction-sign mistakes, unsupported conclusions,
+				// miscalibrated confidence.
+				if req.UseCritic {
+					verdict, cErr := e.runCritic(ctx, req.Question, parsed, evidence, iter, &usage)
+					if cErr != nil {
+						// A broken critic must not block a structurally valid
+						// answer. Log the degradation in the verdict and ship.
+						lastVerdict = &CriticVerdict{
+							Approved: true,
+							Round:    iter,
+							Issues:   []string{"critic unavailable: " + cErr.Error()},
+						}
+						finish(parsed, iter)
+						return parsed, nil
+					}
+					lastVerdict = verdict
+					if !verdict.Approved {
+						lastResp = parsed
+						criticRejected = true
+						break // enter revision path
+					}
+				}
+
+				finish(parsed, iter)
+				return parsed, nil
 			}
 
 			// Model asked for tools. Run each and feed the result back.
@@ -300,14 +336,23 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 			break
 		}
 		// Hand the LLM a critique of the last response and let it revise.
+		// Which critique depends on which gate failed.
 		critique := FormatIssuesForLLM(lastIssues)
+		if criticRejected {
+			critique = FormatCriticVerdictForLLM(lastVerdict)
+		}
 		messages = append(messages, chatMessage{Role: "user", Content: critique})
 	}
 
-	// Reflection budget exhausted without a valid response.
+	// Reflection budget exhausted without a response that cleared both gates.
 	if lastResp != nil {
 		finish(lastResp, budget.MaxIterations)
-		return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s", budget.MaxIterations, strings.Join(lastIssues, "; "))
+		if criticRejected {
+			return lastResp, fmt.Errorf("explain: critic rejected the response after %d iterations: %s",
+				budget.MaxIterations, strings.Join(lastVerdict.Issues, "; "))
+		}
+		return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s",
+			budget.MaxIterations, strings.Join(lastIssues, "; "))
 	}
 	return nil, fmt.Errorf("explain: no parseable response after %d iterations", budget.MaxIterations)
 }
@@ -363,6 +408,43 @@ func (e *OpenAICompatibleExplainer) runPlanner(
 	}
 	exec := executePlan(e.reader, plan, remainingToolCalls, cache, sessionID)
 	return plan, exec, nil
+}
+
+// runCritic executes one critic turn against a candidate answer. Like the
+// planner, the critic gets no tools — it reviews the same evidence the
+// answering agent saw, so its objections are always actionable.
+func (e *OpenAICompatibleExplainer) runCritic(
+	ctx context.Context,
+	question string,
+	candidate *ExplainResponse,
+	evidence string,
+	round int,
+	usage *Usage,
+) (*CriticVerdict, error) {
+	if strings.TrimSpace(e.cfg.CriticPrompt) == "" {
+		return nil, errors.New("critic prompt not configured")
+	}
+	resp, err := e.chat(ctx, []chatMessage{
+		{Role: "system", Content: e.cfg.CriticPrompt},
+		{Role: "user", Content: buildCriticPrompt(question, candidate, evidence)},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, errors.New("critic returned no choices")
+	}
+	usage.LLMTurns++
+	usage.PromptTokens += resp.Usage.PromptTokens
+	usage.CompletionTokens += resp.Usage.CompletionTokens
+	usage.TotalTokens += resp.Usage.TotalTokens
+
+	verdict, err := parseCriticVerdict(resp.Choices[0].Message.Content)
+	if err != nil {
+		return nil, err
+	}
+	verdict.Round = round
+	return verdict, nil
 }
 
 // invalidateStaleCache drops a session's tool-result cache when the ontology
