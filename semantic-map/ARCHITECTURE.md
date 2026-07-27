@@ -860,3 +860,182 @@ The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](../go/cmd/agent/p
 - `cmd/agent/explain_route_test.go` — route wiring: 501 when disabled, 400 on malformed input, 200 with grounded answer through a mock LLM.
 
 None of these require a real LLM to be running. `go test ./...` stays green on any machine.
+
+---
+
+## 14. Explain v2 — Planning, Critic, Sessions, Streaming
+
+§13 describes the v1 surface: one answering agent, tool access, a deterministic validator, and a reflection loop. v2 adds the two Ng patterns v1 was missing and the production hardening the v1 live smoke exposed as necessary.
+
+Everything here is **opt-in per request**. A v1-shaped body (`{"question": "..."}`) still produces v1 behaviour.
+
+### The full pipeline
+
+```
+POST /explain {question, session_id?, use_planner?, use_critic?, stream?}
+   │
+   ├─▶ [session]  resolve or mint · replay prior turns · flush tool cache if
+   │              the ontology history watermark advanced
+   │
+   ├─▶ [planning] ── planner LLM (NO tools) ──▶ Plan{steps:[{tool,args}...]}
+   │       │                                       │
+   │       │                                validatePlan: unknown tool?
+   │       │                                step with no action? no tool steps?
+   │       │                                       │
+   │       └──▶ Go executes the plan ─────────────┘
+   │              (log-and-continue on step failure,
+   │               session cache consulted per step,
+   │               budget-capped with truncation noted)
+   │                       │
+   │                  Evidence bundle
+   │                       │
+   ├─▶ [answering] ◀───────┘  answering LLM (WITH tools, may fetch more)
+   │       │
+   │       ▼
+   ├─▶ GATE 1  deterministic Validate() ── fail ──▶ citation-diff critique ──┐
+   │       │ pass                                                            │
+   │       ▼                                                                 │
+   ├─▶ GATE 2  critic LLM (NO tools) ───── reject ─▶ critic critique ────────┤
+   │       │ approve                                                         │
+   │       ▼                                                            revise
+   └─▶ Response {answer, citations, plan, critic_verdict, usage, session_id} ┘
+                                                          (≤ MaxIterations)
+```
+
+### Why the planner gets no tools
+
+The planner emits JSON naming which tools to call; **Go** executes exactly those. The alternative — letting the planner call tools directly — collapses planning and execution back into one opaque loop. Keeping them separate means:
+
+- The plan is inspectable *before* it costs anything, so a plan naming `drop_database` is rejected structurally, not discovered at dispatch time.
+- The plan appears in the response for audit. An operator can see the strategy, not just the outcome.
+- Tool execution is deterministic Go: same plan, same tools, same order, every time.
+
+### Why the critic gets no tools either
+
+Tool access would let the critic fetch data the answering agent never saw, producing objections that cannot be acted on — *"you missed edge X"* when X was never in the evidence bundle. Reviewing the same evidence keeps the loop closed and every critique actionable.
+
+### The two gates are not redundant
+
+They cover genuinely different properties:
+
+| | Gate 1 — deterministic validator | Gate 2 — critic LLM |
+|---|---|---|
+| Always on? | Yes | Opt-in (`use_critic`) |
+| Catches | Fabricated IDs, wrong numeric values, deprecated edges cited as live, malformed proposals | Wrong causal reading, direction-sign errors, unsupported conclusions, question drift, miscalibrated confidence |
+| Cost | Free (pure Go) | One LLM turn per round |
+| Can be wrong? | No — it compares against live state | Yes — it is a model |
+
+The motivating case is real. During the v1 live smoke, `qwen2.5:7b` produced *"P7: Community & Ecosystem → Resource & Cost"*. P7 exists; the cited numbers were correct; Gate 1 passed it. The claim was still false — P7 is CE→MU. Structural grounding and semantic correctness are different properties, and only Gate 2 covers the second.
+
+Gate 1 runs first and unconditionally: a fabricated citation never reaches the critic, let alone the operator.
+
+### Degradation policy
+
+Every optional stage fails **open**, never closed:
+
+| Failure | Behaviour |
+|---|---|
+| Planner returns unparseable output | Answering agent is told planning failed; gathers evidence itself (the v1 path) |
+| Plan is structurally invalid | Same — plan rejected, request continues |
+| A plan step's tool errors | Recorded in the evidence bundle as `ERROR`; remaining steps still run |
+| Plan exceeds tool budget | Executor stops and notes the truncation *in the bundle*, so the answering agent knows its picture is incomplete |
+| Critic errors or is unreachable | Structurally valid answer ships with the degradation recorded in `critic_verdict.issues` |
+| Critic rejects with no stated issue | Upgraded to approval — burning a revision round on "make it better" helps nobody |
+
+The one thing that never degrades is Gate 1. A response that fails deterministic validation after `MaxIterations` returns HTTP 422 with the partial response and every mismatch enumerated.
+
+### Session memory
+
+`session_id` opts into multi-turn. The store is in-memory with LRU eviction (defaults: 100 sessions, 20 turns each, 32 cached tool results per session, 60 s tool-cache TTL, 30 min idle TTL).
+
+Two things live in a session:
+
+1. **Prior turns**, replayed into the answering agent's context so an operator can ask *"what about diag-2?"* without restating the question.
+2. **A tool-result cache**, keyed by `(tool_name, canonical(args))`. Flushed wholesale when the ontology history watermark advances — any mutation (tune, deprecate, strength set, construct or proposition added) invalidates it.
+
+Whole-cache invalidation rather than per-key is deliberate: the graph is 7 nodes and 15 edges. Reasoning about which cached results a given mutation could have affected costs more, in code and in bug surface, than just refetching.
+
+Sessions are **not persisted**. They carry no scientific role — P6 results come from the reasoner, not the Explainer — so crash-recovery machinery would be complexity without a customer. The durable substrate already exists: `/graph` and `/history`.
+
+An unknown `session_id` returns an error rather than silently minting a fresh session. A client that lost its ID should find out, not get an amnesiac conversation that looks like it worked.
+
+### Streaming
+
+`"stream": true` switches the response to **NDJSON over chunked encoding** — one compact JSON event per line.
+
+```
+{"event":"session","session_id":"a3f2..."}
+{"event":"planning"}
+{"event":"plan","plan":{"approach":"...","steps":[...]}}
+{"event":"tool_call","tool":"get_cost","args":{"node_id":"master"}}
+{"event":"tool_result","tool":"get_cost","digest":"cost node=master rc=0.0350"}
+{"event":"answering","iteration":1}
+{"event":"validating","iteration":1}
+{"event":"critic","iteration":1}
+{"event":"critic_verdict","iteration":1,"verdict":{"approved":true}}
+{"event":"final","response":{...}}
+```
+
+Every stream terminates in exactly one `final` or `error`, so a client loops until it sees either. Clients should tolerate unknown event kinds — new markers may be added without a schema bump precisely because that terminal guarantee holds.
+
+NDJSON rather than SSE because the consumer is a CLI or script, not a browser `EventSource`. Line-delimited JSON parses with a plain line reader in any language and pipes into `jq`; SSE would only buy browser auto-reconnect, which nothing in this deployment wants.
+
+`StreamingExplainer` is a separate optional interface rather than a widening of `Explainer`, so `DisabledExplainer` stays trivial and a streaming request against a non-streaming backend gets a clear 501 instead of a silent downgrade.
+
+### Structured decoding
+
+`response_format: {"type":"json_object"}` is sent **only on tool-free turns** (planner, critic, and the final answering turn once evidence is gathered).
+
+This matters more than it looks: constraining output to a JSON object during a *tool-calling* turn prevents the model from emitting `tool_calls` at all. The symptom would be "the model ignores its tools" — an expensive thing to debug from the outside.
+
+### Cost accounting
+
+Every response carries `usage`:
+
+```json
+{
+  "prompt_tokens": 2481, "completion_tokens": 193, "total_tokens": 2674,
+  "wall_clock_ms": 4120, "tool_calls": 3, "tool_cache_hits": 1, "llm_turns": 3
+}
+```
+
+`llm_turns` counts planner + answering + critic + revision turns separately, so the cost of each opt-in feature is directly measurable. This is what lets the paper defend the *"the LLM sits on the operator-facing surface, not the hot path"* claim with numbers rather than assertion.
+
+### Configuration
+
+```
+-explain-provider         none | openai-compatible          (default: none)
+-explain-url              http://localhost:11434/v1
+-explain-model            qwen2.5:7b-instruct
+-explain-prompt           cmd/agent/prompts/explain-v1.md
+-explain-planner-prompt   (derived: <prompt-dir>/planner-v1.md)
+-explain-critic-prompt    (derived: <prompt-dir>/critic-v1.md)
+-explain-keep-alive       30m
+-explain-sessions         true
+-explain-api-key          ""   (env EXPLAIN_API_KEY wins)
+```
+
+A missing *derived* planner/critic prompt disables that stage with a log line; an explicitly-specified path that fails to load logs a warning and disables the stage. Either way the daemon boots — a partial prompt directory degrades features, it does not block startup.
+
+### Prompt versioning
+
+Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+
+### What v2 does not change
+
+- **The reasoner, updater, Bridge, and prior-init pipeline remain pure deterministic Go.** No LLM touches the ingestion or reasoning path.
+- **The tool registry is still read-only.** Planner, answering agent, and critic all get the same six read tools. None can mutate.
+- **`-explain-provider=none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
+
+### Tests
+
+| File | Covers |
+|---|---|
+| `pkg/explain/session_test.go` | LRU eviction, touch-on-get, TTL expiry, mutation-driven invalidation, turn-buffer trimming |
+| `pkg/explain/planner_test.go` | Plan parsing (fences, prose, truncation), structural validation, evidence collection, error continuation, budget capping, cache hits |
+| `pkg/explain/critic_test.go` | Verdict parsing, issue truncation, unactionable-rejection upgrade, prompt assembly, revision formatting |
+| `pkg/explain/streaming_test.go` | Event ordering, terminal event on success and failure, payload correctness, nil-emitter safety, interface satisfaction |
+| `pkg/explain/openai_test.go` | v2 integration: planner-runs-tools, planner-failure fallback, critic approve, **critic catches structurally-valid-but-wrong**, critic-failure ships anyway, session mint and persist, unknown session, usage accounting |
+| `cmd/agent/explain_route_test.go` | NDJSON content type and parse, 501 for non-streaming explainers |
+
+All run against a scripted mock LLM. No test requires Ollama.

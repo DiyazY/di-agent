@@ -735,3 +735,72 @@ If the LLM asks *"should I…?"* it can also return a `proposal` — a suggested
 - **Groundedness.** Every value the LLM cites is checked against live graph state before the answer leaves the daemon. Fabricated proposition IDs, wrong EMA values, and references to deprecated edges are rejected — the LLM gets a critique and up to two more attempts. See [ARCHITECTURE.md §13](ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain) for the reflection-loop shape.
 - **Read-only.** The LLM's tool set is `get_cost`, `get_edges`, `get_history`, `get_peers`, `get_recommend`, `get_graph`. No mutation tool exists in the registry; the LLM literally cannot call `POST /agent/tune` or `POST /ontology/deprecate`. That preserves the human-judgment anchor from [ARCHITECTURE.md §8](ARCHITECTURE.md#8-connection-to-research).
 - **Determinism where it counts.** The reasoner, updater, and prior-init pipeline stay pure Go. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `-explain-provider=none`.
+
+### v2 features (opt-in per request)
+
+Everything below is off unless you ask for it. A v1-shaped body still behaves exactly as v1. Design rationale in [ARCHITECTURE.md §14](ARCHITECTURE.md#14-explain-v2--planning-critic-sessions-streaming).
+
+**Planning** — a dedicated planner turn writes a structured plan; Go executes exactly the tools it names.
+
+```bash
+curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Why is my ResourceCost high?","use_planner":true}' | jq '.plan'
+```
+
+**Critic** — a second LLM reviews the answer for semantic errors the deterministic validator cannot see (wrong causal reading, direction-sign mistakes, miscalibrated confidence).
+
+```bash
+curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Which edge dominates?","use_critic":true}' | jq '.critic_verdict'
+```
+
+**Sessions** — multi-turn conversation plus a session-scoped tool-result cache.
+
+```bash
+# Turn 1 — omit session_id to mint one
+SID=$(curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+      -d '{"question":"What drives my cost?"}' | jq -r '.session_id')
+
+# Turn 2 — follow up without restating context
+curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d "{\"question\":\"And how do my peers compare?\",\"session_id\":\"$SID\"}" | jq -r '.answer'
+```
+
+**Streaming** — NDJSON progress events instead of a blocking call.
+
+```bash
+curl -N -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Why?","use_planner":true,"use_critic":true,"stream":true}' \
+  | jq -c '{event, tool, iteration}'
+```
+
+Every stream ends in exactly one `final` or `error` event — loop until you see either.
+
+**All four together:**
+
+```bash
+curl -N -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Should I deprecate P7?","use_planner":true,"use_critic":true,"stream":true}'
+```
+
+### Cost accounting
+
+Every response carries a `usage` block so you can see what each feature costs:
+
+```json
+{"prompt_tokens":2481,"completion_tokens":193,"total_tokens":2674,
+ "wall_clock_ms":4120,"tool_calls":3,"tool_cache_hits":1,"llm_turns":3}
+```
+
+`llm_turns` counts planner, answering, critic, and revision turns separately.
+
+### v2 flags
+
+```
+-explain-planner-prompt   path to planner prompt   (default: <prompt-dir>/planner-v1.md)
+-explain-critic-prompt    path to critic prompt    (default: <prompt-dir>/critic-v1.md)
+-explain-keep-alive       model residency hint     (default: 30m — big latency win on repeat calls)
+-explain-sessions         enable session memory    (default: true)
+```
+
+A missing planner or critic prompt disables that stage with a log line rather than failing startup.

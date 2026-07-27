@@ -64,11 +64,23 @@ type ExplainRequest struct {
 
 // ExplainBudget bounds an Explain call so a runaway loop can't burn tokens
 // indefinitely. Zero values fall back to package defaults.
+//
+// Timeout covers the WHOLE call — planner turn, every tool dispatch, every
+// answering iteration, and every critic turn. The default is sized for a
+// local quantised 7B model doing a planner + answer + critic sequence over a
+// growing conversation, which is several times slower than a single hosted
+// API round-trip. Operators on faster backends can tighten it per request.
 type ExplainBudget struct {
 	MaxIterations int           `json:"max_iterations,omitempty"` // reflection cap; default 3
-	MaxToolCalls  int           `json:"max_tool_calls,omitempty"` // total across the session; default 10
-	Timeout       time.Duration `json:"timeout,omitempty"`        // wall-clock; default 60s
+	MaxToolCalls  int           `json:"max_tool_calls,omitempty"` // total across the call; default 10
+	Timeout       time.Duration `json:"timeout,omitempty"`        // whole-call wall clock; default 5m
 }
+
+// DefaultExplainTimeout bounds a full Explain call. Measured against
+// qwen2.5:7b-instruct (Q4_K_M) on Apple Silicon: a planner + answer + critic
+// sequence runs ~15s warm, but a tool-looping model over an accumulated
+// context can reach several minutes before the forced-answer path kicks in.
+const DefaultExplainTimeout = 5 * time.Minute
 
 // Defaults returns a budget with the package defaults populated. Called by
 // implementations to normalize a caller-provided budget.
@@ -80,7 +92,7 @@ func (b ExplainBudget) Defaults() ExplainBudget {
 		b.MaxToolCalls = 10
 	}
 	if b.Timeout <= 0 {
-		b.Timeout = 60 * time.Second
+		b.Timeout = DefaultExplainTimeout
 	}
 	return b
 }

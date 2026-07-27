@@ -450,6 +450,55 @@ func TestExplain_SessionIDWithoutStoreIsRejected(t *testing.T) {
 	}
 }
 
+// A model that loops on tool calls must not fail the request. Once the tool
+// budget is spent we strip the tools and demand an answer from the evidence
+// already gathered. Regression test for the v2 live smoke, where qwen2.5:7b
+// burned all 10 tool calls on "how many propositions are in the graph?" and
+// the daemon returned a bare "exceeded MaxToolCalls" with no answer.
+func TestExplain_ToolLoopIsForcedToAnswerRatherThanFailing(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+
+	// Script: three tool calls (budget is 3), then a grounded answer.
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     "Forced to answer from partial evidence: " + e0.PropositionID + ".",
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "low",
+	})
+	llm := &scriptedLLM{responses: []string{
+		assistantToolCall("c1", "get_peers", `{}`),
+		assistantToolCall("c2", "get_peers", `{}`),
+		assistantToolCall("c3", "get_peers", `{}`),
+		assistantOnly(string(answer)), // tools stripped by now
+	}}
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL: srv.URL, Model: "m", SystemPrompt: "p", HTTPTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := exp.Explain(context.Background(), explain.ExplainRequest{
+		Question: "Count them",
+		Budget:   explain.ExplainBudget{MaxToolCalls: 3},
+	})
+	if err != nil {
+		t.Fatalf("budget exhaustion must degrade to an answer, not an error: %v", err)
+	}
+	if !strings.Contains(resp.Answer, e0.PropositionID) {
+		t.Errorf("expected a grounded answer after the forced finish; got %q", resp.Answer)
+	}
+	if resp.Usage.ToolCalls != 3 {
+		t.Errorf("expected exactly the budgeted 3 tool calls; got %d", resp.Usage.ToolCalls)
+	}
+}
+
 func TestExplain_UsageAccountsTokensAndWallClock(t *testing.T) {
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
 	if err != nil {

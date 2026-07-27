@@ -88,7 +88,10 @@ func NewOpenAICompatible(reader SemanticMapReader, cfg OpenAICompatibleConfig) (
 		return nil, errors.New("explain: SystemPrompt is required (load from PromptFile before construction)")
 	}
 	if cfg.HTTPTimeout <= 0 {
-		cfg.HTTPTimeout = 60 * time.Second
+		// Per-request, not per-call. Must be generous enough for one slow
+		// local-model turn over a long conversation; the whole-call bound is
+		// ExplainBudget.Timeout, which the caller can tune per request.
+		cfg.HTTPTimeout = 2 * time.Minute
 	}
 	sum := sha256.Sum256([]byte(cfg.SystemPrompt))
 	return &OpenAICompatibleExplainer{
@@ -191,6 +194,9 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 		// deterministic validator) is what failed the round, the answering
 		// agent should see the critic's reasoning, not a citation diff.
 		criticRejected bool
+		// toolBudgetAnnounced ensures the "no more tools" instruction is
+		// injected exactly once, not on every subsequent turn.
+		toolBudgetAnnounced bool
 	)
 
 	// finish stamps every non-user-facing bookkeeping field on a candidate
@@ -267,11 +273,30 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+
+			// Tool budget exhausted: rather than failing the request, strip
+			// the tools and demand an answer from the evidence already
+			// gathered. A model that loops on tool calls (small models do
+			// this) still produces something citable, and the deterministic
+			// validator still gates it. Erroring out here would throw away
+			// perfectly good evidence.
+			turnTools := tools
 			if toolCallsSpent >= budget.MaxToolCalls {
-				return nil, fmt.Errorf("explain: exceeded MaxToolCalls=%d", budget.MaxToolCalls)
+				if !toolBudgetAnnounced {
+					messages = append(messages, chatMessage{
+						Role: "user",
+						Content: fmt.Sprintf("You have used all %d permitted tool calls. "+
+							"Do not request more tools. Answer now, using only the evidence already gathered. "+
+							"If that evidence is insufficient, say so plainly and set confidence to \"low\".",
+							budget.MaxToolCalls),
+					})
+					toolBudgetAnnounced = true
+					emit(Event{Kind: EventAnswering, Iteration: iter, Message: "tool budget exhausted; forcing final answer"})
+				}
+				turnTools = nil
 			}
 
-			resp, err := e.chat(ctx, messages, tools)
+			resp, err := e.chat(ctx, messages, turnTools)
 			if err != nil {
 				return nil, err
 			}
@@ -339,7 +364,16 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 			// Model asked for tools. Run each and feed the result back.
 			for _, tc := range msg.ToolCalls {
 				if toolCallsSpent >= budget.MaxToolCalls {
-					return nil, fmt.Errorf("explain: exceeded MaxToolCalls=%d mid-turn", budget.MaxToolCalls)
+					// Budget ran out partway through a batch of tool calls.
+					// The protocol requires a tool message for every call the
+					// model made, so answer each remaining one with a refusal
+					// rather than leaving the conversation malformed.
+					messages = append(messages, chatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Content:    `{"error":"tool-call budget exhausted","hint":"answer from the evidence you already have"}`,
+					})
+					continue
 				}
 				toolCallsSpent++
 				args := map[string]any{}
