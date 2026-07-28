@@ -978,7 +978,7 @@ Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary 
 
 ### Prompt versioning
 
-The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](../go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
 
 ### Response shape
 

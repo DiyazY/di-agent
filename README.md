@@ -69,11 +69,21 @@ Early implementation — contracts, edge-minimal daemon, and prior initializatio
 
 ## Quick start
 
+Go 1.22+ is the only hard requirement.
+
 ```bash
 cd semantic-map/go
+go build ./... && go test ./...     # verify the checkout
+
 ./dev.sh demo              # 3-minute guided tour: build, graph, 12 scenarios, UI
 ./dev.sh replay list       # inventory of the dissertation's 225 Netdata parquets
 ./dev.sh replay run --kd k0s --test idle --run 1 --speed 0   # replay one parquet
 ```
 
-See [`semantic-map/README.md`](semantic-map/README.md) for the full structure, API, and operational guide; [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) for the design record (contracts, profiles, multigraph, externally-driven replay path).
+## Documentation
+
+| Document | Read it for |
+| -------- | ----------- |
+| [`DEVELOPING.md`](DEVELOPING.md) | **Start here to change code.** Install, the inner loop, how to extend (collectors, MetricTypes, contracts, profiles, endpoints, explain tools), testing, conventions, troubleshooting. |
+| [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the six contracts and why, multigraph backbone, coordination, the natural-language layer. |
+| [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, prior initialization, PoC quickstart. |

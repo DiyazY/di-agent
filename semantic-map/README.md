@@ -10,6 +10,8 @@ For design rationale, contract decisions, language strategy, and research connec
 
 ---
 
+> **Changing code?** Read [`DEVELOPING.md`](../DEVELOPING.md) first — install, the `dev.sh` inner loop, extension recipes, testing, and conventions. This file is the operational reference; that one is the developer guide.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
