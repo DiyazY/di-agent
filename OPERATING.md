@@ -78,12 +78,17 @@ There are no packages or images. Build the binary and copy it.
 git clone https://github.com/DiyazY/di-agent.git
 cd di-agent/semantic-map/go
 
-# Native
-go build -o di-agent ./cmd/agent
+# Cross-compile for a Raspberry Pi 4 or other arm64 Linux node.
+# CGO_ENABLED=0 gives a fully static binary with Go's own DNS resolver —
+# no glibc dependency, and no nscd/unix-socket needs to allow through the
+# systemd sandbox in §4.
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o di-agent-arm64 ./cmd/agent
 
-# Cross-compile for a Raspberry Pi 4 or other arm64 Linux node
-GOOS=linux GOARCH=arm64 go build -o di-agent-arm64 ./cmd/agent
+# amd64 edge server
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o di-agent-amd64 ./cmd/agent
 ```
+
+Building natively on the node (`go build -o di-agent ./cmd/agent`) also works, but defaults to `CGO_ENABLED=1` and therefore glibc's resolver — see the sandbox caveat in [§4](#4-run-under-systemd).
 
 Then on each node:
 
@@ -168,12 +173,27 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ReadOnlyPaths=/sys/fs/cgroup
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is required, not optional: a CGO-enabled build (the default when
+# you `go build` natively on the node) uses glibc's resolver, which may talk
+# to nscd/systemd-resolved over a unix socket. Omit it and hostname lookups
+# for peers and Netdata fail while everything else looks healthy.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=128M
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **Two caveats on this unit, stated plainly.**
+>
+> 1. **It has not been run on a live systemd host.** The directives follow from verified properties of the binary — it writes nothing, needs no privileges, opens one socket — but the unit itself is untested. Deploy it to one node and check `systemctl status` and `journalctl -u di-agent` before rolling it out. If the sandbox is the problem, comment out the hardening block and re-add directives one at a time.
+> 2. **`MemoryMax=128M` assumes default session caps.** It is ~8× the measured working set, which holds for the agent plus the explain layer at its default limits (100 sessions × 20 turns). Raise it if you increase those.
+>
+> Build with `CGO_ENABLED=0` to sidestep the resolver question entirely — you get a fully static binary using Go's own DNS resolver, which needs only `/etc/resolv.conf`:
+>
+> ```bash
+> CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o di-agent-arm64 ./cmd/agent
+> ```
 
 ```bash
 # /etc/di-agent/env
