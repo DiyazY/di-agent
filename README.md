@@ -84,6 +84,7 @@ go build ./... && go test ./...     # verify the checkout
 
 | Document | Read it for |
 | -------- | ----------- |
-| [`DEVELOPING.md`](DEVELOPING.md) | **Start here to change code.** Install, the inner loop, how to extend (collectors, MetricTypes, contracts, profiles, endpoints, explain tools), testing, conventions, troubleshooting. |
+| [`DEVELOPING.md`](DEVELOPING.md) | **Changing code?** Install, the inner loop, how to extend (collectors, MetricTypes, contracts, profiles, endpoints, explain tools), testing, conventions, troubleshooting. |
+| [`OPERATING.md`](OPERATING.md) | **Deploying it?** Security posture (read this first — there is no auth), resource footprint, systemd unit, health checks, monitoring, multi-node setup, upgrades, what it touches on your system. |
 | [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the six contracts and why, multigraph backbone, coordination, the natural-language layer. |
 | [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, prior initialization, PoC quickstart. |

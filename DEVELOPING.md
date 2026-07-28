@@ -2,6 +2,8 @@
 
 A working guide for building, running, extending, and testing this repository.
 
+Deploying rather than developing? Read [`OPERATING.md`](OPERATING.md) — it covers the security posture, footprint, systemd, and monitoring.
+
 For *what the system is and why it is shaped this way*, read [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) — start with §1, which has the layer map and the four request lifecycles. For the operational reference (endpoint tables, flag tables), read [`semantic-map/README.md`](semantic-map/README.md). This file is the one you want when you are about to change code.
 
 ---
