@@ -164,11 +164,13 @@ type CollectorContract interface {
 
 ```go
 func TestMyCollectorCompliance(t *testing.T) {
-    compliance.RunCollectorCompliance(t, func() contracts.CollectorContract {
+    compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
         return NewMyCollector(/* … */)
     })
 }
 ```
+
+Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. (`UpdaterFactory` is the exception: it returns `(UpdaterContract, StorageContract)`, because the updater's guarantees can only be checked against the storage it writes to.) `internal/scripted/collector_test.go` is the shortest working example to copy.
 
 **The rule: your implementation is valid if and only if it passes the compliance suite.** That is the definition, not a check on top of one.
 
@@ -176,20 +178,30 @@ func TestMyCollectorCompliance(t *testing.T) {
 
 ### 4.2 Add a MetricType
 
-Two edits, both required, or the sample is silently dropped:
+**Three** edits, all required. The enum is currently duplicated across three hand-maintained lists, and skipping any one fails differently:
 
-1. `pkg/types/types.go` — add the constant to the `MetricType` block.
-2. `pkg/semmap/bridge.go` — add it to `metricTypeToConstruct` so the Bridge knows which construct it informs.
+| # | File | Miss it and… |
+| - | ---- | ------------ |
+| 1 | `pkg/types/types.go` — the `MetricType` constant block | it does not compile |
+| 2 | `pkg/semmap/bridge.go` — `metricTypeToConstruct` | the Bridge silently ignores the sample; no edge ever updates |
+| 3 | `cmd/agent/dto.go` — `knownMetricTypes` | `POST /ingest-sample` rejects it with `400 unknown metric_type`, even though the Bridge would have routed it fine |
 
 ```go
-// types.go
+// 1. pkg/types/types.go
 FuelConsumption MetricType = "fuel_consumption"
 
-// bridge.go
+// 2. pkg/semmap/bridge.go
 types.FuelConsumption: "RC",
+
+// 3. cmd/agent/dto.go
+types.FuelConsumption: {},
 ```
 
+Miss #3 and the failure is genuinely confusing: an in-process collector works (it calls the Bridge directly), but the HTTP path — which the replay tool and any external collector use — rejects the same metric. Grep for the constant name after you add it; you should get three non-test hits.
+
 Then update the MetricType catalogue in [ARCHITECTURE §5](semantic-map/ARCHITECTURE.md#5-telemetry-pipeline) — required by the documentation rule, see [§6](#6-conventions).
+
+> Three copies of one enum is a smell, not a design. The right fix is a single registry that the Bridge and the DTO validator both read, which is the same refactor the deferred `metric_types.json` work would do. Until then, the third edit is load-bearing.
 
 The catalogue is **compile-time closed on purpose**: `POST /ingest-sample` rejects any type not in the enum, so a misconfigured collector fails loudly instead of poisoning the graph with silent unknowns. Externalising it to a config file is a known, deliberately deferred design item — see the open gap in `research-docs/SEMANTIC-MAP-STATUS.md` (private repo) for the chosen approach and why it waits for a real driver.
 
