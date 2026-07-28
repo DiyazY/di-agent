@@ -212,6 +212,99 @@ func TestExplainStream_EmitsValidationFailedOnFabrication(t *testing.T) {
 	}
 }
 
+// The contract clients are told to implement is "loop until final or error".
+// That only works if exactly one of them ever arrives. A partial result — an
+// answer that parsed but failed a gate — must ride along on the error event,
+// not be emitted as a second terminal.
+func TestExplainStream_PartialResultEmitsExactlyOneTerminalEvent(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every attempt cites a fabricated P99 → parses fine, fails Gate 1 on all
+	// three iterations → explain() returns (partial response, error).
+	bad := assistantOnly(`{"answer":"P99 did it.","citations":[{"kind":"edge","id":"P99","ema_weight":0.42}],"confidence":"high"}`)
+	llm := &scriptedLLM{responses: []string{bad, bad, bad}}
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL: srv.URL, Model: "m", SystemPrompt: "p", HTTPTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := collectEvents(t, exp, explain.ExplainRequest{Question: "Why?"})
+	if err == nil {
+		t.Fatal("expected a validation failure after MaxIterations")
+	}
+
+	var terminals []explain.EventKind
+	for _, ev := range events {
+		if ev.Kind == explain.EventFinal || ev.Kind == explain.EventError {
+			terminals = append(terminals, ev.Kind)
+		}
+	}
+	if len(terminals) != 1 {
+		t.Fatalf("expected exactly one terminal event; got %d %v (all: %v)", len(terminals), terminals, kindsOf(events))
+	}
+	if terminals[0] != explain.EventError {
+		t.Errorf("a failed call must terminate in 'error', not %q", terminals[0])
+	}
+
+	last := events[len(events)-1]
+	if last.Kind != explain.EventError {
+		t.Errorf("the terminal event must be last; got %q", last.Kind)
+	}
+	if last.Error == "" {
+		t.Error("the error event must carry the reason")
+	}
+	// The partial answer must still reach the client — that is the whole point
+	// of not simply dropping it.
+	if last.Response == nil {
+		t.Error("the error event must carry the partial response when one exists")
+	}
+}
+
+// The success counterpart: exactly one terminal, and it is 'final'.
+func TestExplainStream_SuccessEmitsExactlyOneTerminalEvent(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     "Citing " + e0.PropositionID + ".",
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "high",
+	})
+	llm := &scriptedLLM{responses: []string{assistantOnly(string(answer))}}
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL: srv.URL, Model: "m", SystemPrompt: "p", HTTPTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := collectEvents(t, exp, explain.ExplainRequest{Question: "Why?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminals int
+	for _, ev := range events {
+		if ev.Kind == explain.EventFinal || ev.Kind == explain.EventError {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("expected exactly one terminal event; got %d (all: %v)", terminals, kindsOf(events))
+	}
+}
+
 func TestExplainStream_NilEmitIsSafe(t *testing.T) {
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
 	if err != nil {

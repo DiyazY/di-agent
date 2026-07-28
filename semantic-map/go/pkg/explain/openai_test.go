@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,11 +24,23 @@ type scriptedLLM struct {
 	responses []string
 	idx       atomic.Int32
 	seen      atomic.Int32 // number of requests received
+
+	// mu guards bodies. Captured so tests can assert on what the model was
+	// actually SENT, not just on what came back. Without this a test can only
+	// check the mock's own script, which would pass even if the production
+	// code never fed the model its evidence.
+	mu     sync.Mutex
+	bodies []string
 }
 
 func (s *scriptedLLM) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.seen.Add(1)
+		if raw, err := io.ReadAll(r.Body); err == nil {
+			s.mu.Lock()
+			s.bodies = append(s.bodies, string(raw))
+			s.mu.Unlock()
+		}
 		i := int(s.idx.Add(1)) - 1
 		if i >= len(s.responses) {
 			http.Error(w, "scriptedLLM: out of programmed responses", http.StatusInternalServerError)
@@ -35,6 +49,23 @@ func (s *scriptedLLM) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, s.responses[i])
 	})
+}
+
+// requestBody returns the n-th request body the mock received (0-indexed).
+func (s *scriptedLLM) requestBody(n int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n < 0 || n >= len(s.bodies) {
+		return ""
+	}
+	return s.bodies[n]
+}
+
+// requestCount reports how many requests reached the mock.
+func (s *scriptedLLM) requestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.bodies)
 }
 
 // assistantOnly wraps a raw assistant content string in the chat-completions
@@ -290,6 +321,30 @@ func TestExplain_PlannerRunsToolsBeforeAnswering(t *testing.T) {
 	}
 	if resp.SchemaVersion != explain.SchemaVersion {
 		t.Errorf("expected schema_version %q; got %q", explain.SchemaVersion, resp.SchemaVersion)
+	}
+
+	// The point of the planning stage is that the ANSWERING agent sees the
+	// gathered evidence. Asserting only on ToolTrace would pass even if the
+	// evidence bundle were dropped on the floor, because the trace is built
+	// independently of what gets sent to the model. Inspect the second
+	// request (index 1 — the answering turn) directly.
+	if llm.requestCount() < 2 {
+		t.Fatalf("expected at least 2 LLM requests; got %d", llm.requestCount())
+	}
+	answerReq := llm.requestBody(1)
+	if !strings.Contains(answerReq, "EVIDENCE COLLECTED BY THE PLAN") {
+		t.Error("the answering turn did not receive the plan's evidence bundle")
+	}
+	if !strings.Contains(answerReq, "look at peers") {
+		t.Error("the evidence bundle should carry the plan's approach line")
+	}
+	if !strings.Contains(answerReq, "get_peers") {
+		t.Error("the evidence bundle should name the tool the plan executed")
+	}
+	// The planner turn itself (index 0) must NOT be given tools — that
+	// separation is what makes the plan auditable before it costs anything.
+	if strings.Contains(llm.requestBody(0), `"tools"`) {
+		t.Error("the planner turn must be sent without tools")
 	}
 }
 
@@ -551,6 +606,27 @@ func TestExplain_ToolLoopIsForcedToAnswerRatherThanFailing(t *testing.T) {
 	}
 	if resp.Usage.ToolCalls != 3 {
 		t.Errorf("expected exactly the budgeted 3 tool calls; got %d", resp.Usage.ToolCalls)
+	}
+
+	// Without these, the test would pass even with the forced-answer path
+	// deleted: a scripted model that simply stops after three tool calls
+	// produces the same response. Assert the budget was actually the thing
+	// that stopped it.
+	if llm.requestCount() != 4 {
+		t.Fatalf("expected 4 LLM turns (3 tool rounds + 1 forced answer); got %d", llm.requestCount())
+	}
+	final := llm.requestBody(3)
+	if !strings.Contains(final, "used all 3 permitted tool calls") {
+		t.Error("the final turn should carry the budget-exhausted instruction")
+	}
+	// Tools must be stripped on the forced turn — leaving them in is what
+	// lets a looping model keep asking for more.
+	if strings.Contains(final, `"tools"`) {
+		t.Error("the forced-answer turn must be sent with tools stripped")
+	}
+	// The three earlier turns SHOULD have carried tools.
+	if !strings.Contains(llm.requestBody(0), `"tools"`) {
+		t.Error("the first turn should have been sent with tools available")
 	}
 }
 

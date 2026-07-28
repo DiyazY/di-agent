@@ -68,10 +68,12 @@ const (
 	EventCritic EventKind = "critic"
 	// EventCriticVerdict carries the critic's verdict.
 	EventCriticVerdict EventKind = "critic_verdict"
-	// EventFinal carries the completed response. Always the last event on a
-	// successful stream.
+	// EventFinal carries the completed response. Emitted exactly once, and
+	// only when the call succeeded.
 	EventFinal EventKind = "final"
-	// EventError terminates a stream that could not produce a response.
+	// EventError terminates a stream that failed. Response is non-nil when a
+	// partial answer is still worth showing — one that cleared parsing but
+	// failed a gate. Emitted exactly once, and only when the call failed.
 	EventError EventKind = "error"
 )
 

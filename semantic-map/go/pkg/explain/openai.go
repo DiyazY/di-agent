@@ -26,7 +26,7 @@ type OpenAICompatibleConfig struct {
 	APIKey       string        // usually empty for local models; passed via Authorization if set
 	SystemPrompt string        // full text of explain-v1.md (or newer)
 	PromptFile   string        // path used, kept for provenance in the response
-	HTTPTimeout  time.Duration // per-request timeout; default 60s
+	HTTPTimeout  time.Duration // per-request timeout; default 2m (see NewOpenAICompatible)
 
 	// PlannerPrompt is the system prompt for the planning stage. When empty,
 	// UsePlanner requests fall back to unplanned execution with a note in the
@@ -63,6 +63,10 @@ type OpenAICompatibleExplainer struct {
 	http          *http.Client
 	reader        SemanticMapReader
 	promptVersion string // sha256[:12] of the answering system prompt
+	// tools is the OpenAI-shaped tool schema, built once. The registry is a
+	// package-level constant, so rebuilding it per request allocated ~21
+	// objects for a value that never changes.
+	tools []any
 }
 
 // Sessions exposes the configured session store so the HTTP layer can mint
@@ -99,6 +103,7 @@ func NewOpenAICompatible(reader SemanticMapReader, cfg OpenAICompatibleConfig) (
 		http:          &http.Client{Timeout: cfg.HTTPTimeout},
 		reader:        reader,
 		promptVersion: hex.EncodeToString(sum[:6]),
+		tools:         buildToolsForOpenAI(),
 	}, nil
 }
 
@@ -131,18 +136,39 @@ func (e *OpenAICompatibleExplainer) ExplainStream(ctx context.Context, req Expla
 	}
 	resp, err := e.explain(ctx, req, emit)
 	switch {
-	case err != nil && resp != nil:
-		// Partial result: emit both so the client sees the response that
-		// failed and the reason it failed.
-		emit(Event{Kind: EventFinal, Response: resp})
-		emit(Event{Kind: EventError, Error: err.Error()})
 	case err != nil:
-		emit(Event{Kind: EventError, Error: err.Error()})
+		// Exactly one terminal event, always. A partial result rides along on
+		// the error event rather than being emitted as a separate `final` —
+		// emitting both would break the "loop until final or error" contract
+		// clients are told to implement: they would treat `final` as success
+		// and either stop reading before the error arrived, or report success
+		// and failure for the same request.
+		//
+		// Response is non-nil here when the answer failed a gate but is still
+		// worth showing (HTTP 422 does the same).
+		emit(Event{Kind: EventError, Error: err.Error(), Response: resp})
 	default:
 		emit(Event{Kind: EventFinal, Response: resp})
 	}
 	return resp, err
 }
+
+// failureReason names why a reflection round failed to produce a shippable
+// answer. Every path that breaks out of an answering turn must assign one, so
+// the revision critique and the final error always describe the round that
+// actually failed.
+type failureReason int
+
+const (
+	failureNone failureReason = iota
+	// failureParse — the assistant message was not parseable as the response
+	// schema. The model needs a syntax correction, not a semantic one.
+	failureParse
+	// failureValidation — Gate 1 rejected a citation as fabricated or stale.
+	failureValidation
+	// failureCritic — Gate 2 accepted the citations but rejected the reasoning.
+	failureCritic
+)
 
 func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequest, emit EmitFunc) (*ExplainResponse, error) {
 	budget := req.Budget.Defaults()
@@ -180,20 +206,28 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 		emit(Event{Kind: EventSession, SessionID: sessionID})
 	}
 
-	tools := buildToolsForOpenAI()
+	tools := e.tools
 
 	var (
 		trace          []ToolInvocation
 		toolCallsSpent int
 		lastResp       *ExplainResponse
 		lastIssues     []string
-		plan           *Plan
-		lastVerdict    *CriticVerdict
-		evidence       string
-		// criticRejected routes the revision prompt: when the critic (not the
-		// deterministic validator) is what failed the round, the answering
-		// agent should see the critic's reasoning, not a citation diff.
-		criticRejected bool
+		plan        *Plan
+		lastVerdict *CriticVerdict
+		evidence    string
+		// lastFailure records WHY the most recent round did not produce a
+		// shippable answer. It routes the revision critique and the final
+		// error message.
+		//
+		// Modelled as an explicit reason rather than a boolean because a
+		// boolean only records "was it the critic?" — and nothing resets it
+		// when a later round fails for a different reason. A critic rejection
+		// followed by a parse failure then reported the parse failure as a
+		// critic rejection, and fed the model the stale semantic critique
+		// instead of the syntax error. Assigning the reason on every failing
+		// path makes staleness unrepresentable.
+		lastFailure failureReason
 		// toolBudgetAnnounced ensures the "no more tools" instruction is
 		// injected exactly once, not on every subsequent turn.
 		toolBudgetAnnounced bool
@@ -333,6 +367,7 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 				parsed, parseErr := parseExplainResponse(msg.Content)
 				if parseErr != nil {
 					lastIssues = []string{fmt.Sprintf("could not parse response as JSON: %v", parseErr)}
+					lastFailure = failureParse
 					break // fall through to revision path
 				}
 				// Gate 1 — deterministic validator. Structural grounding is
@@ -344,7 +379,7 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 					emit(Event{Kind: EventValidationFailed, Iteration: iter, Issues: v.Issues})
 					lastResp = parsed
 					lastIssues = v.Issues
-					criticRejected = false
+					lastFailure = failureValidation
 					break // enter revision path
 				}
 
@@ -371,7 +406,7 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 					emit(Event{Kind: EventCriticVerdict, Iteration: iter, Verdict: verdict})
 					if !verdict.Approved {
 						lastResp = parsed
-						criticRejected = true
+						lastFailure = failureCritic
 						break // enter revision path
 					}
 				}
@@ -397,13 +432,32 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 				}
 				toolCallsSpent++
 				args := map[string]any{}
+				var argErr error
 				if raw := tc.Function.Arguments; raw != "" {
-					_ = json.Unmarshal([]byte(raw), &args)
+					argErr = json.Unmarshal([]byte(raw), &args)
 				}
 				emit(Event{Kind: EventToolCall, Tool: tc.Function.Name, Args: args, Iteration: iter})
 
 				inv := ToolInvocation{Name: tc.Function.Name, Arguments: args}
 				var content string
+
+				// Malformed arguments must be reported as such. Falling
+				// through with an empty args map makes the dispatcher answer
+				// "node_id and task_type are required", which sends the model
+				// off fixing arguments it did in fact supply — the real fault
+				// was its JSON syntax.
+				if argErr != nil {
+					inv.Error = "malformed tool arguments: " + argErr.Error()
+					content = fmt.Sprintf(
+						`{"error":%q,"hint":"your arguments were not valid JSON; re-emit this tool call with a well-formed arguments object"}`,
+						inv.Error)
+					emit(Event{Kind: EventToolResult, Tool: tc.Function.Name, Digest: inv.ResultDigest, Iteration: iter, Error: inv.Error})
+					trace = append(trace, inv)
+					messages = append(messages, chatMessage{
+						Role: "tool", ToolCallID: tc.ID, Content: content,
+					})
+					continue
+				}
 
 				// Session-scoped cache: an answering agent that re-asks for
 				// data the planner already fetched pays nothing.
@@ -437,24 +491,31 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 		if iter >= budget.MaxIterations {
 			break
 		}
-		// Hand the LLM a critique of the last response and let it revise.
-		// Which critique depends on which gate failed.
+		// Hand the LLM a critique of the round that just failed. A critic
+		// rejection needs the critic's reasoning; everything else needs the
+		// citation diff or the parse error.
 		critique := FormatIssuesForLLM(lastIssues)
-		if criticRejected {
+		if lastFailure == failureCritic {
 			critique = FormatCriticVerdictForLLM(lastVerdict)
 		}
 		messages = append(messages, chatMessage{Role: "user", Content: critique})
 	}
 
-	// Reflection budget exhausted without a response that cleared both gates.
+	// Reflection budget exhausted without a response that cleared every gate.
+	// The error names the reason the LAST round failed, not an earlier one.
 	if lastResp != nil {
 		finish(lastResp, budget.MaxIterations)
-		if criticRejected {
+		switch lastFailure {
+		case failureCritic:
 			return lastResp, fmt.Errorf("explain: critic rejected the response after %d iterations: %s",
 				budget.MaxIterations, strings.Join(lastVerdict.Issues, "; "))
+		case failureParse:
+			return lastResp, fmt.Errorf("explain: could not parse a response after %d iterations: %s",
+				budget.MaxIterations, strings.Join(lastIssues, "; "))
+		default:
+			return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s",
+				budget.MaxIterations, strings.Join(lastIssues, "; "))
 		}
-		return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s",
-			budget.MaxIterations, strings.Join(lastIssues, "; "))
 	}
 	return nil, fmt.Errorf("explain: no parseable response after %d iterations", budget.MaxIterations)
 }
@@ -583,8 +644,20 @@ func (e *OpenAICompatibleExplainer) invalidateStaleCache(session *Session) {
 	if session == nil || e.cfg.Sessions == nil {
 		return
 	}
-	events, err := e.reader.History(time.Time{})
-	if err != nil || len(events) == 0 {
+	// Ask only for events NEWER than what this session has already accounted
+	// for. Passing the zero time would refetch the entire audit log on every
+	// request and walk it linearly — O(total events) per call, on a log that
+	// only grows. Steady state here is an empty slice.
+	events, err := e.reader.History(session.HistoryWatermark)
+	if err != nil {
+		// Fail closed on the cache: if we cannot tell whether the ontology
+		// moved, assume it did. Serving a stale tool result is worse than
+		// re-fetching one, because the answer would cite values that no
+		// longer match live state — exactly what Gate 1 exists to prevent.
+		e.cfg.Sessions.InvalidateOnMutation(session.ID, time.Now())
+		return
+	}
+	if len(events) == 0 {
 		return
 	}
 	newest := events[0].Timestamp

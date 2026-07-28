@@ -235,6 +235,51 @@ func TestExplainRoute_StreamingReturnsNDJSON(t *testing.T) {
 	}
 }
 
+// An unknown session_id is the CALLER's mistake. Returning 500 would send an
+// operator hunting for a server fault over an expired or mistyped session id.
+func TestExplainRoute_UnknownSessionReturns400(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatalf("profiles.Build: %v", err)
+	}
+	// The LLM is never reached — session resolution fails first.
+	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the LLM must not be called when the session id is unknown")
+	}))
+	defer llmServer.Close()
+
+	explainer, err := explain.NewOpenAICompatible(explainerReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL:      llmServer.URL,
+		Model:        "mock",
+		SystemPrompt: "test prompt",
+		Sessions:     explain.NewSessionStore(explain.SessionConfig{}),
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	registerRoutes(mux, sm, explainer)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/explain", "application/json",
+		bytes.NewReader([]byte(`{"question":"Why?","session_id":"does-not-exist"}`)))
+	if err != nil {
+		t.Fatalf("POST /explain: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400 for an unknown session; got %d: %s", resp.StatusCode, string(body))
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if msg, _ := out["error"].(string); !strings.Contains(msg, "session not found") {
+		t.Errorf("the error body should name the cause; got %v", out)
+	}
+}
+
 // A streaming request against an Explainer that cannot stream must fail
 // clearly rather than silently degrading to a buffered response.
 func TestExplainRoute_StreamingAgainstDisabledReturns501(t *testing.T) {

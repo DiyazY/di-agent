@@ -241,7 +241,13 @@ func (s *SessionStore) AppendTurn(id, question, answer string) error {
 }
 
 // CacheTool records one tool result under this session. Overwrites any prior
-// entry with the same key. Evicts the LRU cache entry when the cache is full.
+// entry with the same key.
+//
+// When the cache is full it drops an ARBITRARY entry, not the least-recently
+// used one. Tracking recency per entry would cost a second index for a cache
+// that is already bounded at 32 entries and expired by TTL — the size cap is
+// a memory guard, not a hit-rate optimisation. Named honestly here because a
+// docstring promising LRU would mislead the next person tuning cache hits.
 func (s *SessionStore) CacheTool(id, toolName string, args map[string]any, payload json.RawMessage, digest string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
