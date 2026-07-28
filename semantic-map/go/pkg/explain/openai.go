@@ -26,7 +26,33 @@ type OpenAICompatibleConfig struct {
 	APIKey       string        // usually empty for local models; passed via Authorization if set
 	SystemPrompt string        // full text of explain-v1.md (or newer)
 	PromptFile   string        // path used, kept for provenance in the response
-	HTTPTimeout  time.Duration // per-request timeout; default 60s
+	HTTPTimeout  time.Duration // per-request timeout; default 2m (see NewOpenAICompatible)
+
+	// PlannerPrompt is the system prompt for the planning stage. When empty,
+	// UsePlanner requests fall back to unplanned execution with a note in the
+	// response — a missing optional prompt degrades the feature rather than
+	// failing the request.
+	PlannerPrompt string
+
+	// CriticPrompt is the system prompt for the multi-agent critic. Same
+	// fallback semantics as PlannerPrompt.
+	CriticPrompt string
+
+	// KeepAlive is passed to Ollama-style backends as the `keep_alive` field
+	// so the model stays resident between calls. Empty means "don't send the
+	// field" — backends that don't understand it are unaffected either way.
+	KeepAlive string
+
+	// DisableStructuredDecoding turns OFF the token-level JSON constraint we
+	// otherwise request from backends that support it (Ollama `format`, vLLM
+	// guided decoding). Named negatively so the zero value keeps the good
+	// default (constrained decoding on) without a pointer or sentinel.
+	DisableStructuredDecoding bool
+
+	// Sessions is the store backing multi-turn conversations and the tool
+	// result cache. Nil disables session support — requests carrying a
+	// SessionID then fail with ErrSessionNotFound.
+	Sessions *SessionStore
 }
 
 // OpenAICompatibleExplainer speaks the OpenAI /v1/chat/completions surface
@@ -36,8 +62,16 @@ type OpenAICompatibleExplainer struct {
 	cfg           OpenAICompatibleConfig
 	http          *http.Client
 	reader        SemanticMapReader
-	promptVersion string // sha256[:12] of the system prompt for provenance
+	promptVersion string // sha256[:12] of the answering system prompt
+	// tools is the OpenAI-shaped tool schema, built once. The registry is a
+	// package-level constant, so rebuilding it per request allocated ~21
+	// objects for a value that never changes.
+	tools []any
 }
+
+// Sessions exposes the configured session store so the HTTP layer can mint
+// IDs before delegating. Returns nil when session support is disabled.
+func (e *OpenAICompatibleExplainer) Sessions() *SessionStore { return e.cfg.Sessions }
 
 // NewOpenAICompatible builds an Explainer against the given reader. The
 // SystemPrompt is loaded from disk once at construction time — callers must
@@ -58,7 +92,10 @@ func NewOpenAICompatible(reader SemanticMapReader, cfg OpenAICompatibleConfig) (
 		return nil, errors.New("explain: SystemPrompt is required (load from PromptFile before construction)")
 	}
 	if cfg.HTTPTimeout <= 0 {
-		cfg.HTTPTimeout = 60 * time.Second
+		// Per-request, not per-call. Must be generous enough for one slow
+		// local-model turn over a long conversation; the whole-call bound is
+		// ExplainBudget.Timeout, which the caller can tune per request.
+		cfg.HTTPTimeout = 2 * time.Minute
 	}
 	sum := sha256.Sum256([]byte(cfg.SystemPrompt))
 	return &OpenAICompatibleExplainer{
@@ -66,6 +103,7 @@ func NewOpenAICompatible(reader SemanticMapReader, cfg OpenAICompatibleConfig) (
 		http:          &http.Client{Timeout: cfg.HTTPTimeout},
 		reader:        reader,
 		promptVersion: hex.EncodeToString(sum[:6]),
+		tools:         buildToolsForOpenAI(),
 	}, nil
 }
 
@@ -83,8 +121,56 @@ func LoadPrompt(path string) (string, error) {
 func (e *OpenAICompatibleExplainer) Close() error { return nil }
 
 // Explain runs the reflection loop: draft → validate against live graph →
-// revise until valid or budget exhausted.
+// revise until valid or budget exhausted. Progress is discarded; callers who
+// want it should use ExplainStream.
 func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequest) (*ExplainResponse, error) {
+	return e.explain(ctx, req, discardEmit)
+}
+
+// ExplainStream is Explain with progress reporting. Every phase transition,
+// tool dispatch, validation outcome, and critic verdict is emitted before the
+// final response. Satisfies StreamingExplainer.
+func (e *OpenAICompatibleExplainer) ExplainStream(ctx context.Context, req ExplainRequest, emit EmitFunc) (*ExplainResponse, error) {
+	if emit == nil {
+		emit = discardEmit
+	}
+	resp, err := e.explain(ctx, req, emit)
+	switch {
+	case err != nil:
+		// Exactly one terminal event, always. A partial result rides along on
+		// the error event rather than being emitted as a separate `final` —
+		// emitting both would break the "loop until final or error" contract
+		// clients are told to implement: they would treat `final` as success
+		// and either stop reading before the error arrived, or report success
+		// and failure for the same request.
+		//
+		// Response is non-nil here when the answer failed a gate but is still
+		// worth showing (HTTP 422 does the same).
+		emit(Event{Kind: EventError, Error: err.Error(), Response: resp})
+	default:
+		emit(Event{Kind: EventFinal, Response: resp})
+	}
+	return resp, err
+}
+
+// failureReason names why a reflection round failed to produce a shippable
+// answer. Every path that breaks out of an answering turn must assign one, so
+// the revision critique and the final error always describe the round that
+// actually failed.
+type failureReason int
+
+const (
+	failureNone failureReason = iota
+	// failureParse — the assistant message was not parseable as the response
+	// schema. The model needs a syntax correction, not a semantic one.
+	failureParse
+	// failureValidation — Gate 1 rejected a citation as fabricated or stale.
+	failureValidation
+	// failureCritic — Gate 2 accepted the citations but rejected the reasoning.
+	failureCritic
+)
+
+func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequest, emit EmitFunc) (*ExplainResponse, error) {
 	budget := req.Budget.Defaults()
 	ctx, cancel := context.WithTimeout(ctx, budget.Timeout)
 	defer cancel()
@@ -92,21 +178,146 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 	if strings.TrimSpace(req.Question) == "" {
 		return nil, errors.New("explain: question is empty")
 	}
+	startedAt := time.Now()
+	usage := Usage{}
 
-	messages := []chatMessage{
-		{Role: "system", Content: e.cfg.SystemPrompt},
-		{Role: "user", Content: req.Question},
+	// ── session resolution ───────────────────────────────────────────────
+	// An empty SessionID with a configured store mints a fresh session; a
+	// non-empty ID must resolve or the request fails (silently minting would
+	// hide a client bug behind an amnesiac conversation).
+	var session *Session
+	if e.cfg.Sessions != nil {
+		if req.SessionID == "" {
+			session = e.cfg.Sessions.Create()
+		} else {
+			s, err := e.cfg.Sessions.Get(req.SessionID)
+			if err != nil {
+				return nil, fmt.Errorf("explain: %w (id=%s)", err, req.SessionID)
+			}
+			session = s
+		}
+		e.invalidateStaleCache(session)
+	} else if req.SessionID != "" {
+		return nil, errors.New("explain: session_id supplied but session support is disabled on this daemon")
 	}
-	tools := buildToolsForOpenAI()
+	sessionID := ""
+	if session != nil {
+		sessionID = session.ID
+		emit(Event{Kind: EventSession, SessionID: sessionID})
+	}
+
+	tools := e.tools
 
 	var (
 		trace          []ToolInvocation
 		toolCallsSpent int
 		lastResp       *ExplainResponse
 		lastIssues     []string
+		plan        *Plan
+		lastVerdict *CriticVerdict
+		evidence    string
+		// lastFailure records WHY the most recent round did not produce a
+		// shippable answer. It routes the revision critique and the final
+		// error message.
+		//
+		// Modelled as an explicit reason rather than a boolean because a
+		// boolean only records "was it the critic?" — and nothing resets it
+		// when a later round fails for a different reason. A critic rejection
+		// followed by a parse failure then reported the parse failure as a
+		// critic rejection, and fed the model the stale semantic critique
+		// instead of the syntax error. Assigning the reason on every failing
+		// path makes staleness unrepresentable.
+		lastFailure failureReason
+		// toolBudgetAnnounced ensures the "no more tools" instruction is
+		// injected exactly once, not on every subsequent turn.
+		toolBudgetAnnounced bool
 	)
 
+	// finish stamps every non-user-facing bookkeeping field on a candidate
+	// response so both the success and partial-failure paths report the same
+	// provenance shape. Called just before we return.
+	//
+	// Deliberately does NOT persist to the session — see persistTurn.
+	finish := func(resp *ExplainResponse, iter int) {
+		if resp == nil {
+			return
+		}
+		resp.SchemaVersion = SchemaVersion
+		resp.ToolTrace = trace
+		resp.ModelName = e.cfg.Model
+		resp.PromptVersion = e.promptVersion
+		resp.Iterations = iter
+		resp.Plan = plan
+		resp.CriticVerdict = lastVerdict
+		resp.SessionID = sessionID
+		usage.ToolCalls = toolCallsSpent
+		usage.WallClockMs = time.Since(startedAt).Milliseconds()
+		resp.Usage = usage
+	}
+
+	// persistTurn records the exchange in the session. Called ONLY when a
+	// response cleared every gate that was enabled.
+	//
+	// A response that failed validation or was rejected by the critic must
+	// never enter the transcript: the next turn replays prior answers as
+	// assistant messages, so persisting a bad one would feed the model its
+	// own rejected output as established context. That is the circular
+	// self-confirmation the architecture guards against (§8) — the failure
+	// mode is silent, because the bad answer looks like history rather than
+	// like a mistake.
+	persistTurn := func(resp *ExplainResponse) {
+		if session == nil || resp == nil {
+			return
+		}
+		_ = e.cfg.Sessions.AppendTurn(session.ID, req.Question, resp.Answer)
+	}
+
+	// ── build the answering agent's opening context ───────────────────────
+	messages := []chatMessage{{Role: "system", Content: e.cfg.SystemPrompt}}
+
+	// Prior turns give the answering agent conversational continuity so the
+	// operator can ask follow-ups ("what about diag-2?") without restating
+	// context. Bounded by the session store's MaxMessagesPerSes.
+	// Only the answer text is replayed, not the serialized response. The
+	// tool_trace / usage / plan blocks are ~16x the answer's size and carry
+	// nothing the model can act on; replaying them crowds out the system
+	// prompt on small-context local models.
+	if session != nil {
+		for _, turn := range session.Turns {
+			messages = append(messages,
+				chatMessage{Role: "user", Content: turn.Question},
+				chatMessage{Role: "assistant", Content: turn.Answer},
+			)
+		}
+	}
+	messages = append(messages, chatMessage{Role: "user", Content: req.Question})
+
+	// ── planning stage (Ng Step 3) ────────────────────────────────────────
+	if req.UsePlanner {
+		emit(Event{Kind: EventPlanning})
+		p, exec, err := e.runPlanner(ctx, req.Question, budget.MaxToolCalls-toolCallsSpent, sessionID, &usage, emit)
+		switch {
+		case err != nil:
+			// A failed planner must not fail the request. Fall through to
+			// unplanned execution and tell the answering agent why its
+			// evidence bundle is missing.
+			emit(Event{Kind: EventPlanFailed, Message: "falling back to unplanned execution", Error: err.Error()})
+			messages = append(messages, chatMessage{
+				Role:    "user",
+				Content: "NOTE: the planning stage failed (" + err.Error() + "). Gather evidence with tool calls yourself.",
+			})
+		default:
+			plan = p
+			trace = append(trace, exec.Trace...)
+			toolCallsSpent += exec.ToolCalls
+			usage.ToolCacheHits += exec.CacheHits
+			evidence = exec.Evidence
+			messages = append(messages, chatMessage{Role: "user", Content: exec.Evidence})
+		}
+	}
+
 	for iter := 1; iter <= budget.MaxIterations; iter++ {
+		emit(Event{Kind: EventAnswering, Iteration: iter})
 		// One full LLM turn: keep letting the model call tools until it
 		// produces a final assistant message with no tool calls, or until we
 		// exceed the tool-call budget.
@@ -114,17 +325,40 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
+
+			// Tool budget exhausted: rather than failing the request, strip
+			// the tools and demand an answer from the evidence already
+			// gathered. A model that loops on tool calls (small models do
+			// this) still produces something citable, and the deterministic
+			// validator still gates it. Erroring out here would throw away
+			// perfectly good evidence.
+			turnTools := tools
 			if toolCallsSpent >= budget.MaxToolCalls {
-				return nil, fmt.Errorf("explain: exceeded MaxToolCalls=%d", budget.MaxToolCalls)
+				if !toolBudgetAnnounced {
+					messages = append(messages, chatMessage{
+						Role: "user",
+						Content: fmt.Sprintf("You have used all %d permitted tool calls. "+
+							"Do not request more tools. Answer now, using only the evidence already gathered. "+
+							"If that evidence is insufficient, say so plainly and set confidence to \"low\".",
+							budget.MaxToolCalls),
+					})
+					toolBudgetAnnounced = true
+					emit(Event{Kind: EventAnswering, Iteration: iter, Message: "tool budget exhausted; forcing final answer"})
+				}
+				turnTools = nil
 			}
 
-			resp, err := e.chat(ctx, messages, tools)
+			resp, err := e.chat(ctx, messages, turnTools)
 			if err != nil {
 				return nil, err
 			}
 			if len(resp.Choices) == 0 {
 				return nil, errors.New("explain: model returned no choices")
 			}
+			usage.LLMTurns++
+			usage.PromptTokens += resp.Usage.PromptTokens
+			usage.CompletionTokens += resp.Usage.CompletionTokens
+			usage.TotalTokens += resp.Usage.TotalTokens
 			msg := resp.Choices[0].Message
 			messages = append(messages, msg)
 
@@ -133,42 +367,116 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 				parsed, parseErr := parseExplainResponse(msg.Content)
 				if parseErr != nil {
 					lastIssues = []string{fmt.Sprintf("could not parse response as JSON: %v", parseErr)}
+					lastFailure = failureParse
 					break // fall through to revision path
 				}
-				parsed.ToolTrace = trace
-				parsed.ModelName = e.cfg.Model
-				parsed.PromptVersion = e.promptVersion
-				parsed.Iterations = iter
-
+				// Gate 1 — deterministic validator. Structural grounding is
+				// non-negotiable; a fabricated citation never reaches the
+				// critic, let alone the operator.
+				emit(Event{Kind: EventValidating, Iteration: iter})
 				v := Validate(e.reader, parsed)
-				if v.IsValid {
-					return parsed, nil
+				if !v.IsValid {
+					emit(Event{Kind: EventValidationFailed, Iteration: iter, Issues: v.Issues})
+					lastResp = parsed
+					lastIssues = v.Issues
+					lastFailure = failureValidation
+					break // enter revision path
 				}
-				lastResp = parsed
-				lastIssues = v.Issues
-				break // enter revision path
+
+				// Gate 2 — multi-agent critic (Ng Step 4). Catches semantic
+				// errors that survive structural validation: wrong causal
+				// reading, direction-sign mistakes, unsupported conclusions,
+				// miscalibrated confidence.
+				if req.UseCritic {
+					emit(Event{Kind: EventCritic, Iteration: iter})
+					verdict, cErr := e.runCritic(ctx, req.Question, parsed, evidence, iter, &usage)
+					if cErr != nil {
+						// A broken critic must not block a structurally valid
+						// answer. Log the degradation in the verdict and ship.
+						lastVerdict = &CriticVerdict{
+							Approved: true,
+							Round:    iter,
+							Issues:   []string{"critic unavailable: " + cErr.Error()},
+						}
+						finish(parsed, iter)
+						persistTurn(parsed)
+						return parsed, nil
+					}
+					lastVerdict = verdict
+					emit(Event{Kind: EventCriticVerdict, Iteration: iter, Verdict: verdict})
+					if !verdict.Approved {
+						lastResp = parsed
+						lastFailure = failureCritic
+						break // enter revision path
+					}
+				}
+
+				finish(parsed, iter)
+				persistTurn(parsed)
+				return parsed, nil
 			}
 
 			// Model asked for tools. Run each and feed the result back.
 			for _, tc := range msg.ToolCalls {
 				if toolCallsSpent >= budget.MaxToolCalls {
-					return nil, fmt.Errorf("explain: exceeded MaxToolCalls=%d mid-turn", budget.MaxToolCalls)
+					// Budget ran out partway through a batch of tool calls.
+					// The protocol requires a tool message for every call the
+					// model made, so answer each remaining one with a refusal
+					// rather than leaving the conversation malformed.
+					messages = append(messages, chatMessage{
+						Role:       "tool",
+						ToolCallID: tc.ID,
+						Content:    `{"error":"tool-call budget exhausted","hint":"answer from the evidence you already have"}`,
+					})
+					continue
 				}
 				toolCallsSpent++
 				args := map[string]any{}
+				var argErr error
 				if raw := tc.Function.Arguments; raw != "" {
-					_ = json.Unmarshal([]byte(raw), &args)
+					argErr = json.Unmarshal([]byte(raw), &args)
 				}
-				result, err := Dispatch(e.reader, tc.Function.Name, args)
+				emit(Event{Kind: EventToolCall, Tool: tc.Function.Name, Args: args, Iteration: iter})
+
 				inv := ToolInvocation{Name: tc.Function.Name, Arguments: args}
 				var content string
-				if err != nil {
+
+				// Malformed arguments must be reported as such. Falling
+				// through with an empty args map makes the dispatcher answer
+				// "node_id and task_type are required", which sends the model
+				// off fixing arguments it did in fact supply — the real fault
+				// was its JSON syntax.
+				if argErr != nil {
+					inv.Error = "malformed tool arguments: " + argErr.Error()
+					content = fmt.Sprintf(
+						`{"error":%q,"hint":"your arguments were not valid JSON; re-emit this tool call with a well-formed arguments object"}`,
+						inv.Error)
+					emit(Event{Kind: EventToolResult, Tool: tc.Function.Name, Digest: inv.ResultDigest, Iteration: iter, Error: inv.Error})
+					trace = append(trace, inv)
+					messages = append(messages, chatMessage{
+						Role: "tool", ToolCallID: tc.ID, Content: content,
+					})
+					continue
+				}
+
+				// Session-scoped cache: an answering agent that re-asks for
+				// data the planner already fetched pays nothing.
+				if cached, ok := e.cachedTool(sessionID, tc.Function.Name, args); ok {
+					usage.ToolCacheHits++
+					inv.ResultDigest = cached.Digest + " (cached)"
+					content = string(cached.Payload)
+				} else if result, err := Dispatch(e.reader, tc.Function.Name, args); err != nil {
 					inv.Error = err.Error()
-					content = fmt.Sprintf(`{"error":%q}`, err.Error())
+					// Per-tool error feedback: the model sees what went wrong
+					// and can correct its arguments on the next call rather
+					// than abandoning the turn.
+					content = fmt.Sprintf(`{"error":%q,"hint":"check the tool's required arguments and retry"}`, err.Error())
 				} else {
 					inv.ResultDigest = result.Digest
 					content = string(result.Payload)
+					e.cacheTool(sessionID, tc.Function.Name, args, result)
 				}
+				emit(Event{Kind: EventToolResult, Tool: tc.Function.Name, Digest: inv.ResultDigest, Iteration: iter, Error: inv.Error})
 				trace = append(trace, inv)
 				messages = append(messages, chatMessage{
 					Role:       "tool",
@@ -183,18 +491,182 @@ func (e *OpenAICompatibleExplainer) Explain(ctx context.Context, req ExplainRequ
 		if iter >= budget.MaxIterations {
 			break
 		}
-		// Hand the LLM a critique of the last response and let it revise.
+		// Hand the LLM a critique of the round that just failed. A critic
+		// rejection needs the critic's reasoning; everything else needs the
+		// citation diff or the parse error.
 		critique := FormatIssuesForLLM(lastIssues)
+		if lastFailure == failureCritic {
+			critique = FormatCriticVerdictForLLM(lastVerdict)
+		}
 		messages = append(messages, chatMessage{Role: "user", Content: critique})
 	}
 
-	// Reflection budget exhausted without a valid response.
+	// Reflection budget exhausted without a response that cleared every gate.
+	// The error names the reason the LAST round failed, not an earlier one.
 	if lastResp != nil {
-		lastResp.Iterations = budget.MaxIterations
-		lastResp.ToolTrace = trace
-		return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s", budget.MaxIterations, strings.Join(lastIssues, "; "))
+		finish(lastResp, budget.MaxIterations)
+		switch lastFailure {
+		case failureCritic:
+			return lastResp, fmt.Errorf("explain: critic rejected the response after %d iterations: %s",
+				budget.MaxIterations, strings.Join(lastVerdict.Issues, "; "))
+		case failureParse:
+			return lastResp, fmt.Errorf("explain: could not parse a response after %d iterations: %s",
+				budget.MaxIterations, strings.Join(lastIssues, "; "))
+		default:
+			return lastResp, fmt.Errorf("explain: response failed validation after %d iterations: %s",
+				budget.MaxIterations, strings.Join(lastIssues, "; "))
+		}
 	}
 	return nil, fmt.Errorf("explain: no parseable response after %d iterations", budget.MaxIterations)
+}
+
+// runPlanner executes the planning stage: one LLM turn with the planner
+// system prompt, then deterministic execution of the resulting plan's tool
+// steps. Returns the plan and its execution result.
+//
+// The planner turn is given NO tools — it emits a plan as JSON rather than
+// calling anything itself. That separation is what makes the plan auditable:
+// the tools that run are exactly the ones the plan named, executed by Go, not
+// by the model.
+func (e *OpenAICompatibleExplainer) runPlanner(
+	ctx context.Context,
+	question string,
+	remainingToolCalls int,
+	sessionID string,
+	usage *Usage,
+	emit EmitFunc,
+) (*Plan, planExecution, error) {
+	if strings.TrimSpace(e.cfg.PlannerPrompt) == "" {
+		return nil, planExecution{}, errors.New("planner prompt not configured")
+	}
+	if remainingToolCalls <= 0 {
+		return nil, planExecution{}, errors.New("no tool-call budget remains for planning")
+	}
+
+	resp, err := e.chat(ctx, []chatMessage{
+		{Role: "system", Content: e.cfg.PlannerPrompt},
+		{Role: "user", Content: question},
+	}, nil) // nil tools — the planner writes a plan, it does not call tools
+	if err != nil {
+		return nil, planExecution{}, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, planExecution{}, errors.New("planner returned no choices")
+	}
+	usage.LLMTurns++
+	usage.PromptTokens += resp.Usage.PromptTokens
+	usage.CompletionTokens += resp.Usage.CompletionTokens
+	usage.TotalTokens += resp.Usage.TotalTokens
+
+	plan, err := parsePlan(resp.Choices[0].Message.Content)
+	if err != nil {
+		return nil, planExecution{}, err
+	}
+	if issues := validatePlan(plan); len(issues) > 0 {
+		return nil, planExecution{}, fmt.Errorf("plan is structurally invalid: %s", strings.Join(issues, "; "))
+	}
+	emit(Event{Kind: EventPlan, Plan: plan})
+
+	var cache toolCache
+	if e.cfg.Sessions != nil {
+		cache = e.cfg.Sessions
+	}
+	exec := executePlan(e.reader, plan, remainingToolCalls, cache, sessionID, emit)
+	return plan, exec, nil
+}
+
+// cachedTool looks up a session-scoped tool result. Returns (nil, false) when
+// sessions are disabled or the entry is absent/expired.
+func (e *OpenAICompatibleExplainer) cachedTool(sessionID, name string, args map[string]any) (*ToolResult, bool) {
+	if e.cfg.Sessions == nil || sessionID == "" {
+		return nil, false
+	}
+	return e.cfg.Sessions.CachedTool(sessionID, name, args)
+}
+
+// cacheTool stores a tool result under the session. No-op when sessions are
+// disabled — the cache is a session-scoped optimisation, not a global one,
+// because a shared cache would leak one operator's view into another's.
+func (e *OpenAICompatibleExplainer) cacheTool(sessionID, name string, args map[string]any, result *ToolResult) {
+	if e.cfg.Sessions == nil || sessionID == "" || result == nil {
+		return
+	}
+	_ = e.cfg.Sessions.CacheTool(sessionID, name, args, result.Payload, result.Digest)
+}
+
+// runCritic executes one critic turn against a candidate answer. Like the
+// planner, the critic gets no tools — it reviews the same evidence the
+// answering agent saw, so its objections are always actionable.
+func (e *OpenAICompatibleExplainer) runCritic(
+	ctx context.Context,
+	question string,
+	candidate *ExplainResponse,
+	evidence string,
+	round int,
+	usage *Usage,
+) (*CriticVerdict, error) {
+	if strings.TrimSpace(e.cfg.CriticPrompt) == "" {
+		return nil, errors.New("critic prompt not configured")
+	}
+	resp, err := e.chat(ctx, []chatMessage{
+		{Role: "system", Content: e.cfg.CriticPrompt},
+		{Role: "user", Content: buildCriticPrompt(question, candidate, evidence)},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, errors.New("critic returned no choices")
+	}
+	usage.LLMTurns++
+	usage.PromptTokens += resp.Usage.PromptTokens
+	usage.CompletionTokens += resp.Usage.CompletionTokens
+	usage.TotalTokens += resp.Usage.TotalTokens
+
+	verdict, err := parseCriticVerdict(resp.Choices[0].Message.Content)
+	if err != nil {
+		return nil, err
+	}
+	verdict.Round = round
+	return verdict, nil
+}
+
+// invalidateStaleCache drops a session's tool-result cache when the ontology
+// has changed since the cache was populated. The watermark is the timestamp
+// of the newest OntologyEvent; any mutation (tune, deprecate, strength set,
+// construct/proposition added) advances it.
+//
+// Rationale for whole-cache invalidation over per-key: the graph is 7 nodes
+// and 15 edges. Reasoning about which cached tool results a given mutation
+// could have affected costs more (in code and in bug surface) than just
+// refetching. If the graph grows by orders of magnitude, revisit.
+func (e *OpenAICompatibleExplainer) invalidateStaleCache(session *Session) {
+	if session == nil || e.cfg.Sessions == nil {
+		return
+	}
+	// Ask only for events NEWER than what this session has already accounted
+	// for. Passing the zero time would refetch the entire audit log on every
+	// request and walk it linearly — O(total events) per call, on a log that
+	// only grows. Steady state here is an empty slice.
+	events, err := e.reader.History(session.HistoryWatermark)
+	if err != nil {
+		// Fail closed on the cache: if we cannot tell whether the ontology
+		// moved, assume it did. Serving a stale tool result is worse than
+		// re-fetching one, because the answer would cite values that no
+		// longer match live state — exactly what Gate 1 exists to prevent.
+		e.cfg.Sessions.InvalidateOnMutation(session.ID, time.Now())
+		return
+	}
+	if len(events) == 0 {
+		return
+	}
+	newest := events[0].Timestamp
+	for _, ev := range events[1:] {
+		if ev.Timestamp.After(newest) {
+			newest = ev.Timestamp
+		}
+	}
+	e.cfg.Sessions.InvalidateOnMutation(session.ID, newest)
 }
 
 // ── OpenAI-compatible wire types ────────────────────────────────────────────
@@ -224,12 +696,26 @@ type chatRequest struct {
 	ResponseFormat any           `json:"response_format,omitempty"`
 	Temperature    float64       `json:"temperature"`
 	Stream         bool          `json:"stream"`
+	// KeepAlive is an Ollama extension: how long to keep the model resident
+	// after this request. Omitted when empty so strict OpenAI backends that
+	// reject unknown fields are unaffected.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+	Usage chatUsage `json:"usage"`
+}
+
+// chatUsage mirrors the OpenAI /v1/chat/completions usage block. Ollama's
+// OpenAI-compat endpoint reports these; llama-server / LM Studio / vLLM
+// generally do too. Zero when the backend does not populate them.
+type chatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 func buildToolsForOpenAI() []any {
@@ -254,9 +740,15 @@ func (e *OpenAICompatibleExplainer) chat(ctx context.Context, messages []chatMes
 		Tools:       tools,
 		Temperature: 0, // deterministic decoding when the backend honors it
 		Stream:      false,
-		// Ask for JSON output when the backend supports it. Many local
-		// backends ignore this hint; the prompt itself is the real guard.
-		ResponseFormat: map[string]string{"type": "json_object"},
+		KeepAlive:   e.cfg.KeepAlive,
+	}
+	// Token-level JSON constraint where the backend supports it. When tools
+	// are in play we must NOT constrain output to a JSON object — the model
+	// needs to be free to emit a tool_calls message instead. Structured
+	// decoding therefore applies only to tool-free turns (planner, critic,
+	// and the final answering turn once evidence is gathered).
+	if !e.cfg.DisableStructuredDecoding && len(tools) == 0 {
+		body.ResponseFormat = map[string]string{"type": "json_object"}
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -292,25 +784,9 @@ func (e *OpenAICompatibleExplainer) chat(ctx context.Context, messages []chatMes
 // prose, both of which some local models emit despite the prompt asking for
 // pure JSON.
 func parseExplainResponse(content string) (*ExplainResponse, error) {
-	content = strings.TrimSpace(content)
+	content = stripJSONEnvelope(content)
 	if content == "" {
 		return nil, errors.New("assistant message is empty")
-	}
-	// Strip ``` fences if present.
-	if strings.HasPrefix(content, "```") {
-		if idx := strings.Index(content, "\n"); idx >= 0 {
-			content = content[idx+1:]
-		}
-		content = strings.TrimSuffix(content, "```")
-		content = strings.TrimSpace(content)
-	}
-	// Trim any leading non-JSON prose.
-	if i := strings.Index(content, "{"); i > 0 {
-		content = content[i:]
-	}
-	// Trim trailing prose.
-	if i := strings.LastIndex(content, "}"); i >= 0 && i < len(content)-1 {
-		content = content[:i+1]
 	}
 	var out ExplainResponse
 	if err := json.Unmarshal([]byte(content), &out); err != nil {

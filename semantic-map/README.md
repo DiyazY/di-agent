@@ -117,7 +117,19 @@ semantic-map/
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
-    │   ├── semmap/map.go       SemanticMap Go facade (includes peer registry + client)
+    │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
+    │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
+    │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
+    │   │   ├── tools.go        6 READ-ONLY tools over the facade + Dispatch()
+    │   │   ├── validator.go    Deterministic citation validator (Gate 1)
+    │   │   ├── planner.go      Plan parse / structural validate / deterministic execute
+    │   │   ├── critic.go       Critic verdict parse + prompt assembly (Gate 2)
+    │   │   ├── session.go      LRU session store + tool-result cache w/ TTL + invalidation
+    │   │   ├── streaming.go    NDJSON Event vocabulary + StreamingExplainer iface
+    │   │   └── openai.go       OpenAI-compatible client; planner→answer→critic loop
+    │   ├── semmap/
+    │   │   ├── map.go          SemanticMap Go facade (includes peer registry + client)
+    │   │   └── bridge.go       MetricType → construct routing (stateless, NOT a contract)
     │   └── profiles/           Profile factory
     │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
     │
@@ -158,6 +170,11 @@ semantic-map/
     │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
     │   ├── static.go           //go:embed all:static + staticHandler()
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
+    │   ├── explain_route_test.go  POST /explain: 501/400/200 + NDJSON streaming
+    │   ├── prompts/            Versioned LLM system prompts (loaded at startup)
+    │   │   ├── explain-v1.md   Answering agent — graph semantics, tools, response schema
+    │   │   ├── planner-v1.md   Planner agent — planning rules + worked examples
+    │   │   └── critic-v1.md    Critic agent — what Gate 1 already covers, what only it can catch
     │   └── static/             Embedded web UI assets
     │       ├── index.html      Cytoscape mount + side panel + <dialog> modal + toast region
     │       ├── app.js          Vanilla-JS controller; fetches /graph; POSTs mutations
@@ -329,7 +346,15 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/confirm`          | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/reject`           | path only                                                | Phase 1  |
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
+| GET  | `/peers`                            | —                                                        | Step 4.9 |
+| POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
+| DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
+| POST | `/peers/{id}/trust`                 | `{value}`                                                | Step 4.9 |
+| POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
+| POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
+
+`POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `-explain-provider=none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
 
 JSON error shape for Phase 1 endpoints:
 
@@ -465,6 +490,22 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
+| `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
+| `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
+
+**Explain layer** (all optional; `POST /explain` returns 501 unless `-explain-provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
+
+| Flag                       | Default                          | Meaning                                                                 |
+| -------------------------- | -------------------------------- | ----------------------------------------------------------------------- |
+| `-explain-provider`        | `none`                           | `none` (disabled) or `openai-compatible` (Ollama, llama-server, LM Studio, vLLM, hosted OpenAI). |
+| `-explain-url`             | `http://localhost:11434/v1`      | Base URL of the OpenAI-compatible backend.                              |
+| `-explain-model`           | `qwen2.5:7b-instruct`            | Model name passed to that backend.                                      |
+| `-explain-prompt`          | `cmd/agent/prompts/explain-v1.md`| Answering-agent system prompt. Required when the provider is enabled.   |
+| `-explain-planner-prompt`  | `<prompt-dir>/planner-v1.md`     | Planner prompt. A missing *derived* default disables the planning stage with a log line rather than failing startup. |
+| `-explain-critic-prompt`   | `<prompt-dir>/critic-v1.md`      | Critic prompt. Same degradation semantics as the planner prompt.        |
+| `-explain-keep-alive`      | `30m`                            | Passed to Ollama-style backends as `keep_alive` so the model stays resident between calls. Empty omits the field. |
+| `-explain-sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
+| `-explain-api-key`         | `""`                             | Bearer token for the backend. `EXPLAIN_API_KEY` in the environment takes precedence. |
 
 ---
 
@@ -735,3 +776,72 @@ If the LLM asks *"should I…?"* it can also return a `proposal` — a suggested
 - **Groundedness.** Every value the LLM cites is checked against live graph state before the answer leaves the daemon. Fabricated proposition IDs, wrong EMA values, and references to deprecated edges are rejected — the LLM gets a critique and up to two more attempts. See [ARCHITECTURE.md §13](ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain) for the reflection-loop shape.
 - **Read-only.** The LLM's tool set is `get_cost`, `get_edges`, `get_history`, `get_peers`, `get_recommend`, `get_graph`. No mutation tool exists in the registry; the LLM literally cannot call `POST /agent/tune` or `POST /ontology/deprecate`. That preserves the human-judgment anchor from [ARCHITECTURE.md §8](ARCHITECTURE.md#8-connection-to-research).
 - **Determinism where it counts.** The reasoner, updater, and prior-init pipeline stay pure Go. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `-explain-provider=none`.
+
+### v2 features (opt-in per request)
+
+Everything below is off unless you ask for it. A v1-shaped body still behaves exactly as v1. Design rationale in [ARCHITECTURE.md §14](ARCHITECTURE.md#14-explain-v2--planning-critic-sessions-streaming).
+
+**Planning** — a dedicated planner turn writes a structured plan; Go executes exactly the tools it names.
+
+```bash
+curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Why is my ResourceCost high?","use_planner":true}' | jq '.plan'
+```
+
+**Critic** — a second LLM reviews the answer for semantic errors the deterministic validator cannot see (wrong causal reading, direction-sign mistakes, miscalibrated confidence).
+
+```bash
+curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Which edge dominates?","use_critic":true}' | jq '.critic_verdict'
+```
+
+**Sessions** — multi-turn conversation plus a session-scoped tool-result cache.
+
+```bash
+# Turn 1 — omit session_id to mint one
+SID=$(curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+      -d '{"question":"What drives my cost?"}' | jq -r '.session_id')
+
+# Turn 2 — follow up without restating context
+curl -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d "{\"question\":\"And how do my peers compare?\",\"session_id\":\"$SID\"}" | jq -r '.answer'
+```
+
+**Streaming** — NDJSON progress events instead of a blocking call.
+
+```bash
+curl -N -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Why?","use_planner":true,"use_critic":true,"stream":true}' \
+  | jq -c '{event, tool, iteration}'
+```
+
+Every stream ends in exactly one `final` or `error` event — loop until you see either.
+
+**All four together:**
+
+```bash
+curl -N -s -X POST localhost:8080/explain -H 'Content-Type: application/json' \
+  -d '{"question":"Should I deprecate P7?","use_planner":true,"use_critic":true,"stream":true}'
+```
+
+### Cost accounting
+
+Every response carries a `usage` block so you can see what each feature costs:
+
+```json
+{"prompt_tokens":2481,"completion_tokens":193,"total_tokens":2674,
+ "wall_clock_ms":4120,"tool_calls":3,"tool_cache_hits":1,"llm_turns":3}
+```
+
+`llm_turns` counts planner, answering, critic, and revision turns separately.
+
+### v2 flags
+
+```
+-explain-planner-prompt   path to planner prompt   (default: <prompt-dir>/planner-v1.md)
+-explain-critic-prompt    path to critic prompt    (default: <prompt-dir>/critic-v1.md)
+-explain-keep-alive       model residency hint     (default: 30m — big latency win on repeat calls)
+-explain-sessions         enable session memory    (default: true)
+```
+
+A missing planner or critic prompt disables that stage with a log line rather than failing startup.

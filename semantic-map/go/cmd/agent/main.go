@@ -38,6 +38,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -96,6 +97,15 @@ func main() {
 	explainAPIKey := flag.String("explain-api-key", "",
 		"optional bearer token for the OpenAI-compatible backend "+
 			"(env var EXPLAIN_API_KEY takes precedence when both are set)")
+	explainPlannerPrompt := flag.String("explain-planner-prompt", "",
+		"path to the planner system prompt; empty derives planner-v1.md from -explain-prompt's directory")
+	explainCriticPrompt := flag.String("explain-critic-prompt", "",
+		"path to the critic system prompt; empty derives critic-v1.md from -explain-prompt's directory")
+	explainKeepAlive := flag.String("explain-keep-alive", "30m",
+		"how long the backend should keep the model resident between calls "+
+			"(Ollama `keep_alive`); empty disables the hint")
+	explainSessions := flag.Bool("explain-sessions", true,
+		"enable multi-turn session memory and the session-scoped tool cache for /explain")
 
 	flag.Parse()
 
@@ -133,7 +143,17 @@ func main() {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
-	explainer, err := buildExplainer(sm, *explainProvider, *explainURL, *explainModel, *explainPrompt, *explainAPIKey)
+	explainer, err := buildExplainer(sm, explainOptions{
+		Provider:      *explainProvider,
+		BaseURL:       *explainURL,
+		Model:         *explainModel,
+		PromptPath:    *explainPrompt,
+		PlannerPath:   *explainPlannerPrompt,
+		CriticPath:    *explainCriticPrompt,
+		FlagAPIKey:    *explainAPIKey,
+		KeepAlive:     *explainKeepAlive,
+		EnableSession: *explainSessions,
+	})
 	if err != nil {
 		log.Fatalf("failed to build explainer: %v", err)
 	}
@@ -296,40 +316,92 @@ func runCollectionLoop(
 // -explain-api-key flag. Env-first matches the standard secret-handling
 // convention: credentials don't live in shell history or systemd unit files
 // unless the operator explicitly opted in via the flag.
-func buildExplainer(
-	sm *semmap.SemanticMap,
-	provider, baseURL, model, promptPath, flagAPIKey string,
-) (explain.Explainer, error) {
-	if provider == "" || provider == "none" {
+// explainOptions bundles the -explain-* flags. A struct rather than a long
+// positional list so adding a knob doesn't churn every call site.
+type explainOptions struct {
+	Provider      string
+	BaseURL       string
+	Model         string
+	PromptPath    string
+	PlannerPath   string
+	CriticPath    string
+	FlagAPIKey    string
+	KeepAlive     string
+	EnableSession bool
+}
+
+func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explainer, error) {
+	if opt.Provider == "" || opt.Provider == "none" {
 		log.Printf("explain: provider=none (POST /explain will return 501)")
 		return explain.NewDisabled(), nil
 	}
-	if provider != "openai-compatible" {
-		return nil, fmt.Errorf("unknown -explain-provider %q (valid: none, openai-compatible)", provider)
+	if opt.Provider != "openai-compatible" {
+		return nil, fmt.Errorf("unknown -explain-provider %q (valid: none, openai-compatible)", opt.Provider)
 	}
-	if promptPath == "" {
-		promptPath = "cmd/agent/prompts/explain-v1.md"
+	if opt.PromptPath == "" {
+		opt.PromptPath = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
 	}
-	prompt, err := explain.LoadPrompt(promptPath)
+	prompt, err := explain.LoadPrompt(opt.PromptPath)
 	if err != nil {
 		return nil, fmt.Errorf("read prompt: %w", err)
 	}
+
+	// Planner and critic prompts are optional: a missing file disables that
+	// stage rather than failing startup, so an operator can run answer-only
+	// even with a partial prompt directory.
+	promptDir := filepath.Dir(opt.PromptPath)
+	plannerPrompt := loadOptionalPrompt(opt.PlannerPath, promptDir, "planner-v1.md", "planner")
+	criticPrompt := loadOptionalPrompt(opt.CriticPath, promptDir, "critic-v1.md", "critic")
+
 	apiKey := os.Getenv("EXPLAIN_API_KEY")
 	if apiKey == "" {
-		apiKey = flagAPIKey
+		apiKey = opt.FlagAPIKey
 	}
+
+	var sessions *explain.SessionStore
+	if opt.EnableSession {
+		sessions = explain.NewSessionStore(explain.SessionConfig{})
+	}
+
 	e, err := explain.NewOpenAICompatible(explainReader{sm}, explain.OpenAICompatibleConfig{
-		BaseURL:      baseURL,
-		Model:        model,
-		APIKey:       apiKey,
-		SystemPrompt: prompt,
-		PromptFile:   promptPath,
+		BaseURL:       opt.BaseURL,
+		Model:         opt.Model,
+		APIKey:        apiKey,
+		SystemPrompt:  prompt,
+		PromptFile:    opt.PromptPath,
+		PlannerPrompt: plannerPrompt,
+		CriticPrompt:  criticPrompt,
+		KeepAlive:     opt.KeepAlive,
+		Sessions:      sessions,
 	})
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("explain: provider=openai-compatible url=%s model=%s prompt=%s", baseURL, model, promptPath)
+	log.Printf("explain: provider=openai-compatible url=%s model=%s prompt=%s planner=%t critic=%t sessions=%t keep_alive=%s",
+		opt.BaseURL, opt.Model, opt.PromptPath, plannerPrompt != "", criticPrompt != "", opt.EnableSession, opt.KeepAlive)
 	return e, nil
+}
+
+// loadOptionalPrompt reads an optional stage prompt. An explicit path that
+// fails to load is a hard error (the operator asked for it); a derived
+// default that is absent just disables the stage with a log line.
+func loadOptionalPrompt(explicitPath, dir, defaultName, label string) string {
+	path := explicitPath
+	derived := false
+	if path == "" {
+		path = filepath.Join(dir, defaultName)
+		derived = true
+	}
+	text, err := explain.LoadPrompt(path)
+	if err != nil {
+		if derived {
+			log.Printf("explain: %s stage disabled (no prompt at %s)", label, path)
+			return ""
+		}
+		log.Printf("explain: WARNING %s prompt %q could not be read (%v); stage disabled", label, path, err)
+		return ""
+	}
+	return text
 }
 
 // explainReader adapts *semmap.SemanticMap to explain.SemanticMapReader. All

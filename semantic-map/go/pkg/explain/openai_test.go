@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/semmap"
 )
 
 // scriptedLLM is an httptest server that responds to /chat/completions with a
@@ -20,11 +24,23 @@ type scriptedLLM struct {
 	responses []string
 	idx       atomic.Int32
 	seen      atomic.Int32 // number of requests received
+
+	// mu guards bodies. Captured so tests can assert on what the model was
+	// actually SENT, not just on what came back. Without this a test can only
+	// check the mock's own script, which would pass even if the production
+	// code never fed the model its evidence.
+	mu     sync.Mutex
+	bodies []string
 }
 
 func (s *scriptedLLM) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.seen.Add(1)
+		if raw, err := io.ReadAll(r.Body); err == nil {
+			s.mu.Lock()
+			s.bodies = append(s.bodies, string(raw))
+			s.mu.Unlock()
+		}
 		i := int(s.idx.Add(1)) - 1
 		if i >= len(s.responses) {
 			http.Error(w, "scriptedLLM: out of programmed responses", http.StatusInternalServerError)
@@ -33,6 +49,23 @@ func (s *scriptedLLM) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, s.responses[i])
 	})
+}
+
+// requestBody returns the n-th request body the mock received (0-indexed).
+func (s *scriptedLLM) requestBody(n int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n < 0 || n >= len(s.bodies) {
+		return ""
+	}
+	return s.bodies[n]
+}
+
+// requestCount reports how many requests reached the mock.
+func (s *scriptedLLM) requestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.bodies)
 }
 
 // assistantOnly wraps a raw assistant content string in the chat-completions
@@ -190,5 +223,450 @@ func TestExplain_DisabledReturnsErrNotEnabled(t *testing.T) {
 	e := explain.NewDisabled()
 	if _, err := e.Explain(context.Background(), explain.ExplainRequest{Question: "hi"}); err != explain.ErrNotEnabled {
 		t.Errorf("expected ErrNotEnabled; got %v", err)
+	}
+}
+
+// ── v2: planner + critic + session integration ──────────────────────────────
+
+// newV2Explainer builds an explainer with planner/critic prompts and a
+// session store, driven by a scripted LLM.
+func newV2Explainer(t *testing.T, script []string, sessions *explain.SessionStore) (*explain.OpenAICompatibleExplainer, *semmap.SemanticMap, *scriptedLLM) {
+	t.Helper()
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatalf("profiles.Build: %v", err)
+	}
+	llm := &scriptedLLM{responses: script}
+	srv := httptest.NewServer(llm.handler())
+	t.Cleanup(srv.Close)
+
+	e, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL:       srv.URL,
+		Model:         "test-model",
+		SystemPrompt:  "answering prompt",
+		PlannerPrompt: "planner prompt",
+		CriticPrompt:  "critic prompt",
+		Sessions:      sessions,
+		HTTPTimeout:   5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible: %v", err)
+	}
+	return e, sm, llm
+}
+
+// groundedAnswer builds an answer JSON citing a real edge so the
+// deterministic validator passes.
+func groundedAnswer(e0 edgeFacts, text string) string {
+	body, _ := json.Marshal(map[string]any{
+		"answer": text,
+		"citations": []map[string]any{{
+			"kind": "edge", "id": e0.ID,
+			"ema_weight": e0.EMA, "prior_weight": e0.Prior, "confidence": e0.Conf,
+		}},
+		"confidence": "high",
+	})
+	return assistantOnly(string(body))
+}
+
+type edgeFacts struct {
+	ID    string
+	EMA   float64
+	Prior float64
+	Conf  float64
+}
+
+func firstEdge(t *testing.T, sm *semmap.SemanticMap) edgeFacts {
+	t.Helper()
+	edges, err := sm.AllEdges()
+	if err != nil || len(edges) == 0 {
+		t.Fatalf("AllEdges: %v (n=%d)", err, len(edges))
+	}
+	e := edges[0]
+	return edgeFacts{ID: e.PropositionID, EMA: e.EMAWeight, Prior: e.PriorWeight, Conf: e.Confidence}
+}
+
+func TestExplain_PlannerRunsToolsBeforeAnswering(t *testing.T) {
+	// Script: [0] planner emits a plan, [1] answering agent answers.
+	// The answering agent makes NO tool calls — the plan already gathered
+	// the evidence, which is the whole point of the planning stage.
+	plan := assistantOnly(`{"approach":"look at peers","steps":[
+		{"tool":"get_peers","args":{}},
+		{"synthesize":"summarise peer trust"}
+	]}`)
+	e, sm, llm := newV2Explainer(t, []string{plan, ""}, nil)
+	e0 := firstEdge(t, sm)
+	llm.responses[1] = groundedAnswer(e0, "No peers are registered; "+e0.ID+" is unaffected.")
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{
+		Question:   "What peers do I have?",
+		UsePlanner: true,
+	})
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if resp.Plan == nil {
+		t.Fatal("expected the plan to be returned for audit")
+	}
+	if resp.Plan.Approach != "look at peers" || len(resp.Plan.Steps) != 2 {
+		t.Errorf("unexpected plan: %+v", resp.Plan)
+	}
+	// The plan's get_peers step must show up in the trace even though the
+	// answering agent never called a tool itself.
+	if len(resp.ToolTrace) != 1 || resp.ToolTrace[0].Name != "get_peers" {
+		t.Errorf("expected the plan's tool call in the trace; got %+v", resp.ToolTrace)
+	}
+	if resp.Usage.LLMTurns != 2 {
+		t.Errorf("expected 2 LLM turns (planner + answer); got %d", resp.Usage.LLMTurns)
+	}
+	if resp.SchemaVersion != explain.SchemaVersion {
+		t.Errorf("expected schema_version %q; got %q", explain.SchemaVersion, resp.SchemaVersion)
+	}
+
+	// The point of the planning stage is that the ANSWERING agent sees the
+	// gathered evidence. Asserting only on ToolTrace would pass even if the
+	// evidence bundle were dropped on the floor, because the trace is built
+	// independently of what gets sent to the model. Inspect the second
+	// request (index 1 — the answering turn) directly.
+	if llm.requestCount() < 2 {
+		t.Fatalf("expected at least 2 LLM requests; got %d", llm.requestCount())
+	}
+	answerReq := llm.requestBody(1)
+	if !strings.Contains(answerReq, "EVIDENCE COLLECTED BY THE PLAN") {
+		t.Error("the answering turn did not receive the plan's evidence bundle")
+	}
+	if !strings.Contains(answerReq, "look at peers") {
+		t.Error("the evidence bundle should carry the plan's approach line")
+	}
+	if !strings.Contains(answerReq, "get_peers") {
+		t.Error("the evidence bundle should name the tool the plan executed")
+	}
+	// The planner turn itself (index 0) must NOT be given tools — that
+	// separation is what makes the plan auditable before it costs anything.
+	if strings.Contains(llm.requestBody(0), `"tools"`) {
+		t.Error("the planner turn must be sent without tools")
+	}
+}
+
+func TestExplain_PlannerFailureFallsBackToUnplanned(t *testing.T) {
+	// Planner emits garbage; the request must still succeed via the v1 path.
+	e, sm, llm := newV2Explainer(t, []string{assistantOnly("I am not JSON"), ""}, nil)
+	e0 := firstEdge(t, sm)
+	llm.responses[1] = groundedAnswer(e0, "Answered without a plan: "+e0.ID+".")
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{
+		Question:   "Anything?",
+		UsePlanner: true,
+	})
+	if err != nil {
+		t.Fatalf("a broken planner must not fail the request: %v", err)
+	}
+	if resp.Plan != nil {
+		t.Errorf("expected no plan on planner failure; got %+v", resp.Plan)
+	}
+}
+
+func TestExplain_CriticApprovesGroundedAnswer(t *testing.T) {
+	e, sm, llm := newV2Explainer(t, []string{"", assistantOnly(`{"approved":true,"issues":[]}`)}, nil)
+	e0 := firstEdge(t, sm)
+	llm.responses[0] = groundedAnswer(e0, "Driven by "+e0.ID+".")
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{
+		Question:  "Why?",
+		UseCritic: true,
+	})
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if resp.CriticVerdict == nil || !resp.CriticVerdict.Approved {
+		t.Errorf("expected an approving verdict; got %+v", resp.CriticVerdict)
+	}
+	if resp.Usage.LLMTurns != 2 {
+		t.Errorf("expected 2 LLM turns (answer + critic); got %d", resp.Usage.LLMTurns)
+	}
+}
+
+// The headline v2 case: an answer that is structurally perfect (every cited
+// value matches live graph state) but semantically wrong. The deterministic
+// validator waves it through; only the critic catches it.
+func TestExplain_CriticCatchesStructurallyValidButWrongAnswer(t *testing.T) {
+	e, sm, llm := newV2Explainer(t, []string{"", "", "", ""}, nil)
+	e0 := firstEdge(t, sm)
+
+	llm.responses[0] = groundedAnswer(e0, e0.ID+" targets Resource & Cost.") // wrong claim, right numbers
+	llm.responses[1] = assistantOnly(`{"approved":false,"issues":["` + e0.ID + ` does not target RC — check the edge's destination construct."],"suggested_revision":"State the correct destination construct."}`)
+	llm.responses[2] = groundedAnswer(e0, "Corrected: "+e0.ID+" has a specific destination construct in the graph.")
+	llm.responses[3] = assistantOnly(`{"approved":true,"issues":[]}`)
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{
+		Question:  "What does it target?",
+		UseCritic: true,
+	})
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if resp.Iterations != 2 {
+		t.Errorf("expected 2 iterations (rejected then corrected); got %d", resp.Iterations)
+	}
+	if !strings.Contains(resp.Answer, "Corrected") {
+		t.Errorf("expected the corrected answer; got %q", resp.Answer)
+	}
+	if resp.CriticVerdict == nil || !resp.CriticVerdict.Approved || resp.CriticVerdict.Round != 2 {
+		t.Errorf("expected an approving round-2 verdict; got %+v", resp.CriticVerdict)
+	}
+	if resp.Usage.LLMTurns != 4 {
+		t.Errorf("expected 4 LLM turns (answer, critic-reject, revise, critic-approve); got %d", resp.Usage.LLMTurns)
+	}
+}
+
+// A critic that errors must not block a structurally valid answer.
+func TestExplain_CriticFailureShipsValidAnswerWithNote(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     "Fine answer citing " + e0.PropositionID + ".",
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "high",
+	})
+
+	llm := &scriptedLLM{responses: []string{assistantOnly(string(answer))}} // no critic response scripted → 500
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL:      srv.URL,
+		Model:        "test-model",
+		SystemPrompt: "answering prompt",
+		CriticPrompt: "critic prompt",
+		HTTPTimeout:  5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := exp.Explain(context.Background(), explain.ExplainRequest{Question: "Why?", UseCritic: true})
+	if err != nil {
+		t.Fatalf("a broken critic must not fail a structurally valid answer: %v", err)
+	}
+	if resp.CriticVerdict == nil || !resp.CriticVerdict.Approved {
+		t.Fatalf("expected a degraded-but-approving verdict; got %+v", resp.CriticVerdict)
+	}
+	if len(resp.CriticVerdict.Issues) == 0 || !strings.Contains(resp.CriticVerdict.Issues[0], "critic unavailable") {
+		t.Errorf("expected the verdict to record the degradation; got %+v", resp.CriticVerdict.Issues)
+	}
+}
+
+func TestExplain_SessionMintsIDAndPersistsTurn(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	e, sm, llm := newV2Explainer(t, []string{""}, store)
+	e0 := firstEdge(t, sm)
+	llm.responses[0] = groundedAnswer(e0, "First turn about "+e0.ID+".")
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{Question: "First?"})
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	if resp.SessionID == "" {
+		t.Fatal("expected a minted session ID")
+	}
+	sess, err := store.Get(resp.SessionID)
+	if err != nil {
+		t.Fatalf("session should exist after the turn: %v", err)
+	}
+	if len(sess.Turns) != 1 || sess.Turns[0].Question != "First?" {
+		t.Errorf("expected the turn recorded; got %+v", sess.Turns)
+	}
+}
+
+// A response that never cleared the gates must NOT enter session history.
+// Persisting it would replay the model's own rejected output as an assistant
+// message on the next turn — the circular self-confirmation the architecture
+// guards against.
+func TestExplain_FailedResponseIsNotPersistedToSession(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	// Every attempt cites a fabricated P99, so all 3 iterations fail Gate 1.
+	bad := assistantOnly(`{"answer":"P99 did it.","citations":[{"kind":"edge","id":"P99","ema_weight":0.42}],"confidence":"high"}`)
+	e, _, _ := newV2Explainer(t, []string{bad, bad, bad}, store)
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{Question: "Why?"})
+	if err == nil {
+		t.Fatal("expected the request to fail validation after MaxIterations")
+	}
+	if resp == nil || resp.SessionID == "" {
+		t.Fatalf("expected a partial response carrying the session id; got %+v", resp)
+	}
+	sess, gErr := store.Get(resp.SessionID)
+	if gErr != nil {
+		t.Fatalf("session should exist: %v", gErr)
+	}
+	if len(sess.Turns) != 0 {
+		t.Errorf("a failed response must not be recorded; found %d turn(s): %+v", len(sess.Turns), sess.Turns)
+	}
+}
+
+// The successful counterpart: a response clearing every gate IS persisted,
+// and only its answer text is kept — not the serialized DTO.
+func TestExplain_SucceededResponsePersistsAnswerTextOnly(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	e, sm, llm := newV2Explainer(t, []string{""}, store)
+	e0 := firstEdge(t, sm)
+	llm.responses[0] = groundedAnswer(e0, "Driven by "+e0.ID+".")
+
+	resp, err := e.Explain(context.Background(), explain.ExplainRequest{Question: "Why?"})
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	sess, err := store.Get(resp.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Turns) != 1 {
+		t.Fatalf("expected the successful turn recorded; got %d", len(sess.Turns))
+	}
+	got := sess.Turns[0].Answer
+	if got != resp.Answer {
+		t.Errorf("stored answer should match the response answer\n got: %q\nwant: %q", got, resp.Answer)
+	}
+	// The stored turn must be the answer, not a serialized response object.
+	if strings.Contains(got, "tool_trace") || strings.Contains(got, "schema_version") {
+		t.Errorf("stored turn leaked response metadata into the transcript: %q", got)
+	}
+}
+
+func TestExplain_UnknownSessionIDFailsLoudly(t *testing.T) {
+	store := explain.NewSessionStore(explain.SessionConfig{})
+	e, _, _ := newV2Explainer(t, []string{assistantOnly(`{"answer":"x","citations":[]}`)}, store)
+
+	_, err := e.Explain(context.Background(), explain.ExplainRequest{
+		Question:  "Continue?",
+		SessionID: "does-not-exist",
+	})
+	if err == nil || !strings.Contains(err.Error(), "session not found") {
+		t.Errorf("expected a session-not-found error; got %v", err)
+	}
+}
+
+func TestExplain_SessionIDWithoutStoreIsRejected(t *testing.T) {
+	e, _, _ := newV2Explainer(t, []string{assistantOnly(`{"answer":"x","citations":[]}`)}, nil)
+	_, err := e.Explain(context.Background(), explain.ExplainRequest{
+		Question:  "Continue?",
+		SessionID: "abc123",
+	})
+	if err == nil || !strings.Contains(err.Error(), "session support is disabled") {
+		t.Errorf("expected a disabled-session error; got %v", err)
+	}
+}
+
+// A model that loops on tool calls must not fail the request. Once the tool
+// budget is spent we strip the tools and demand an answer from the evidence
+// already gathered. Regression test for the v2 live smoke, where qwen2.5:7b
+// burned all 10 tool calls on "how many propositions are in the graph?" and
+// the daemon returned a bare "exceeded MaxToolCalls" with no answer.
+func TestExplain_ToolLoopIsForcedToAnswerRatherThanFailing(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+
+	// Script: three tool calls (budget is 3), then a grounded answer.
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     "Forced to answer from partial evidence: " + e0.PropositionID + ".",
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "low",
+	})
+	llm := &scriptedLLM{responses: []string{
+		assistantToolCall("c1", "get_peers", `{}`),
+		assistantToolCall("c2", "get_peers", `{}`),
+		assistantToolCall("c3", "get_peers", `{}`),
+		assistantOnly(string(answer)), // tools stripped by now
+	}}
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL: srv.URL, Model: "m", SystemPrompt: "p", HTTPTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := exp.Explain(context.Background(), explain.ExplainRequest{
+		Question: "Count them",
+		Budget:   explain.ExplainBudget{MaxToolCalls: 3},
+	})
+	if err != nil {
+		t.Fatalf("budget exhaustion must degrade to an answer, not an error: %v", err)
+	}
+	if !strings.Contains(resp.Answer, e0.PropositionID) {
+		t.Errorf("expected a grounded answer after the forced finish; got %q", resp.Answer)
+	}
+	if resp.Usage.ToolCalls != 3 {
+		t.Errorf("expected exactly the budgeted 3 tool calls; got %d", resp.Usage.ToolCalls)
+	}
+
+	// Without these, the test would pass even with the forced-answer path
+	// deleted: a scripted model that simply stops after three tool calls
+	// produces the same response. Assert the budget was actually the thing
+	// that stopped it.
+	if llm.requestCount() != 4 {
+		t.Fatalf("expected 4 LLM turns (3 tool rounds + 1 forced answer); got %d", llm.requestCount())
+	}
+	final := llm.requestBody(3)
+	if !strings.Contains(final, "used all 3 permitted tool calls") {
+		t.Error("the final turn should carry the budget-exhausted instruction")
+	}
+	// Tools must be stripped on the forced turn — leaving them in is what
+	// lets a looping model keep asking for more.
+	if strings.Contains(final, `"tools"`) {
+		t.Error("the forced-answer turn must be sent with tools stripped")
+	}
+	// The three earlier turns SHOULD have carried tools.
+	if !strings.Contains(llm.requestBody(0), `"tools"`) {
+		t.Error("the first turn should have been sent with tools available")
+	}
+}
+
+func TestExplain_UsageAccountsTokensAndWallClock(t *testing.T) {
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges, _ := sm.AllEdges()
+	e0 := edges[0]
+	answer, _ := json.Marshal(map[string]any{
+		"answer":     "Citing " + e0.PropositionID + ".",
+		"citations":  []map[string]any{{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight}},
+		"confidence": "high",
+	})
+	// Include a usage block so the accumulator has something to read.
+	quoted, _ := json.Marshal(string(answer))
+	body := fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":%s}}],"usage":{"prompt_tokens":120,"completion_tokens":45,"total_tokens":165}}`, string(quoted))
+
+	llm := &scriptedLLM{responses: []string{body}}
+	srv := httptest.NewServer(llm.handler())
+	defer srv.Close()
+
+	exp, err := explain.NewOpenAICompatible(smReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL: srv.URL, Model: "m", SystemPrompt: "p", HTTPTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := exp.Explain(context.Background(), explain.ExplainRequest{Question: "Why?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.PromptTokens != 120 || resp.Usage.CompletionTokens != 45 || resp.Usage.TotalTokens != 165 {
+		t.Errorf("token accounting wrong: %+v", resp.Usage)
+	}
+	if resp.Usage.LLMTurns != 1 {
+		t.Errorf("expected 1 LLM turn; got %d", resp.Usage.LLMTurns)
+	}
+	if resp.Usage.WallClockMs < 0 {
+		t.Errorf("wall clock must be non-negative; got %d", resp.Usage.WallClockMs)
 	}
 }

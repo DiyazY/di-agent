@@ -33,6 +33,10 @@ package main
 // /peers/{id}                       DELETE  —                              204
 // /peers/{id}/trust                 POST    SetTrustRequest                204
 // /offload                          POST    OffloadHTTPRequest             200 OffloadHTTPResponse
+// /explain                          POST    ExplainHTTPRequest             200 ExplainResponse
+//                                                                          422 {error,response} (failed a gate)
+//                                                                          501 (provider disabled)
+//                                                                          200 x-ndjson (stream:true)
 // /ui/...                           GET     —                              200 (embedded HTML)
 //
 // Endpoints above the divider are pre-existing and keep their original
@@ -745,34 +749,108 @@ func registerExplainRoute(mux *http.ServeMux, explainer explain.Explainer) {
 			writeError(w, http.StatusBadRequest, "question is required")
 			return
 		}
-		resp, err := explainer.Explain(r.Context(), explain.ExplainRequest{
-			Question: req.Question,
+		explainReq := explain.ExplainRequest{
+			Question:   req.Question,
+			SessionID:  req.SessionID,
+			UsePlanner: req.UsePlanner,
+			UseCritic:  req.UseCritic,
+			Stream:     req.Stream,
 			Budget: explain.ExplainBudget{
 				MaxIterations: req.MaxIterations,
 				MaxToolCalls:  req.MaxToolCalls,
 			},
-		})
-		if err != nil {
-			if errors.Is(err, explain.ErrNotEnabled) {
-				writeError(w, http.StatusNotImplemented, err.Error())
+		}
+
+		// Streaming path: NDJSON over chunked encoding. Requires both the
+		// caller to ask for it and the Explainer to support it.
+		if req.Stream {
+			streamer, ok := explainer.(explain.StreamingExplainer)
+			if !ok {
+				writeError(w, http.StatusNotImplemented, "this explainer does not support streaming")
 				return
 			}
-			// Partial responses (validation failed after MaxIterations) come
-			// back with a non-nil resp AND an error — surface both so the
-			// operator sees why the LLM failed to ground its answer.
-			if resp != nil {
+			serveExplainStream(w, r, streamer, explainReq)
+			return
+		}
+
+		resp, err := explainer.Explain(r.Context(), explainReq)
+		if err != nil {
+			switch {
+			case errors.Is(err, explain.ErrNotEnabled):
+				writeError(w, http.StatusNotImplemented, err.Error())
+			case errors.Is(err, explain.ErrSessionNotFound):
+				// The caller sent a session_id we do not have — their fault,
+				// not ours. A 500 here would send an operator hunting for a
+				// server failure over an expired or mistyped session.
+				writeError(w, http.StatusBadRequest, err.Error())
+			case resp != nil:
+				// Partial response: the answer parsed but failed a gate after
+				// MaxIterations. Surface both so the operator sees the attempt
+				// and the reason it was rejected.
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnprocessableEntity)
-				_ = json.NewEncoder(w).Encode(map[string]any{
+				if encErr := json.NewEncoder(w).Encode(map[string]any{
 					"error":    err.Error(),
 					"response": resp,
-				})
-				return
+				}); encErr != nil {
+					log.Printf("explain: encoding 422 body failed: %v", encErr)
+				}
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
 			}
-			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		// Header is already committed by the first Write, so an encode failure
+		// here cannot change the status — but it must not vanish either, or a
+		// truncated 200 looks like a success to everyone involved.
+		if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
+			log.Printf("explain: encoding response failed after 200 was sent: %v", encErr)
+		}
 	})
+}
+
+// serveExplainStream runs a streaming /explain call, writing one compact JSON
+// object per line (NDJSON) as progress arrives.
+//
+// Why NDJSON rather than SSE: the consumer here is a CLI or a script, not a
+// browser EventSource. NDJSON is trivially parseable with a line reader in
+// every language, needs no `data:` prefix stripping, and composes with `jq`
+// on the command line. SSE would buy browser auto-reconnect, which nothing in
+// this deployment wants.
+//
+// The stream always terminates in exactly one `final` or `error` event, so a
+// client can loop until it sees one of those two kinds.
+func serveExplainStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	streamer explain.StreamingExplainer,
+	req explain.ExplainRequest,
+) {
+	flusher, canFlush := w.(http.Flusher)
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	enc := json.NewEncoder(w)
+	emit := func(ev explain.Event) {
+		if err := enc.Encode(ev); err != nil {
+			// The client hung up. Nothing useful to do — the explain loop
+			// will notice via ctx cancellation on its next check.
+			return
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	// ExplainStream emits the terminal final/error event itself, so we must
+	// not write anything to the body after it returns. The error is still
+	// worth logging: the client sees it in the stream, but without this the
+	// server side has no record of streaming failures to correlate against.
+	if _, err := streamer.ExplainStream(r.Context(), req, emit); err != nil {
+		log.Printf("explain: stream ended with error: %v", err)
+	}
 }
