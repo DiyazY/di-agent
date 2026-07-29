@@ -1,3 +1,7 @@
+
+# Build artifacts
+semantic-map/go/agent
+
 terraform.*
 terraform.
 

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 )
@@ -29,7 +30,7 @@ func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup
 		t.Fatalf("profiles.Build: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerRoutes(mux, sm)
+	registerRoutes(mux, sm, explain.NewDisabled())
 	srv := httptest.NewServer(mux)
 	return srv.URL, sm, srv.Close
 }
@@ -822,7 +823,7 @@ func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, 
 		t.Fatalf("profiles.Build: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerRoutes(mux, sm)
+	registerRoutes(mux, sm, explain.NewDisabled())
 	srv := httptest.NewServer(mux)
 	return srv.URL, sm, srv.Close
 }

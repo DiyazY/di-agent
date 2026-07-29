@@ -38,11 +38,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 )
@@ -83,6 +86,29 @@ func main() {
 	var useRuleBasedTuner bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
 	flag.BoolVar(&useRuleBasedTuner, "rule-based-tuner", true, "enable rule-based operator tuning (disable to turn off /agent/tune)")
+
+	explainProvider := flag.String("explain-provider", "none",
+		"natural-language explain provider: none (disabled) or openai-compatible "+
+			"(routes to any OpenAI-compat backend — Ollama, llama-server, LM Studio, vLLM)")
+	explainURL := flag.String("explain-url", "http://localhost:11434/v1",
+		"base URL for the OpenAI-compatible backend (used when -explain-provider=openai-compatible)")
+	explainModel := flag.String("explain-model", "qwen2.5:7b-instruct",
+		"model name for the OpenAI-compatible backend")
+	explainPrompt := flag.String("explain-prompt", "",
+		"path to the system-prompt file for /explain (default: cmd/agent/prompts/explain-v1.md alongside the binary)")
+	explainAPIKey := flag.String("explain-api-key", "",
+		"optional bearer token for the OpenAI-compatible backend "+
+			"(env var EXPLAIN_API_KEY takes precedence when both are set)")
+	explainPlannerPrompt := flag.String("explain-planner-prompt", "",
+		"path to the planner system prompt; empty derives planner-v1.md from -explain-prompt's directory")
+	explainCriticPrompt := flag.String("explain-critic-prompt", "",
+		"path to the critic system prompt; empty derives critic-v1.md from -explain-prompt's directory")
+	explainKeepAlive := flag.String("explain-keep-alive", "30m",
+		"how long the backend should keep the model resident between calls "+
+			"(Ollama `keep_alive`); empty disables the hint")
+	explainSessions := flag.Bool("explain-sessions", true,
+		"enable multi-turn session memory and the session-scoped tool cache for /explain")
+
 	flag.Parse()
 
 	if err := applyRegime(*regime, alpha, convergence); err != nil {
@@ -120,8 +146,24 @@ func main() {
 		log.Printf("registered %d peers: %s", len(peerURLs), strings.Join(peerURLs, ", "))
 	}
 
+	explainer, err := buildExplainer(sm, explainOptions{
+		Provider:      *explainProvider,
+		BaseURL:       *explainURL,
+		Model:         *explainModel,
+		PromptPath:    *explainPrompt,
+		PlannerPath:   *explainPlannerPrompt,
+		CriticPath:    *explainCriticPrompt,
+		FlagAPIKey:    *explainAPIKey,
+		KeepAlive:     *explainKeepAlive,
+		EnableSession: *explainSessions,
+	})
+	if err != nil {
+		log.Fatalf("failed to build explainer: %v", err)
+	}
+	defer explainer.Close()
+
 	mux := http.NewServeMux()
-	registerRoutes(mux, sm)
+	registerRoutes(mux, sm, explainer)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
 
@@ -268,3 +310,107 @@ func runCollectionLoop(
 		}
 	}
 }
+
+// buildExplainer constructs the /explain backend based on the -explain-provider
+// flag. Returns a DisabledExplainer when the operator hasn't opted in, so the
+// route handler can always safely call methods on the returned value.
+//
+// The bearer token comes from EXPLAIN_API_KEY (env) if set, otherwise from the
+// -explain-api-key flag. Env-first matches the standard secret-handling
+// convention: credentials don't live in shell history or systemd unit files
+// unless the operator explicitly opted in via the flag.
+// explainOptions bundles the -explain-* flags. A struct rather than a long
+// positional list so adding a knob doesn't churn every call site.
+type explainOptions struct {
+	Provider      string
+	BaseURL       string
+	Model         string
+	PromptPath    string
+	PlannerPath   string
+	CriticPath    string
+	FlagAPIKey    string
+	KeepAlive     string
+	EnableSession bool
+}
+
+func buildExplainer(sm *semmap.SemanticMap, opt explainOptions) (explain.Explainer, error) {
+	if opt.Provider == "" || opt.Provider == "none" {
+		log.Printf("explain: provider=none (POST /explain will return 501)")
+		return explain.NewDisabled(), nil
+	}
+	if opt.Provider != "openai-compatible" {
+		return nil, fmt.Errorf("unknown -explain-provider %q (valid: none, openai-compatible)", opt.Provider)
+	}
+	if opt.PromptPath == "" {
+		opt.PromptPath = filepath.Join("cmd", "agent", "prompts", "explain-v1.md")
+	}
+	prompt, err := explain.LoadPrompt(opt.PromptPath)
+	if err != nil {
+		return nil, fmt.Errorf("read prompt: %w", err)
+	}
+
+	// Planner and critic prompts are optional: a missing file disables that
+	// stage rather than failing startup, so an operator can run answer-only
+	// even with a partial prompt directory.
+	promptDir := filepath.Dir(opt.PromptPath)
+	plannerPrompt := loadOptionalPrompt(opt.PlannerPath, promptDir, "planner-v1.md", "planner")
+	criticPrompt := loadOptionalPrompt(opt.CriticPath, promptDir, "critic-v1.md", "critic")
+
+	apiKey := os.Getenv("EXPLAIN_API_KEY")
+	if apiKey == "" {
+		apiKey = opt.FlagAPIKey
+	}
+
+	var sessions *explain.SessionStore
+	if opt.EnableSession {
+		sessions = explain.NewSessionStore(explain.SessionConfig{})
+	}
+
+	e, err := explain.NewOpenAICompatible(explainReader{sm}, explain.OpenAICompatibleConfig{
+		BaseURL:       opt.BaseURL,
+		Model:         opt.Model,
+		APIKey:        apiKey,
+		SystemPrompt:  prompt,
+		PromptFile:    opt.PromptPath,
+		PlannerPrompt: plannerPrompt,
+		CriticPrompt:  criticPrompt,
+		KeepAlive:     opt.KeepAlive,
+		Sessions:      sessions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("explain: provider=openai-compatible url=%s model=%s prompt=%s planner=%t critic=%t sessions=%t keep_alive=%s",
+		opt.BaseURL, opt.Model, opt.PromptPath, plannerPrompt != "", criticPrompt != "", opt.EnableSession, opt.KeepAlive)
+	return e, nil
+}
+
+// loadOptionalPrompt reads an optional stage prompt. An explicit path that
+// fails to load is a hard error (the operator asked for it); a derived
+// default that is absent just disables the stage with a log line.
+func loadOptionalPrompt(explicitPath, dir, defaultName, label string) string {
+	path := explicitPath
+	derived := false
+	if path == "" {
+		path = filepath.Join(dir, defaultName)
+		derived = true
+	}
+	text, err := explain.LoadPrompt(path)
+	if err != nil {
+		if derived {
+			log.Printf("explain: %s stage disabled (no prompt at %s)", label, path)
+			return ""
+		}
+		log.Printf("explain: WARNING %s prompt %q could not be read (%v); stage disabled", label, path, err)
+		return ""
+	}
+	return text
+}
+
+// explainReader adapts *semmap.SemanticMap to explain.SemanticMapReader. All
+// the methods already exist on SemanticMap; this shim only exists because Go
+// interfaces require an explicit adapter when one type implements an interface
+// declared in a package that would create an import cycle if imported directly.
+type explainReader struct{ *semmap.SemanticMap }
+
+func (r explainReader) Peers() *peers.Registry { return r.SemanticMap.Peers() }

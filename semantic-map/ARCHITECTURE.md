@@ -7,14 +7,18 @@ Design rationale and decision record. Update this file when a contract, profile,
 ## Table of Contents
 
 - [1. Core Concept](#1-core-concept)
+  - [The agent at a glance](#the-agent-at-a-glance)
+  - [Component reference](#component-reference)
+  - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
   - [The six contracts](#the-six-contracts)
+  - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
 - [3. Deployment Profiles](#3-deployment-profiles)
 - [4. Language Strategy](#4-language-strategy)
 - [5. Telemetry Pipeline](#5-telemetry-pipeline)
-  - [CollectorContract](#collectorcont ract)
+  - [CollectorContract](#collectorcontract)
   - [MetricType catalogue](#metrictype-catalogue)
   - [The Bridge](#the-bridge)
   - [Planned collector implementations](#planned-collector-implementations)
@@ -24,6 +28,9 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [9. Control Surface](#9-control-surface)
 - [10. Coordination](#10-coordination)
 - [11. Operator Tuning Interface](#11-operator-tuning-interface)
+- [12. PoC Deployment (`poc/`)](#12-poc-deployment-poc)
+- [13. Natural-Language Explain Layer (`pkg/explain`)](#13-natural-language-explain-layer-pkgexplain)
+- [14. Explain v2 — Planning, Critic, Sessions, Streaming](#14-explain-v2--planning-critic-sessions-streaming)
 
 ---
 
@@ -60,6 +67,128 @@ At `confidence = 0.0` the agent uses the literature. At `confidence = 1.0` it us
 | Proposition magnitudes (edge weights) | No — learned from evidence                     |
 | New edges (P16+)                      | Possible — discovered by the Proposer contract |
 
+### The agent at a glance
+
+One daemon, four concentric layers. Everything outside the core is optional; the core is what makes the agent an agent.
+
+```
+                            ╔═══════════════════════════════════════════════════╗
+   HUMAN / SCRIPT ─────────▶║  LAYER 4 · OPERATOR SURFACE                       ║
+   "why is my cost high?"   ║                                                   ║
+                            ║   HTTP API  ·  mapctl CLI  ·  /ui/  ·  /explain   ║
+                            ║   ─────────────────────────────────────────────   ║
+                            ║   pkg/explain: planner → answer → critic          ║
+                            ║   (LLM CONSUMES the graph; never mutates it)      ║
+                            ╚════════════════════════╤══════════════════════════╝
+                                                     │ read-only tools
+                            ╔════════════════════════▼══════════════════════════╗
+   PEER AGENTS ────────────▶║  LAYER 3 · DECISION                               ║
+   GET /cost                ║                                                   ║
+   POST /offload            ║   SemanticMap facade                              ║
+                            ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
+                            ║   ┌──────────┬───────────┬──────────┬──────────┐  ║
+                            ║   │ Reasoner │ Ontology  │ Proposer │  Tuner   │  ║
+                            ║   └──────────┴───────────┴──────────┴──────────┘  ║
+                            ╚════════════════════════╤══════════════════════════╝
+                                                     │ reads / writes
+                            ╔════════════════════════▼══════════════════════════╗
+                            ║  LAYER 2 · STATE                                  ║
+                            ║                                                   ║
+                            ║   Storage (multigraph, keyed by from,to,propID)   ║
+                            ║   ┌─────────────────────────────────────────────┐ ║
+                            ║   │ Backbone: 7 constructs, 15 propositions     │ ║
+                            ║   │ Evidence: per-edge EMA + confidence + n_obs │ ║
+                            ║   │ Audit:    append-only OntologyEvent log     │ ║
+                            ║   └─────────────────────────────────────────────┘ ║
+                            ╚════════════════════════▲══════════════════════════╝
+                                                     │ update_edge()
+                            ╔════════════════════════╧══════════════════════════╗
+   /sys/fs/cgroup ─────────▶║  LAYER 1 · INGESTION                              ║
+   Netdata :19999           ║                                                   ║
+   parquet replay           ║   Collector ──samples──▶ Bridge ──▶ Updater (EMA) ║
+                            ║   (typed MetricSample)   (routes    (idempotent   ║
+                            ║                           to        per event_id) ║
+                            ║                           construct)              ║
+                            ╚═══════════════════════════════════════════════════╝
+```
+
+**Read the diagram bottom-up for data, top-down for questions.** Telemetry flows up from Layer 1 and settles into Layer 2. Questions arrive at Layer 4 or Layer 3 and read downward. The two directions meet at Storage, which is the only mutable state in the process.
+
+**The one-way rule.** Layer 4 can read everything and write nothing. The LLM in `pkg/explain` gets six read-only tools; it cannot call `Deprecate`, `Tune`, or `ResetEdge`. When it wants a mutation it emits a *draft proposal* that a human must POST themselves. This is what keeps the human-judgment anchor intact (§8) and what keeps P6's results reproducible without an LLM in the loop (§13).
+
+### Component reference
+
+What each piece is for, when it runs, and whether it is required.
+
+| Component | Package | Purpose | Runs when | Required? |
+|---|---|---|---|---|
+| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest` works without one |
+| **Bridge** | `pkg/semmap` | Route one `MetricSample` to its construct, then to every edge touching it | Every sample | Yes (stateless, not a contract) |
+| **Updater** | `internal/minimal` | Fold the observation into each edge's EMA; bump confidence | Every routed sample | Yes |
+| **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
+| **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
+| **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
+| **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`-proposer`) | Optional |
+| **Tuner** | `internal/minimal` | Parse operator intent text → proposition-strength deltas | `POST /agent/tune` | Optional |
+| **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/offload` | Optional |
+| **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`-explain-provider=none` default) |
+| **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup | Once, at boot | Yes |
+
+### The four request lifecycles
+
+Four distinct things can happen to this daemon. Each takes a different path.
+
+**① Telemetry arrives** — the loop that makes the agent learn.
+
+```
+Collector.Collect()
+  └─▶ []*MetricSample {NodeID, MetricType, Value, EventID}
+        └─▶ Bridge: MetricType → construct (e.g. cpu_utilization → RC)
+              └─▶ Ontology.Relationships(RC) → every proposition touching RC
+                    └─▶ Updater.UpdateEdge(from, to, value, eventID)  × each pair
+                          └─▶ Storage: ema += α(value − ema); n_obs++; confidence = n_obs/N
+```
+*Idempotent per `(edge, event_id)` — replaying the same sample changes nothing.*
+
+**② A decision is requested** — the loop that makes the agent useful.
+
+```
+GET /cost?task=pod-scheduling&node=master
+  └─▶ Reasoner.CostOfAction
+        ├─▶ Storage.AllEdges()          — current EMA, prior, confidence per edge
+        ├─▶ Ontology.Propositions()     — skip anything Deprecated
+        └─▶ for each RC-destination edge:
+              effective = (1−c)·prior + c·ema
+              ResourceCost += (effective − prior) · sign(direction)
+        └─▶ ActionCost {ResourceCost, Confidence, Rationale, GraphPathUsed}
+```
+*Pure read. No state changes. Always returns a rationale naming the edges used.*
+
+**③ The graph is mutated** — the loop that keeps the agent honest.
+
+```
+POST /ontology/deprecate {"proposition_id":"P7","reason":"..."}
+  └─▶ Ontology.Deprecate
+        ├─▶ mark Proposition.Deprecated = true      (soft delete — never removed)
+        ├─▶ sync EdgeDescriptor.Deprecated in Storage
+        └─▶ append OntologyEvent {actor, kind, target, timestamp}
+              └─▶ readable forever via GET /history
+```
+*Only four mutations exist: `SetPropositionStrength`, `AddConstruct`, `AddValidatedProposition`, `Deprecate`. Every one is audited. Construct removal and direction reversal are impossible by design.*
+
+**④ A human asks a question** — the loop that makes the agent legible.
+
+```
+POST /explain {"question":"why is my cost high?","use_planner":true,"use_critic":true}
+  └─▶ planner LLM (no tools)  → Plan{steps:[{tool:"get_cost"},…]}
+        └─▶ Go executes the plan  → evidence bundle
+              └─▶ answering LLM (read-only tools) → answer + citations
+                    ├─▶ GATE 1: deterministic validator — do the cited values match live state?
+                    └─▶ GATE 2: critic LLM — is the reasoning actually right?
+                          └─▶ ExplainResponse {answer, citations, plan, verdict, usage}
+```
+*Detailed in §13–§14. The LLM never writes; it only reads and drafts.*
+
 ---
 
 ## 2. Contract Architecture
@@ -77,13 +206,32 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
         ┌───────────────────────────────────────────┐
         │              SemanticMap facade            │
         │  cost_of_action()  recommend_peer()        │
-        │  simulate_outcome()                        │
-        └───┬───────┬──────────┬────────┬────────────┘
-            │       │          │        │
-        Storage  Ontology  Reasoner  Proposer
+        │  simulate_outcome()  tune()                │
+        └───┬───────┬──────────┬────────┬───────┬───┘
+            │       │          │        │       │
+        Storage  Ontology  Reasoner  Proposer  Tuner
+            ▲                                        
+            │ read-only                              
+   ┌────────┴──────────┬──────────────────┐          
+[peers]            [explain]         [control surface]
+ registry       planner·critic       HTTP · mapctl · /ui
+ + client       + validator          (§9)
+   (§10)          (§13–14)
 ```
 
-The Collector and Bridge live outside the SemanticMap facade — they feed it. The Bridge is not a contract; it is a thin, stateless mapper (see §5).
+The Collector and Bridge live outside the SemanticMap facade — they feed it. The Bridge is not a contract; it is a thin, stateless mapper (see §5). The three components below the facade are *consumers*: they read graph state and expose it, but only the facade's own mutation methods can change it.
+
+### What is deliberately not a contract
+
+The contract set has stayed at six since the first release. Three substantial components sit outside it on purpose:
+
+| Component | Why it is concrete, not a contract |
+|---|---|
+| **Bridge** (`pkg/semmap`) | Stateless pure function of `(MetricType, Ontology)`. There is nothing to swap — a second implementation would be the same code with a different routing table, and the routing table is already data. |
+| **Peers** (`pkg/peers`) | One implementation exists. Promoting it to a contract before a second one (SQLite-backed registry, gossip discovery) would be designing an interface against a sample size of one. |
+| **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `-explain-provider=none`. |
+
+The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
 
 ### The six contracts
 
@@ -416,6 +564,18 @@ No other file needs to change.
 3. Convergence study: how quickly does deployment evidence override generic priors?
 4. Propose-then-confirm loop: controlled automatic backbone extension with structural validation
 
+**Theoretical framing.** The architecture reported here can be read as a concrete instance of the *graph stage* in Andrew Ng's progression from single-loop to graph-based agentic workflows (Ng, *What's Next for AI Agentic Workflows*, Sequoia AI Ascent 2024; Schluntz & Zhang, *Building Effective Agents*, Anthropic 2024). Ng characterises the graph stage as one in which shared state is externalised into a durable, queryable structure that agents read from and write to via typed handoffs, rather than living in prompts and transcripts. A knowledge graph, in this framing, plays three complementary roles: shared memory for orchestrator–worker configurations, grounding layer for evaluator–optimiser loops, and persistent world model for reflective loops. The Semantic Map instantiates the latter two directly for the orchestration-selection domain.
+
+Both authors identify a further requirement — *anchors* — without which "even a graph of loops can become a circular system of mutual confirmation" (Ng, ibid.). Our architecture supplies three explicit anchors:
+
+| Anchor (Ng)          | Semantic Map implementation                                                                                             |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Real-world outcomes  | Netdata telemetry — only `MetricSample` observations update the EMA; no model-estimated evidence                        |
+| Frozen rules         | Di-Select's 15 propositions as an append-only backbone (constructs never removed; direction reversal disallowed)        |
+| Human judgment       | Operator tune, candidate confirm/reject, deprecate — every mutation stamped in the `OntologyEvent` audit log            |
+
+This design also satisfies Ng's reliable-agentic-system invariant — *every important output can be traced to a task, a plan, an artifact, a source, an evaluator decision, and a bounded execution record* — as an architectural property: `CostRequest`, `GraphPathUsed`, `ActionCost`, `EventID` provenance, `Rationale`, and `n_observations` correspond one-to-one to the six required trace elements. The distinction from most LLM-agent frameworks in this space is that the backbone is not an ad-hoc ontology invented by prompting an LLM: it is Di-Select's grounded-theory result [P3]. Any downstream LLM consumer of this graph sits on the *operator-facing surface* — the reasoning and ingestion paths remain deterministic Go code, and reproducibility of P6 results does not depend on any LLM's behaviour.
+
 ---
 
 ## 9. Control Surface
@@ -745,3 +905,294 @@ make -C poc teardown                   # delete VMs and purge
 - **Independent single-node clusters**: each VM runs k0s `--single`, not a joined multi-node cluster. The PoC tests agent-level routing decisions, not k8s scheduling. Three separate clusters keep provisioning simple and failure-isolated.
 - **No auth**: same v1 stance as the coordination layer — lab network only.
 - **`-proposer=false`**: MI proposer disabled on 2-vCPU VMs to keep CPU headroom for workload and measurement.
+
+---
+
+## 13. Natural-Language Explain Layer (`pkg/explain`)
+
+`pkg/explain` adds an operator-facing surface that lets a human ask questions in natural language and get a grounded, cited answer. It exists to make the semantic map talk-to-able: *"Why is my ResourceCost higher than my peers?"*, *"Which propositions are driving the recommendation?"*, *"Should I deprecate P7?"*
+
+The design follows the framing in §8: our graph is the **world model** for an LLM operator agent, and every anchor property (real-world outcomes, frozen rules, human judgment) is preserved because the LLM is a **consumer** of the graph, never a mutator.
+
+### Position in the architecture
+
+```
+Operator → POST /explain (question)
+             │
+             ▼
+        pkg/explain (OpenAICompatibleExplainer)
+             │
+             │  (system prompt: cmd/agent/prompts/explain-v1.md)
+             │  (tool schemas: get_cost, get_edges, get_history,
+             │                 get_peers, get_recommend, get_graph)
+             │
+             ▼                              ┌────────────────────────────┐
+        OpenAI-compatible LLM   ◀───tool───▶│  SemanticMap (read-only)   │
+        (local: Ollama /                    │  All reads bypass HTTP:    │
+        llama-server /                      │  in-process Go calls to    │
+        LM Studio / vLLM)                   │  the facade methods.       │
+             │                              └────────────────────────────┘
+             ▼
+        Draft answer + citations
+             │
+             ▼
+        Deterministic citation validator
+             │  (every cited edge/proposition/peer exists?
+             │   values match live graph within Epsilon=1e-3?
+             │   answer mentions Pn ⇒ Pn is in citations?)
+             │
+             ├── valid ──▶ Return ExplainResponse to operator
+             │
+             └── invalid ─▶ Feed critique back to LLM (reflection loop, max 3)
+```
+
+### The two guarantees the layer ships
+
+1. **Groundedness.** Every value in the answer's `citations` array is checked against live graph state before the response leaves the daemon. A hallucinated proposition ID, wrong EMA value, or reference to a deprecated edge is rejected with a critique that goes back to the LLM. If the reflection loop can't produce a valid response within `MaxIterations`, the daemon returns HTTP 422 with both the error message and the partial response — no "confident lies" reach the operator.
+
+2. **No mutation.** The tool set is **read-only** by construction. The LLM cannot call `POST /agent/tune`, `POST /ontology/deprecate`, or any other mutation endpoint. When the operator asks *"what should I change?"* the LLM produces a structured `Proposal` in its response — a suggested endpoint + payload + rationale — that the operator invokes explicitly if they choose to act. The human-judgment anchor from §8 stays intact.
+
+### Provider
+
+v1 speaks the OpenAI `/v1/chat/completions` surface with function-tool semantics. This routes to any local backend that exposes that shape:
+
+| Backend         | Base URL                          |
+| --------------- | --------------------------------- |
+| Ollama          | `http://localhost:11434/v1`       |
+| llama-server    | `http://localhost:8080/v1`        |
+| LM Studio       | `http://localhost:1234/v1`        |
+| vLLM            | `http://localhost:8000/v1`        |
+| Hosted (OpenAI) | `https://api.openai.com/v1`       |
+
+Default: Ollama on `localhost:11434/v1`. The daemon does not ship an LLM binary — install one out of band. `POST /explain` returns HTTP 501 with a clear remediation message when `-explain-provider=none` (the default).
+
+### Configuration flags
+
+```
+-explain-provider     none | openai-compatible          (default: none)
+-explain-url          http://localhost:11434/v1         (default)
+-explain-model        qwen2.5:7b-instruct               (default)
+-explain-prompt       cmd/agent/prompts/explain-v1.md   (default)
+-explain-api-key      ""                                (env EXPLAIN_API_KEY overrides)
+```
+
+### Prompt versioning
+
+The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prompts/explain-v1.md), loaded once at daemon startup. Every response records a `prompt_version` field (the first 12 hex chars of `sha256(prompt)`), so a paper's replication package can pin the exact prompt used for reported results. Bump the filename (v2, v3, …) rather than editing v1 in place — old snapshots then remain reproducible.
+
+### Response shape
+
+```json
+{
+  "answer": "The dominant edge is P10 (PS→RC, prior 0.645, effective 0.62 at confidence 0.60).",
+  "citations": [
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.60, "n_observations": 15}
+  ],
+  "confidence": "high",
+  "proposal": null,
+  "tool_trace": [{"name": "get_edges", "arguments": {"from": "PS", "to": "RC"}, "result_digest": "edges from=PS to=RC count=1"}],
+  "model_name": "qwen2.5:7b-instruct",
+  "prompt_version": "a1b2c3d4e5f6",
+  "iterations": 1
+}
+```
+
+### Reproducibility stance
+
+`pkg/explain` is on the **operator-facing** surface, not on the ingestion or reasoning path. Every P6 result reported in `research-docs/` uses `-explain-provider=none`: the reasoner, updater, prior-init pipeline, and convergence measurements are pure Go and fully deterministic. The Explain layer is a demo asset and an operator convenience, not a load-bearing component of the scientific claims.
+
+### Tests
+
+- `pkg/explain/tools_test.go` — tool registry + citation validator against live SemanticMap.
+- `pkg/explain/openai_test.go` — reflection loop end-to-end against a scripted mock LLM. Covers happy path, tool-then-answer, and fabrication-then-fix.
+- `cmd/agent/explain_route_test.go` — route wiring: 501 when disabled, 400 on malformed input, 200 with grounded answer through a mock LLM.
+
+None of these require a real LLM to be running. `go test ./...` stays green on any machine.
+
+---
+
+## 14. Explain v2 — Planning, Critic, Sessions, Streaming
+
+§13 describes the v1 surface: one answering agent, tool access, a deterministic validator, and a reflection loop. v2 adds the two Ng patterns v1 was missing and the production hardening the v1 live smoke exposed as necessary.
+
+Everything here is **opt-in per request**. A v1-shaped body (`{"question": "..."}`) still produces v1 behaviour.
+
+### The full pipeline
+
+```
+POST /explain {question, session_id?, use_planner?, use_critic?, stream?}
+   │
+   ├─▶ [session]  resolve or mint · replay prior turns · flush tool cache if
+   │              the ontology history watermark advanced
+   │
+   ├─▶ [planning] ── planner LLM (NO tools) ──▶ Plan{steps:[{tool,args}...]}
+   │       │                                       │
+   │       │                                validatePlan: unknown tool?
+   │       │                                step with no action? no tool steps?
+   │       │                                       │
+   │       └──▶ Go executes the plan ─────────────┘
+   │              (log-and-continue on step failure,
+   │               session cache consulted per step,
+   │               budget-capped with truncation noted)
+   │                       │
+   │                  Evidence bundle
+   │                       │
+   ├─▶ [answering] ◀───────┘  answering LLM (WITH tools, may fetch more)
+   │       │
+   │       ▼
+   ├─▶ GATE 1  deterministic Validate() ── fail ──▶ citation-diff critique ──┐
+   │       │ pass                                                            │
+   │       ▼                                                                 │
+   ├─▶ GATE 2  critic LLM (NO tools) ───── reject ─▶ critic critique ────────┤
+   │       │ approve                                                         │
+   │       ▼                                                            revise
+   └─▶ Response {answer, citations, plan, critic_verdict, usage, session_id} ┘
+                                                          (≤ MaxIterations)
+```
+
+### Why the planner gets no tools
+
+The planner emits JSON naming which tools to call; **Go** executes exactly those. The alternative — letting the planner call tools directly — collapses planning and execution back into one opaque loop. Keeping them separate means:
+
+- The plan is inspectable *before* it costs anything, so a plan naming `drop_database` is rejected structurally, not discovered at dispatch time.
+- The plan appears in the response for audit. An operator can see the strategy, not just the outcome.
+- Tool execution is deterministic Go: same plan, same tools, same order, every time.
+
+### Why the critic gets no tools either
+
+Tool access would let the critic fetch data the answering agent never saw, producing objections that cannot be acted on — *"you missed edge X"* when X was never in the evidence bundle. Reviewing the same evidence keeps the loop closed and every critique actionable.
+
+### The two gates are not redundant
+
+They cover genuinely different properties:
+
+| | Gate 1 — deterministic validator | Gate 2 — critic LLM |
+|---|---|---|
+| Always on? | Yes | Opt-in (`use_critic`) |
+| Catches | Fabricated IDs, wrong numeric values, deprecated edges cited as live, malformed proposals | Wrong causal reading, direction-sign errors, unsupported conclusions, question drift, miscalibrated confidence |
+| Cost | Free (pure Go) | One LLM turn per round |
+| Can be wrong? | No — it compares against live state | Yes — it is a model |
+
+The motivating case is real. During the v1 live smoke, `qwen2.5:7b` produced *"P7: Community & Ecosystem → Resource & Cost"*. P7 exists; the cited numbers were correct; Gate 1 passed it. The claim was still false — P7 is CE→MU. Structural grounding and semantic correctness are different properties, and only Gate 2 covers the second.
+
+Gate 1 runs first and unconditionally: a fabricated citation never reaches the critic, let alone the operator.
+
+### Degradation policy
+
+Every optional stage fails **open**, never closed:
+
+| Failure | Behaviour |
+|---|---|
+| Planner returns unparseable output | Answering agent is told planning failed; gathers evidence itself (the v1 path) |
+| Plan is structurally invalid | Same — plan rejected, request continues |
+| A plan step's tool errors | Recorded in the evidence bundle as `ERROR`; remaining steps still run |
+| Plan exceeds tool budget | Executor stops and notes the truncation *in the bundle*, so the answering agent knows its picture is incomplete |
+| Critic errors or is unreachable | Structurally valid answer ships with the degradation recorded in `critic_verdict.issues` |
+| Critic rejects with no stated issue | Upgraded to approval — burning a revision round on "make it better" helps nobody |
+
+The one thing that never degrades is Gate 1. A response that fails deterministic validation after `MaxIterations` returns HTTP 422 with the partial response and every mismatch enumerated.
+
+### Session memory
+
+`session_id` opts into multi-turn. The store is in-memory with LRU eviction (defaults: 100 sessions, 20 turns each, 32 cached tool results per session, 60 s tool-cache TTL, 30 min idle TTL).
+
+Two things live in a session:
+
+1. **Prior turns**, replayed into the answering agent's context so an operator can ask *"what about diag-2?"* without restating the question.
+2. **A tool-result cache**, keyed by `(tool_name, canonical(args))`. Flushed wholesale when the ontology history watermark advances — any mutation (tune, deprecate, strength set, construct or proposition added) invalidates it.
+
+Whole-cache invalidation rather than per-key is deliberate: the graph is 7 nodes and 15 edges. Reasoning about which cached results a given mutation could have affected costs more, in code and in bug surface, than just refetching.
+
+Three properties of the transcript are load-bearing:
+
+- **Only successful turns are recorded.** A response that failed Gate 1 or was rejected by Gate 2 is returned to the caller but never enters session history. Persisting it would replay the model's own rejected output as an assistant message on the next turn — the model would treat its mistake as established context. That is exactly the circular self-confirmation the anchors in §8 exist to prevent, and it fails *silently*, because a bad answer in the transcript looks like history rather than like an error.
+- **Only the answer text is replayed**, not the serialized `ExplainResponse`. Replaying the full DTO would push `tool_trace`, `usage`, `plan`, and `critic_verdict` back into context — measured at ~16× the answer's size (813 bytes vs 49 for a typical response, ~4 000 tokens at a full 20-turn buffer). None of it is actionable for the model, and on a small-context local model it can evict the system prompt. The failure mode there presents as *"the model forgot its instructions"*, which is expensive to trace back to its cause.
+- **`Get` returns a defensive copy.** Two concurrent `/explain` calls may legitimately carry the same `session_id`; handing out the live `*Session` would race the turn slice against `AppendTurn`. Mutation goes exclusively through `AppendTurn` / `CacheTool` / `InvalidateOnMutation`, all of which take the store lock. `TestSessionStore_ConcurrentAccessIsRaceFree` exercises this under `-race`.
+
+Idle sessions are swept on `Create` rather than by a background ticker. `Create` is the only moment the store grows, so it is exactly when reclaiming dead entries matters, and a goroutine would need lifecycle management and leak tests to reclaim memory nobody is contending for.
+
+Sessions are **not persisted**. They carry no scientific role — P6 results come from the reasoner, not the Explainer — so crash-recovery machinery would be complexity without a customer. The durable substrate already exists: `/graph` and `/history`.
+
+An unknown `session_id` returns an error rather than silently minting a fresh session. A client that lost its ID should find out, not get an amnesiac conversation that looks like it worked.
+
+### Streaming
+
+`"stream": true` switches the response to **NDJSON over chunked encoding** — one compact JSON event per line.
+
+```
+{"event":"session","session_id":"a3f2..."}
+{"event":"planning"}
+{"event":"plan","plan":{"approach":"...","steps":[...]}}     ← plan always non-nil
+{"event":"plan_failed","error":"..."}                        ← the alternative; no plan field
+{"event":"tool_call","tool":"get_cost","args":{"node_id":"master"}}
+{"event":"tool_result","tool":"get_cost","digest":"cost node=master rc=0.0350"}
+{"event":"answering","iteration":1}
+{"event":"validating","iteration":1}
+{"event":"critic","iteration":1}
+{"event":"critic_verdict","iteration":1,"verdict":{"approved":true}}
+{"event":"final","response":{...}}
+```
+
+Every stream terminates in exactly one `final` or `error`, so a client loops until it sees either. Clients should tolerate unknown event kinds — new markers may be added without a schema bump precisely because that terminal guarantee holds.
+
+NDJSON rather than SSE because the consumer is a CLI or script, not a browser `EventSource`. Line-delimited JSON parses with a plain line reader in any language and pipes into `jq`; SSE would only buy browser auto-reconnect, which nothing in this deployment wants.
+
+`StreamingExplainer` is a separate optional interface rather than a widening of `Explainer`, so `DisabledExplainer` stays trivial and a streaming request against a non-streaming backend gets a clear 501 instead of a silent downgrade.
+
+### Structured decoding
+
+`response_format: {"type":"json_object"}` is sent **only on tool-free turns** (planner, critic, and the final answering turn once evidence is gathered).
+
+This matters more than it looks: constraining output to a JSON object during a *tool-calling* turn prevents the model from emitting `tool_calls` at all. The symptom would be "the model ignores its tools" — an expensive thing to debug from the outside.
+
+### Cost accounting
+
+Every response carries `usage`:
+
+```json
+{
+  "prompt_tokens": 2481, "completion_tokens": 193, "total_tokens": 2674,
+  "wall_clock_ms": 4120, "tool_calls": 3, "tool_cache_hits": 1, "llm_turns": 3
+}
+```
+
+`llm_turns` counts planner + answering + critic + revision turns separately, so the cost of each opt-in feature is directly measurable. This is what lets the paper defend the *"the LLM sits on the operator-facing surface, not the hot path"* claim with numbers rather than assertion.
+
+### Configuration
+
+```
+-explain-provider         none | openai-compatible          (default: none)
+-explain-url              http://localhost:11434/v1
+-explain-model            qwen2.5:7b-instruct
+-explain-prompt           cmd/agent/prompts/explain-v1.md
+-explain-planner-prompt   (derived: <prompt-dir>/planner-v1.md)
+-explain-critic-prompt    (derived: <prompt-dir>/critic-v1.md)
+-explain-keep-alive       30m
+-explain-sessions         true
+-explain-api-key          ""   (env EXPLAIN_API_KEY wins)
+```
+
+A missing *derived* planner/critic prompt disables that stage with a log line; an explicitly-specified path that fails to load logs a warning and disables the stage. Either way the daemon boots — a partial prompt directory degrades features, it does not block startup.
+
+### Prompt versioning
+
+Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `critic-v1.md`. The answering prompt's `sha256[:12]` is stamped on every response as `prompt_version`. Bump the filename rather than editing in place, so results reported against v1 stay reproducible.
+
+### What v2 does not change
+
+- **The reasoner, updater, Bridge, and prior-init pipeline remain pure deterministic Go.** No LLM touches the ingestion or reasoning path.
+- **The tool registry is still read-only.** Planner, answering agent, and critic all get the same six read tools. None can mutate.
+- **`-explain-provider=none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
+
+### Tests
+
+| File | Covers |
+|---|---|
+| `pkg/explain/session_test.go` | LRU eviction, touch-on-get, TTL expiry, mutation-driven invalidation, turn-buffer trimming |
+| `pkg/explain/planner_test.go` | Plan parsing (fences, prose, truncation), structural validation, evidence collection, error continuation, budget capping, cache hits |
+| `pkg/explain/critic_test.go` | Verdict parsing, issue truncation, unactionable-rejection upgrade, prompt assembly, revision formatting |
+| `pkg/explain/streaming_test.go` | Event ordering, terminal event on success and failure, payload correctness, nil-emitter safety, interface satisfaction |
+| `pkg/explain/openai_test.go` | v2 integration: planner-runs-tools, planner-failure fallback, critic approve, **critic catches structurally-valid-but-wrong**, critic-failure ships anyway, session mint and persist, unknown session, usage accounting |
+| `cmd/agent/explain_route_test.go` | NDJSON content type and parse, 501 for non-streaming explainers |
+
+All run against a scripted mock LLM. No test requires Ollama.
