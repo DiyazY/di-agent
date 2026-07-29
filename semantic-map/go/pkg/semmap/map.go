@@ -232,15 +232,52 @@ func (m *SemanticMap) Deprecate(id, reason string) error {
 	return nil
 }
 
-// AddConstruct appends a new construct to the ontology.
+// AddConstruct appends a new construct to the ontology and materializes its
+// node descriptor in storage.
+//
+// The storage write is not optional bookkeeping: the Reasoner and the Updater
+// address constructs through storage, so an ontology-only construct is
+// invisible to every read path that matters. Constructs added at startup get
+// their node from seedFromOntology; one added at runtime needs the same
+// treatment, at the neutral 0.5 prior seedFromOntology uses.
 func (m *SemanticMap) AddConstruct(c *types.Construct) error {
-	return m.ontology.AddConstruct(c)
+	if err := m.ontology.AddConstruct(c); err != nil {
+		return err
+	}
+	return m.storage.PutNode(&types.NodeDescriptor{
+		NodeID:        c.ConstructID,
+		ConstructType: c.Name,
+		PriorValue:    0.5,
+		EMAValue:      0.5,
+		Confidence:    0.0,
+		NObservations: 0,
+	})
 }
 
 // AddValidatedProposition appends a new proposition after the ontology has
-// validated it against the existing backbone.
+// validated it against the existing backbone, and seeds the corresponding
+// EdgeDescriptor in storage.
+//
+// Without the storage write the proposition exists only in the ontology: it
+// appears in Propositions() and in GET /graph's proposition list, but the
+// Reasoner iterates AllEdges() and would never traverse it, so a confirmed
+// candidate edge silently fails to participate in any cost computation. The
+// edge starts at EMAWeight == PriorWeight with zero confidence, matching the
+// cold-start invariant every seeded edge satisfies (§4.3 of the paper).
 func (m *SemanticMap) AddValidatedProposition(p *types.Proposition) error {
-	return m.ontology.AddValidatedProposition(p)
+	if err := m.ontology.AddValidatedProposition(p); err != nil {
+		return err
+	}
+	return m.storage.PutEdge(&types.EdgeDescriptor{
+		FromID:        p.FromConstruct,
+		ToID:          p.ToConstruct,
+		PropositionID: p.PropositionID,
+		Direction:     p.Direction,
+		PriorWeight:   p.PriorStrength,
+		EMAWeight:     p.PriorStrength,
+		Confidence:    0.0,
+		NObservations: 0,
+	})
 }
 
 // ResetEdge restores every edge between (from, to) to its prior state.

@@ -5,8 +5,10 @@ package main
 // Endpoint                          Method  Body / Path                    Status on success
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // /ingest                           POST    {from_id,to_id,observation,…}  204
+//                                                                          400 (unknown construct pair)
 // /cost                             GET     ?task=&node=                   200 ActionCost
 // /recommend                        POST    OffloadContext                 200 PeerRecommendation
+//                                                                          409 (no peer qualifies / none registered)
 // /simulate                         POST    {context,target_node_id}       200 OutcomeSimulation
 // /candidates                       GET     —                              200 []CandidateEdge
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -55,6 +57,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
@@ -106,7 +109,11 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.Ingest(req.FromID, req.ToID, req.Observation, req.EventID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			// An unknown (from_id, to_id) pair is the caller naming a construct
+			// pair that carries no edge — a client error, not a server fault.
+			// Returning 500 here made a malformed request indistinguishable
+			// from a genuine internal failure.
+			writeError(w, statusForIngestError(err), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -133,7 +140,16 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.RecommendPeer(&ctx)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			// ErrInsufficientTrust covers "no peer registry", "no peers
+			// registered" and "no peer qualifies" — all ordinary states of a
+			// single-node or freshly-started deployment, not server faults.
+			// 409 says the request was well-formed but current state cannot
+			// satisfy it, which is what an operator needs to distinguish.
+			if errors.Is(err, contracts.ErrInsufficientTrust) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, result)
@@ -853,4 +869,17 @@ func serveExplainStream(
 	if _, err := streamer.ExplainStream(r.Context(), req, emit); err != nil {
 		log.Printf("explain: stream ended with error: %v", err)
 	}
+}
+
+// statusForIngestError maps an Ingest failure to an HTTP status. A missing edge
+// means the caller named a construct pair the backbone does not carry, which is
+// a client error; anything else is treated as internal.
+func statusForIngestError(err error) int {
+	if err == nil {
+		return http.StatusNoContent
+	}
+	if strings.Contains(err.Error(), "not found in storage") {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
 }
