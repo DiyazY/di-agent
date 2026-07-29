@@ -109,6 +109,10 @@ func main() {
 
 	flag.Parse()
 
+	if err := checkNoPositionalArgs(flag.NArg(), flag.Arg(0)); err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	if err := applyRegime(*regime, alpha, convergence); err != nil {
 		log.Fatalf("invalid -regime %q: %v", *regime, err)
 	}
@@ -411,3 +415,20 @@ func loadOptionalPrompt(explicitPath, dir, defaultName, label string) string {
 type explainReader struct{ *semmap.SemanticMap }
 
 func (r explainReader) Peers() *peers.Registry { return r.SemanticMap.Peers() }
+
+// checkNoPositionalArgs rejects stray positional arguments after flag parsing.
+//
+// Go's flag package stops parsing at the first non-flag argument, so
+// `-proposer false` (space instead of `=`) is read as `-proposer` followed by
+// the positional "false" — and every flag after it is silently discarded. That
+// failure mode produced convergence runs whose -alpha, -convergence, -priors
+// and -kd were all ignored while the daemon started and served normally on
+// hardcoded ontology defaults. Failing loud is cheaper than the silent version.
+func checkNoPositionalArgs(n int, first string) error {
+	if n == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
+		"the form -flag=false (not -flag false), otherwise every flag after it "+
+		"is silently ignored", first)
+}
