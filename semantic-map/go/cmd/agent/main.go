@@ -84,6 +84,10 @@ func main() {
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
+	var useTuner bool
+	flag.BoolVar(&useTuner, "tuner", true,
+		"enable the RuleBasedTuner behind POST /agent/tune (disable to wire DisabledTuner, "+
+			"which accepts requests and applies nothing)")
 
 	explainProvider := flag.String("explain-provider", "none",
 		"natural-language explain provider: none (disabled) or openai-compatible "+
@@ -137,6 +141,13 @@ func main() {
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
 		UseProposer:          useProposer,
+		// Must be set explicitly: this literal does not start from
+		// DefaultConfig(), so an omitted field is false, and omitting this one
+		// silently wired DisabledTuner into every daemon. POST /agent/tune then
+		// returned HTTP 200 with an empty applied[] — accepting the request and
+		// doing nothing — which is indistinguishable from an intent that matched
+		// no keyword group.
+		UseRuleBasedTuner:    useTuner,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)
