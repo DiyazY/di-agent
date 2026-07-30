@@ -1,9 +1,4 @@
 services:
-  caddy:
-    image: caddy:2.11.4
-    deploy:
-      mode: global
-
   di-agent:
     build: ./go
     restart: unless-stopped

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 04-agent.sh — build the di-agent binary (linux/arm64), transfer to each VM,
-#               and install it as a systemd service.
+# 03-agent.sh — build the di-agent binary for the selected Linux target and
+#               deploy the stack.
 #
 # Usage: ./04-agent.sh [vm1 vm2 vm3]
 #   VM names default to diag-1 diag-2 diag-3.
@@ -25,6 +25,8 @@ GO_SRC="$(dirname "$POC_DIR")/semantic-map/go"
 SERVICE_SRC="$POC_DIR/config/di-agent.service"
 BINARY_OUT="./cmd/agent/tmp/di-agent-poc"
 DOCKER_COMPOSE_SRC="$(dirname "$POC_DIR")/semantic-map/docker-compose.yml"
+BUILD_GOOS="${BUILD_GOOS:-linux}"
+BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-$(go env GOARCH)}}"
 
 # ── args ─────────────────────────────────────────────────────────────────────
 if [ "$#" -eq 0 ]; then
@@ -34,7 +36,7 @@ else
 fi
 
 # ── build ─────────────────────────────────────────────────────────────────────
-info "Building di-agent for linux/amd64 from $GO_SRC ..."
+info "Building di-agent for ${BUILD_GOOS}/${BUILD_GOARCH} from $GO_SRC ..."
 if [ ! -d "$GO_SRC" ]; then
     err "Go source directory not found: $GO_SRC"
     exit 1
@@ -42,7 +44,7 @@ fi
 
 (
     cd "$GO_SRC"
-    GOOS=linux GOARCH=amd64 go build -o "$BINARY_OUT" ./cmd/agent/
+    GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" go build -o "$BINARY_OUT" ./cmd/agent/
 )
 ok "Binary built: $BINARY_OUT ($(du -sh "$BINARY_OUT" | cut -f1))"
 

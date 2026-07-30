@@ -54,7 +54,7 @@ max_key() {
     local max_k="" max_v="-9999"
     while [ "$#" -ge 2 ]; do
         local k="$1" v="$2"; shift 2
-        if python3 -c "exit(0 if float('${v}') > float('${max_v}') else 1)" 2>/dev/null; then
+        if python3 -c 'import sys; exit(0 if float(sys.argv[1]) > float(sys.argv[2]) else 1)' -- "$v" "$max_v" 2>/dev/null; then
             max_k="$k"; max_v="$v"
         fi
     done
