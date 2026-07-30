@@ -25,6 +25,20 @@ from pathlib import Path
 from .calibration import compute_construct_scores, compute_proposition_strengths, PROPOSITIONS, KDS
 
 
+# Constructs whose proxy variable is instrumented runtime telemetry. Only these
+# carry a per-distribution calibration; see build_edge_weights.
+TELEMETRY_CONSTRUCTS = {"PS", "RC", "CO"}
+
+# Bounds on an emitted edge prior. These match the operator tuner's global bounds
+# in go/pkg/semmap/map.go (floor 0.10, ceiling 0.95) deliberately: the pipeline
+# must not emit a prior that the tuner would refuse to let an operator set. They
+# also keep the prior off the boundary where the Bernoulli KL divergence used in
+# the convergence study is unbounded — a prior of exactly 0 makes any nonzero
+# observation register as near-infinite information gain.
+EDGE_PRIOR_FLOOR = 0.10
+EDGE_PRIOR_CEIL = 0.95
+
+
 def build_edge_weights(
     construct_scores: dict[str, dict[str, float]],
     proposition_strengths: dict[str, dict],
@@ -37,21 +51,49 @@ def build_edge_weights(
       to_id          – target construct ID
       proposition_id – P1..P15
       direction      – positive | negative
-      prior_weight   – distribution-specific source construct score
-                       (how strongly this KD exhibits the source construct)
+      prior_weight   – see below
       ema_weight     – same as prior_weight at T=0 (no observations yet)
+
+    Per-distribution calibration is restricted to edges whose SOURCE construct
+    has an instrumented runtime-telemetry proxy (PS, RC, CO). For those, the
+    prior is the distribution's construct score modulated by the proposition
+    strength, as before.
+
+    Edges sourced from SC, MU or CE fall back to the global proposition strength
+    with no per-distribution modulation. Their proxies do not survive scrutiny as
+    empirical calibration inputs: SC is a CIS score produced by a third-party
+    scanner, CE is a GitHub star count, and MU is setup time measured in human
+    hours. None is a system measurement, and min-max normalising three such
+    proxies across five distributions produced magnitudes that read as empirical
+    but encoded only a rank within the sample. Falling back to the global lambda
+    states the honest position: those constructs carry Di-Select's structural
+    prior and nothing distribution-specific.
+
+    This also makes the treatment consistent end to end. SC, MU, CE and RR have
+    no runtime telemetry analog, so they never accumulate evidence (paper §5.2);
+    they are now equally uncalibrated per-distribution at initialization. They
+    are structural priors at every stage, revisable only by explicit operator
+    action.
+
+    Every emitted prior is finally clamped to [EDGE_PRIOR_FLOOR,
+    EDGE_PRIOR_CEIL]. The clamp is applied to the product, not to the construct
+    score, because multiplying a floored score by a strength below 1.0 drags it
+    back under the floor.
     """
     edges: dict[str, dict[str, dict]] = {}
 
     for kd in KDS:
         edges[kd] = {}
         for prop_id, from_c, to_c, direction in PROPOSITIONS:
-            # Edge weight = source construct score for this distribution,
-            # modulated by the proposition strength.
-            source_score = construct_scores[kd][from_c]
-            strength     = proposition_strengths[prop_id]["prior_weight"] = \
-                           proposition_strengths[prop_id]["prior_strength"]
-            prior        = round(source_score * strength, 4)
+            strength = proposition_strengths[prop_id]["prior_weight"] = \
+                       proposition_strengths[prop_id]["prior_strength"]
+
+            if from_c in TELEMETRY_CONSTRUCTS:
+                raw = construct_scores[kd][from_c] * strength
+            else:
+                raw = strength
+
+            prior = round(min(EDGE_PRIOR_CEIL, max(EDGE_PRIOR_FLOOR, raw)), 4)
 
             edge_key = f"{from_c}→{to_c}:{prop_id}"
             edges[kd][edge_key] = {
@@ -61,6 +103,7 @@ def build_edge_weights(
                 "direction":      direction,
                 "prior_weight":   prior,
                 "ema_weight":     prior,   # identical at cold-start
+                "calibrated":     from_c in TELEMETRY_CONSTRUCTS,
             }
 
     return edges
