@@ -11,7 +11,7 @@ Design rationale and decision record. Update this file when a contract, profile,
   - [Component reference](#component-reference)
   - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
-  - [The six contracts](#the-six-contracts)
+  - [The seven contracts](#the-seven-contracts)
   - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
@@ -233,7 +233,7 @@ The contract set has stayed at six since the first release. Three substantial co
 
 The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
 
-### The six contracts
+### The seven contracts
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -243,12 +243,13 @@ The rule we hold to: **no new contract without a second implementation that need
 | **Updater**   | Incorporate telemetry into edge/node descriptors            | Idempotent per `(edge, event_id)` — one observation updates every edge in a `(from, to)` pair, each tracking its own EMA. `Reset` restores prior without deleting |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing graph path; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone edges   | Never modifies Storage or Ontology directly; `Reject` permanently suppresses within session               |
+| **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
 
 ### Behavioral guarantees
 
 Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
 
-Compliance suites exist for all six contracts (`compliance/{collector,storage,updater,ontology,reasoner,proposer}.go`). Each runs against a factory the implementation supplies, so a new storage or ontology can be validated with a single test file wired to the suite.
+Compliance suites exist for all seven contracts (`compliance/{collector,storage,updater,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new storage or ontology can be validated with a single test file wired to the suite.
 
 ### End-to-end validation: integration scenarios
 
@@ -282,12 +283,18 @@ A separate numerical verification (`pkg/profiles/profiles_test.go::TestPerKDSeed
 
 The ontology is not a static reference. Empirical priors get recalibrated as new papers land, operators deprecate claims that the deployment's evidence contradicts, and new domains may introduce new constructs. The contract therefore admits four kinds of mutation, each emitting one `OntologyEvent` to an append-only audit log:
 
-| Mutation                          | Method                                       | Typical caller                          |
-| --------------------------------- | -------------------------------------------- | --------------------------------------- |
-| Edge magnitude recalibrated       | `SetPropositionStrength(propID, strength)`   | `prior_init` pipeline; operator tuning  |
-| New edge added (validated)        | `AddValidatedProposition(p)`                 | `Proposer.Confirm` (post-review)        |
-| New construct added               | `AddConstruct(c)`                            | Operator (new domain extension)         |
-| Existing edge retired (soft)      | `Deprecate(propID, reason)`                  | Operator (evidence-against accumulated) |
+| Mutation                          | Method                                       | Typical caller                          | Storage write |
+| --------------------------------- | -------------------------------------------- | --------------------------------------- | ------------- |
+| Edge magnitude recalibrated       | `SetPropositionStrength(propID, strength)`   | `prior_init` pipeline; operator tuning  | `PriorWeight` on every matching edge; `EMAWeight` too when `NObservations == 0` |
+| New edge added (validated)        | `AddValidatedProposition(p)`                 | `Proposer.Confirm` (post-review)        | new `EdgeDescriptor`, `EMAWeight == PriorWeight`, zero confidence |
+| New construct added               | `AddConstruct(c)`                            | Operator (new domain extension)         | new `NodeDescriptor` at the neutral 0.5 prior |
+| Existing edge retired (soft)      | `Deprecate(propID, reason)`                  | Operator (evidence-against accumulated) | `Deprecated` + `DeprecatedReason` flags; descriptor and evidence retained |
+
+**Every ontology mutation must write through to storage.** This is an invariant, not an implementation detail, and it is the one most easily broken: the Reasoner computes `CostOfAction` by iterating `storage.AllEdges()`, never the ontology's proposition list. An ontology-only mutation is therefore invisible to every decision the agent makes — it appears in `Propositions()`, it appears in `GetHistory()`, and it changes nothing. That failure mode is silent by construction, because the audit log records the operator's intent faithfully whether or not the graph acted on it.
+
+The boot path hides the problem: `applyPriorWeights` runs immediately before `seedFromOntology`, so startup calibration propagates by ordering. Nothing re-runs seeding afterwards, so the same call at runtime does not. Three of the four mutations above once relied on that ordering and were inert after boot; `pkg/semmap/ontology_sync_test.go` and `strength_propagation_test.go` now pin each one's storage effect.
+
+`EMAWeight` is the subtle case. On an edge with observations it is evidence and a prior recalibration must leave it alone. On an edge with none it is merely the seed value, and leaving it behind would anchor the first future observation to a magnitude the operator has already superseded — which is the common case, not a corner, since the recalibration path exists mainly for the six edges with no telemetry analog.
 
 What is stable, what is not:
 
@@ -522,7 +529,7 @@ The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default
 
 ## 7. Adding a New Profile
 
-1. Create `go/internal/<profile-name>/` and implement all six contracts, or reuse existing implementations.
+1. Create `go/internal/<profile-name>/` and implement all seven contracts, or reuse existing implementations.
 2. Every implementation must pass its contract's compliance suite before being wired into a profile.
 3. Add a case to `go/pkg/profiles/profiles.go`:
 
@@ -535,7 +542,11 @@ case "my-profile":
     reasoner  := myprofile.NewMyReasoner(storage, ontology, ...)
     proposer  := myprofile.NewMyProposer(...)
     tuner     := myprofile.NewMyTuner(...)      // or minimal.NewDisabledTuner() to opt out
-    seedFromOntology(storage, ontology)
+    // pw is the parsed prior_weights.json (nil if -priors was not given); kd
+    // selects the per-distribution edge weights. Seeding must run before the
+    // map is handed out — it is what puts an EdgeDescriptor in storage for
+    // every proposition, and the Reasoner iterates storage, not the ontology.
+    seedFromOntology(storage, ontology, pw, cfg.KD)
     return semmap.New(storage, ontology, updater, reasoner, proposer, tuner), collector, nil
 ```
 
@@ -781,15 +792,25 @@ POST /agent/tune {"intent": "prioritize security", "operator": "alice"}
           ↓
 TunerContract.ParseIntent(text) → []TuneIntent{PropositionID, Delta}
           ↓
-SemanticMap.Tune: resolve current strengths → compute newStrength = clamp(old+delta, floor, ceil)
+SemanticMap.Tune: resolve current magnitudes from storage.AllEdges() (NOT from
+                  ontology.Propositions()) → newStrength = clamp(old+delta, floor, ceil)
           ↓
 TunerContract.Validate(adjustments) — hard bounds check
           ↓
-OntologyContract.SetPropositionStrength × N   ← each emits "set-strength" event
+SemanticMap.SetPropositionStrength × N        ← facade, not the ontology method:
+                                                writes ontology AND storage edge
 OntologyContract.RecordTune(text, operator)   ← single "operator-tune" event
           ↓
 Return []TuneAdjustment: PropositionID, OldStrength, NewStrength, Rationale
 ```
+
+Two details in that flow are load-bearing and were both once wrong.
+
+**The delta anchors to the edge's magnitude, not the proposition's strength.** Those differ by construction: `seedFromOntology` seeds edges from `prior_weights.json`'s per-distribution `distribution_edge_weights` table while the ontology carries the global `propositions` table. On a k0s-seeded daemon P1's edge sits at 0.2138 against a proposition strength of 0.620. Anchoring a +0.12 nudge to the global figure would jump the edge from 0.2138 to 0.740, discarding per-distribution calibration in a single operator action. It also makes the SC-adjacent floor of 0.30 unreachable — anchored to per-KD magnitudes, P11 (0.0089 + 0.12 = 0.1289) clamps to it immediately.
+
+**Adjustments apply through `SemanticMap.SetPropositionStrength`, not `OntologyContract.SetPropositionStrength`.** Only the facade writes through to storage. Calling the contract method directly leaves the tune visible in `Propositions()` and in the audit log while changing no agent decision — see the write-through invariant in §2.
+
+The resulting cost effect is predictable in closed form. `CostOfAction` accumulates `(effective − w_prior) · sign(direction)` over RC-adjacent edges, and effective = (1 − c)·w_prior + c·w_ema, so the deviation term is c·(w_ema − w_prior). Raising a prior by δ on a positive edge changes the estimate by exactly −c·δ. Measured on a k0s daemon after 976 idle samples (c = 0.9767 per observable edge): predicted −0.1172, observed −0.11712.
 
 ### Hard bounds
 
