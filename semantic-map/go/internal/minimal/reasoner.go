@@ -171,11 +171,11 @@ func (r *RuleEngineReasoner) deprecatedPropositionSet() (map[string]bool, error)
 //  2. Compute the local CostOfAction once.
 //  3. For each peer with Trust ≥ minTrustScore, GET /cost on the peer URL.
 //     a. Success → MarkSeen on the registry; compute savings as
-//        (myEnergy − peerEnergy); compute trust-weighted savings as
-//        savings × peer.Trust.
+//     (myEnergy − peerEnergy); compute trust-weighted savings as
+//     savings × peer.Trust.
 //     b. Failure → log via log.Printf and apply peerPenalty to the peer's
-//        trust score. Skip this peer; do not abort the run. The reasoner
-//        must remain useful when one peer is down.
+//     trust score. Skip this peer; do not abort the run. The reasoner
+//     must remain useful when one peer is down.
 //  4. Pick the peer with the highest trust-weighted savings. If no peer
 //     beats local cost (savings ≤ 0 everywhere) → ErrInsufficientTrust.
 //  5. Build a PeerRecommendation citing the peer ID, the trust score we

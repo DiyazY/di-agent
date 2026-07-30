@@ -40,7 +40,7 @@ func TestPerKDSeedingMatchesPriorWeights(t *testing.T) {
 		kd := kd
 		t.Run(kd, func(t *testing.T) {
 			storage := minimal.NewInMemoryStorage()
-			ontology := minimal.NewStaticDiSelectOntology()
+			ontology := minimal.NewOntologyFromSpec(mustSpec())
 			applyPriorWeights(ontology, &expected)
 			seedFromOntology(storage, ontology, &expected, kd)
 
@@ -94,7 +94,7 @@ func TestGlobalSeedingWhenKDIsEmpty(t *testing.T) {
 	_ = json.Unmarshal(raw, &pw)
 
 	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	applyPriorWeights(ontology, &pw)
 	seedFromOntology(storage, ontology, &pw, "") // no KD
 

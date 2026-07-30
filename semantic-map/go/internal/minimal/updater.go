@@ -22,8 +22,8 @@ import (
 //
 //	effective = (1 - confidence) * prior + confidence * ema
 type EMAUpdater struct {
-	storage             storageWriter
-	alpha               float64
+	storage              storageWriter
+	alpha                float64
 	convergenceThreshold float64
 
 	mu   sync.Mutex
@@ -43,10 +43,10 @@ type storageWriter interface {
 //   - convergenceThreshold: number of observations at which confidence reaches 1.0.
 func NewEMAUpdater(storage storageWriter, alpha, convergenceThreshold float64) *EMAUpdater {
 	return &EMAUpdater{
-		storage:             storage,
-		alpha:               alpha,
+		storage:              storage,
+		alpha:                alpha,
 		convergenceThreshold: convergenceThreshold,
-		seen:                make(map[string]struct{}),
+		seen:                 make(map[string]struct{}),
 	}
 }
 

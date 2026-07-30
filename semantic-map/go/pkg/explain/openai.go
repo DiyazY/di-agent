@@ -213,9 +213,9 @@ func (e *OpenAICompatibleExplainer) explain(ctx context.Context, req ExplainRequ
 		toolCallsSpent int
 		lastResp       *ExplainResponse
 		lastIssues     []string
-		plan        *Plan
-		lastVerdict *CriticVerdict
-		evidence    string
+		plan           *Plan
+		lastVerdict    *CriticVerdict
+		evidence       string
 		// lastFailure records WHY the most recent round did not produce a
 		// shippable answer. It routes the revision critique and the final
 		// error message.

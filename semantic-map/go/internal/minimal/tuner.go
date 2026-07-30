@@ -50,7 +50,7 @@ func NewRuleBasedTuner() *RuleBasedTuner { return &RuleBasedTuner{} }
 const defaultDelta = 0.12
 
 type intentRule struct {
-	keywords   []string         // any of these triggers the rule (case-insensitive)
+	keywords   []string           // any of these triggers the rule (case-insensitive)
 	propDeltas map[string]float64 // propID → delta when direction=positive
 	// When direction is negative, all deltas are negated before applying.
 }

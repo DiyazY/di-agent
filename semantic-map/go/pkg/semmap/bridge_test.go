@@ -36,7 +36,7 @@ func (f *fakeUpdater) UpdateEdge(from, to string, value float64, eventID string)
 //
 // Five unique endpoint pairs after de-duplication.
 func TestBridge_KnownMetricTypeUpdatesRelatedEdges(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	upd := &fakeUpdater{}
 
 	sample := &types.MetricSample{
@@ -83,7 +83,7 @@ func TestBridge_KnownMetricTypeUpdatesRelatedEdges(t *testing.T) {
 // guarantee: a MetricType not in the routing table produces zero updater
 // calls and no error.
 func TestBridge_UnknownMetricTypeIsSilentlyIgnored(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	upd := &fakeUpdater{}
 
 	sample := &types.MetricSample{
@@ -106,7 +106,7 @@ func TestBridge_UnknownMetricTypeIsSilentlyIgnored(t *testing.T) {
 // EXACTLY ONCE per sample. The Updater handles multigraph fan-out internally;
 // the Bridge must not double-count.
 func TestBridge_ConflictPairIsUpdatedOnce(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	upd := &fakeUpdater{}
 
 	sample := &types.MetricSample{

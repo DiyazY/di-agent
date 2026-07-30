@@ -40,7 +40,7 @@ func hasKind(events []explain.Event, k explain.EventKind) bool {
 }
 
 func TestExplainStream_EmitsFinalOnSuccess(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestExplainStream_EmitsFinalOnSuccess(t *testing.T) {
 }
 
 func TestExplainStream_EmitsErrorWhenLLMUnreachable(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestExplainStream_EmitsSessionEvent(t *testing.T) {
 }
 
 func TestExplainStream_EmitsValidationFailedOnFabrication(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestExplainStream_EmitsValidationFailedOnFabrication(t *testing.T) {
 // answer that parsed but failed a gate — must ride along on the error event,
 // not be emitted as a second terminal.
 func TestExplainStream_PartialResultEmitsExactlyOneTerminalEvent(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestExplainStream_PartialResultEmitsExactlyOneTerminalEvent(t *testing.T) {
 
 // The success counterpart: exactly one terminal, and it is 'final'.
 func TestExplainStream_SuccessEmitsExactlyOneTerminalEvent(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestExplainStream_SuccessEmitsExactlyOneTerminalEvent(t *testing.T) {
 }
 
 func TestExplainStream_NilEmitIsSafe(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

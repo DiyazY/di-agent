@@ -42,8 +42,8 @@ type EdgeDescriptor struct {
 	EMAWeight        float64
 	Confidence       float64
 	NObservations    int
-	Deprecated       bool   // mirrors Proposition.Deprecated; set by SemanticMap.Deprecate
-	DeprecatedReason string // mirrors Proposition.DeprecatedReason
+	Deprecated       bool     // mirrors Proposition.Deprecated; set by SemanticMap.Deprecate
+	DeprecatedReason string   // mirrors Proposition.DeprecatedReason
 	Mu               *float64 // Gaussian mean  (edge-standard profile+); nil if unavailable
 	Sigma            *float64 // Gaussian std   (edge-standard profile+); nil if unavailable
 }
@@ -57,11 +57,11 @@ type Construct struct {
 }
 
 type Proposition struct {
-	PropositionID   string
-	FromConstruct   string
-	ToConstruct     string
-	Direction       Direction
-	PriorStrength   float64
+	PropositionID string
+	FromConstruct string
+	ToConstruct   string
+	Direction     Direction
+	PriorStrength float64
 	// Description is a one-sentence English statement of the causal claim
 	// (e.g. "Lightweight distributions reduce pod-startup latency"). Empty
 	// for auto-proposed candidates until an operator fills it in via
@@ -85,11 +85,11 @@ type ValidationResult struct {
 // ── Agent query types ─────────────────────────────────────────────────────────
 
 type OffloadContext struct {
-	TaskType            string
-	SourceNodeID        string
-	DataSizeBytes       int64
-	LatencyBudgetMs     float64
-	EnergyBudgetJoules  *float64 // nil = unconstrained
+	TaskType           string
+	SourceNodeID       string
+	DataSizeBytes      int64
+	LatencyBudgetMs    float64
+	EnergyBudgetJoules *float64 // nil = unconstrained
 }
 
 type ActionCost struct {
@@ -98,7 +98,7 @@ type ActionCost struct {
 	EnergyCost      float64 // placeholder: zero until EnergyJoules observations are available
 	LatencyEstimate float64
 	Confidence      float64
-	Rationale       string   // must reference specific node/edge IDs
+	Rationale       string // must reference specific node/edge IDs
 	GraphPathUsed   []string
 }
 
@@ -111,8 +111,8 @@ type PeerRecommendation struct {
 
 type OutcomeSimulation struct {
 	ExpectedLatency      float64
-	ExpectedResourceCost float64  // resource overhead derived from CPU/memory observations
-	ExpectedEnergy       float64  // placeholder: zero until EnergyJoules observations are available
+	ExpectedResourceCost float64 // resource overhead derived from CPU/memory observations
+	ExpectedEnergy       float64 // placeholder: zero until EnergyJoules observations are available
 	Confidence           float64
 	GraphPathUsed        []string
 	P95Latency           *float64 // nil if Gaussian descriptors unavailable
@@ -236,7 +236,7 @@ const (
 //	EventPropositionDeprecated  -> {"reason": ...}
 type OntologyEvent struct {
 	Timestamp time.Time
-	Actor     string         // "system", "operator:alice", "proposer", "prior_init_pipeline", …
+	Actor     string // "system", "operator:alice", "proposer", "prior_init_pipeline", …
 	Kind      OntologyEventKind
 	TargetID  string
 	Detail    map[string]any

@@ -74,7 +74,7 @@ func netdataFakeHandler(t *testing.T) http.Handler {
 
 func TestStaticDiSelectOntologyCompliance(t *testing.T) {
 	compliance.RunOntologyCompliance(t, func(t *testing.T) contracts.OntologyContract {
-		return minimal.NewStaticDiSelectOntology()
+		return minimal.NewOntologyFromSpec(mustSpec())
 	})
 }
 
@@ -84,7 +84,7 @@ func TestRuleEngineReasonerCompliance(t *testing.T) {
 		// the same wiring the edge-minimal profile uses so the compliance suite
 		// exercises a realistic configuration.
 		s := minimal.NewInMemoryStorage()
-		o := minimal.NewStaticDiSelectOntology()
+		o := minimal.NewOntologyFromSpec(mustSpec())
 		seedReasonerState(t, s, o)
 		return minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
 	})
@@ -98,7 +98,7 @@ func TestDisabledProposerCompliance(t *testing.T) {
 
 func TestMICorrelationProposerCompliance(t *testing.T) {
 	compliance.RunProposerCompliance(t, func(t *testing.T) contracts.ProposerContract {
-		o := minimal.NewStaticDiSelectOntology()
+		o := minimal.NewOntologyFromSpec(mustSpec())
 		return minimal.NewMICorrelationProposer(o, 0.8, 10, 50)
 	})
 }
@@ -122,7 +122,7 @@ func TestDisabledTunerCompliance(t *testing.T) {
 // for audit / replay).
 func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 	s := minimal.NewInMemoryStorage()
-	o := minimal.NewStaticDiSelectOntology()
+	o := minimal.NewOntologyFromSpec(mustSpec())
 	seedReasonerState(t, s, o)
 	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
 
@@ -185,7 +185,7 @@ func contains(haystack, needle string) bool {
 // proposition, mirroring what profiles.seedFromOntology does at daemon startup.
 // Without seeding, the reasoner has nothing to traverse and GraphPathUsed
 // would be empty.
-func seedReasonerState(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology) {
+func seedReasonerState(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology) {
 	t.Helper()
 	cs, err := o.Constructs()
 	if err != nil {
@@ -234,7 +234,7 @@ func newFakeCgroupRoot(t *testing.T) string {
 			"throttled_usec 25000\n",
 	)
 	mustWrite(t, filepath.Join(root, "memory.current"), "2147483648\n") // 2 GB
-	mustWrite(t, filepath.Join(root, "memory.max"), "8589934592\n")      // 8 GB
+	mustWrite(t, filepath.Join(root, "memory.max"), "8589934592\n")     // 8 GB
 
 	return root
 }

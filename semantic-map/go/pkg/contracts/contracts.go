@@ -129,7 +129,7 @@ type ReasonerContract interface {
 
 // Sentinel errors returned by ReasonerContract implementations.
 var (
-	ErrNoRationale      = contractError("reasoner must provide a non-empty rationale")
+	ErrNoRationale       = contractError("reasoner must provide a non-empty rationale")
 	ErrInsufficientTrust = contractError("no peer meets the minimum trust threshold")
 )
 

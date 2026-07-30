@@ -73,9 +73,9 @@ func (d *Descriptor) clone() *Descriptor {
 // URL — calling Add twice with the same URL returns the existing descriptor
 // without disturbing its trust history.
 type Registry struct {
-	mu          sync.RWMutex
-	byID        map[string]*Descriptor
-	urlToID     map[string]string
+	mu      sync.RWMutex
+	byID    map[string]*Descriptor
+	urlToID map[string]string
 }
 
 // NewRegistry returns an empty in-memory peer registry.

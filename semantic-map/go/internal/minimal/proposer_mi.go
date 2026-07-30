@@ -33,7 +33,7 @@ type MICorrelationProposer struct {
 	ontology contracts.OntologyContract
 
 	mu           sync.Mutex
-	buffers      map[string]*pairBuffer         // key: fromID + "→" + toID
+	buffers      map[string]*pairBuffer          // key: fromID + "→" + toID
 	candidates   map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order        []string                        // insertion order of CandidateIDs, for stable history iteration
 	latestValues map[string]float64              // construct → most recent observed value

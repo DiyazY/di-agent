@@ -46,7 +46,7 @@ func newJSONEncoder(w io.Writer) *json.Encoder     { return json.NewEncoder(w) }
 type scenarioAgent struct {
 	sm       *semmap.SemanticMap
 	storage  *minimal.InMemoryStorage
-	ontology *minimal.StaticDiSelectOntology
+	ontology *minimal.SpecOntology
 	updater  *minimal.EMAUpdater
 }
 
@@ -59,7 +59,7 @@ type scenarioAgent struct {
 func newScenarioAgent(t *testing.T) *scenarioAgent {
 	t.Helper()
 	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
 	proposer := minimal.NewDisabledProposer()
@@ -77,9 +77,9 @@ func newScenarioAgent(t *testing.T) *scenarioAgent {
 // edgeSnapshot is a frozen view of one edge's state at a moment in time.
 // Used to print "T=N: edge X is here" narrative rows.
 type edgeSnapshot struct {
-	FromID, ToID, PropID                                   string
+	FromID, ToID, PropID                          string
 	PriorWeight, EMAWeight, Effective, Confidence float64
-	NObservations                                  int
+	NObservations                                 int
 }
 
 func (s edgeSnapshot) String() string {
@@ -214,14 +214,16 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	pwPath := findPriorWeightsFileForScenarios(t)
 
 	smK3s, _, err := profiles.Build("edge-minimal", profiles.Config{
-		EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
+		DomainSpec: mustSpec(),
+		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k3s",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	smK0s, _, err := profiles.Build("edge-minimal", profiles.Config{
-		EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
+		DomainSpec: mustSpec(),
+		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k0s",
 	})
 	if err != nil {
@@ -448,6 +450,7 @@ type coordinationAgent struct {
 func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordinationAgent {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		DomainSpec:           mustSpec(),
 		EMAAlpha:             0.5,
 		ConvergenceThreshold: 100,
 		MinTrustScore:        0.5,
@@ -519,9 +522,9 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 // the target that conf×ema dominates the (1-conf)×prior term — 200 ticks at
 // alpha=0.5 / convergence=100 saturates confidence at 1.0.
 //
-//   target ≈ +0.85 → high-cost agent (the one that wants to offload)
-//   target ≈ +0.10 → low-cost agent  (the attractive offload destination)
-//   target ≈ +0.50 → medium-cost agent
+//	target ≈ +0.85 → high-cost agent (the one that wants to offload)
+//	target ≈ +0.10 → low-cost agent  (the attractive offload destination)
+//	target ≈ +0.50 → medium-cost agent
 //
 // The shape is: P1 SC→RC (+, prior 0.6) contribution = +obs.
 //
@@ -763,7 +766,7 @@ func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descript
 //  5. Verified: a new non-deprecated proposition covering CE↔RC exists.
 func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	s := minimal.NewInMemoryStorage()
-	o := minimal.NewStaticDiSelectOntology()
+	o := minimal.NewOntologyFromSpec(mustSpec())
 	seedReasonerState(t, s, o)
 
 	u := minimal.NewEMAUpdater(s, 0.2, 500)
@@ -837,7 +840,7 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 //  4. Verify that CostOfAction after tuning is traversable without error.
 func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	s := minimal.NewInMemoryStorage()
-	o := minimal.NewStaticDiSelectOntology()
+	o := minimal.NewOntologyFromSpec(mustSpec())
 	seedReasonerState(t, s, o)
 
 	u := minimal.NewEMAUpdater(s, 0.2, 500)

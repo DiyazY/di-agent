@@ -29,7 +29,7 @@ import (
 type evolutionAgent struct {
 	sm        *semmap.SemanticMap
 	storage   *minimal.InMemoryStorage
-	ontology  *minimal.StaticDiSelectOntology
+	ontology  *minimal.SpecOntology
 	updater   *minimal.EMAUpdater
 	proposer  contracts.ProposerContract
 	collector *scripted.ScriptedCollector
@@ -49,7 +49,7 @@ func newEvolutionAgent(t *testing.T, collector *scripted.ScriptedCollector, prop
 func newEvolutionAgentWithConvergence(t *testing.T, collector *scripted.ScriptedCollector, proposer contracts.ProposerContract, convergence float64) *evolutionAgent {
 	t.Helper()
 	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	updater := minimal.NewEMAUpdater(storage, 0.2, convergence)
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
 	if proposer == nil {
@@ -104,7 +104,7 @@ func (s edgeSnap) String() string {
 		s.PropID, s.From, s.To, s.Direction, s.Prior, s.EMA, s.Confidence, s.Effective, s.Delta, s.NObservations)
 }
 
-func snap(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology, propID string) edgeSnap {
+func snap(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology, propID string) edgeSnap {
 	t.Helper()
 	edges, _ := s.AllEdges()
 	props, _ := o.Propositions()
@@ -145,7 +145,7 @@ func directionString(d types.Direction) string {
 
 // allSnaps returns every edge's snapshot, sorted by PropositionID
 // (P1, P2, …, P10, P11, …).
-func allSnaps(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology) []edgeSnap {
+func allSnaps(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology) []edgeSnap {
 	t.Helper()
 	props, _ := o.Propositions()
 	out := make([]edgeSnap, 0, len(props))
@@ -178,7 +178,7 @@ func propNum(p string) int {
 // emitAdvisories scans edges and prints "ADVISORY" lines via t.Logf when
 // (a) confidence > 0.7 AND |Δeff| > 0.25 (suggests deprecation review), or
 // (b) confidence > 0.95 (suggests promotion). Returns the count emitted.
-func emitAdvisories(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology, tag string) int {
+func emitAdvisories(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology, tag string) int {
 	t.Helper()
 	count := 0
 	for _, e := range allSnaps(t, s, o) {
@@ -199,7 +199,7 @@ func emitAdvisories(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticD
 }
 
 // printSummary prints the EVOLUTION SUMMARY block at the end of each scenario.
-func printSummary(t *testing.T, name string, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology) {
+func printSummary(t *testing.T, name string, s *minimal.InMemoryStorage, o *minimal.SpecOntology) {
 	t.Helper()
 	all := allSnaps(t, s, o)
 
@@ -244,7 +244,7 @@ func printSummary(t *testing.T, name string, s *minimal.InMemoryStorage, o *mini
 
 // printRows is a small helper to dump a focused set of edges as a checkpoint
 // table.
-func printRows(t *testing.T, label string, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology, propIDs []string) {
+func printRows(t *testing.T, label string, s *minimal.InMemoryStorage, o *minimal.SpecOntology, propIDs []string) {
 	t.Helper()
 	t.Logf("  %s", label)
 	for _, id := range propIDs {
@@ -576,7 +576,7 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 
 func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	col := scripted.New("node_1") // collector unused — the proposer is driven directly
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	proposer := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	// Verify MU→PS is a free pair (no proposition in the bootstrap).

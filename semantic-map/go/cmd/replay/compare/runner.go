@@ -236,9 +236,9 @@ func replaySingleRun(opts Options, kd string, run int, hostFilter map[string]str
 // complete. If zero runs are available, returns an error.
 func replayAllRunsAndAverage(opts Options, kd string, hostFilter map[string]struct{}) (*PerKDResult, error) {
 	var (
-		snapshots      []*PerKDResult
-		totalSent      int
-		totalSkipped   int
+		snapshots    []*PerKDResult
+		totalSent    int
+		totalSkipped int
 	)
 	for run := 1; run <= 5; run++ {
 		path := parquetPath(opts.DataDir, kd, opts.TestType, run)

@@ -20,7 +20,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 		// PS→RC observations; P10 (PS→RC −) is in the bootstrap, but the
 		// suite's data has positive correlation, so the proposer emits a
 		// positive PS→RC candidate (conflict-pair sibling — multigraph-legal).
-		ontology := minimal.NewStaticDiSelectOntology()
+		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		return minimal.NewMICorrelationProposer(ontology, 0.8, 30, 100)
 	})
 }
@@ -28,7 +28,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 // ── Strongly correlated input → emits a candidate ─────────────────────────────
 
 func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	// Use a free pair (MU↛PS), threshold 0.8, minPairs 30, bufSize 200.
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
@@ -62,7 +62,7 @@ func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
 // ── Uncorrelated input → no candidate ─────────────────────────────────────────
 
 func TestMICorrelationProposer_UncorrelatedQuiet(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 	rng := rand.New(rand.NewSource(7))
 
@@ -83,7 +83,7 @@ func TestMICorrelationProposer_UncorrelatedQuiet(t *testing.T) {
 // ── Confirm: candidate becomes a real proposition ────────────────────────────
 
 func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	for i := 0; i < 60; i++ {
@@ -140,7 +140,7 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 // ── Reject suppresses future re-emission ──────────────────────────────────────
 
 func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	feed := func() {
@@ -174,7 +174,7 @@ func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
 // ── Re-emission idempotency: many Observes → one CandidateID ──────────────────
 
 func TestMICorrelationProposer_NoDuplicateCandidate(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	for i := 0; i < 500; i++ {
@@ -204,7 +204,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 	// same pair must be blocked; opposite-direction (conflict-pair sibling)
 	// proposals are permitted (multigraph behavior).
 	{
-		ontology := minimal.NewStaticDiSelectOntology()
+		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
@@ -217,7 +217,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 		}
 	}
 	{
-		ontology := minimal.NewStaticDiSelectOntology()
+		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
@@ -237,7 +237,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 // ── Pearson sanity ────────────────────────────────────────────────────────────
 
 func TestMICorrelationProposer_PerfectCorrelation(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.5, 10, 50)
 	// y = x exactly → r should be ≈ 1.0.
 	for i := 0; i < 20; i++ {

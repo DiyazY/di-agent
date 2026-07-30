@@ -186,9 +186,9 @@ type Plan struct {
 // PlanStep is one entry in Plan.Steps. Exactly one of Tool or Synthesize
 // must be non-empty.
 type PlanStep struct {
-	Tool        string         `json:"tool,omitempty"`
-	Args        map[string]any `json:"args,omitempty"`
-	Synthesize  string         `json:"synthesize,omitempty"`
+	Tool       string         `json:"tool,omitempty"`
+	Args       map[string]any `json:"args,omitempty"`
+	Synthesize string         `json:"synthesize,omitempty"`
 	// Rationale records why the planner chose this step. Optional but
 	// operators find it useful when auditing why the plan was structured
 	// the way it was.

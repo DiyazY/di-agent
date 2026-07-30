@@ -22,7 +22,7 @@ import (
 func newTestMap(t *testing.T) *SemanticMap {
 	t.Helper()
 	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
 

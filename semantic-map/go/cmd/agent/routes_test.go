@@ -22,6 +22,7 @@ import (
 func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.2,
 		ConvergenceThreshold: 500,
 		MinTrustScore:        0.5,
@@ -815,6 +816,7 @@ func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
 func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.5,
 		ConvergenceThreshold: 100,
 		MinTrustScore:        0.5,

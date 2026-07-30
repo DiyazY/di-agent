@@ -27,7 +27,7 @@ import (
 func newSplitMap(t *testing.T, edgePriors map[string]float64) *SemanticMap {
 	t.Helper()
 	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
 

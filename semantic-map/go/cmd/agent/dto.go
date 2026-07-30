@@ -156,11 +156,11 @@ type HealthResponse struct {
 
 // VersionResponse is the body of GET /version.
 type VersionResponse struct {
-	AgentVersion        string `json:"agent_version"`
-	GoVersion           string `json:"go_version"`
-	BuildCommit         string `json:"build_commit"`
-	SemmapConstructs    int    `json:"semmap_constructs"`
-	SemmapPropositions  int    `json:"semmap_propositions"`
+	AgentVersion       string `json:"agent_version"`
+	GoVersion          string `json:"go_version"`
+	BuildCommit        string `json:"build_commit"`
+	SemmapConstructs   int    `json:"semmap_constructs"`
+	SemmapPropositions int    `json:"semmap_propositions"`
 }
 
 // ErrorResponse is the body of any 4xx/5xx returned by a NEW endpoint.

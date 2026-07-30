@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
@@ -59,28 +60,33 @@ const Version = "0.1.0"
 var BuildCommit = ""
 
 func main() {
-	profileName     := flag.String("profile", "edge-minimal", "deployment profile")
-	addr            := flag.String("addr", ":8080", "HTTP listen address")
-	alpha           := flag.Float64("alpha", 0.2, "EMA decay factor (0 < alpha < 1)")
-	convergence     := flag.Float64("convergence", 500, "observations for confidence=1.0")
-	minTrust        := flag.Float64("min-trust", 0.5, "minimum peer trust score")
-	priorsPath      := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
-	kd              := flag.String("kd", "", "Kubernetes distribution running on this node "+
+	profileName := flag.String("profile", "edge-minimal", "deployment profile")
+	addr := flag.String("addr", ":8080", "HTTP listen address")
+	alpha := flag.Float64("alpha", 0.2, "EMA decay factor (0 < alpha < 1)")
+	convergence := flag.Float64("convergence", 500, "observations for confidence=1.0")
+	minTrust := flag.Float64("min-trust", 0.5, "minimum peer trust score")
+	priorsPath := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
+	kd := flag.String("kd", "", "Kubernetes distribution running on this node "+
 		"(k3s|k0s|k8s|kubeEdge|openYurt); selects per-KD edge weights from -priors when set")
 	collectInterval := flag.Duration("collect-interval", 10*time.Second,
 		"how often the collection loop ticks the Collector; 0 disables the loop")
-	cgroupRoot      := flag.String("cgroup-root", "/sys/fs/cgroup",
+	cgroupRoot := flag.String("cgroup-root", "/sys/fs/cgroup",
 		"filesystem root the cgroup collector reads from; empty string disables the loop")
-	nodeID          := flag.String("node-id", "",
+	nodeID := flag.String("node-id", "",
 		"identifier this agent uses in MetricSamples; empty falls back to os.Hostname()")
-	netdataURL      := flag.String("netdata-url", "",
+	netdataURL := flag.String("netdata-url", "",
 		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
-	peersFlag       := flag.String("peers", "",
+	peersFlag := flag.String("peers", "",
 		"comma-separated peer agent URLs to register at startup "+
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
 			"these by trust-weighted savings. Additional peers can be added at "+
 			"runtime via POST /peers.")
-	regime          := flag.String("regime", "",
+	domainPath := flag.String("domain", "",
+		"path to domain_spec.json: the constructs, metric routing, propositions, "+
+			"adjustment policy and operator vocabulary the agent reasons over. "+
+			"Required — the binary carries no built-in model. When empty the daemon "+
+			"searches upward from the working directory.")
+	regime := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
@@ -127,6 +133,24 @@ func main() {
 		}
 	}
 
+	// The domain model is data, not code: the binary ships with no constructs,
+	// propositions or routing of its own. An agent without a model has nothing to
+	// reason over, so this fails loud rather than serving an empty graph.
+	var (
+		spec    *domain.Spec
+		specErr error
+	)
+	if *domainPath != "" {
+		spec, specErr = domain.Load(*domainPath)
+	} else {
+		spec, specErr = domain.LoadFound()
+	}
+	if specErr != nil {
+		log.Fatalf("domain spec: %v (pass -domain <path>)", specErr)
+	}
+	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
+		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
+
 	peerURLs := parsePeerURLs(*peersFlag)
 
 	cfg := profiles.Config{
@@ -147,7 +171,8 @@ func main() {
 		// returned HTTP 200 with an empty applied[] — accepting the request and
 		// doing nothing — which is indistinguishable from an intent that matched
 		// no keyword group.
-		UseRuleBasedTuner:    useTuner,
+		UseRuleBasedTuner: useTuner,
+		DomainSpec:        spec,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)

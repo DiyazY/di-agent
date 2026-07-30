@@ -52,14 +52,14 @@ func Compute(perKD []*PerKDResult) []*EdgeDivergence {
 
 	// Union of proposition IDs across every KD's snapshot.
 	type slot struct {
-		from, to  string
-		dir       types.Direction
-		prior     float64
-		eff       []float64
-		ema       []float64
-		conf      []float64
-		nobs      []int
-		hasPrior  bool
+		from, to string
+		dir      types.Direction
+		prior    float64
+		eff      []float64
+		ema      []float64
+		conf     []float64
+		nobs     []int
+		hasPrior bool
 	}
 	byProp := map[string]*slot{}
 
@@ -72,14 +72,14 @@ func Compute(perKD []*PerKDResult) []*EdgeDivergence {
 			s, ok := byProp[propID]
 			if !ok {
 				s = &slot{
-					from:    e.FromID,
-					to:      e.ToID,
-					dir:     e.Direction,
-					prior:   e.PriorWeight,
-					eff:     make([]float64, len(perKD)),
-					ema:     make([]float64, len(perKD)),
-					conf:    make([]float64, len(perKD)),
-					nobs:    make([]int, len(perKD)),
+					from:     e.FromID,
+					to:       e.ToID,
+					dir:      e.Direction,
+					prior:    e.PriorWeight,
+					eff:      make([]float64, len(perKD)),
+					ema:      make([]float64, len(perKD)),
+					conf:     make([]float64, len(perKD)),
+					nobs:     make([]int, len(perKD)),
 					hasPrior: true,
 				}
 				byProp[propID] = s

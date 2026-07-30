@@ -22,7 +22,7 @@ func (s smReader) Peers() *peers.Registry { return s.SemanticMap.Peers() }
 // with the daemon-standard priors loaded.
 func newTestMap(t *testing.T) (explain.SemanticMapReader, *semmap.SemanticMap) {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}
