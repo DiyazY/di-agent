@@ -22,12 +22,14 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from .calibration import compute_construct_scores, compute_proposition_strengths, PROPOSITIONS, KDS
+from .calibration import (compute_construct_scores, compute_proposition_strengths,
+                          PROPOSITIONS, KDS, TELEMETRY_CONSTRUCTS, CONSTRUCT_META,
+                          DISELECT_PROPOSITIONS)
 
 
-# Constructs whose proxy variable is instrumented runtime telemetry. Only these
-# carry a per-distribution calibration; see build_edge_weights.
-TELEMETRY_CONSTRUCTS = {"PS", "RC", "CO"}
+# TELEMETRY_CONSTRUCTS is imported from calibration, which is the single source
+# of the domain model's scope. It was previously duplicated here as a set literal,
+# which shadowed the import and broke JSON serialization.
 
 # Bounds on an emitted edge prior. These match the operator tuner's global bounds
 # in go/pkg/semmap/map.go (floor 0.10, ceiling 0.95) deliberately: the pipeline
@@ -122,12 +124,39 @@ def run(root_dir: str | None = None, out_path: str | None = None) -> dict:
             tag = "(domain_override)" if v["method"] == "domain_override" else "(proxy reversal — investigate)"
             warnings.append(f"{pid} {tag}: ρ={v['spearman_rho']:.3f}")
 
+    # The constructs block makes the agent's domain model a data artifact. The Go
+    # ontology reads constructs and propositions from this file rather than
+    # carrying them as literals, so reshaping the graph — adding a construct once
+    # a MetricType routes to it, retiring one that turns out not to be runtime
+    # state — is a regeneration, not a recompile.
+    constructs = [
+        {"construct_id": cid,
+         "name":         CONSTRUCT_META[cid][0],
+         "description":  CONSTRUCT_META[cid][1]}
+        for cid in TELEMETRY_CONSTRUCTS
+    ]
+
     output = {
-        "version":        "1.0",
+        "version":        "2.0",
         "generated_at":   str(date.today()),
         "evidence_papers": ["P1", "P2", "P4", "P5"],
         "distributions":  KDS,
         "warnings":       warnings,
+        "scope": {
+            "telemetry_constructs": TELEMETRY_CONSTRUCTS,
+            "diselect_propositions": len(DISELECT_PROPOSITIONS),
+            "agent_propositions":   [p[0] for p in PROPOSITIONS],
+            "rationale": (
+                "The agent's graph carries only propositions whose both endpoints "
+                "are observable at runtime. An edge with no observable endpoint is "
+                "inert in the Reasoner: cost accumulates (effective - prior), and "
+                "an unobserved edge has effective == prior, so it contributes "
+                "exactly zero regardless of its prior or of operator action. "
+                "Di-Select remains the origin of the causal claims; the agent "
+                "instantiates the subset it can observe."
+            ),
+        },
+        "constructs":     constructs,
         "propositions":   prop_strengths,
         "distribution_construct_scores":  construct_scores,
         "distribution_edge_weights":      edge_weights,

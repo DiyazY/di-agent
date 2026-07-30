@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "2.0",
   "generated_at": "2026-07-30",
   "evidence_papers": [
     "P1",
@@ -15,28 +15,42 @@
     "openYurt"
   ],
   "warnings": [
-    "P1 (domain_override): \u03c1=-0.112",
     "P2 (domain_override): \u03c1=0.700",
-    "P5 (domain_override): \u03c1=-0.400",
-    "P8 (proxy reversal \u2014 investigate): \u03c1=0.316",
-    "P9 (proxy reversal \u2014 investigate): \u03c1=0.316",
-    "P10 (proxy reversal \u2014 investigate): \u03c1=0.700",
-    "P11 (domain_override): \u03c1=-0.112"
+    "P10 (proxy reversal \u2014 investigate): \u03c1=0.700"
+  ],
+  "scope": {
+    "telemetry_constructs": [
+      "RC",
+      "CO",
+      "PS"
+    ],
+    "diselect_propositions": 15,
+    "agent_propositions": [
+      "P2",
+      "P3",
+      "P10",
+      "P13"
+    ],
+    "rationale": "The agent's graph carries only propositions whose both endpoints are observable at runtime. An edge with no observable endpoint is inert in the Reasoner: cost accumulates (effective - prior), and an unobserved edge has effective == prior, so it contributes exactly zero regardless of its prior or of operator action. Di-Select remains the origin of the causal claims; the agent instantiates the subset it can observe."
+  },
+  "constructs": [
+    {
+      "construct_id": "RC",
+      "name": "Resource Constraints & Cost",
+      "description": "CPU, memory and energy cost of running the workload"
+    },
+    {
+      "construct_id": "CO",
+      "name": "Connectivity & Offline Resilience",
+      "description": "network throughput, loss and latency to peers"
+    },
+    {
+      "construct_id": "PS",
+      "name": "Performance & Scalability",
+      "description": "scheduling and startup latency; resource pressure experienced"
+    }
   ],
   "propositions": {
-    "P1": {
-      "prior_strength": 0.62,
-      "direction": "positive",
-      "from_construct": "SC",
-      "to_construct": "RC",
-      "spearman_rho": -0.1118,
-      "p_value": 0.8579,
-      "sign_consistent": 0,
-      "n_distributions": 5,
-      "method": "domain_override",
-      "calibration_note": "Proxy masked: k8s high SC + high energy efficiency overrides expected SC-overhead pattern. P2 paper evidence: security compliance positively correlates with setup/maintenance overhead (P12 \u03c1=-0.884 confirms). \u03bb=0.62 from domain knowledge (security CIS overhead documented in P2).",
-      "prior_weight": 0.62
-    },
     "P2": {
       "prior_strength": 0.55,
       "direction": "negative",
@@ -63,84 +77,6 @@
       "calibration_note": "|\u03c1|=0.700 (p=0.188); direction confirmed",
       "prior_weight": 0.7
     },
-    "P4": {
-      "prior_strength": 0.8944,
-      "direction": "negative",
-      "from_construct": "SC",
-      "to_construct": "RR",
-      "spearman_rho": -0.8944,
-      "p_value": 0.0405,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.894 (p=0.041); direction confirmed",
-      "prior_weight": 0.8944
-    },
-    "P5": {
-      "prior_strength": 0.65,
-      "direction": "positive",
-      "from_construct": "CO",
-      "to_construct": "RR",
-      "spearman_rho": -0.4,
-      "p_value": 0.5046,
-      "sign_consistent": 0,
-      "n_distributions": 5,
-      "method": "domain_override",
-      "calibration_note": "RR proxy dominated by recovery-time metric where k3s/k0s excel. P5 specifically captures continuity DURING outage \u2014 a binary quality. kubeEdge/openYurt preserve messages during partition (P2 paper). \u03bb=0.65 from domain knowledge; distinct from P6 (cloud-dependency penalty).",
-      "prior_weight": 0.65
-    },
-    "P6": {
-      "prior_strength": 0.4,
-      "direction": "negative",
-      "from_construct": "CO",
-      "to_construct": "RR",
-      "spearman_rho": -0.4,
-      "p_value": 0.5046,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.400 (p=0.505); direction confirmed",
-      "prior_weight": 0.4
-    },
-    "P7": {
-      "prior_strength": 0.3162,
-      "direction": "positive",
-      "from_construct": "CE",
-      "to_construct": "MU",
-      "spearman_rho": 0.3162,
-      "p_value": 0.6042,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.316 (p=0.604); direction confirmed",
-      "prior_weight": 0.3162
-    },
-    "P8": {
-      "prior_strength": 0.3162,
-      "direction": "negative",
-      "from_construct": "MU",
-      "to_construct": "RC",
-      "spearman_rho": 0.3162,
-      "p_value": 0.6042,
-      "sign_consistent": 0,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.316 (p=0.604); direction reversed \u2014 proxy limitation",
-      "prior_weight": 0.3162
-    },
-    "P9": {
-      "prior_strength": 0.3162,
-      "direction": "negative",
-      "from_construct": "CE",
-      "to_construct": "MU",
-      "spearman_rho": 0.3162,
-      "p_value": 0.6042,
-      "sign_consistent": 0,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.316 (p=0.604); direction reversed \u2014 proxy limitation",
-      "prior_weight": 0.3162
-    },
     "P10": {
       "prior_strength": 0.7,
       "direction": "negative",
@@ -154,32 +90,6 @@
       "calibration_note": "|\u03c1|=0.700 (p=0.188); direction reversed \u2014 proxy limitation",
       "prior_weight": 0.7
     },
-    "P11": {
-      "prior_strength": 0.48,
-      "direction": "positive",
-      "from_construct": "CE",
-      "to_construct": "SC",
-      "spearman_rho": -0.1118,
-      "p_value": 0.8579,
-      "sign_consistent": 0,
-      "n_distributions": 5,
-      "method": "domain_override",
-      "calibration_note": "Near-zero proxy \u03c1 because kubeEdge/openYurt reach same CIS score as k8s via different paths (custom hardening vs upstream patches). \u03bb=0.48 from literature; community patch velocity well-documented but not observable in single benchmark snapshot.",
-      "prior_weight": 0.48
-    },
-    "P12": {
-      "prior_strength": 0.8839,
-      "direction": "negative",
-      "from_construct": "SC",
-      "to_construct": "MU",
-      "spearman_rho": -0.8839,
-      "p_value": 0.0467,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.884 (p=0.047); direction confirmed",
-      "prior_weight": 0.8839
-    },
     "P13": {
       "prior_strength": 0.6,
       "direction": "negative",
@@ -192,32 +102,6 @@
       "method": "spearman",
       "calibration_note": "|\u03c1|=0.600 (p=0.285); direction confirmed",
       "prior_weight": 0.6
-    },
-    "P14": {
-      "prior_strength": 0.3,
-      "direction": "negative",
-      "from_construct": "RC",
-      "to_construct": "SC",
-      "spearman_rho": -0.1118,
-      "p_value": 0.8579,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.300 (p=0.858); direction confirmed",
-      "prior_weight": 0.3
-    },
-    "P15": {
-      "prior_strength": 0.6325,
-      "direction": "positive",
-      "from_construct": "MU",
-      "to_construct": "RR",
-      "spearman_rho": 0.6325,
-      "p_value": 0.2522,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.632 (p=0.252); direction confirmed",
-      "prior_weight": 0.6325
     }
   },
   "distribution_construct_scores": {
@@ -269,15 +153,6 @@
   },
   "distribution_edge_weights": {
     "k3s": {
-      "SC\u2192RC:P1": {
-        "from_id": "SC",
-        "to_id": "RC",
-        "proposition_id": "P1",
-        "direction": "positive",
-        "prior_weight": 0.62,
-        "ema_weight": 0.62,
-        "calibrated": false
-      },
       "RC\u2192PS:P2": {
         "from_id": "RC",
         "to_id": "PS",
@@ -296,60 +171,6 @@
         "ema_weight": 0.5356,
         "calibrated": true
       },
-      "SC\u2192RR:P4": {
-        "from_id": "SC",
-        "to_id": "RR",
-        "proposition_id": "P4",
-        "direction": "negative",
-        "prior_weight": 0.8944,
-        "ema_weight": 0.8944,
-        "calibrated": false
-      },
-      "CO\u2192RR:P5": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P5",
-        "direction": "positive",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      },
-      "CO\u2192RR:P6": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P6",
-        "direction": "negative",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      },
-      "CE\u2192MU:P7": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P7",
-        "direction": "positive",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "MU\u2192RC:P8": {
-        "from_id": "MU",
-        "to_id": "RC",
-        "proposition_id": "P8",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "CE\u2192MU:P9": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P9",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
       "PS\u2192RC:P10": {
         "from_id": "PS",
         "to_id": "RC",
@@ -359,24 +180,6 @@
         "ema_weight": 0.6386,
         "calibrated": true
       },
-      "CE\u2192SC:P11": {
-        "from_id": "CE",
-        "to_id": "SC",
-        "proposition_id": "P11",
-        "direction": "positive",
-        "prior_weight": 0.48,
-        "ema_weight": 0.48,
-        "calibrated": false
-      },
-      "SC\u2192MU:P12": {
-        "from_id": "SC",
-        "to_id": "MU",
-        "proposition_id": "P12",
-        "direction": "negative",
-        "prior_weight": 0.8839,
-        "ema_weight": 0.8839,
-        "calibrated": false
-      },
       "CO\u2192PS:P13": {
         "from_id": "CO",
         "to_id": "PS",
@@ -385,36 +188,9 @@
         "prior_weight": 0.1,
         "ema_weight": 0.1,
         "calibrated": true
-      },
-      "RC\u2192SC:P14": {
-        "from_id": "RC",
-        "to_id": "SC",
-        "proposition_id": "P14",
-        "direction": "negative",
-        "prior_weight": 0.2295,
-        "ema_weight": 0.2295,
-        "calibrated": true
-      },
-      "MU\u2192RR:P15": {
-        "from_id": "MU",
-        "to_id": "RR",
-        "proposition_id": "P15",
-        "direction": "positive",
-        "prior_weight": 0.6325,
-        "ema_weight": 0.6325,
-        "calibrated": false
       }
     },
     "k0s": {
-      "SC\u2192RC:P1": {
-        "from_id": "SC",
-        "to_id": "RC",
-        "proposition_id": "P1",
-        "direction": "positive",
-        "prior_weight": 0.62,
-        "ema_weight": 0.62,
-        "calibrated": false
-      },
       "RC\u2192PS:P2": {
         "from_id": "RC",
         "to_id": "PS",
@@ -433,60 +209,6 @@
         "ema_weight": 0.4063,
         "calibrated": true
       },
-      "SC\u2192RR:P4": {
-        "from_id": "SC",
-        "to_id": "RR",
-        "proposition_id": "P4",
-        "direction": "negative",
-        "prior_weight": 0.8944,
-        "ema_weight": 0.8944,
-        "calibrated": false
-      },
-      "CO\u2192RR:P5": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P5",
-        "direction": "positive",
-        "prior_weight": 0.195,
-        "ema_weight": 0.195,
-        "calibrated": true
-      },
-      "CO\u2192RR:P6": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P6",
-        "direction": "negative",
-        "prior_weight": 0.12,
-        "ema_weight": 0.12,
-        "calibrated": true
-      },
-      "CE\u2192MU:P7": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P7",
-        "direction": "positive",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "MU\u2192RC:P8": {
-        "from_id": "MU",
-        "to_id": "RC",
-        "proposition_id": "P8",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "CE\u2192MU:P9": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P9",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
       "PS\u2192RC:P10": {
         "from_id": "PS",
         "to_id": "RC",
@@ -496,24 +218,6 @@
         "ema_weight": 0.645,
         "calibrated": true
       },
-      "CE\u2192SC:P11": {
-        "from_id": "CE",
-        "to_id": "SC",
-        "proposition_id": "P11",
-        "direction": "positive",
-        "prior_weight": 0.48,
-        "ema_weight": 0.48,
-        "calibrated": false
-      },
-      "SC\u2192MU:P12": {
-        "from_id": "SC",
-        "to_id": "MU",
-        "proposition_id": "P12",
-        "direction": "negative",
-        "prior_weight": 0.8839,
-        "ema_weight": 0.8839,
-        "calibrated": false
-      },
       "CO\u2192PS:P13": {
         "from_id": "CO",
         "to_id": "PS",
@@ -522,36 +226,9 @@
         "prior_weight": 0.18,
         "ema_weight": 0.18,
         "calibrated": true
-      },
-      "RC\u2192SC:P14": {
-        "from_id": "RC",
-        "to_id": "SC",
-        "proposition_id": "P14",
-        "direction": "negative",
-        "prior_weight": 0.1741,
-        "ema_weight": 0.1741,
-        "calibrated": true
-      },
-      "MU\u2192RR:P15": {
-        "from_id": "MU",
-        "to_id": "RR",
-        "proposition_id": "P15",
-        "direction": "positive",
-        "prior_weight": 0.6325,
-        "ema_weight": 0.6325,
-        "calibrated": false
       }
     },
     "k8s": {
-      "SC\u2192RC:P1": {
-        "from_id": "SC",
-        "to_id": "RC",
-        "proposition_id": "P1",
-        "direction": "positive",
-        "prior_weight": 0.62,
-        "ema_weight": 0.62,
-        "calibrated": false
-      },
       "RC\u2192PS:P2": {
         "from_id": "RC",
         "to_id": "PS",
@@ -570,60 +247,6 @@
         "ema_weight": 0.7,
         "calibrated": true
       },
-      "SC\u2192RR:P4": {
-        "from_id": "SC",
-        "to_id": "RR",
-        "proposition_id": "P4",
-        "direction": "negative",
-        "prior_weight": 0.8944,
-        "ema_weight": 0.8944,
-        "calibrated": false
-      },
-      "CO\u2192RR:P5": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P5",
-        "direction": "positive",
-        "prior_weight": 0.191,
-        "ema_weight": 0.191,
-        "calibrated": true
-      },
-      "CO\u2192RR:P6": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P6",
-        "direction": "negative",
-        "prior_weight": 0.1175,
-        "ema_weight": 0.1175,
-        "calibrated": true
-      },
-      "CE\u2192MU:P7": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P7",
-        "direction": "positive",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "MU\u2192RC:P8": {
-        "from_id": "MU",
-        "to_id": "RC",
-        "proposition_id": "P8",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "CE\u2192MU:P9": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P9",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
       "PS\u2192RC:P10": {
         "from_id": "PS",
         "to_id": "RC",
@@ -633,24 +256,6 @@
         "ema_weight": 0.6896,
         "calibrated": true
       },
-      "CE\u2192SC:P11": {
-        "from_id": "CE",
-        "to_id": "SC",
-        "proposition_id": "P11",
-        "direction": "positive",
-        "prior_weight": 0.48,
-        "ema_weight": 0.48,
-        "calibrated": false
-      },
-      "SC\u2192MU:P12": {
-        "from_id": "SC",
-        "to_id": "MU",
-        "proposition_id": "P12",
-        "direction": "negative",
-        "prior_weight": 0.8839,
-        "ema_weight": 0.8839,
-        "calibrated": false
-      },
       "CO\u2192PS:P13": {
         "from_id": "CO",
         "to_id": "PS",
@@ -659,36 +264,9 @@
         "prior_weight": 0.1763,
         "ema_weight": 0.1763,
         "calibrated": true
-      },
-      "RC\u2192SC:P14": {
-        "from_id": "RC",
-        "to_id": "SC",
-        "proposition_id": "P14",
-        "direction": "negative",
-        "prior_weight": 0.3,
-        "ema_weight": 0.3,
-        "calibrated": true
-      },
-      "MU\u2192RR:P15": {
-        "from_id": "MU",
-        "to_id": "RR",
-        "proposition_id": "P15",
-        "direction": "positive",
-        "prior_weight": 0.6325,
-        "ema_weight": 0.6325,
-        "calibrated": false
       }
     },
     "kubeEdge": {
-      "SC\u2192RC:P1": {
-        "from_id": "SC",
-        "to_id": "RC",
-        "proposition_id": "P1",
-        "direction": "positive",
-        "prior_weight": 0.62,
-        "ema_weight": 0.62,
-        "calibrated": false
-      },
       "RC\u2192PS:P2": {
         "from_id": "RC",
         "to_id": "PS",
@@ -707,60 +285,6 @@
         "ema_weight": 0.2325,
         "calibrated": true
       },
-      "SC\u2192RR:P4": {
-        "from_id": "SC",
-        "to_id": "RR",
-        "proposition_id": "P4",
-        "direction": "negative",
-        "prior_weight": 0.8944,
-        "ema_weight": 0.8944,
-        "calibrated": false
-      },
-      "CO\u2192RR:P5": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P5",
-        "direction": "positive",
-        "prior_weight": 0.455,
-        "ema_weight": 0.455,
-        "calibrated": true
-      },
-      "CO\u2192RR:P6": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P6",
-        "direction": "negative",
-        "prior_weight": 0.28,
-        "ema_weight": 0.28,
-        "calibrated": true
-      },
-      "CE\u2192MU:P7": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P7",
-        "direction": "positive",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "MU\u2192RC:P8": {
-        "from_id": "MU",
-        "to_id": "RC",
-        "proposition_id": "P8",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "CE\u2192MU:P9": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P9",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
       "PS\u2192RC:P10": {
         "from_id": "PS",
         "to_id": "RC",
@@ -770,24 +294,6 @@
         "ema_weight": 0.1,
         "calibrated": true
       },
-      "CE\u2192SC:P11": {
-        "from_id": "CE",
-        "to_id": "SC",
-        "proposition_id": "P11",
-        "direction": "positive",
-        "prior_weight": 0.48,
-        "ema_weight": 0.48,
-        "calibrated": false
-      },
-      "SC\u2192MU:P12": {
-        "from_id": "SC",
-        "to_id": "MU",
-        "proposition_id": "P12",
-        "direction": "negative",
-        "prior_weight": 0.8839,
-        "ema_weight": 0.8839,
-        "calibrated": false
-      },
       "CO\u2192PS:P13": {
         "from_id": "CO",
         "to_id": "PS",
@@ -796,36 +302,9 @@
         "prior_weight": 0.42,
         "ema_weight": 0.42,
         "calibrated": true
-      },
-      "RC\u2192SC:P14": {
-        "from_id": "RC",
-        "to_id": "SC",
-        "proposition_id": "P14",
-        "direction": "negative",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      },
-      "MU\u2192RR:P15": {
-        "from_id": "MU",
-        "to_id": "RR",
-        "proposition_id": "P15",
-        "direction": "positive",
-        "prior_weight": 0.6325,
-        "ema_weight": 0.6325,
-        "calibrated": false
       }
     },
     "openYurt": {
-      "SC\u2192RC:P1": {
-        "from_id": "SC",
-        "to_id": "RC",
-        "proposition_id": "P1",
-        "direction": "positive",
-        "prior_weight": 0.62,
-        "ema_weight": 0.62,
-        "calibrated": false
-      },
       "RC\u2192PS:P2": {
         "from_id": "RC",
         "to_id": "PS",
@@ -844,60 +323,6 @@
         "ema_weight": 0.4885,
         "calibrated": true
       },
-      "SC\u2192RR:P4": {
-        "from_id": "SC",
-        "to_id": "RR",
-        "proposition_id": "P4",
-        "direction": "negative",
-        "prior_weight": 0.8944,
-        "ema_weight": 0.8944,
-        "calibrated": false
-      },
-      "CO\u2192RR:P5": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P5",
-        "direction": "positive",
-        "prior_weight": 0.622,
-        "ema_weight": 0.622,
-        "calibrated": true
-      },
-      "CO\u2192RR:P6": {
-        "from_id": "CO",
-        "to_id": "RR",
-        "proposition_id": "P6",
-        "direction": "negative",
-        "prior_weight": 0.3828,
-        "ema_weight": 0.3828,
-        "calibrated": true
-      },
-      "CE\u2192MU:P7": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P7",
-        "direction": "positive",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "MU\u2192RC:P8": {
-        "from_id": "MU",
-        "to_id": "RC",
-        "proposition_id": "P8",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
-      "CE\u2192MU:P9": {
-        "from_id": "CE",
-        "to_id": "MU",
-        "proposition_id": "P9",
-        "direction": "negative",
-        "prior_weight": 0.3162,
-        "ema_weight": 0.3162,
-        "calibrated": false
-      },
       "PS\u2192RC:P10": {
         "from_id": "PS",
         "to_id": "RC",
@@ -907,24 +332,6 @@
         "ema_weight": 0.5555,
         "calibrated": true
       },
-      "CE\u2192SC:P11": {
-        "from_id": "CE",
-        "to_id": "SC",
-        "proposition_id": "P11",
-        "direction": "positive",
-        "prior_weight": 0.48,
-        "ema_weight": 0.48,
-        "calibrated": false
-      },
-      "SC\u2192MU:P12": {
-        "from_id": "SC",
-        "to_id": "MU",
-        "proposition_id": "P12",
-        "direction": "negative",
-        "prior_weight": 0.8839,
-        "ema_weight": 0.8839,
-        "calibrated": false
-      },
       "CO\u2192PS:P13": {
         "from_id": "CO",
         "to_id": "PS",
@@ -933,24 +340,6 @@
         "prior_weight": 0.5741,
         "ema_weight": 0.5741,
         "calibrated": true
-      },
-      "RC\u2192SC:P14": {
-        "from_id": "RC",
-        "to_id": "SC",
-        "proposition_id": "P14",
-        "direction": "negative",
-        "prior_weight": 0.2093,
-        "ema_weight": 0.2093,
-        "calibrated": true
-      },
-      "MU\u2192RR:P15": {
-        "from_id": "MU",
-        "to_id": "RR",
-        "proposition_id": "P15",
-        "direction": "positive",
-        "prior_weight": 0.6325,
-        "ema_weight": 0.6325,
-        "calibrated": false
       }
     }
   }

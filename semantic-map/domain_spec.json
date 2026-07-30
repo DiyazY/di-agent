@@ -1,0 +1,117 @@
+{
+  "version": "1.0",
+  "description": "The agent's domain model: what constructs exist, how metrics reach them, what causal claims relate them, and the policy bounding operator adjustment. This file is the model. Nothing here is compiled into the binary — the daemon loads it at startup with -domain, and every element can also be added at runtime through the ontology surface, so a construct or proposition that appears while a cluster is running does not require a rebuild.",
+
+  "scope_rationale": "A construct belongs here when it is a property of a running cluster, which means some MetricType routes to it. A construct that cannot change while the cluster runs is not state, and an edge with no observable endpoint is provably inert in the Reasoner: cost accumulates (effective - prior), and an unobserved edge has effective == prior by definition, so it contributes exactly zero regardless of its prior or of any operator action on it. Di-Select's full seven-construct backbone remains the origin of the causal claims; the agent instantiates the subset it can observe.",
+
+  "constructs": [
+    {
+      "construct_id": "RC",
+      "name": "Resource Constraints & Cost",
+      "description": "CPU, memory and energy cost of running the workload"
+    },
+    {
+      "construct_id": "CO",
+      "name": "Connectivity & Offline Resilience",
+      "description": "Network throughput, loss and latency to peers"
+    },
+    {
+      "construct_id": "PS",
+      "name": "Performance & Scalability",
+      "description": "Scheduling and startup latency; resource pressure experienced"
+    }
+  ],
+
+  "metric_routing": [
+    { "metric_type": "cpu_utilization",      "construct_id": "RC", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "memory_utilization",   "construct_id": "RC", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "cpu_throttle_ratio",   "construct_id": "RC", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "block_io_util",        "construct_id": "RC", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "energy_joules",        "construct_id": "RC", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "network_rx_bps",       "construct_id": "CO", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "network_tx_bps",       "construct_id": "CO", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "network_loss_ratio",   "construct_id": "CO", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "network_latency_ms",   "construct_id": "CO", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "pod_startup_ms",       "construct_id": "PS", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "scheduling_latency_ms","construct_id": "PS", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "cpu_pressure_ratio",   "construct_id": "PS", "unit": "fraction", "range": [0, 1] },
+    { "metric_type": "io_pressure_ratio",    "construct_id": "PS", "unit": "fraction", "range": [0, 1] }
+  ],
+
+  "propositions": [
+    {
+      "proposition_id": "P2",
+      "from_construct": "RC",
+      "to_construct": "PS",
+      "direction": "negative",
+      "description": "Resource overhead reduces scheduling throughput.",
+      "evidence_sources": ["P1", "P4"]
+    },
+    {
+      "proposition_id": "P3",
+      "from_construct": "RC",
+      "to_construct": "PS",
+      "direction": "positive",
+      "description": "A lighter resource footprint reduces pod-startup latency.",
+      "evidence_sources": ["P1", "P4"]
+    },
+    {
+      "proposition_id": "P10",
+      "from_construct": "PS",
+      "to_construct": "RC",
+      "direction": "negative",
+      "description": "Better efficiency delivers equal workload at lower cost.",
+      "evidence_sources": ["P1", "P4", "P5"]
+    },
+    {
+      "proposition_id": "P13",
+      "from_construct": "CO",
+      "to_construct": "PS",
+      "direction": "negative",
+      "description": "Offline-capable designs incur caching and sync overhead.",
+      "evidence_sources": ["P2"]
+    }
+  ],
+
+  "adjustment_policy": {
+    "description": "Bounds on any operator adjustment to a proposition strength. The global bounds are also enforced by the prior-initialisation pipeline, which must not emit a value the operator would be forbidden to set. per_proposition_floor raises the floor for claims that must stay structurally meaningful under optimisation pressure; it is keyed by proposition so a new proposition can be given a policy at runtime without code changes.",
+    "global_floor": 0.10,
+    "global_ceiling": 0.95,
+    "per_proposition_floor": {}
+  },
+
+  "intent_rules": [
+    {
+      "intent": "performance",
+      "keywords": ["performance", "throughput", "latency", "fast", "speed"],
+      "deltas": { "P3": 0.12, "P2": -0.10 },
+      "note": "Favour the lightweight-to-fast mechanism and suppress its conflict-pair opposite on RC→PS."
+    },
+    {
+      "intent": "efficiency",
+      "keywords": ["energy", "power", "efficient", "battery", "watt", "cost"],
+      "deltas": { "P10": 0.12 },
+      "note": "Strengthen the claim that better performance yields lower cost."
+    },
+    {
+      "intent": "connectivity",
+      "keywords": ["connectivity", "offline", "disconnected", "sync", "bandwidth"],
+      "deltas": { "P13": 0.12 },
+      "note": "Acknowledge the sync overhead an offline-capable design pays."
+    },
+    {
+      "intent": "responsiveness",
+      "keywords": ["responsive", "tail", "p95", "p99", "jitter", "pressure"],
+      "deltas": { "P3": 0.08, "P13": -0.08 },
+      "note": "Prefer startup responsiveness over offline caching when the two trade off."
+    }
+  ],
+
+  "retired_intents": {
+    "description": "Intents that addressed constructs outside the agent's scope. They are recorded rather than deleted so the omission is legible: an operator asking for them is asking about a selection-time property the running cluster cannot exhibit, and the answer belongs to the selection framework rather than the agent. If a MetricType is ever routed to one of these constructs, the intent can be restored here.",
+    "security": "targeted SC (hardening posture) — configuration state, not runtime state",
+    "reliability": "targeted RR (recovery behaviour) — runtime, but no MetricType routes to it yet",
+    "maintainability": "targeted MU (operational effort) — assessed at install and upgrade",
+    "community": "targeted CE (vendor backing, ecosystem) — not a cluster property"
+  }
+}
