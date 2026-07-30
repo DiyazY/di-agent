@@ -1,11 +1,14 @@
-
 # Build artifacts
 semantic-map/go/agent
 
 terraform.*
-terraform.
 
 .terraform.*
 .terraform
+
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform.lock.hcl
 
 tfplan
