@@ -327,10 +327,10 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 
 | Verb | Path                                | Body / params                                            | Since    |
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |
-| POST | `/ingest`                           | `{from_id,to_id,observation,event_id}`                   | existing |
+| POST | `/ingest`                           | `{from_id,to_id,observation,event_id}`                   | existing | `400` when the `(from_id, to_id)` pair carries no edge |
 | POST | `/ingest-sample`                    | `MetricSampleRequest`                                    | replay   |
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
-| POST | `/recommend`                        | `OffloadContext`                                         | existing |
+| POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered — an ordinary state, not a fault |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
 | GET  | `/candidates`                       | —                                                        | existing |
 | GET  | `/graph`                            | —                                                        | Phase 1  |

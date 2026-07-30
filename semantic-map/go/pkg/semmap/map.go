@@ -205,9 +205,52 @@ func (m *SemanticMap) History(since time.Time) ([]*types.OntologyEvent, error) {
 // ── Write-side facade (ontology mutations) ────────────────────────────────────
 
 // SetPropositionStrength recalibrates the prior strength of an existing
-// proposition and appends an event to the audit log.
+// proposition, appends an event to the audit log, and writes the new magnitude
+// through to every matching EdgeDescriptor in storage.
+//
+// The storage write is the point of the operation, not bookkeeping. This is the
+// write path for "this edge's magnitude should change because better knowledge
+// arrived" — a fresh kube-bench scan revising an SC score, a new paper revising
+// a proposition, or an operator tune. The Reasoner computes cost from storage
+// edge weights, so an ontology-only write leaves the agent's decisions exactly
+// as they were and the recalibration is silently cosmetic.
+//
+// The value is absolute: a new scan yields a new magnitude, not a delta. Callers
+// that think in deltas (see Tune) resolve the current value first and pass the
+// result. Writing here deliberately supersedes the per-distribution calibration
+// that prior_init seeded — an operator asserting a value for *this* deployment
+// outranks a cross-distribution estimate, and the audit log records that it
+// happened. Cold-start equivalence to Di-Select (paper §4.3) is a property of
+// the state at c = 0 before any operator action, not an invariant for all time.
+//
+// EMAWeight is handled conditionally, and the condition matters. On an edge that
+// has accumulated observations it is evidence, and recalibrating a prior must not
+// rewrite observation history — so it is left untouched. On an edge with zero
+// observations it is not evidence at all, merely the seed value that
+// seedFromOntology set equal to the prior; leaving it behind would anchor the
+// first future observation's EMA to a magnitude the operator has already
+// superseded. That is not a corner case: the recalibration path exists primarily
+// for the six edges with no telemetry analog (paper §5.2), which carry zero
+// observations by definition.
 func (m *SemanticMap) SetPropositionStrength(id string, strength float64) error {
-	return m.ontology.SetPropositionStrength(id, strength)
+	if err := m.ontology.SetPropositionStrength(id, strength); err != nil {
+		return err
+	}
+	edges, err := m.storage.AllEdges()
+	if err != nil {
+		return nil // ontology already updated; storage sync is best-effort
+	}
+	for _, e := range edges {
+		if e.PropositionID != id {
+			continue
+		}
+		e.PriorWeight = strength
+		if e.NObservations == 0 {
+			e.EMAWeight = strength
+		}
+		_ = m.storage.PutEdge(e)
+	}
+	return nil
 }
 
 // Deprecate marks a proposition as no-longer-endorsed (soft delete).
@@ -323,14 +366,21 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		return nil, nil
 	}
 
-	// Resolve current strengths from ontology.
-	props, err := m.ontology.Propositions()
+	// Resolve current magnitudes from the storage edges, not from the ontology's
+	// proposition strengths. The two differ by construction: prior_init seeds
+	// edges from the per-distribution `distribution_edge_weights` table while
+	// the ontology carries the global `propositions` table, so on a k0s-seeded
+	// daemon P1's edge sits at 0.2138 against a proposition strength of 0.620.
+	// Tuning has to nudge the value the Reasoner actually reads — anchoring the
+	// delta to the global figure would jump a "+0.12 nudge" from 0.2138 to 0.740
+	// and discard the per-distribution calibration in a single operator action.
+	edges, err := m.storage.AllEdges()
 	if err != nil {
 		return nil, err
 	}
-	strengthByID := make(map[string]float64, len(props))
-	for _, p := range props {
-		strengthByID[p.PropositionID] = p.PriorStrength
+	strengthByID := make(map[string]float64, len(edges))
+	for _, e := range edges {
+		strengthByID[e.PropositionID] = e.PriorWeight
 	}
 
 	// Build bounded adjustments.
@@ -362,10 +412,15 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 	}
 
 	// Apply and collect results.
+	//
+	// This goes through the facade's SetPropositionStrength, not the ontology's,
+	// so the new magnitude reaches the storage EdgeDescriptor the Reasoner reads.
+	// Calling the ontology method directly would leave the tune visible in
+	// Propositions() and in the audit log while changing no agent decision.
 	var applied []*types.TuneAdjustment
 	var appliedIDs []string
 	for _, a := range adjustments {
-		if err := m.ontology.SetPropositionStrength(a.PropositionID, a.NewStrength); err != nil {
+		if err := m.SetPropositionStrength(a.PropositionID, a.NewStrength); err != nil {
 			return applied, err
 		}
 		applied = append(applied, a)
