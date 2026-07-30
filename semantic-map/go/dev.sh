@@ -21,7 +21,7 @@ cd "$SCRIPT_DIR"
 
 PORT="${PORT:-8080}"
 PROFILE="${PROFILE:-edge-minimal}"
-KD="${KD:-k0s}"
+KD="${KD:-}"
 PRIORS="${PRIORS:-}"
 ALPHA="${ALPHA:-0.2}"
 CONVERGENCE="${CONVERGENCE:-500}"
@@ -31,6 +31,9 @@ AGENT_BIN="./cmd/agent/tmp/di-agent-poc"
 MAPCTL_BIN="/tmp/semantic-map-mapctl"
 REPLAY_BIN="/tmp/semantic-map-replay"
 LOG_FILE="/tmp/semantic-map-agent.log"
+BUILD_GOOS="${BUILD_GOOS:-${GOOS:-}}"
+BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-}}"
+BUILD_TARGET_FILE="/tmp/semantic-map-build-target"
 
 # Where the parquet dataset lives. Falls back to walking up from the
 # semantic-map/go directory; the replay binary itself does a second walk
@@ -73,29 +76,51 @@ ensure_jq() {
     command -v jq >/dev/null 2>&1 || warn "jq not installed; some output will be raw JSON"
 }
 
+effective_build_target() {
+    local goos goarch
+    goos="${BUILD_GOOS:-$(go env GOOS)}"
+    goarch="${BUILD_GOARCH:-$(go env GOARCH)}"
+    printf "%s/%s" "$goos" "$goarch"
+}
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 cmd_build() {
+    local target goos goarch
+    target="$(effective_build_target)"
+    goos="${target%/*}"
+    goarch="${target#*/}"
+
+    info "building for $target"
     step "go build -o $AGENT_BIN ./cmd/agent"
-    GOOS=linux GOARCH=amd64 go build -o "$AGENT_BIN" ./cmd/agent
-    # step "go build -o $MAPCTL_BIN ./cmd/mapctl"
-    # GOOS=linux GOARCH=arm64 go build -o "$MAPCTL_BIN" ./cmd/mapctl
-    # step "go build -o $REPLAY_BIN ./cmd/replay"
-    # GOOS=linux GOARCH=arm64 go build -o "$REPLAY_BIN" ./cmd/replay
-    # info "built: $AGENT_BIN, $MAPCTL_BIN, $REPLAY_BIN"
+    GOOS="$goos" GOARCH="$goarch" go build -o "$AGENT_BIN" ./cmd/agent
+    step "go build -o $MAPCTL_BIN ./cmd/mapctl"
+    GOOS="$goos" GOARCH="$goarch" go build -o "$MAPCTL_BIN" ./cmd/mapctl
+    step "go build -o $REPLAY_BIN ./cmd/replay"
+    GOOS="$goos" GOARCH="$goarch" go build -o "$REPLAY_BIN" ./cmd/replay
+    printf "%s\n" "$target" > "$BUILD_TARGET_FILE"
+    info "built: $AGENT_BIN, $MAPCTL_BIN, $REPLAY_BIN"
 }
 
 cmd_start() {
-    local pid
+    local pid target built_target
     pid="$(running_pid)"
     if [[ -n "$pid" ]]; then
         warn "agent already running on :$PORT (PID $pid). Use 'restart' to swap, 'stop' to kill."
         return 0
     fi
 
+    target="$(effective_build_target)"
+
     if [[ ! -x "$AGENT_BIN" ]]; then
         warn "no agent binary at $AGENT_BIN — building first"
         cmd_build
+    elif [[ -f "$BUILD_TARGET_FILE" ]]; then
+        built_target="$(<"$BUILD_TARGET_FILE")"
+        if [[ "$built_target" != "$target" ]]; then
+            warn "agent binary was built for $built_target, current target is $target — rebuilding"
+            cmd_build
+        fi
     fi
 
     local args=(-profile "$PROFILE" -addr ":$PORT" -alpha "$ALPHA" -convergence "$CONVERGENCE")
@@ -108,6 +133,16 @@ cmd_start() {
     sleep 1
 
     pid="$(running_pid)"
+    if [[ -z "$pid" ]] && grep -qi "exec format error" "$LOG_FILE" 2>/dev/null; then
+        warn "binary architecture mismatch detected (exec format error) — rebuilding for $target"
+        cmd_build
+        step "$AGENT_BIN ${args[*]}"
+        nohup "$AGENT_BIN" "${args[@]}" > "$LOG_FILE" 2>&1 &
+        disown
+        sleep 1
+        pid="$(running_pid)"
+    fi
+
     if [[ -z "$pid" ]]; then
         fail "agent failed to start. Check $LOG_FILE"
     fi
@@ -409,6 +444,8 @@ ${BOLD}Commands:${RESET}
 ${BOLD}Environment overrides:${RESET}
   PORT          ${BLUE}${PORT}${RESET}            HTTP port
   PROFILE       ${BLUE}${PROFILE}${RESET}   Deployment profile
+    BUILD_GOOS    ${BLUE}${BUILD_GOOS:-(auto)}${RESET}         build target GOOS (default: host)
+    BUILD_GOARCH  ${BLUE}${BUILD_GOARCH:-(auto)}${RESET}         build target GOARCH (default: host)
   KD            ${BLUE}${KD:-(none)}${RESET}         k3s|k0s|k8s|kubeEdge|openYurt
   PRIORS        ${BLUE}${PRIORS:-(none)}${RESET}         path to prior_weights.json
   ALPHA         ${BLUE}${ALPHA}${RESET}            EMA decay factor
