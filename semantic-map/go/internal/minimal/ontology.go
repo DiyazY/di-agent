@@ -5,17 +5,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// StaticDiSelectOntology is the edge-minimal OntologyContract implementation.
-// The 7 constructs and 15 propositions from Di-Select are hardcoded as the
-// bootstrap minimum. The ontology is live — constructs and propositions may
-// be added, prior strengths recalibrated, and propositions deprecated at
-// runtime. Mutations append to an in-memory audit log readable via
-// GetHistory. The log is ephemeral on this profile (lost on restart); the
-// cloud-full profile persists it.
-type StaticDiSelectOntology struct {
+// SpecOntology is the edge-minimal OntologyContract implementation. Constructs
+// and propositions come from a domain.Spec loaded at startup — nothing about the
+// model is compiled in. The ontology is live: constructs and propositions may be
+// added, prior strengths recalibrated, and propositions deprecated at runtime,
+// and every mutation appends to an in-memory audit log readable via GetHistory.
+// The log is ephemeral on this profile; a persisting profile would carry it.
+//
+// Holding the spec rather than a copy of its contents matters for one case in
+// particular: a construct that appears mid-deployment needs a metric routed to it
+// before it can accumulate evidence, and routing lives in the same spec. See
+// pkg/domain.
+type SpecOntology struct {
+	spec         *domain.Spec
 	mu           sync.RWMutex
 	constructs   []*types.Construct
 	propositions []*types.Proposition
@@ -26,16 +32,42 @@ type StaticDiSelectOntology struct {
 	now func() time.Time
 }
 
-func NewStaticDiSelectOntology() *StaticDiSelectOntology {
-	return &StaticDiSelectOntology{
-		constructs:   diSelectConstructs(),
-		propositions: diSelectPropositions(),
+// NewOntologyFromSpec builds an ontology from a loaded domain specification.
+func NewOntologyFromSpec(spec *domain.Spec) *SpecOntology {
+	o := &SpecOntology{spec: spec}
+	for _, c := range spec.Constructs {
+		o.constructs = append(o.constructs, &types.Construct{
+			ConstructID: c.ConstructID,
+			Name:        c.Name,
+			Description: c.Description,
+		})
 	}
+	for _, p := range spec.Propositions {
+		dir := types.Positive
+		if p.Direction == "negative" {
+			dir = types.Negative
+		}
+		o.propositions = append(o.propositions, &types.Proposition{
+			PropositionID:   p.PropositionID,
+			FromConstruct:   p.FromConstruct,
+			ToConstruct:     p.ToConstruct,
+			Direction:       dir,
+			PriorStrength:   spec.FloorFor(p.PropositionID),
+			Description:     p.Description,
+			EvidenceSources: p.EvidenceSources,
+		})
+	}
+	return o
 }
+
+// Spec exposes the loaded model so the Bridge can resolve metric routing and the
+// facade can read the adjustment policy. Both are part of the domain model, and
+// keeping them in one place is what lets a runtime-added construct be reachable.
+func (o *SpecOntology) Spec() *domain.Spec { return o.spec }
 
 // appendEvent records one mutation in the audit log. Callers hold o.mu.
 // actor defaults to "system" when the parameter is empty.
-func (o *StaticDiSelectOntology) appendEvent(actor string, kind types.OntologyEventKind, targetID string, detail map[string]any) {
+func (o *SpecOntology) appendEvent(actor string, kind types.OntologyEventKind, targetID string, detail map[string]any) {
 	if actor == "" {
 		actor = "system"
 	}
@@ -57,7 +89,7 @@ func (o *StaticDiSelectOntology) appendEvent(actor string, kind types.OntologyEv
 // Constructs returns a defensive copy of the construct list. Callers may mutate
 // the returned slice or its elements without affecting the ontology's internal
 // state; to register a new construct, use the ontology's setters.
-func (o *StaticDiSelectOntology) Constructs() ([]*types.Construct, error) {
+func (o *SpecOntology) Constructs() ([]*types.Construct, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	out := make([]*types.Construct, len(o.constructs))
@@ -71,7 +103,7 @@ func (o *StaticDiSelectOntology) Constructs() ([]*types.Construct, error) {
 // Propositions returns a defensive copy of the proposition list. Mutating
 // returned entries does NOT update the ontology — use SetPropositionStrength
 // (or AddValidatedProposition) to make changes.
-func (o *StaticDiSelectOntology) Propositions() ([]*types.Proposition, error) {
+func (o *SpecOntology) Propositions() ([]*types.Proposition, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	out := make([]*types.Proposition, len(o.propositions))
@@ -86,7 +118,7 @@ func (o *StaticDiSelectOntology) Propositions() ([]*types.Proposition, error) {
 	return out, nil
 }
 
-func (o *StaticDiSelectOntology) Relationships(constructID string) ([]*types.Proposition, error) {
+func (o *SpecOntology) Relationships(constructID string) ([]*types.Proposition, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	var out []*types.Proposition
@@ -109,7 +141,7 @@ func (o *StaticDiSelectOntology) Relationships(constructID string) ([]*types.Pro
 // that method returns defensive copies.
 //
 // Returns an error if the proposition ID is not found.
-func (o *StaticDiSelectOntology) SetPropositionStrength(propositionID string, strength float64) error {
+func (o *SpecOntology) SetPropositionStrength(propositionID string, strength float64) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, p := range o.propositions {
@@ -129,7 +161,7 @@ func (o *StaticDiSelectOntology) SetPropositionStrength(propositionID string, st
 // AddConstruct appends a new construct to the ontology. Constructs are
 // append-only — there is no removal path because constructs are domain-stable
 // per the architecture. Duplicate ConstructIDs are rejected.
-func (o *StaticDiSelectOntology) AddConstruct(c *types.Construct) error {
+func (o *SpecOntology) AddConstruct(c *types.Construct) error {
 	if c == nil || c.ConstructID == "" {
 		return fmt.Errorf("AddConstruct: nil construct or empty ConstructID")
 	}
@@ -156,7 +188,7 @@ func (o *StaticDiSelectOntology) AddConstruct(c *types.Construct) error {
 // the second call (no duplicate event, no error).
 //
 // Returns an error if the proposition ID is not found.
-func (o *StaticDiSelectOntology) Deprecate(propositionID, reason string) error {
+func (o *SpecOntology) Deprecate(propositionID, reason string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, p := range o.propositions {
@@ -179,7 +211,7 @@ func (o *StaticDiSelectOntology) Deprecate(propositionID, reason string) error {
 // in chronological insertion order. Pass a zero time.Time to retrieve the
 // full log. The returned slice is a defensive copy; mutating it does not
 // affect the ontology's internal log.
-func (o *StaticDiSelectOntology) GetHistory(since time.Time) ([]*types.OntologyEvent, error) {
+func (o *SpecOntology) GetHistory(since time.Time) ([]*types.OntologyEvent, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	out := make([]*types.OntologyEvent, 0, len(o.events))
@@ -199,7 +231,7 @@ func (o *StaticDiSelectOntology) GetHistory(since time.Time) ([]*types.OntologyE
 	return out, nil
 }
 
-func (o *StaticDiSelectOntology) ValidateProposition(fromID, toID string, dir types.Direction) (*types.ValidationResult, error) {
+func (o *SpecOntology) ValidateProposition(fromID, toID string, dir types.Direction) (*types.ValidationResult, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	res := &types.ValidationResult{Valid: true}
@@ -212,7 +244,7 @@ func (o *StaticDiSelectOntology) ValidateProposition(fromID, toID string, dir ty
 	return res, nil
 }
 
-func (o *StaticDiSelectOntology) AddValidatedProposition(p *types.Proposition) error {
+func (o *SpecOntology) AddValidatedProposition(p *types.Proposition) error {
 	if p == nil || p.PropositionID == "" {
 		return fmt.Errorf("AddValidatedProposition: nil proposition or empty PropositionID")
 	}
@@ -245,7 +277,7 @@ func (o *StaticDiSelectOntology) AddValidatedProposition(p *types.Proposition) e
 // without modifying any proposition strength. It records the operator's intent
 // string alongside the proposition IDs that were adjusted in the same batch.
 // Returns nil (best-effort; never blocks Tune).
-func (o *StaticDiSelectOntology) RecordTune(text, operator string, appliedIDs []string) error {
+func (o *SpecOntology) RecordTune(text, operator string, appliedIDs []string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.events = append(o.events, &types.OntologyEvent{
@@ -261,76 +293,4 @@ func (o *StaticDiSelectOntology) RecordTune(text, operator string, appliedIDs []
 		Detail:   map[string]any{"intent": text, "proposition_ids": appliedIDs},
 	})
 	return nil
-}
-
-// ── Di-Select bootstrap data ──────────────────────────────────────────────────
-// Construct IDs match the short names used as edge FromID/ToID throughout the system.
-
-func diSelectConstructs() []*types.Construct {
-	return []*types.Construct{
-		{ConstructID: "PS", Name: "Performance & Scalability", Description: "Latency, throughput, pod startup, cluster scaling, scheduling efficiency"},
-		{ConstructID: "SC", Name: "Security & Compliance", Description: "CIS benchmarks, encryption, FIPS compliance, attack surface, CVE patching"},
-		{ConstructID: "RR", Name: "Reliability & Resilience", Description: "Recovery time, fault tolerance, disaster recovery, self-healing, HA"},
-		{ConstructID: "MU", Name: "Maintainability & Usability", Description: "Installation ease, configuration complexity, upgrade burden, automation"},
-		{ConstructID: "RC", Name: "Resource Constraints & Cost", Description: "Memory/CPU footprint, energy efficiency, hardware and operational costs"},
-		{ConstructID: "CO", Name: "Connectivity & Offline Resilience", Description: "Offline autonomy, bandwidth optimization, disconnected operation, sync"},
-		{ConstructID: "CE", Name: "Community & Ecosystem", Description: "Vendor backing, plugin availability, documentation, long-term stability"},
-	}
-}
-
-func diSelectPropositions() []*types.Proposition {
-	// Prior strengths are initialised from P1–P5 empirical evidence.
-	// They will be refined by the prior initialization pipeline.
-	//
-	// Descriptions are the one-sentence causal statements from Di-Select
-	// (see CLAUDE.md §"The 15 Causal Propositions"). They surface in the
-	// /graph response and the UI edge panel so operators can read the
-	// claim, not just the ID.
-	return []*types.Proposition{
-		{PropositionID: "P1",  FromConstruct: "SC", ToConstruct: "RC", Direction: types.Positive, PriorStrength: 0.6,
-			Description:     "Security hardening increases CPU consumption.",
-			EvidenceSources: []string{"P1", "P2", "P4"}},
-		{PropositionID: "P2",  FromConstruct: "RC", ToConstruct: "PS", Direction: types.Negative, PriorStrength: 0.4,
-			Description:     "CPU overhead from security reduces scheduling throughput.",
-			EvidenceSources: []string{"P1", "P4"}},
-		{PropositionID: "P3",  FromConstruct: "RC", ToConstruct: "PS", Direction: types.Positive, PriorStrength: 0.5,
-			Description:     "Lightweight distributions reduce pod-startup latency.",
-			EvidenceSources: []string{"P1", "P4"}},
-		{PropositionID: "P4",  FromConstruct: "SC", ToConstruct: "RR", Direction: types.Negative, PriorStrength: 0.4,
-			Description:     "Security hardening slows recovery time after failures.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P5",  FromConstruct: "CO", ToConstruct: "RR", Direction: types.Positive, PriorStrength: 0.7,
-			Description:     "Offline autonomy improves continuity during network partitions.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P6",  FromConstruct: "CO", ToConstruct: "RR", Direction: types.Negative, PriorStrength: 0.5,
-			Description:     "Cloud dependency reduces stability in poor networks.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P7",  FromConstruct: "CE", ToConstruct: "MU", Direction: types.Positive, PriorStrength: 0.6,
-			Description:     "Rich ecosystem lowers operator effort.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P8",  FromConstruct: "MU", ToConstruct: "RC", Direction: types.Negative, PriorStrength: 0.5,
-			Description:     "Administrative simplicity reduces operational cost.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P9",  FromConstruct: "CE", ToConstruct: "MU", Direction: types.Negative, PriorStrength: 0.4,
-			Description:     "Excessive features increase maintenance complexity.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P10", FromConstruct: "PS", ToConstruct: "RC", Direction: types.Negative, PriorStrength: 0.5,
-			Description:     "Better efficiency enables equal workload at lower cost.",
-			EvidenceSources: []string{"P1", "P4"}},
-		{PropositionID: "P11", FromConstruct: "CE", ToConstruct: "SC", Direction: types.Positive, PriorStrength: 0.5,
-			Description:     "Active communities accelerate security patch availability.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P12", FromConstruct: "SC", ToConstruct: "MU", Direction: types.Negative, PriorStrength: 0.6,
-			Description:     "Security controls add configuration and upgrade burden.",
-			EvidenceSources: []string{"P2"}},
-		{PropositionID: "P13", FromConstruct: "CO", ToConstruct: "PS", Direction: types.Negative, PriorStrength: 0.5,
-			Description:     "Offline designs incur caching and sync overhead.",
-			EvidenceSources: []string{"P1"}},
-		{PropositionID: "P14", FromConstruct: "RC", ToConstruct: "SC", Direction: types.Negative, PriorStrength: 0.5,
-			Description:     "Tight budgets lead to relaxed security hardening.",
-			EvidenceSources: []string{"P2", "P5"}},
-		{PropositionID: "P15", FromConstruct: "MU", ToConstruct: "RR", Direction: types.Positive, PriorStrength: 0.5,
-			Description:     "Better automation shortens recovery time.",
-			EvidenceSources: []string{"P2"}},
-	}
 }

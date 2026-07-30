@@ -10,6 +10,7 @@ import (
 
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -91,6 +92,11 @@ type Config struct {
 	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
 	ProposerBufSize int
 
+	// DomainSpec is the loaded domain model: constructs, metric routing,
+	// propositions, adjustment policy and operator vocabulary. Required — a
+	// profile without one has no graph to reason over. See pkg/domain.
+	DomainSpec *domain.Spec
+
 	// UseRuleBasedTuner enables the RuleBasedTuner instead of the DisabledTuner.
 	// When true (default for edge-minimal), natural-language operator intent can be
 	// mapped to proposition strength adjustments via SemanticMap.Tune / POST /agent/tune.
@@ -114,11 +120,11 @@ func DefaultConfig() Config {
 // priorWeightsFile mirrors the top-level structure of prior_weights.json
 // produced by semantic_map.prior_init.pipeline.
 type priorWeightsFile struct {
-	Version                  string                                `json:"version"`
-	GeneratedAt              string                                `json:"generated_at"`
-	Distributions            []string                              `json:"distributions"`
-	Propositions             map[string]propositionPrior           `json:"propositions"`
-	DistributionEdgeWeights  map[string]map[string]edgePrior       `json:"distribution_edge_weights"`
+	Version                 string                          `json:"version"`
+	GeneratedAt             string                          `json:"generated_at"`
+	Distributions           []string                        `json:"distributions"`
+	Propositions            map[string]propositionPrior     `json:"propositions"`
+	DistributionEdgeWeights map[string]map[string]edgePrior `json:"distribution_edge_weights"`
 }
 
 type propositionPrior struct {
@@ -170,6 +176,12 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	if err := validateKD(pw, cfg.KD); err != nil {
 		return nil, nil, err
 	}
+	// A profile without a domain model has no graph to reason over. Fail here
+	// rather than constructing an agent whose /graph is empty, which would look
+	// identical to an agent whose telemetry has not arrived yet.
+	if cfg.DomainSpec == nil {
+		return nil, nil, fmt.Errorf("no domain spec: pass -domain <path> to load one")
+	}
 	switch profileName {
 	case "edge-minimal":
 		sm, coll := buildEdgeMinimal(cfg, pw)
@@ -196,7 +208,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 
 func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
 	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
 	updater := minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
@@ -271,7 +283,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
 	case hasCgroup:
 		collector = minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
-	// else: collector stays nil — collection loop disabled
+		// else: collector stays nil — collection loop disabled
 	}
 
 	return sm, collector
@@ -282,7 +294,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 // internally, does not mutate pointers returned by Propositions()). Unknown
 // proposition IDs are silently ignored so old files remain compatible with
 // new code.
-func applyPriorWeights(ontology *minimal.StaticDiSelectOntology, pw *priorWeightsFile) {
+func applyPriorWeights(ontology *minimal.SpecOntology, pw *priorWeightsFile) {
 	for propID, entry := range pw.Propositions {
 		_ = ontology.SetPropositionStrength(propID, entry.PriorStrength)
 	}
@@ -297,7 +309,7 @@ func applyPriorWeights(ontology *minimal.StaticDiSelectOntology, pw *priorWeight
 //     overwritten by applyPriorWeights from the global pw.Propositions table).
 func seedFromOntology(
 	storage *minimal.InMemoryStorage,
-	ontology *minimal.StaticDiSelectOntology,
+	ontology *minimal.SpecOntology,
 	pw *priorWeightsFile,
 	kd string,
 ) {
