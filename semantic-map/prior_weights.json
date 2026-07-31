@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "generated_at": "2026-07-30",
+  "generated_at": "2026-07-31",
   "evidence_papers": [
     "P1",
     "P2",
@@ -340,6 +340,527 @@
         "prior_weight": 0.5741,
         "ema_weight": 0.5741,
         "calibrated": true
+      }
+    }
+  },
+  "machine_classes": {
+    "rationale": "A cluster's machines are not interchangeable, and calibrating them alike misattributes measurements. On this testbed the control-plane host is an x86 NUC and the workers are ARM RPi4s. Each source constant is routed to the class it was actually measured on; where a class has no measurement the score is inherited from the cross-class figure and said to be inherited, so the gap is visible rather than hidden behind a uniform prior. Nothing is re-derived from the telemetry the agent later learns from, which would make the prior a summary of the evaluation data.",
+    "classes": [
+      "control-plane",
+      "worker"
+    ],
+    "host_classes": {
+      "master": "control-plane",
+      "node_1": "worker",
+      "node_2": "worker",
+      "node_3": "worker"
+    },
+    "provenance": {
+      "PS": {
+        "control-plane": "class-specific: pod-startup latency, a control-plane operation timed against the API server (P1)",
+        "worker": "class-specific: data-plane throughput, memtier against Redis pods running on workers (P1)"
+      },
+      "RC": {
+        "control-plane": "inherited: every quantity feeding RC is worker-measured (P4's Cortex-A72 DVFS model, P5's node_2 cgroups). The campaign contains no control-plane-side energy measurement, so no class-specific score exists.",
+        "worker": "class-specific: P4 energy per pod and control-plane power overhead, both from the RPi4 model"
+      },
+      "CO": {
+        "control-plane": "cross-class: offline preservation is architectural rather than per-host, and interrupt amplification is not resolved per host",
+        "worker": "cross-class: offline preservation is architectural rather than per-host, and interrupt amplification is not resolved per host"
+      }
+    }
+  },
+  "machine_class_construct_scores": {
+    "k3s": {
+      "control-plane": {
+        "PS": 1.0,
+        "SC": 0.0,
+        "RR": 0.6,
+        "MU": 1.0,
+        "RC": 0.7651,
+        "CO": 0.1158,
+        "CE": 0.2514
+      },
+      "worker": {
+        "PS": 0.8246,
+        "SC": 0.0,
+        "RR": 0.6,
+        "MU": 1.0,
+        "RC": 0.7651,
+        "CO": 0.1158,
+        "CE": 0.2514
+      }
+    },
+    "k0s": {
+      "control-plane": {
+        "PS": 0.9831,
+        "SC": 0.3448,
+        "RR": 0.54,
+        "MU": 1.0,
+        "RC": 0.5804,
+        "CO": 0.3,
+        "CE": 0.0185
+      },
+      "worker": {
+        "PS": 0.8596,
+        "SC": 0.3448,
+        "RR": 0.54,
+        "MU": 1.0,
+        "RC": 0.5804,
+        "CO": 0.3,
+        "CE": 0.0185
+      }
+    },
+    "k8s": {
+      "control-plane": {
+        "PS": 0.9705,
+        "SC": 1.0,
+        "RR": 0.36,
+        "MU": 0.6957,
+        "RC": 1.0,
+        "CO": 0.2938,
+        "CE": 1.0
+      },
+      "worker": {
+        "PS": 1.0,
+        "SC": 1.0,
+        "RR": 0.36,
+        "MU": 0.6957,
+        "RC": 1.0,
+        "CO": 0.2938,
+        "CE": 1.0
+      }
+    },
+    "kubeEdge": {
+      "control-plane": {
+        "PS": 0.0,
+        "SC": 1.0,
+        "RR": 0.46,
+        "MU": 0.0,
+        "RC": 0.3321,
+        "CO": 0.7,
+        "CE": 0.0712
+      },
+      "worker": {
+        "PS": 0.0,
+        "SC": 1.0,
+        "RR": 0.46,
+        "MU": 0.0,
+        "RC": 0.3321,
+        "CO": 0.7,
+        "CE": 0.0712
+      }
+    },
+    "openYurt": {
+      "control-plane": {
+        "PS": 0.903,
+        "SC": 1.0,
+        "RR": 0.4,
+        "MU": 0.0,
+        "RC": 0.6978,
+        "CO": 0.9569,
+        "CE": 0.0
+      },
+      "worker": {
+        "PS": 0.6842,
+        "SC": 1.0,
+        "RR": 0.4,
+        "MU": 0.0,
+        "RC": 0.6978,
+        "CO": 0.9569,
+        "CE": 0.0
+      }
+    }
+  },
+  "machine_class_edge_weights": {
+    "k3s": {
+      "control-plane": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.4208,
+          "ema_weight": 0.4208,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.5356,
+          "ema_weight": 0.5356,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.7,
+          "ema_weight": 0.7,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.1,
+          "ema_weight": 0.1,
+          "calibrated": true
+        }
+      },
+      "worker": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.4208,
+          "ema_weight": 0.4208,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.5356,
+          "ema_weight": 0.5356,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.5772,
+          "ema_weight": 0.5772,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.1,
+          "ema_weight": 0.1,
+          "calibrated": true
+        }
+      }
+    },
+    "k0s": {
+      "control-plane": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.3192,
+          "ema_weight": 0.3192,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.4063,
+          "ema_weight": 0.4063,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.6882,
+          "ema_weight": 0.6882,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.18,
+          "ema_weight": 0.18,
+          "calibrated": true
+        }
+      },
+      "worker": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.3192,
+          "ema_weight": 0.3192,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.4063,
+          "ema_weight": 0.4063,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.6017,
+          "ema_weight": 0.6017,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.18,
+          "ema_weight": 0.18,
+          "calibrated": true
+        }
+      }
+    },
+    "k8s": {
+      "control-plane": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.55,
+          "ema_weight": 0.55,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.7,
+          "ema_weight": 0.7,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.6794,
+          "ema_weight": 0.6794,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.1763,
+          "ema_weight": 0.1763,
+          "calibrated": true
+        }
+      },
+      "worker": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.55,
+          "ema_weight": 0.55,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.7,
+          "ema_weight": 0.7,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.7,
+          "ema_weight": 0.7,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.1763,
+          "ema_weight": 0.1763,
+          "calibrated": true
+        }
+      }
+    },
+    "kubeEdge": {
+      "control-plane": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.1827,
+          "ema_weight": 0.1827,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.2325,
+          "ema_weight": 0.2325,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.1,
+          "ema_weight": 0.1,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.42,
+          "ema_weight": 0.42,
+          "calibrated": true
+        }
+      },
+      "worker": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.1827,
+          "ema_weight": 0.1827,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.2325,
+          "ema_weight": 0.2325,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.1,
+          "ema_weight": 0.1,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.42,
+          "ema_weight": 0.42,
+          "calibrated": true
+        }
+      }
+    },
+    "openYurt": {
+      "control-plane": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.3838,
+          "ema_weight": 0.3838,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.4885,
+          "ema_weight": 0.4885,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.6321,
+          "ema_weight": 0.6321,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.5741,
+          "ema_weight": 0.5741,
+          "calibrated": true
+        }
+      },
+      "worker": {
+        "RC\u2192PS:P2": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P2",
+          "direction": "negative",
+          "prior_weight": 0.3838,
+          "ema_weight": 0.3838,
+          "calibrated": true
+        },
+        "RC\u2192PS:P3": {
+          "from_id": "RC",
+          "to_id": "PS",
+          "proposition_id": "P3",
+          "direction": "positive",
+          "prior_weight": 0.4885,
+          "ema_weight": 0.4885,
+          "calibrated": true
+        },
+        "PS\u2192RC:P10": {
+          "from_id": "PS",
+          "to_id": "RC",
+          "proposition_id": "P10",
+          "direction": "negative",
+          "prior_weight": 0.4789,
+          "ema_weight": 0.4789,
+          "calibrated": true
+        },
+        "CO\u2192PS:P13": {
+          "from_id": "CO",
+          "to_id": "PS",
+          "proposition_id": "P13",
+          "direction": "negative",
+          "prior_weight": 0.5741,
+          "ema_weight": 0.5741,
+          "calibrated": true
+        }
       }
     }
   }

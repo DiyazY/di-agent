@@ -122,6 +122,100 @@ def _spearman_strength(x: list[float], y: list[float]) -> float:
     return float(max(0.30, min(0.90, abs(rho))))
 
 
+# ── Machine classes ──────────────────────────────────────────────────────────
+#
+# A cluster's machines are not interchangeable, and calibrating them as if they
+# were misattributes measurements. On the dissertation testbed the control-plane
+# host is an x86 NUC (i7-10710U, 64 GB) and the workers are ARM RPi4s
+# (Cortex-A72, 8 GB): different instruction set, an order of magnitude of memory,
+# and different roles.
+#
+# The per-class scores below are a CORRECTION rather than a re-fit. Each source
+# constant is routed to the class it was actually measured on, and where no
+# measurement exists for a class the score is inherited from the cross-class
+# figure and said to be inherited. Nothing is re-derived from the same telemetry
+# the agent later learns from, which would make the prior a summary of the
+# evaluation data.
+#
+# Provenance per construct, from the sources in constants.py and loaders.py:
+#
+#   RC  worker only. P4's energy model is an ARM Cortex-A72 / BCM2711 DVFS model
+#       ("on RPi4 worker nodes"), and P5's overhead decomposition is cgroup data
+#       from node_2. Both quantities that feed RC therefore describe a worker.
+#       There is no control-plane-side energy measurement in the campaign, so the
+#       control-plane class inherits — and the gap is recorded rather than hidden
+#       behind a uniform prior.
+#
+#   PS  splits genuinely. Pod-startup latency is a control-plane operation, timed
+#       by a k-bench client against the API server; data-plane throughput is
+#       memtier against Redis pods, which run on workers. So the control-plane
+#       class takes the latency component and the worker class the throughput
+#       component, instead of both classes taking a 50/50 blend of the two.
+#
+#   CO  cross-class. Offline message preservation is architectural — a property of
+#       the distribution's edge design, not of a host — and the interrupt
+#       amplification figures are not resolved per host in P4's results.
+MACHINE_CLASSES = ["control-plane", "worker"]
+
+# Which class each host of the testbed belongs to. Consumed by the measurement
+# harness so that a per-node replay can pick the right prior set.
+HOST_CLASSES = {
+    "master": "control-plane",
+    "node_1": "worker",
+    "node_2": "worker",
+    "node_3": "worker",
+}
+
+
+def compute_construct_scores_by_class(
+    root_dir: str | None = None,
+) -> tuple[dict[str, dict[str, dict[str, float]]], dict[str, dict[str, str]]]:
+    """
+    Returns ({kd: {machine_class: {construct: score}}}, provenance) with scores in
+    [0, 1] and provenance recording, per construct and class, whether the score is
+    class-specific or inherited from the cross-class figure.
+    """
+    cross = compute_construct_scores(root_dir)
+
+    # PS split: latency is a control-plane measurement, throughput a worker one.
+    latency_inv = _norm_inv(POD_STARTUP_LATENCY_MS)
+    throughput_n = _norm(DP_THROUGHPUT_OPS)
+
+    by_class: dict[str, dict[str, dict[str, float]]] = {}
+    for kd in KDS:
+        by_class[kd] = {}
+        for cls in MACHINE_CLASSES:
+            scores = dict(cross[kd])  # start from the cross-class figures
+            if cls == "control-plane":
+                scores["PS"] = round(latency_inv[kd], 4)
+            else:
+                scores["PS"] = round(throughput_n[kd], 4)
+            by_class[kd][cls] = {k: round(v, 4) for k, v in scores.items()}
+
+    provenance = {
+        "PS": {
+            "control-plane": "class-specific: pod-startup latency, a control-plane "
+                             "operation timed against the API server (P1)",
+            "worker": "class-specific: data-plane throughput, memtier against Redis "
+                      "pods running on workers (P1)",
+        },
+        "RC": {
+            "control-plane": "inherited: every quantity feeding RC is worker-measured "
+                             "(P4's Cortex-A72 DVFS model, P5's node_2 cgroups). The "
+                             "campaign contains no control-plane-side energy "
+                             "measurement, so no class-specific score exists.",
+            "worker": "class-specific: P4 energy per pod and control-plane power "
+                      "overhead, both from the RPi4 model",
+        },
+        "CO": {
+            cls: "cross-class: offline preservation is architectural rather than "
+                 "per-host, and interrupt amplification is not resolved per host"
+            for cls in MACHINE_CLASSES
+        },
+    }
+    return by_class, provenance
+
+
 def compute_construct_scores(root_dir: str | None = None) -> dict[str, dict[str, float]]:
     """
     Returns {kd: {construct_id: score}} with all scores in [0, 1].

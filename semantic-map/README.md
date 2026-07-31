@@ -427,6 +427,31 @@ the resulting edge weights are means over machines that may be different physica
 systems. `GET /cost?node=X` returns 409 when X is not this agent, pointing at that
 machine's own endpoint when it is a known peer.
 
+### Per-machine-class priors
+
+Machines in one cluster are not interchangeable, and neither are the measurements
+that calibrate them. `-machine-class` seeds from the class-specific table in
+`prior_weights.json`:
+
+```bash
+agent -profile edge-minimal -domain ../domain_spec.json \
+  -priors ../prior_weights.json -kd k0s \
+  -node-id node_1 -machine-class worker
+```
+
+Precedence is class-specific → per-cluster → global proposition strength, each step
+averaging over one more thing. An undeclared class is an error rather than a silent
+fallback, so a typo cannot leave an operator believing their agent was calibrated for
+its hardware when it was not.
+
+The classes and the host-to-class mapping live in the artefact's `machine_classes`
+block, together with a `provenance` entry per construct saying whether that class's
+score is class-specific or inherited. On the committed calibration one of four edges
+differs by class: performance splits (pod-startup latency is a control-plane
+operation, data-plane throughput is measured on workers), while the resource
+construct has no control-plane-side measurement — P4's energy model is an RPi4 model
+— so the control-plane class inherits and says so.
+
 ### Choosing how edges learn
 
 `-relational` switches the updater from tracking one endpoint's magnitude to

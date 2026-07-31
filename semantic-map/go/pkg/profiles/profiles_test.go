@@ -42,7 +42,7 @@ func TestPerKDSeedingMatchesPriorWeights(t *testing.T) {
 			storage := minimal.NewInMemoryStorage()
 			ontology := minimal.NewOntologyFromSpec(mustSpec())
 			applyPriorWeights(ontology, &expected)
-			seedFromOntology(storage, ontology, &expected, kd)
+			seedFromOntology(storage, ontology, &expected, kd, "")
 
 			perKD := expected.DistributionEdgeWeights[kd]
 			if len(perKD) == 0 {
@@ -96,7 +96,7 @@ func TestGlobalSeedingWhenKDIsEmpty(t *testing.T) {
 	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	applyPriorWeights(ontology, &pw)
-	seedFromOntology(storage, ontology, &pw, "") // no KD
+	seedFromOntology(storage, ontology, &pw, "", "") // no KD, no class
 
 	edges, _ := storage.AllEdges()
 	for _, e := range edges {

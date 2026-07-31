@@ -170,3 +170,84 @@ func TestBuildKeepsOntologyAndStorageInAgreement(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildAppliesMachineClassPriors pins the precedence that makes per-class
+// calibration meaningful: with a class named, every seeded edge must match that
+// class's entry in prior_weights.json, not the class-averaged per-cluster one.
+//
+// The two tables agree on most edges by construction — the pipeline distinguishes
+// classes only where a source constant was actually measured per class — so the
+// test also asserts that at least one edge DIFFERS somewhere, otherwise it would
+// pass just as happily against a file with no class information at all.
+func TestBuildAppliesMachineClassPriors(t *testing.T) {
+	pwPath := findPriorWeightsFile(t)
+	pw, err := loadPriorWeights(pwPath)
+	if err != nil {
+		t.Fatalf("loadPriorWeights: %v", err)
+	}
+	if len(pw.MachineClasses.Classes) == 0 {
+		t.Skip("prior_weights.json declares no machine classes")
+	}
+
+	differsSomewhere := false
+	for _, kd := range pw.Distributions {
+		for _, class := range pw.MachineClasses.Classes {
+			kd, class := kd, class
+			t.Run(kd+"/"+class, func(t *testing.T) {
+				cfg := DefaultConfig()
+				cfg.DomainSpec = mustSpec()
+				cfg.PriorWeightsPath = pwPath
+				cfg.KD = kd
+				cfg.MachineClass = class
+
+				sm, _, err := Build("edge-minimal", cfg)
+				if err != nil {
+					t.Fatalf("Build: %v", err)
+				}
+				edges, err := sm.AllEdges()
+				if err != nil {
+					t.Fatalf("AllEdges: %v", err)
+				}
+				want := pw.MachineClassEdgeWeights[kd][class]
+				if len(want) == 0 {
+					t.Fatalf("no class edge weights for %s/%s", kd, class)
+				}
+				perKD := pw.DistributionEdgeWeights[kd]
+				for _, e := range edges {
+					key := edgeKey(e.FromID, e.ToID, e.PropositionID)
+					w, ok := want[key]
+					if !ok {
+						t.Errorf("edge %q absent from the %s table", key, class)
+						continue
+					}
+					if diff := e.PriorWeight - w.PriorWeight; diff > 1e-6 || diff < -1e-6 {
+						t.Errorf("%s: seeded %.6f, want the %s prior %.6f",
+							e.PropositionID, e.PriorWeight, class, w.PriorWeight)
+					}
+					if o, ok := perKD[key]; ok && o.PriorWeight != w.PriorWeight {
+						differsSomewhere = true
+					}
+				}
+			})
+		}
+	}
+	if !differsSomewhere {
+		t.Error("no edge's class prior differs from its class-averaged prior anywhere; " +
+			"this test would pass against a file carrying no class information")
+	}
+}
+
+// TestBuildRejectsUnknownMachineClass keeps a typo loud. Silently falling back to
+// the class-averaged priors would leave an operator believing their agent was
+// calibrated for its hardware when it was not.
+func TestBuildRejectsUnknownMachineClass(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DomainSpec = mustSpec()
+	cfg.PriorWeightsPath = findPriorWeightsFile(t)
+	cfg.KD = "k0s"
+	cfg.MachineClass = "definitely-not-a-class"
+
+	if _, _, err := Build("edge-minimal", cfg); err == nil {
+		t.Fatal("an undeclared machine class was accepted")
+	}
+}

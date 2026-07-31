@@ -106,6 +106,29 @@ whole testbed into one daemon is legitimate and available via `-ingest-scope=any
 which logs at startup that the resulting graph is an aggregate and not a deployment
 topology.
 
+**Whose calibration is this?** A cluster's machines are not interchangeable either,
+and several of the calibration's source constants were measured on one machine class
+and applied to all of them. P4's energy model is an ARM Cortex-A72 / BCM2711 DVFS
+model — its own documentation says "on RPi4 worker nodes" — and P5's overhead
+decomposition is cgroup data from a single worker. Both feed the resource construct's
+score, which was then used to seed the x86 control-plane host too.
+
+`prior_weights.json` therefore carries `machine_class_edge_weights[kd][class]`
+alongside the per-cluster table, and `-machine-class` selects it. The precedence is
+class-specific, then per-cluster, then the global proposition strength: each step
+averages over one more thing.
+
+Two properties of that table are worth knowing before relying on it. It is a
+*correction*, not a re-fit — each source constant is routed to the class it was
+measured on, and nothing is re-derived from the telemetry the agent later learns
+from, which would make the prior a summary of the evaluation data. And it
+distinguishes classes only where the data can: on the committed calibration exactly
+one of four edges differs by class, the one whose source construct is performance
+(pod-startup latency is a control-plane operation, data-plane throughput is measured
+on workers). The resource construct has no control-plane-side measurement at all, so
+that class inherits and the artefact records the inheritance in its `provenance`
+block rather than presenting a uniform number as a per-class one.
+
 **Which constructs belong here.** A quantity that cannot change while the cluster
 runs is not state; it is a property of the platform, fixed when the platform was
 chosen. The committed specification therefore declares the three constructs a
