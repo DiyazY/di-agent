@@ -111,6 +111,34 @@ type UpdaterContract interface {
 	Reset(fromID, toID string) error
 }
 
+// RelationalUpdaterContract is an optional extension for updaters that learn an
+// edge's weight from paired observations of its two endpoints rather than from a
+// single construct's value.
+//
+// The distinction is semantic, not cosmetic. An edge asserts that one construct
+// influences another with some strength; a single construct's value is a proxy
+// for that strength at best, and it cannot distinguish a conflict pair — two
+// propositions on the same endpoints with opposite directions — because both
+// receive the identical observation. A paired observation can: evidence whose
+// sign matches one sibling's declared direction is evidence against the other.
+//
+// Additional guarantees beyond UpdaterContract:
+//   - Same idempotency rule, keyed on the paired eventID: a replayed pair leaves
+//     both the stored edge and the implementation's pairing state unchanged.
+//   - Support threshold: an implementation may decline to move the weight until
+//     it holds enough pairs, in which case n_observations must not advance —
+//     confidence has to keep reporting that nothing has been learned yet.
+//   - Scale: the emitted strength must be comparable to PriorWeight, because the
+//     Reasoner blends the two. An implementation that learns on a different
+//     scale breaks the blend silently.
+//
+// Callers detect support with a type assertion; the facade falls back to the
+// single-value path when an updater does not implement this.
+type RelationalUpdaterContract interface {
+	UpdaterContract
+	UpdateEdgeRelation(fromID, toID string, fromValue, toValue float64, eventID string) (*types.EdgeDescriptor, error)
+}
+
 // ── Reasoner ──────────────────────────────────────────────────────────────────
 
 // ReasonerContract produces agent decisions with traceable rationales.

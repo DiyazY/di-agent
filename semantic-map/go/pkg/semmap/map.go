@@ -25,6 +25,11 @@ type SemanticMap struct {
 
 	peers *peers.Registry
 	peerc *peers.Client
+
+	// pairs tracks the latest observation per construct so a relational updater
+	// can form paired observations across collectors that sample on different
+	// grids. Unused when the updater is not relational.
+	pairs *pairTracker
 }
 
 // New constructs a SemanticMap without peer coordination. The facade still
@@ -46,6 +51,7 @@ func New(
 		reasoner: reasoner,
 		proposer: proposer,
 		tuner:    tuner,
+		pairs:    newPairTracker(DefaultPairWindowSeconds),
 	}
 }
 
@@ -71,7 +77,14 @@ func NewWithPeers(
 		tuner:    tuner,
 		peers:    peerRegistry,
 		peerc:    peerClient,
+		pairs:    newPairTracker(DefaultPairWindowSeconds),
 	}
+}
+
+// SetPairWindow overrides how far apart two construct observations may be and
+// still form a pair. Only meaningful with a relational updater.
+func (m *SemanticMap) SetPairWindow(seconds int) {
+	m.pairs = newPairTracker(seconds)
 }
 
 // Peers returns the peer registry attached to this map. If no registry was
@@ -135,15 +148,46 @@ func (m *SemanticMap) Ingest(fromID, toID string, observation float64, eventID s
 // every reachable edge regardless of individual failures.
 func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	router := m.router()
-	if err := Bridge(sample, router, m.ontology, m.updater); err != nil {
-		return err
+	if sample == nil || router == nil {
+		return nil
 	}
-	if m.proposer != nil && router != nil {
-		if construct, ok := router.ConstructForMetric(string(sample.MetricType)); ok {
-			_ = m.proposer.ObserveConstruct(construct, sample.Value)
+	construct, routed := router.ConstructForMetric(string(sample.MetricType))
+	if !routed {
+		return nil
+	}
+
+	var err error
+	if rel, ok := m.updater.(contracts.RelationalUpdaterContract); ok {
+		// Relational mode: the edge weight is learned from paired observations of
+		// both endpoints, so a single construct's value is not an observation of
+		// any edge. It updates the construct's own node descriptor — that is
+		// where a construct's magnitude belongs — and waits for a counterpart.
+		if _, nerr := rel.UpdateNode(construct, sample.Value, sample.EventID); nerr != nil {
+			err = nerr
 		}
+		if _, perr := ingestPaired(sample, construct, m.ontology, rel, m.pairs); perr != nil && err == nil {
+			err = perr
+		}
+	} else if berr := Bridge(sample, router, m.ontology, m.updater); berr != nil {
+		err = berr
 	}
-	return nil
+
+	if m.proposer != nil {
+		_ = m.proposer.ObserveConstruct(construct, sample.Value)
+	}
+	return err
+}
+
+// RoutedConstruct reports which construct a metric type is routed to by the
+// loaded domain specification, and whether it is routed at all. Exposed so an
+// API boundary can reject an unrouted type loudly without keeping its own copy
+// of the routing table.
+func (m *SemanticMap) RoutedConstruct(metricType string) (string, bool) {
+	router := m.router()
+	if router == nil {
+		return "", false
+	}
+	return router.ConstructForMetric(metricType)
 }
 
 // router returns the metric routing table for this map, which is the loaded

@@ -102,6 +102,35 @@ type Config struct {
 	// mapped to proposition strength adjustments via SemanticMap.Tune / POST /agent/tune.
 	// Set false to disable operator tuning entirely.
 	UseRuleBasedTuner bool
+
+	// Relational selects the RelationalEMAUpdater, which learns each edge's
+	// weight from paired observations of its two endpoints instead of from
+	// whichever endpoint a sample observed. The two modes answer different
+	// questions and are not interchangeable:
+	//
+	//   endpoint (default) — the weight tracks the magnitude of one construct.
+	//                        Every sample moves an edge, so confidence grows with
+	//                        the raw sample rate.
+	//   relational        — the weight tracks the strength of the association
+	//                        between the endpoints, on the same scale as the
+	//                        calibrated prior. An edge advances only when both
+	//                        endpoints have been observed within the pairing
+	//                        window, so confidence grows with paired coverage.
+	//
+	// Default stays endpoint so previously reported measurements remain
+	// reproducible from the same flags.
+	Relational bool
+
+	// PairWindowSeconds is how far apart two construct observations may be and
+	// still form a pair. Only used when Relational is set. Zero means
+	// semmap.DefaultPairWindowSeconds.
+	PairWindowSeconds int
+
+	// PairMinSupport is the number of pairs an edge needs before the relational
+	// updater emits a strength; PairWindow is the sliding window length. Zero
+	// means the built-in defaults (8 and 60).
+	PairMinSupport int
+	PairWindow     int
 }
 
 func DefaultConfig() Config {
@@ -209,7 +238,19 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
 	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
-	updater := minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
+
+	var updater contracts.UpdaterContract = minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
+	if cfg.Relational {
+		minSupport, window := cfg.PairMinSupport, cfg.PairWindow
+		if minSupport <= 0 {
+			minSupport = 8
+		}
+		if window <= 0 {
+			window = 60
+		}
+		updater = minimal.NewRelationalEMAUpdater(storage, cfg.EMAAlpha,
+			cfg.ConvergenceThreshold, minSupport, window)
+	}
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
 	// network I/O) so the reasoner has a place to look up peers even when
@@ -266,6 +307,9 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	seedFromOntology(storage, ontology, pw, cfg.KD)
 
 	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
+	if cfg.Relational && cfg.PairWindowSeconds > 0 {
+		sm.SetPairWindow(cfg.PairWindowSeconds)
+	}
 
 	// Build collector(s): Netdata, Cgroup, or both via MultiCollector.
 	// Empty CgroupRoot/NodeID or empty NetdataURL disables the respective

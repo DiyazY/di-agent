@@ -29,6 +29,22 @@ func TestEMAUpdaterCompliance(t *testing.T) {
 	})
 }
 
+// The relational updater must satisfy the base suite as well as the paired one:
+// it is an UpdaterContract first, and the paired path is an extension rather
+// than a replacement.
+func TestRelationalEMAUpdaterCompliance(t *testing.T) {
+	compliance.RunUpdaterCompliance(t, func(t *testing.T) (contracts.UpdaterContract, contracts.StorageContract) {
+		s := minimal.NewInMemoryStorage()
+		u := minimal.NewRelationalEMAUpdater(s, 0.2, 500, 8, 60)
+		return u, s
+	})
+	compliance.RunRelationalUpdaterCompliance(t, func(t *testing.T) (contracts.RelationalUpdaterContract, contracts.StorageContract) {
+		s := minimal.NewInMemoryStorage()
+		u := minimal.NewRelationalEMAUpdater(s, 0.2, 500, 8, 60)
+		return u, s
+	})
+}
+
 func TestCgroupCollectorCompliance(t *testing.T) {
 	compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
 		root := newFakeCgroupRoot(t)

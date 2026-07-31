@@ -95,6 +95,19 @@ func main() {
 		"enable the RuleBasedTuner behind POST /agent/tune (disable to wire DisabledTuner, "+
 			"which accepts requests and applies nothing)")
 
+	var relational bool
+	flag.BoolVar(&relational, "relational", false,
+		"learn each edge's weight from paired observations of both endpoints (the strength "+
+			"of the relation, on the same scale as the calibrated prior) instead of from "+
+			"whichever endpoint a sample observed")
+	pairWindow := flag.Int("pair-window", 0,
+		"seconds within which two construct observations count as simultaneous "+
+			"(relational mode only; 0 uses the built-in default)")
+	pairSupport := flag.Int("pair-support", 0,
+		"pairs an edge needs before the relational updater emits a strength (0 = default 8)")
+	pairHistory := flag.Int("pair-history", 0,
+		"sliding window length in pairs for the relational updater (0 = default 60)")
+
 	explainProvider := flag.String("explain-provider", "none",
 		"natural-language explain provider: none (disabled) or openai-compatible "+
 			"(routes to any OpenAI-compat backend — Ollama, llama-server, LM Studio, vLLM)")
@@ -150,6 +163,12 @@ func main() {
 	}
 	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
 		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
+	if relational {
+		log.Printf("updater: relational (paired endpoints; pair window %ds, support %d, history %d)",
+			pairWindowOrDefault(*pairWindow), orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
+	} else {
+		log.Printf("updater: endpoint EMA (each sample updates every incident edge)")
+	}
 
 	peerURLs := parsePeerURLs(*peersFlag)
 
@@ -173,6 +192,10 @@ func main() {
 		// no keyword group.
 		UseRuleBasedTuner: useTuner,
 		DomainSpec:        spec,
+		Relational:        relational,
+		PairWindowSeconds: *pairWindow,
+		PairMinSupport:    *pairSupport,
+		PairWindow:        *pairHistory,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)
@@ -467,4 +490,20 @@ func checkNoPositionalArgs(n int, first string) error {
 	return fmt.Errorf("unexpected positional argument %q; boolean flags require "+
 		"the form -flag=false (not -flag false), otherwise every flag after it "+
 		"is silently ignored", first)
+}
+
+// pairWindowOrDefault and orDefault report the values actually in force, so the
+// startup log is a record of the configuration rather than of the flags typed.
+func pairWindowOrDefault(v int) int {
+	if v <= 0 {
+		return semmap.DefaultPairWindowSeconds
+	}
+	return v
+}
+
+func orDefault(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
 }

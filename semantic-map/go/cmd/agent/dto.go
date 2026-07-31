@@ -284,23 +284,18 @@ func eventToDTO(e *types.OntologyEvent) OntologyEventDTO {
 	}
 }
 
-// knownMetricTypes is the closed enumeration of accepted metric types on the
-// /ingest-sample boundary. The Bridge silently ignores types not in
-// metricTypeToConstruct, but the HTTP layer rejects unknown values up front
-// so that operators (and the replay tool) get a clear 400 instead of a
-// silent no-op.
-var knownMetricTypes = map[types.MetricType]struct{}{
-	types.CPUUtilization:      {},
-	types.MemoryUtilization:   {},
-	types.CPUThrottleRatio:    {},
-	types.BlockIOUtil:         {},
-	types.EnergyJoules:        {},
-	types.PodStartupMs:        {},
-	types.SchedulingLatencyMs: {},
-	types.NetworkRxBps:        {},
-	types.NetworkTxBps:        {},
-	types.NetworkLossRatio:    {},
-	types.NetworkLatencyMs:    {},
+// metricTypeValidator answers whether the loaded domain specification routes a
+// metric type. The /ingest-sample boundary rejects unrouted types with 400 so
+// operators and the replay tool get a clear error instead of a silent no-op —
+// ingestion itself ignores them for forward compatibility, which is the right
+// behaviour inside the pipeline but the wrong behaviour at an API boundary a
+// human is typing against.
+//
+// This asks the specification rather than carrying a list. A hardcoded copy here
+// was a third place routing knowledge lived, and it silently rejected the two PSI
+// types the specification routes to PS.
+type metricTypeValidator interface {
+	RoutedConstruct(metricType string) (string, bool)
 }
 
 func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
@@ -316,10 +311,13 @@ func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
 // validating the metric_type string against the closed catalogue declared in
 // pkg/types. Returns an error suitable for writeError(400, ...) when the
 // metric type is unknown.
-func sampleRequestToTypes(req *MetricSampleRequest) (*types.MetricSample, error) {
+func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*types.MetricSample, error) {
 	mt := types.MetricType(req.MetricType)
-	if _, ok := knownMetricTypes[mt]; !ok {
-		return nil, fmt.Errorf("unknown metric_type %q; must be one of the types in pkg/types.MetricType", req.MetricType)
+	if v == nil {
+		return nil, fmt.Errorf("no domain specification loaded; nothing routes metric_type %q", req.MetricType)
+	}
+	if _, ok := v.RoutedConstruct(req.MetricType); !ok {
+		return nil, fmt.Errorf("metric_type %q is not routed by the loaded domain specification", req.MetricType)
 	}
 	return &types.MetricSample{
 		NodeID:        req.NodeID,
