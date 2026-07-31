@@ -11,6 +11,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -27,6 +28,15 @@ type SemanticMap struct {
 
 	peers *peers.Registry
 	peerc *peers.Client
+
+	// state is the live state model: the properties this system exhibits and the
+	// relationships between them. Every ingested sample updates it, so it holds what
+	// the system is doing now rather than what a schema said it would do.
+	//
+	// Nil is permitted: an agent built without one still ingests and reasons over the
+	// construct graph, which keeps the state model an addition rather than a
+	// precondition for every caller.
+	state *statemap.Map
 
 	// pairs tracks the latest observation per construct so a relational updater
 	// can form paired observations across collectors that sample on different
@@ -122,6 +132,13 @@ func NewWithPeers(
 	}
 }
 
+// AttachState gives this map a state model to feed. Samples ingested afterwards
+// create and update its properties.
+func (m *SemanticMap) AttachState(s *statemap.Map) { m.state = s }
+
+// State returns the attached state model, or nil.
+func (m *SemanticMap) State() *statemap.Map { return m.state }
+
 // SetPairWindow overrides how far apart two construct observations may be and
 // still form a pair. Only meaningful with a relational updater.
 func (m *SemanticMap) SetPairWindow(seconds int) {
@@ -192,13 +209,29 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	if sample == nil || router == nil {
 		return nil
 	}
-	construct, routed := router.ConstructForMetric(string(sample.MetricType))
-	if !routed {
-		return nil
-	}
 	if m.selfID != "" && !m.acceptForeign && sample.NodeID != "" && sample.NodeID != m.selfID {
 		return fmt.Errorf("%w: sample node_id=%q, this agent is %q",
 			ErrForeignSample, sample.NodeID, m.selfID)
+	}
+
+	// The state model records the observation BEFORE the routing table is consulted,
+	// and that order is the substance rather than a detail. The routing table says
+	// what this agent knows how to summarise; it does not say what the system is
+	// allowed to exhibit. A metric nobody has mapped yet is still something the
+	// system is doing, so it becomes a property here — journalled as an admission —
+	// where the construct path below would drop it.
+	if m.state != nil {
+		if serr := m.state.Observe(string(sample.MetricType), sample.Value,
+			time.Unix(sample.TimestampUnix, 0)); serr != nil {
+			log.Printf("statemap: %v", serr)
+		}
+	}
+
+	construct, routed := router.ConstructForMetric(string(sample.MetricType))
+	if !routed {
+		// Nothing further to do: the sample is in the state model, and no construct
+		// summarises it.
+		return nil
 	}
 
 	var err error

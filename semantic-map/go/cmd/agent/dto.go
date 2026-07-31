@@ -313,12 +313,15 @@ func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
 // metric type is unknown.
 func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*types.MetricSample, error) {
 	mt := types.MetricType(req.MetricType)
-	if v == nil {
-		return nil, fmt.Errorf("no domain specification loaded; nothing routes metric_type %q", req.MetricType)
+	if req.MetricType == "" {
+		return nil, fmt.Errorf("metric_type is required")
 	}
-	if _, ok := v.RoutedConstruct(req.MetricType); !ok {
-		return nil, fmt.Errorf("metric_type %q is not routed by the loaded domain specification", req.MetricType)
-	}
+	// An unrouted metric type is NOT rejected. It is something the system reported,
+	// and the state model records it as a property — a model that can only represent
+	// what someone declared in advance is a model of the system as it was when they
+	// wrote it down. The handler answers 202 rather than 204 so the caller still
+	// learns that nothing summarises it, which is the part a typo needs to surface.
+	_ = v
 	return &types.MetricSample{
 		NodeID:        req.NodeID,
 		MetricType:    mt,

@@ -49,6 +49,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 // Version is the daemon's reported semver. Returned by GET /version.
@@ -77,6 +78,20 @@ func main() {
 			"as its identity: the map is node-local, so samples labelled with another "+
 			"machine's ID are rejected unless -ingest-scope=any. Empty falls back to "+
 			"os.Hostname()")
+	staleAfter := flag.Duration("stale-after", 2*time.Minute,
+		"silence after which a property is marked stale. A model that keeps reporting "+
+			"a departed metric's last value asserts something it cannot support, so the "+
+			"map says 'stale' instead of holding the number quietly.")
+	retireAfter := flag.Duration("retire-after", 0,
+		"silence after which a property is retired automatically. 0 leaves retirement "+
+			"to an operator, which is the safer default for a system whose collectors "+
+			"restart.")
+	noAdmit := flag.Bool("no-admit", false,
+		"reject observations of properties that were never declared. Off by default: a "+
+			"model of a changing system that cannot represent something new is a model "+
+			"of the system as it was when someone wrote it down.")
+	journalSize := flag.Int("journal-size", 0,
+		"entries of change and decision history to hold in memory (0 = default)")
 	machineClass := flag.String("machine-class", "",
 		"hardware class this agent runs on (e.g. control-plane, worker) as declared in "+
 			"prior_weights.json. When set, seeding prefers the class-specific priors "+
@@ -252,8 +267,30 @@ func main() {
 	}
 	defer explainer.Close()
 
+	// The state model: what this system exhibits, updated by every sample. It is
+	// seeded from the domain specification so the properties the agent already knows
+	// how to interpret exist before any telemetry arrives — an operator inspecting a
+	// fresh agent should see the model it will fill in, not an empty map — and
+	// admission is on, so a metric nobody declared still becomes a property.
+	state := statemap.New(statemap.Config{
+		StaleAfter:              *staleAfter,
+		RetireAfter:             *retireAfter,
+		ConvergenceObservations: int(*convergence),
+		Alpha:                   *alpha,
+		AdmitUnknown:            !*noAdmit,
+	}, statemap.NewJournal(*journalSize))
+	if n, err := seedStateFromSpec(state, spec); err != nil {
+		log.Fatalf("failed to seed the state model: %v", err)
+	} else {
+		log.Printf("state model: %d properties seeded from the domain spec, "+
+			"admission of undeclared properties %s", n,
+			map[bool]string{true: "on", false: "off"}[!*noAdmit])
+	}
+	sm.AttachState(state)
+
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
+	registerStateRoutes(mux, state)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
 

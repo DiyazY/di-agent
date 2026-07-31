@@ -566,7 +566,13 @@ func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
 	}
 }
 
-func TestIngestSample_UnknownMetricTypeReturns400(t *testing.T) {
+// TestIngestSample_UnroutedMetricIsRecordedNotRejected pins the contract that
+// replaced a 400. An unrouted metric type is something the system reported: the
+// state model records it as a property, because a map that can only represent what
+// someone declared in advance describes the system as it was when they wrote it
+// down. The response is 202 rather than 204 so a typo is still visible — the caller
+// learns the reading was kept but nothing summarises it.
+func TestIngestSample_UnroutedMetricIsRecordedNotRejected(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
@@ -577,18 +583,21 @@ func TestIngestSample_UnknownMetricTypeReturns400(t *testing.T) {
 		EventID:       "ingest-sample-unknown",
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("unknown metric_type: got %d, want 400 (%s)", resp.StatusCode, body(resp))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("unrouted metric_type: got %d, want 202 (%s)", resp.StatusCode, body(resp))
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("error Content-Type: got %q, want application/json", ct)
+		t.Errorf("Content-Type: got %q, want application/json", ct)
 	}
-	var er ErrorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
-		t.Fatalf("decode error body: %v", err)
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
 	}
-	if !strings.Contains(er.Error, "bogus_metric") {
-		t.Errorf("error %q should mention the bad metric_type", er.Error)
+	if got["routed"] != false {
+		t.Errorf("body should report routed=false, got %v", got["routed"])
+	}
+	if got["metric_type"] != "bogus_metric" {
+		t.Errorf("body should name the metric type, got %v", got["metric_type"])
 	}
 }
 

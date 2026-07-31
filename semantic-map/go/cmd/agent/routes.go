@@ -564,7 +564,23 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.IngestSample(sample); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, statusForIngestError(err), err.Error())
+			return
+		}
+		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed {
+			// Recorded as a property of the system, but no construct summarises it.
+			// Saying so keeps a typo visible without discarding a reading the system
+			// actually produced — a model that can only hold what someone declared in
+			// advance is a model of the system as it was when they wrote it down.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"recorded":    true,
+				"routed":      false,
+				"metric_type": string(sample.MetricType),
+				"note": "not in the domain specification's routing table: recorded as a " +
+					"property, not summarised by any construct",
+			})
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
