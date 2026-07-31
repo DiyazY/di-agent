@@ -2,32 +2,28 @@ package semmap
 
 import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// metricTypeToConstruct routes one MetricType to its primary construct, per
-// ARCHITECTURE.md §5 "MetricType catalogue". Unknown MetricTypes are intentionally
-// absent — the Bridge silently ignores them (forward-compat with future types).
-var metricTypeToConstruct = map[types.MetricType]string{
-	types.CPUUtilization:      "RC",
-	types.MemoryUtilization:   "RC",
-	types.CPUThrottleRatio:    "RC",
-	types.BlockIOUtil:         "RC",
-	types.EnergyJoules:        "RC",
-	types.PodStartupMs:        "PS",
-	types.SchedulingLatencyMs: "PS",
-	types.NetworkRxBps:        "CO",
-	types.NetworkTxBps:        "CO",
-	types.NetworkLossRatio:    "CO",
-	types.NetworkLatencyMs:    "CO",
+// MetricRouter resolves a MetricType to the construct it observes. The routing
+// table is domain data — it lives in domain_spec.json alongside the constructs
+// and propositions — so the Bridge takes a router rather than carrying a table
+// of its own. *domain.Spec satisfies this.
+//
+// This indirection is the whole point: a deployment that declares a new
+// construct and routes a metric to it needs no change here, and a reader can
+// tell what a running agent routes by reading its specification instead of its
+// source.
+type MetricRouter interface {
+	ConstructForMetric(metricType string) (string, bool)
 }
 
-// ConstructForMetric returns the primary construct for a MetricType, and
-// whether the type is known. Used by callers (e.g. IngestSample) that need
-// the construct ID without running the full Bridge.
-func ConstructForMetric(mt types.MetricType) (string, bool) {
-	c, ok := metricTypeToConstruct[mt]
-	return c, ok
+// SpecCarrier is implemented by ontologies built from a domain specification.
+// The facade uses it to recover the routing table without threading the spec
+// through every constructor.
+type SpecCarrier interface {
+	Spec() *domain.Spec
 }
 
 // edgeUpdater is the slim subset of UpdaterContract the Bridge depends on.
@@ -42,9 +38,9 @@ type edgeUpdater interface {
 // by the metric type and the ontology's current backbone.
 //
 // Behavior:
-//   - The sample's MetricType is mapped to its primary construct via
-//     metricTypeToConstruct. Unknown types return (nil, nil) silently —
-//     a no-op for forward compatibility.
+//   - The sample's MetricType is mapped to its construct via the router, i.e.
+//     the loaded domain specification. Unrouted types are a silent no-op, for
+//     forward compatibility with collectors ahead of the specification.
 //   - ontology.Relationships(construct) returns every proposition touching
 //     that construct (incoming OR outgoing). Bridge calls UpdateEdge once per
 //     unique (from, to) endpoint pair — the Updater fans out internally to
@@ -53,15 +49,18 @@ type edgeUpdater interface {
 //     so callers can log without short-circuiting the rest of the sample.
 func Bridge(
 	sample *types.MetricSample,
+	router MetricRouter,
 	ontology contracts.OntologyContract,
 	updater edgeUpdater,
 ) error {
-	if sample == nil {
+	if sample == nil || router == nil {
 		return nil
 	}
-	construct, ok := metricTypeToConstruct[sample.MetricType]
+	construct, ok := router.ConstructForMetric(string(sample.MetricType))
 	if !ok {
-		// Unknown MetricType — Bridge silently ignores (per §5).
+		// The loaded specification routes no construct for this MetricType.
+		// Ignored rather than rejected, so a collector upgraded ahead of the
+		// specification still ingests.
 		return nil
 	}
 

@@ -47,7 +47,7 @@ func TestBridge_KnownMetricTypeUpdatesRelatedEdges(t *testing.T) {
 		EventID:       "evt-cpu-1",
 	}
 
-	if err := Bridge(sample, ontology, upd); err != nil {
+	if err := Bridge(sample, mustSpec(), ontology, upd); err != nil {
 		t.Fatalf("Bridge: unexpected error %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestBridge_UnknownMetricTypeIsSilentlyIgnored(t *testing.T) {
 		EventID:    "evt-x",
 	}
 
-	if err := Bridge(sample, ontology, upd); err != nil {
+	if err := Bridge(sample, mustSpec(), ontology, upd); err != nil {
 		t.Fatalf("Bridge: unexpected error %v", err)
 	}
 	if len(upd.calls) != 0 {
@@ -126,7 +126,7 @@ func TestBridge_ConflictPairIsUpdatedOnce(t *testing.T) {
 		EventID:    "evt-pair",
 	}
 
-	if err := Bridge(sample, ontology, upd); err != nil {
+	if err := Bridge(sample, mustSpec(), ontology, upd); err != nil {
 		t.Fatalf("Bridge: unexpected error %v", err)
 	}
 
@@ -138,5 +138,57 @@ func TestBridge_ConflictPairIsUpdatedOnce(t *testing.T) {
 	}
 	if rcPsCount != 1 {
 		t.Errorf("RC→PS UpdateEdge call count: got %d, want 1 (conflict pair P2/P3 must collapse)", rcPsCount)
+	}
+}
+
+// TestBridge_RoutesThroughTheSpecNotAHardcodedTable is a regression guard. The
+// Bridge used to carry its own MetricType→construct map, so domain_spec.json's
+// metric_routing block had no effect on ingestion: a deployment could declare a
+// route and watch it be ignored, and metric types added to pkg/types were
+// unroutable until someone remembered to edit the Bridge too. Routing a metric
+// the spec knows and one it does not, through a spec-derived router, pins the
+// current behaviour.
+func TestBridge_RoutesThroughTheSpecNotAHardcodedTable(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+
+	// Every routed metric type in the spec must reach at least one edge.
+	for _, route := range spec.MetricRouting {
+		upd := &fakeUpdater{}
+		sample := &types.MetricSample{
+			NodeID:     "node_1",
+			MetricType: types.MetricType(route.MetricType),
+			Value:      0.5,
+			EventID:    "evt-" + route.MetricType,
+		}
+		if err := Bridge(sample, spec, ontology, upd); err != nil {
+			t.Fatalf("Bridge(%s): %v", route.MetricType, err)
+		}
+		if len(upd.calls) == 0 {
+			t.Errorf("%s routes to %s in the spec but reached no edge",
+				route.MetricType, route.ConstructID)
+			continue
+		}
+		for _, c := range upd.calls {
+			if c.from != route.ConstructID && c.to != route.ConstructID {
+				t.Errorf("%s routed to %s but updated edge %s→%s, which does not touch it",
+					route.MetricType, route.ConstructID, c.from, c.to)
+			}
+		}
+	}
+
+	// A type the spec does not route reaches nothing, even if pkg/types names it.
+	upd := &fakeUpdater{}
+	sample := &types.MetricSample{
+		NodeID:     "node_1",
+		MetricType: types.MetricType("unrouted_metric_type"),
+		Value:      0.5,
+		EventID:    "evt-unrouted",
+	}
+	if err := Bridge(sample, spec, ontology, upd); err != nil {
+		t.Fatalf("Bridge(unrouted): %v", err)
+	}
+	if len(upd.calls) != 0 {
+		t.Errorf("unrouted metric type reached %d edges; want 0", len(upd.calls))
 	}
 }

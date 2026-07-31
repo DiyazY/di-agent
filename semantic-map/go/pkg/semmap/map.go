@@ -134,12 +134,27 @@ func (m *SemanticMap) Ingest(fromID, toID string, observation float64, eventID s
 // caller can decide whether to keep looping; the Bridge itself processes
 // every reachable edge regardless of individual failures.
 func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
-	if err := Bridge(sample, m.ontology, m.updater); err != nil {
+	router := m.router()
+	if err := Bridge(sample, router, m.ontology, m.updater); err != nil {
 		return err
 	}
-	if m.proposer != nil {
-		if construct, ok := ConstructForMetric(sample.MetricType); ok {
+	if m.proposer != nil && router != nil {
+		if construct, ok := router.ConstructForMetric(string(sample.MetricType)); ok {
 			_ = m.proposer.ObserveConstruct(construct, sample.Value)
+		}
+	}
+	return nil
+}
+
+// router returns the metric routing table for this map, which is the loaded
+// domain specification. Nil when the ontology carries no specification, in
+// which case ingestion is a no-op rather than a guess: routing a metric to a
+// construct the deployment did not declare would put evidence on an edge the
+// operator never asked to be tracked.
+func (m *SemanticMap) router() MetricRouter {
+	if c, ok := m.ontology.(SpecCarrier); ok {
+		if s := c.Spec(); s != nil {
+			return s
 		}
 	}
 	return nil
