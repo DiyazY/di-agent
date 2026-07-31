@@ -123,19 +123,32 @@ type OutcomeSimulation struct {
 // ── Collector types ───────────────────────────────────────────────────────────
 
 // MetricType is the semantic kind of an observation emitted by a collector.
-// Values are fixed — collectors must normalize raw source data to these units:
 //
-//	CPUUtilization       fraction [0,1]  CPU quota consumed
-//	MemoryUtilization    fraction [0,1]  memory limit consumed
-//	CPUThrottleRatio     fraction [0,1]  scheduling periods throttled
-//	BlockIOUtil          fraction [0,1]  block I/O bandwidth consumed
-//	PodStartupMs         milliseconds    pod creation → running
-//	SchedulingLatencyMs  milliseconds    pod pending → scheduled
-//	NetworkRxBps         bytes/sec       receive throughput
-//	NetworkTxBps         bytes/sec       transmit throughput
-//	NetworkLossRatio     fraction [0,1]  packet loss
-//	NetworkLatencyMs     milliseconds    RTT to a peer node
-//	EnergyJoules         joules          energy in the sample interval
+// Collectors must normalize every value to a fraction on [0,1] before emitting,
+// against whatever reference the deployment considers saturation — link capacity
+// for throughput, a latency budget for durations, an energy budget for joules.
+// This is a correctness requirement, not a convention: edge weights are Bernoulli
+// parameters, so an out-of-range value is clipped and the affected edge stops
+// responding to evidence while the aggregates keep looking healthy.
+//
+//	CPUUtilization       CPU quota consumed
+//	MemoryUtilization    memory limit consumed
+//	CPUThrottleRatio     scheduling periods throttled
+//	BlockIOUtil          block I/O bandwidth consumed
+//	CPUPressureRatio     PSI cpu.some stall fraction
+//	IOPressureRatio      PSI io.some stall fraction
+//	PodStartupMs         pod creation → running, against a budget
+//	SchedulingLatencyMs  pod pending → scheduled, against a budget
+//	NetworkRxBps         receive throughput, against link capacity
+//	NetworkTxBps         transmit throughput, against link capacity
+//	NetworkLossRatio     packet loss
+//	NetworkLatencyMs     RTT to a peer node, against a budget
+//	EnergyJoules         energy in the sample interval, against a budget
+//
+// Which construct each type routes to is declared in domain_spec.json, not here:
+// these constants exist so collectors and tests can name a type without a string
+// literal. A type the loaded specification does not route is ignored rather than
+// rejected, so a collector upgraded ahead of the specification still ingests.
 type MetricType string
 
 const (
@@ -143,6 +156,8 @@ const (
 	MemoryUtilization   MetricType = "memory_utilization"
 	CPUThrottleRatio    MetricType = "cpu_throttle_ratio"
 	BlockIOUtil         MetricType = "block_io_util"
+	CPUPressureRatio    MetricType = "cpu_pressure_ratio"
+	IOPressureRatio     MetricType = "io_pressure_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"

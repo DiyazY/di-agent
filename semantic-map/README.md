@@ -33,9 +33,10 @@ For design rationale, contract decisions, language strategy, and research connec
 Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface) for the design.
 
 ```bash
-# 1. Start the daemon (edge-minimal profile, in-memory)
+# 1. Start the daemon (edge-minimal profile, in-memory).
+# -domain is required: the binary embeds no domain model.
 cd semantic-map/go
-go run ./cmd/agent -profile edge-minimal -addr :8080 &
+go run ./cmd/agent -profile edge-minimal -addr :8080 -domain ../domain_spec.json &
 ```
 
 ```bash
@@ -43,7 +44,7 @@ go run ./cmd/agent -profile edge-minimal -addr :8080 &
 curl -s localhost:8080/graph | jq '{constructs:(.constructs|length),
                                     propositions:(.propositions|length),
                                     edges:(.edges|length)}'
-# → {"constructs":7,"propositions":15,"edges":15}
+# → {"constructs":3,"propositions":4,"edges":4}   with the committed domain_spec.json
 
 curl -s 'localhost:8080/edges?from=RC&to=PS' | jq 'length'
 # → 2  (P2 and P3 — the multigraph conflict pair)
@@ -78,6 +79,11 @@ Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and head
 
 ```
 semantic-map/
+│
+├── domain_spec.json            THE DOMAIN MODEL — constructs, propositions, metric routing,
+│                               adjustment policy, tuner intent rules. The daemon loads this
+│                               at startup (-domain) and refuses to run without it; no
+│                               construct or proposition identifier exists in any binary.
 │
 │  ── Python layer (specification + cloud-full) ──────────────────
 │
@@ -133,7 +139,8 @@ semantic-map/
     │   │   └── openai.go       OpenAI-compatible client; planner→answer→critic loop
     │   ├── semmap/
     │   │   ├── map.go          SemanticMap Go facade (includes peer registry + client)
-    │   │   └── bridge.go       MetricType → construct routing (stateless, NOT a contract)
+    │   │   └── bridge.go       MetricType → construct fan-out (stateless, NOT a contract;
+    │   │                       the routing table itself is spec data)
     │   └── profiles/           Profile factory
     │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
     │
@@ -143,12 +150,14 @@ semantic-map/
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
     │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── storage.go      InMemoryStorage        (multigraph, keyed by from→to:propID)
-    │       ├── ontology.go     StaticDiSelectOntology (7 constructs + P1–P15; live audit log)
+    │       ├── ontology.go     SpecOntology           (constructs + propositions from domain_spec.json;
+    │       │                                           live audit log)
     │       ├── updater.go      EMAUpdater             (idempotency, reset; multigraph-aware)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips deprecated)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
-    │       ├── tuner.go        RuleBasedTuner + DisabledTuner (7 intent patterns; default via -tuner=true)
+    │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
+    │       │                                           default via -tuner=true)
     │       └── tests/
     │           ├── compliance_test.go   Runs all Go compliance suites
     │           └── scenarios_test.go    End-to-end narrated scenarios (ColdStart, Convergence,
@@ -384,11 +393,23 @@ scp agent-arm64 pi@192.168.1.x:/usr/local/bin/agent
 
 # Run on RPi4
 agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
+  -domain /etc/semantic-map/domain_spec.json \
   -priors /etc/semantic-map/prior_weights.json -kd k0s
 
 # Run locally (development)
-go run ./cmd/agent -profile edge-minimal
+go run ./cmd/agent -profile edge-minimal -domain ../domain_spec.json
 ```
+
+`-domain` is mandatory. The daemon carries no constructs, propositions, metric
+routes, adjustment bounds or tuner keywords of its own, so without a
+specification there is no graph to serve and it exits with
+`no domain spec: pass -domain <path> to load one` rather than starting on a
+built-in default. Deploy the specification alongside the binary and treat it as
+part of the release: two daemons on the same binary and different specifications
+are different agents. The daemon also rejects positional arguments, because Go's
+`flag` package stops parsing at the first one — `-proposer false` (a space
+instead of `=`) silently discarded every flag after it and cost this project a
+full round of invalid measurements.
 
 ### Replay (Netdata parquet datasets)
 
@@ -424,8 +445,14 @@ single-row normalizer per triple):
 | --- | --- | --- | --- |
 | `system.cpu` | `idle` | `cpu_utilization` | `1.0 - value/100.0`, clipped to `[0,1]` |
 | `system.ram` | `used` | `memory_utilization` | `value / hostRAM`, host total from testbed (master=64 GiB, RPi4=8 GiB) |
-| `system.net` | `InOctets` | `network_rx_bps` | `value * 125` (kilobits/s → bytes/s) |
-| `system.net` | `OutOctets` | `network_tx_bps` | `|value| * 125` (Netdata reports outbound as signed-negative) |
+| `system.net` | `InOctets` | `network_rx_bps` | `value * 125 / 125e6` — kilobits/s → bytes/s → fraction of a 1 Gbps link |
+| `system.net` | `OutOctets` | `network_tx_bps` | `|value| * 125 / 125e6` (Netdata reports outbound as signed-negative) |
+
+Every normalizer lands on `[0,1]`, which is required rather than tidy: the
+divergence measure is defined on that interval and an out-of-range value clips,
+freezing the affected edge while aggregates keep looking healthy. The reference
+capacity (1 Gbps) is a property of the testbed, so a deployment on a different
+link must change it or its network-derived weights will not be comparable.
 
 Rows outside the table (Netdata's own `netdata.workers.*` self-monitoring,
 disk/inode contexts, per-core `cpu.cpu` channels, …) are silently dropped
@@ -573,11 +600,29 @@ python -m semantic_map.prior_init.pipeline \
   --out prior_weights.json
 ```
 
-The pipeline reads publication constants (J/pod, mJ/op, CIS scores, overhead fractions) and writes:
+The pipeline reads publication constants (J/pod, mJ/op, overhead fractions, throughput and latency) for the constructs a running cluster exhibits and writes:
 
 - `propositions[P*].prior_strength` — one calibrated λ per proposition (global)
-- `distribution_edge_weights[kd][edge_key].prior_weight` — per-KD edge weights (5 KDs × 15 edges)
+- `distribution_edge_weights[kd][edge_key].prior_weight` — per-KD edge weights, one per proposition in scope
 - `distribution_construct_scores[kd][construct]` — per-KD construct scores (informational)
+- `constructs` and `scope` — which constructs the calibration covers and why, so a
+  reader can tell the artefact's scope from the artefact
+
+Every emitted prior is clamped to the specification's `[global_floor,
+global_ceiling]` — the same bounds the operator tuner enforces, so the pipeline
+cannot emit a value an operator would be forbidden to set. The floor also keeps
+the divergence measure meaningful: Bernoulli KL grows without bound as the prior
+approaches zero, so a zero-valued prior would report the degeneracy of the prior
+rather than the informativeness of the evidence.
+
+Propositions are included only when *both* endpoints are constructs the pipeline
+can calibrate from telemetry, which is the same rule the daemon's specification
+applies (ARCHITECTURE.md §2). An earlier version calibrated all seven Di-Select
+constructs, including from a third-party CIS scanner, a GitHub star count, and
+setup time in human hours; min-max normalisation over five distributions put the
+worst performer on each dimension at exactly zero, so those magnitudes encoded a
+rank within the sample rather than a measurement, and adding a sixth distribution
+would have rescaled every prior.
 
 ### Loading priors at startup
 
@@ -593,7 +638,15 @@ agent -priors /etc/semantic-map/prior_weights.json -kd k0s
 
 If the supplied `-kd` is not in the file's `distributions` list, the daemon refuses to start.
 
-The current `prior_weights.json` was generated on 2026-05-12. Re-run if new empirical papers are incorporated or the KD set changes.
+The calibrated weight is written into both layers — the storage edge the Reasoner
+reads and the ontology's proposition strength `GET /propositions` reports. They
+must agree: when they did not, the exposed prior was one the agent never used and
+the first operator tune recorded its transition from that unused number.
+`TestBuildKeepsOntologyAndStorageInAgreement` pins this for all five KDs.
+
+Re-run the pipeline if new empirical papers are incorporated, if the KD set
+changes, or if `domain_spec.json` changes which propositions are in scope — the
+file's `scope` block records what the current artefact covers.
 
 ---
 
@@ -756,15 +809,15 @@ Any backend that speaks the OpenAI `/v1/chat/completions` surface works — `lla
 
 ```json
 {
-  "answer": "P10 (PS→RC, direction −) dominates with effective 0.62 vs prior 0.645, followed by P8 (MU→RC, direction −) at effective 0.30. Both have 15 observations at confidence 0.60.",
+  "answer": "P10 (PS→RC, direction −) dominates with effective 0.62 vs prior 0.645, followed by P3 (RC→PS, direction +) at effective 0.30. Both have 15 observations at confidence 0.03.",
   "citations": [
-    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.60, "n_observations": 15},
-    {"kind": "edge", "id": "P8",  "ema_weight": 0.30, "prior_weight": 0.316, "confidence": 0.60, "n_observations": 15}
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.03, "n_observations": 15},
+    {"kind": "edge", "id": "P3",  "ema_weight": 0.30, "prior_weight": 0.406, "confidence": 0.03, "n_observations": 15}
   ],
   "confidence": "high",
   "proposal": null,
   "tool_trace": [
-    {"name": "get_cost",  "arguments": {"node_id":"master","task_type":"pod-scheduling"}, "result_digest": "cost node=master task=pod-scheduling rc=0.6912 conf=0.600"},
+    {"name": "get_cost",  "arguments": {"node_id":"master","task_type":"pod-scheduling"}, "result_digest": "cost node=master task=pod-scheduling rc=0.6912 conf=0.030"},
     {"name": "get_edges", "arguments": {"to":"RC"}, "result_digest": "edges from= to=RC count=5"}
   ],
   "model_name": "qwen2.5:7b-instruct",
