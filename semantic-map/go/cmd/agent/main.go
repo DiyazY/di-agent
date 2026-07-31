@@ -90,6 +90,11 @@ func main() {
 		"reject observations of properties that were never declared. Off by default: a "+
 			"model of a changing system that cannot represent something new is a model "+
 			"of the system as it was when someone wrote it down.")
+	sweepInterval := flag.Duration("sweep-interval", 0,
+		"how often to apply lifecycle transitions. 0 derives it from -stale-after "+
+			"(half, floored at 5s). Without a sweep, staleness and retirement only "+
+			"happen when something asks for them, which makes -stale-after a setting "+
+			"that describes nothing.")
 	journalSize := flag.Int("journal-size", 0,
 		"entries of change and decision history to hold in memory (0 = default)")
 	ingestScope := flag.String("ingest-scope", "self",
@@ -244,13 +249,9 @@ func main() {
 		Alpha:                   *alpha,
 		AdmitUnknown:            !*noAdmit,
 	}, statemap.NewJournal(*journalSize))
-	if n, err := seedStateFromSpec(state, spec); err != nil {
-		log.Fatalf("failed to seed the state model: %v", err)
-	} else {
-		log.Printf("state model: %d properties seeded from the domain spec, "+
-			"admission of undeclared properties %s", n,
-			map[bool]string{true: "on", false: "off"}[!*noAdmit])
-	}
+	// Seeding happens inside profiles.Build, which holds the calibration as well as
+	// the specification, so relationships get this cluster's priors rather than a
+	// placeholder.
 
 	cfg.StateMap = state
 
@@ -298,6 +299,11 @@ func main() {
 	// collector AND the interval is positive. Both must hold — a configured
 	// collector with interval=0 is a deliberately disabled loop (useful for
 	// tests and for nodes that only accept manual POST /ingest).
+	// Lifecycle is time-based, so something has to advance it. Without this loop
+	// -stale-after and -retire-after would only take effect when an operator posted
+	// /state/sweep, and a quiet property would keep being reported as current.
+	startSweepLoop(ctx, state, sweepEvery(*sweepInterval, *staleAfter))
+
 	startCollectionLoop(ctx, sm, collector, *collectInterval)
 
 	quit := make(chan os.Signal, 1)
@@ -563,4 +569,49 @@ func orDefault(v, def int) int {
 		return def
 	}
 	return v
+}
+
+// sweepEvery resolves the sweep cadence: the explicit interval when given, otherwise
+// half the staleness window so a property is marked within one window of going quiet.
+// Floored at five seconds — a sweep is a lock and a map walk, and running it more
+// often than that costs more than the freshness it buys.
+func sweepEvery(explicit, staleAfter time.Duration) time.Duration {
+	if explicit > 0 {
+		return explicit
+	}
+	d := staleAfter / 2
+	if d < 5*time.Second {
+		d = 5 * time.Second
+	}
+	return d
+}
+
+// startSweepLoop applies lifecycle transitions on a ticker until ctx is cancelled.
+// Transitions are logged because a property going stale is a change in what the agent
+// claims to know, and that should be visible in the daemon's output rather than only
+// in the journal.
+func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duration) {
+	if state == nil || every <= 0 {
+		return
+	}
+	log.Printf("lifecycle sweep: every %s", every)
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				stale, retired := state.Sweep()
+				if len(stale) > 0 {
+					log.Printf("state model: %d properties went stale: %v", len(stale), stale)
+				}
+				if len(retired) > 0 {
+					log.Printf("state model: %d properties retired for silence: %v",
+						len(retired), retired)
+				}
+			}
+		}
+	}()
 }

@@ -96,34 +96,39 @@ func (p *pairTracker) record(node, construct string, obs constructObservation) m
 // it is deterministic: replaying a batch produces the same pair identities and
 // the updater's idempotency rule drops them.
 //
-// Returns the number of paired updates applied, which is zero — legitimately —
-// whenever the counterpart construct has not been observed recently. The caller
-// must not treat that as an error: it is the normal state early in a run and
-// whenever one collector is slower than the pairing window.
+// Returns the construct pairs it updated, which is empty — legitimately — whenever
+// the counterpart construct has not been observed recently. The caller must not treat
+// that as an error: it is the normal state early in a run and whenever one collector
+// is slower than the pairing window.
+//
+// The pairs are returned rather than counted so the caller can propagate the new
+// estimates into the state model. Without that the state model's relationships would
+// sit at their seeded priors forever, and every sensitivity the reasoner reports
+// would be prior-derived no matter how long the agent ran.
 func ingestPaired(
 	sample *types.MetricSample,
 	construct string,
 	ontology contracts.OntologyContract,
 	updater contracts.RelationalUpdaterContract,
 	tracker *pairTracker,
-) (int, error) {
+) ([]ConstructPair, error) {
 	fresh := tracker.record(sample.NodeID, construct, constructObservation{
 		value:   sample.Value,
 		ts:      sample.TimestampUnix,
 		eventID: sample.EventID,
 	})
 	if len(fresh) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
 	props, err := ontology.Relationships(construct)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	type pair struct{ from, to string }
 	seen := make(map[pair]struct{}, len(props))
-	applied := 0
+	var applied []ConstructPair
 	var firstErr error
 
 	// Deterministic order so a paired event ID does not depend on map iteration.
@@ -173,10 +178,14 @@ func ingestPaired(
 			}
 			continue
 		}
-		applied++
+		applied = append(applied, ConstructPair{From: prop.FromConstruct, To: prop.ToConstruct})
 	}
 	return applied, firstErr
 }
+
+// ConstructPair names the endpoints of a relationship that received a paired
+// observation.
+type ConstructPair struct{ From, To string }
 
 // pairEventID builds a deterministic identity for a paired observation. The two
 // contributing IDs are ordered lexicographically so the same physical pair gets

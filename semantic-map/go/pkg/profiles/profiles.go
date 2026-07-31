@@ -228,6 +228,13 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	}
 	switch profileName {
 	case "edge-minimal":
+		// Seed the state model here, where both the specification and the calibration are
+		// in hand: relationships get this cluster's priors instead of a placeholder.
+		if cfg.StateMap != nil {
+			if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
+				return nil, nil, err
+			}
+		}
 		sm, coll := buildEdgeMinimal(cfg, pw)
 		return sm, coll, nil
 	default:

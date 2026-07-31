@@ -2,13 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
@@ -355,85 +353,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 	})
 }
 
-// seedStateFromSpec fills the state model with the properties and relationships the
-// domain specification declares, and returns how many properties were created.
-//
-// Two layers come out of one specification. Each routed metric becomes an OBSERVED
-// property — the thing a collector reports. Each construct becomes a DERIVED
-// property whose members are the metrics routed to it, so the framework's
-// evaluation constructs are summaries over real observations rather than a parallel
-// vocabulary. Each proposition becomes a relationship between two derived
-// properties, carrying its calibrated strength as a seeded prior.
-//
-// Seeding is not required for the model to work: an agent started against a
-// specification that declares nothing still admits properties as telemetry arrives.
-// It exists so that a fresh agent shows the shape it is about to fill in, and so
-// that prior knowledge about how constructs relate is present before the system has
-// been observed.
-func seedStateFromSpec(sm *statemap.Map, spec *domain.Spec) (int, error) {
-	if sm == nil || spec == nil {
-		return 0, nil
-	}
-
-	members := map[string][]string{}
-	for _, route := range spec.MetricRouting {
-		if err := sm.DeclareProperty(statemap.Property{
-			ID:     route.MetricType,
-			Kind:   statemap.Observed,
-			Unit:   route.Unit,
-			Range:  route.Range,
-			Source: "domain spec routing → " + route.ConstructID,
-		}); err != nil {
-			return 0, fmt.Errorf("declaring %s: %w", route.MetricType, err)
-		}
-		members[route.ConstructID] = append(members[route.ConstructID], route.MetricType)
-	}
-
-	for _, c := range spec.Constructs {
-		mem := members[c.ConstructID]
-		if len(mem) == 0 {
-			// A construct with no routed metric would be a summary of nothing. Skipping
-			// it keeps the model to what the system can actually exhibit, and the count
-			// returned to the caller makes the omission visible.
-			continue
-		}
-		if err := sm.DeclareProperty(statemap.Property{
-			ID:      c.ConstructID,
-			Kind:    statemap.Derived,
-			Members: mem,
-			Unit:    "fraction",
-			Range:   [2]float64{0, 1},
-			Source:  "domain spec construct: " + c.Name,
-		}); err != nil {
-			return 0, fmt.Errorf("declaring construct %s: %w", c.ConstructID, err)
-		}
-	}
-
-	for _, prop := range spec.Propositions {
-		sign := 1
-		if prop.Direction == "negative" {
-			sign = -1
-		}
-		// The proposition ID is the label, which is what lets two mechanisms relate
-		// the same pair in opposite directions without one erasing the other.
-		if err := sm.DeclareRelationship(statemap.Relationship{
-			From: prop.FromConstruct, To: prop.ToConstruct,
-			Label: prop.PropositionID, Sign: sign,
-			Prior: 0.5, Provenance: statemap.Seeded,
-			Note: prop.Description,
-		}); err != nil {
-			// A proposition whose endpoints are not both present is skipped rather than
-			// fatal: the specification may declare a construct this deployment cannot
-			// observe, and refusing to start would make an unobservable claim block an
-			// otherwise working agent.
-			continue
-		}
-	}
-
-	return sm.Census().PropertiesTotal, nil
-}
-
-// writeErrorWithBody emits a JSON error that carries extra fields, used where the
+// writeErrorWithBody emits a JSON error carrying extra fields, used where the
 // failure itself is worth tracing.
 func writeErrorWithBody(w http.ResponseWriter, status int, body map[string]any) {
 	w.Header().Set("Content-Type", "application/json")

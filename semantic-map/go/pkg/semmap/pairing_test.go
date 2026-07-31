@@ -2,9 +2,12 @@ package semmap
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/domain"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -151,12 +154,12 @@ func TestIngestPaired_SkipsEdgesWithNoFreshCounterpart(t *testing.T) {
 
 	stale := &types.MetricSample{NodeID: "n1", MetricType: types.CPUPressureRatio,
 		Value: 0.07, TimestampUnix: 1060, EventID: "ps-late"}
-	n, err := ingestPaired(stale, "PS", ontology, upd, tracker)
+	pairs, err := ingestPaired(stale, "PS", ontology, upd, tracker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 || len(upd.calls) != 0 {
-		t.Errorf("a counterpart 60s stale in a 5s window produced %d paired updates", n)
+	if len(pairs) != 0 || len(upd.calls) != 0 {
+		t.Errorf("a counterpart 60s stale in a 5s window produced %d paired updates", len(pairs))
 	}
 }
 
@@ -267,4 +270,136 @@ func TestIngestSample_RecordsConstructStateInBothModes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRelationalObservationsReachTheStateModel closes the gap that made the state
+// model's relationships permanently prior-derived: nothing propagated the learned
+// estimate into it, so confidence stayed at 0 however long the agent ran, and every
+// sensitivity the reasoner reported came from the seed.
+func TestRelationalObservationsReachTheStateModel(t *testing.T) {
+	spec := mustSpec()
+	storage := minimal.NewInMemoryStorage()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	seedForPairing(t, storage, spec)
+
+	state := statemap.New(statemap.Config{ConvergenceObservations: 10}, statemap.NewJournal(0))
+	if err := seedStateForPairing(state, spec); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := New(storage, ontology,
+		minimal.NewRelationalEMAUpdater(storage, 0.5, 10, 4, 30),
+		minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil),
+		minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	// Drive correlated observations of two constructs so pairs form.
+	rcMetric, psMetric := metricFor(spec, "RC"), metricFor(spec, "PS")
+	if rcMetric == "" || psMetric == "" {
+		t.Skip("spec routes no metric to RC or PS")
+	}
+	for i := 0; i < 40; i++ {
+		x := float64(i%10) / 10.0
+		ts := int64(1700000000 + i*5)
+		for _, s := range []*types.MetricSample{
+			{NodeID: "n1", MetricType: types.MetricType(rcMetric), Value: x,
+				TimestampUnix: ts, EventID: "rc-" + itoa(i)},
+			{NodeID: "n1", MetricType: types.MetricType(psMetric), Value: 0.9*x + 0.02,
+				TimestampUnix: ts + 2, EventID: "ps-" + itoa(i)},
+		} {
+			if err := sm.IngestSample(s); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	var moved int
+	for _, r := range state.Relationships("", "") {
+		if r.NObservations > 0 {
+			moved++
+			if r.Provenance != statemap.Learned {
+				t.Errorf("%s has %d observations but provenance %s; a strength that came "+
+					"from this system must not still claim to be seeded", r.ID, r.NObservations, r.Provenance)
+			}
+			if r.Confidence == 0 {
+				t.Errorf("%s observed %d times but reports zero confidence", r.ID, r.NObservations)
+			}
+		}
+	}
+	if moved == 0 {
+		t.Fatal("no state-model relationship received an observation, so its strength " +
+			"can only ever be the seeded prior")
+	}
+}
+
+func itoa(i int) string { return strconv.Itoa(i) }
+
+// metricFor returns a metric the spec routes to one construct, or "".
+func metricFor(spec *domain.Spec, construct string) string {
+	for _, r := range spec.MetricRouting {
+		if r.ConstructID == construct {
+			return r.MetricType
+		}
+	}
+	return ""
+}
+
+// seedForPairing puts one edge per proposition into storage, as the profile does.
+func seedForPairing(t *testing.T, s *minimal.InMemoryStorage, spec *domain.Spec) {
+	t.Helper()
+	// Nodes first: UpdateNode writes the construct's own descriptor, and it errors on
+	// a construct storage has never seen.
+	for _, c := range spec.Constructs {
+		if err := s.PutNode(&types.NodeDescriptor{
+			NodeID: c.ConstructID, ConstructType: c.Name, PriorValue: 0.5, EMAValue: 0.5,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range spec.Propositions {
+		dir := types.Positive
+		if p.Direction == "negative" {
+			dir = types.Negative
+		}
+		if err := s.PutEdge(&types.EdgeDescriptor{
+			FromID: p.FromConstruct, ToID: p.ToConstruct, PropositionID: p.PropositionID,
+			Direction: dir, PriorWeight: 0.5, EMAWeight: 0.5,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// seedStateForPairing mirrors the profile's state seeding closely enough for this test.
+func seedStateForPairing(sm *statemap.Map, spec *domain.Spec) error {
+	members := map[string][]string{}
+	for _, r := range spec.MetricRouting {
+		if err := sm.DeclareProperty(statemap.Property{
+			ID: r.MetricType, Kind: statemap.Observed, Range: r.Range,
+		}); err != nil {
+			return err
+		}
+		members[r.ConstructID] = append(members[r.ConstructID], r.MetricType)
+	}
+	for _, c := range spec.Constructs {
+		if len(members[c.ConstructID]) == 0 {
+			continue
+		}
+		if err := sm.DeclareProperty(statemap.Property{
+			ID: c.ConstructID, Kind: statemap.Derived, Members: members[c.ConstructID],
+		}); err != nil {
+			return err
+		}
+	}
+	for _, p := range spec.Propositions {
+		sign := 1
+		if p.Direction == "negative" {
+			sign = -1
+		}
+		_ = sm.DeclareRelationship(statemap.Relationship{
+			From: p.FromConstruct, To: p.ToConstruct, Label: p.PropositionID,
+			Sign: sign, Prior: 0.5, Provenance: statemap.Seeded,
+		})
+	}
+	return nil
 }

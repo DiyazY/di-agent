@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
@@ -22,7 +23,10 @@ func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 		ConvergenceObservations: 4,
 		AdmitUnknown:            true,
 	}, statemap.NewJournal(0))
-	if _, err := seedStateFromSpec(sm, spec); err != nil {
+	// Seeded without a calibration file: relationships take the neutral placeholder,
+	// which is what these tests are about. The calibrated path is covered in
+	// pkg/profiles, where the priors live.
+	if _, err := profiles.SeedStateMap(sm, spec, "", ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	mux := http.NewServeMux()
