@@ -132,13 +132,6 @@ type Config struct {
 	PairMinSupport int
 	PairWindow     int
 
-	// MachineClass names the hardware class this agent runs on, e.g. control-plane
-	// or worker. When set, seeding prefers the class-specific priors in
-	// prior_weights.json over the class-averaged per-cluster ones. Empty keeps the
-	// per-cluster table, which is the right default for a deployment whose
-	// hardware the calibration never characterised.
-	MachineClass string
-
 	// AcceptForeignSamples lets this agent ingest telemetry labelled with other
 	// machines' IDs into its own graph. The map is node-local by design (one agent
 	// per machine, its graph holding that machine's evidence), so the default is
@@ -169,25 +162,6 @@ type priorWeightsFile struct {
 	Distributions           []string                        `json:"distributions"`
 	Propositions            map[string]propositionPrior     `json:"propositions"`
 	DistributionEdgeWeights map[string]map[string]edgePrior `json:"distribution_edge_weights"`
-
-	// MachineClassEdgeWeights is keyed [kd][machine_class][edge_key]. A cluster's
-	// machines are not interchangeable — an x86 control-plane host and an ARM
-	// worker do not share a resource-to-pressure relation — and several of the
-	// calibration's source constants were measured on one class and previously
-	// applied to all of them. Where a class has no measurement for a construct the
-	// pipeline records the score as inherited rather than inventing one, so this
-	// table differs from DistributionEdgeWeights only on the edges the data can
-	// actually distinguish.
-	MachineClassEdgeWeights map[string]map[string]map[string]edgePrior `json:"machine_class_edge_weights"`
-
-	MachineClasses machineClassMeta `json:"machine_classes"`
-}
-
-type machineClassMeta struct {
-	Classes     []string                     `json:"classes"`
-	HostClasses map[string]string            `json:"host_classes"`
-	Provenance  map[string]map[string]string `json:"provenance"`
-	Rationale   string                       `json:"rationale"`
 }
 
 type propositionPrior struct {
@@ -235,10 +209,6 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	pw, err := loadPriorWeights(cfg.PriorWeightsPath)
 	if err != nil {
 		return nil, nil, err
-	}
-	if cfg.MachineClass != "" && !knownMachineClass(pw, cfg.MachineClass) {
-		return nil, nil, fmt.Errorf("machine class %q not declared in %s (declared: %v)",
-			cfg.MachineClass, cfg.PriorWeightsPath, pw.MachineClasses.Classes)
 	}
 	if err := validateKD(pw, cfg.KD); err != nil {
 		return nil, nil, err
@@ -342,7 +312,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		applyPriorWeights(ontology, pw)
 	}
 
-	seedFromOntology(storage, ontology, pw, cfg.KD, cfg.MachineClass)
+	seedFromOntology(storage, ontology, pw, cfg.KD)
 
 	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
 	sm.SetIdentity(cfg.NodeID, cfg.AcceptForeignSamples)
@@ -401,7 +371,6 @@ func seedFromOntology(
 	ontology *minimal.SpecOntology,
 	pw *priorWeightsFile,
 	kd string,
-	machineClass string,
 ) {
 	constructs, _ := ontology.Constructs()
 	for _, c := range constructs {
@@ -415,7 +384,7 @@ func seedFromOntology(
 		})
 	}
 
-	perKD := perKDEdgeWeights(pw, kd, machineClass)
+	perKD := perKDEdgeWeights(pw, kd)
 
 	propositions, _ := ontology.Propositions()
 	for _, p := range propositions {
@@ -439,42 +408,12 @@ func seedFromOntology(
 
 // perKDEdgeWeights returns the per-distribution edge map for kd, or nil if not
 // applicable. Callers must handle the nil case (fall back to global priors).
-// perKDEdgeWeights resolves the edge priors to seed with, preferring the
-// machine-class table when a class is named and the file carries one.
-//
-// Precedence is deliberate. A class-specific prior is the most specific claim the
-// calibration can make about the machine this agent runs on; the per-cluster
-// table is the next best, averaging over machine classes; and the global
-// proposition strength averages over clusters too. Falling back is normal, not
-// exceptional — the pipeline only distinguishes classes on the edges whose source
-// construct was measured per class.
-func perKDEdgeWeights(pw *priorWeightsFile, kd, machineClass string) map[string]edgePrior {
+// perKDEdgeWeights returns the calibrated edge priors for one cluster, or nil.
+func perKDEdgeWeights(pw *priorWeightsFile, kd string) map[string]edgePrior {
 	if pw == nil || kd == "" {
 		return nil
 	}
-	if machineClass != "" {
-		if byClass, ok := pw.MachineClassEdgeWeights[kd]; ok {
-			if w, ok := byClass[machineClass]; ok && len(w) > 0 {
-				return w
-			}
-		}
-	}
 	return pw.DistributionEdgeWeights[kd]
-}
-
-// knownMachineClass reports whether the file declares this class, so a typo in
-// -machine-class fails loudly instead of silently falling back to the
-// class-averaged priors.
-func knownMachineClass(pw *priorWeightsFile, machineClass string) bool {
-	if pw == nil || machineClass == "" {
-		return false
-	}
-	for _, c := range pw.MachineClasses.Classes {
-		if c == machineClass {
-			return true
-		}
-	}
-	return false
 }
 
 // edgeKey mirrors the key format produced by prior_init/pipeline.py:

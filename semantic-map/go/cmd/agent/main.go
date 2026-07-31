@@ -92,12 +92,6 @@ func main() {
 			"of the system as it was when someone wrote it down.")
 	journalSize := flag.Int("journal-size", 0,
 		"entries of change and decision history to hold in memory (0 = default)")
-	machineClass := flag.String("machine-class", "",
-		"hardware class this agent runs on (e.g. control-plane, worker) as declared in "+
-			"prior_weights.json. When set, seeding prefers the class-specific priors "+
-			"over the class-averaged per-cluster ones — several calibration constants "+
-			"were measured on one machine class and applying them to all of them "+
-			"misattributes the measurement. Empty keeps the per-cluster table.")
 	ingestScope := flag.String("ingest-scope", "self",
 		"self: ingest only this machine's samples, which is what a node-local map means. "+
 			"any: aggregate every machine's telemetry into one graph — correct for "+
@@ -193,10 +187,6 @@ func main() {
 	}
 	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
 		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
-	if *machineClass != "" {
-		log.Printf("machine class: %s (class-specific priors where the calibration "+
-			"distinguishes them)", *machineClass)
-	}
 	switch *ingestScope {
 	case "self":
 		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)
@@ -236,7 +226,6 @@ func main() {
 		UseRuleBasedTuner:    useTuner,
 		DomainSpec:           spec,
 		Relational:           relational,
-		MachineClass:         *machineClass,
 		AcceptForeignSamples: *ingestScope == "any",
 		PairWindowSeconds:    *pairWindow,
 		PairMinSupport:       *pairSupport,

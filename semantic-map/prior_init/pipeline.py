@@ -22,10 +22,9 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from .calibration import (compute_construct_scores, compute_construct_scores_by_class,
-                          compute_proposition_strengths, PROPOSITIONS, KDS,
-                          TELEMETRY_CONSTRUCTS, CONSTRUCT_META, DISELECT_PROPOSITIONS,
-                          MACHINE_CLASSES, HOST_CLASSES)
+from .calibration import (compute_construct_scores, compute_proposition_strengths,
+                          PROPOSITIONS, KDS, TELEMETRY_CONSTRUCTS, CONSTRUCT_META,
+                          DISELECT_PROPOSITIONS)
 
 
 # TELEMETRY_CONSTRUCTS is imported from calibration, which is the single source
@@ -112,49 +111,11 @@ def build_edge_weights(
     return edges
 
 
-def build_machine_class_edge_weights(
-    scores_by_class: dict[str, dict[str, dict[str, float]]],
-    proposition_strengths: dict[str, dict],
-) -> dict[str, dict[str, dict[str, dict]]]:
-    """
-    Build {kd: {machine_class: {edge_key: descriptor}}}.
-
-    Identical arithmetic to build_edge_weights, applied to the per-class construct
-    scores. A cluster's machines are not interchangeable — on this testbed an x86
-    control-plane host and ARM workers — and calibrating them alike misattributes
-    every measurement that was taken on one class to all of them.
-    """
-    out: dict[str, dict[str, dict[str, dict]]] = {}
-    for kd in KDS:
-        out[kd] = {}
-        for cls in MACHINE_CLASSES:
-            out[kd][cls] = {}
-            for prop_id, from_c, to_c, direction in PROPOSITIONS:
-                strength = proposition_strengths[prop_id]["prior_strength"]
-                if from_c in TELEMETRY_CONSTRUCTS:
-                    raw = scores_by_class[kd][cls][from_c] * strength
-                else:
-                    raw = strength
-                prior = round(min(EDGE_PRIOR_CEIL, max(EDGE_PRIOR_FLOOR, raw)), 4)
-                out[kd][cls][f"{from_c}→{to_c}:{prop_id}"] = {
-                    "from_id":        from_c,
-                    "to_id":          to_c,
-                    "proposition_id": prop_id,
-                    "direction":      direction,
-                    "prior_weight":   prior,
-                    "ema_weight":     prior,
-                    "calibrated":     from_c in TELEMETRY_CONSTRUCTS,
-                }
-    return out
-
-
 def run(root_dir: str | None = None, out_path: str | None = None) -> dict:
     """Execute the pipeline and return the output document."""
     construct_scores  = compute_construct_scores(root_dir)
     prop_strengths    = compute_proposition_strengths(construct_scores)
     edge_weights      = build_edge_weights(construct_scores, prop_strengths)
-    scores_by_class, class_provenance = compute_construct_scores_by_class(root_dir)
-    class_edge_weights = build_machine_class_edge_weights(scores_by_class, prop_strengths)
 
     # Summarise reversed propositions.  Overridden ones are noted separately.
     warnings = []
@@ -199,24 +160,6 @@ def run(root_dir: str | None = None, out_path: str | None = None) -> dict:
         "propositions":   prop_strengths,
         "distribution_construct_scores":  construct_scores,
         "distribution_edge_weights":      edge_weights,
-        "machine_classes": {
-            "rationale": (
-                "A cluster's machines are not interchangeable, and calibrating them "
-                "alike misattributes measurements. On this testbed the control-plane "
-                "host is an x86 NUC and the workers are ARM RPi4s. Each source "
-                "constant is routed to the class it was actually measured on; where a "
-                "class has no measurement the score is inherited from the cross-class "
-                "figure and said to be inherited, so the gap is visible rather than "
-                "hidden behind a uniform prior. Nothing is re-derived from the "
-                "telemetry the agent later learns from, which would make the prior a "
-                "summary of the evaluation data."
-            ),
-            "classes":     MACHINE_CLASSES,
-            "host_classes": HOST_CLASSES,
-            "provenance":  class_provenance,
-        },
-        "machine_class_construct_scores": scores_by_class,
-        "machine_class_edge_weights":     class_edge_weights,
     }
 
     # Write output
