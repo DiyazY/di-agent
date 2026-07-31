@@ -65,6 +65,32 @@ func TestFromRow_Table(t *testing.T) {
 			want: Mapping{MetricType: types.NetworkRxBps, Value: 1.0, Ok: true},
 		},
 
+		// ── PSI → PS constructs ─────────────────────────────────────────
+		// Netdata reports the fraction of the window during which at least one
+		// task stalled, as a percentage; /100 puts it on the shared [0,1] scale.
+		{
+			name: "cpu_some_pressure some 10 at 7.5% -> 0.075",
+			ctx:  "system.cpu_some_pressure", mid: "some 10", units: "percentage",
+			host: "node_1", value: 7.5,
+			want: Mapping{MetricType: types.CPUPressureRatio, Value: 0.075, Ok: true},
+		},
+		{
+			name: "io_some_pressure some 10 at 0% -> 0.0 (idle clusters sit here)",
+			ctx:  "system.io_some_pressure", mid: "some 10", units: "percentage",
+			host: "node_1", value: 0.0,
+			want: Mapping{MetricType: types.IOPressureRatio, Value: 0.0, Ok: true},
+		},
+		{
+			// The 60s and 300s windows average over intervals longer than most
+			// state transitions in these workloads, so mapping them would smooth
+			// away the variation the evidence layer exists to track. Unmapped is
+			// deliberate, not an omission.
+			name: "cpu_some_pressure some 60 is deliberately unmapped",
+			ctx:  "system.cpu_some_pressure", mid: "some 60", units: "percentage",
+			host: "node_1", value: 7.5,
+			want: Mapping{},
+		},
+
 		// ── system.net / OutOctets → network_tx_bps (signed, abs first) ──
 		{
 			name: "net OutOctets -8 kilobits/s -> 0.000008 (abs, normalized)",

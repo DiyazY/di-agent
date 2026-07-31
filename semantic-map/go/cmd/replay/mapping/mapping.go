@@ -139,6 +139,34 @@ func FromRow(chartContext, metricID, units, hostname string, value float64) Mapp
 			v = 1
 		}
 		return Mapping{MetricType: types.NetworkTxBps, Value: v, Ok: true}
+
+	case chartContext == "system.cpu_some_pressure" && metricID == "some 10" && units == "percentage":
+		// PSI: the percentage of the last 10 s during which at least one task was
+		// stalled waiting for CPU. /100 puts it on the [0,1] scale every other
+		// route uses.
+		//
+		// The "some 10" window is the right one of the three Netdata reports.
+		// "some 60" and "some 300" average over intervals longer than most of the
+		// state transitions these workloads produce, so they would smooth away the
+		// variation an evidence layer exists to track.
+		return Mapping{MetricType: types.CPUPressureRatio, Value: clip01(value / 100.0), Ok: true}
+
+	case chartContext == "system.io_some_pressure" && metricID == "some 10" && units == "percentage":
+		return Mapping{MetricType: types.IOPressureRatio, Value: clip01(value / 100.0), Ok: true}
 	}
 	return Mapping{}
+}
+
+// clip01 confines a normalized value to the domain edge weights live on. Every
+// mapping needs this: a value outside [0,1] is clipped by the divergence measure
+// downstream, at which point the affected edge stops responding to evidence while
+// aggregate curves stay smooth.
+func clip01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
