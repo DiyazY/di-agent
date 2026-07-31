@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -61,13 +63,19 @@ func newScenarioAgent(t *testing.T) *scenarioAgent {
 	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
+	// ONE state model for the facade and the reasoner. Two would let a facade-level
+	// retirement land in a model the reasoner never reads.
+	state := stateFor(t)
 	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
+	reasoner.AttachState(state)
 	proposer := minimal.NewDisabledProposer()
 
 	seedReasonerState(t, storage, ontology)
 
+	sm := semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
 	return &scenarioAgent{
-		sm:       semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner()),
+		sm:       sm,
 		storage:  storage,
 		ontology: ontology,
 		updater:  updater,
@@ -215,6 +223,7 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 
 	smK3s, _, err := profiles.Build("edge-minimal", profiles.Config{
 		DomainSpec: mustSpec(),
+		StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
 		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k3s",
 	})
@@ -223,6 +232,7 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	}
 	smK0s, _, err := profiles.Build("edge-minimal", profiles.Config{
 		DomainSpec: mustSpec(),
+		StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
 		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k0s",
 	})
@@ -266,8 +276,27 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 			costK3s.Confidence, costK0s.Confidence)
 	}
 
-	// A simulation applies the sensitivity to an assumed demand, which is where the
-	// calibration reaches a decision at cold start.
+	// A simulation applies the sensitivity to an assumed demand. It needs a non-zero
+	// level to act on: with every property unobserved the projection is negative for
+	// both agents and clamps to zero, so the difference in calibration is real but
+	// invisible in the reported cost. Feeding each agent a little telemetry first is
+	// what a simulation on a running system would have.
+	for _, pair := range []struct {
+		sm *semmap.SemanticMap
+		id string
+	}{{smK3s, "k3s"}, {smK0s, "k0s"}} {
+		for i := 0; i < 20; i++ {
+			for _, m := range costMetrics(t) {
+				if err := pair.sm.IngestSample(&types.MetricSample{
+					NodeID: "node_1", MetricType: types.MetricType(m), Value: 0.6,
+					TimestampUnix: int64(1700000000 + i), EventID: pair.id + m + itoaScenario(i),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+
 	size := int64(16 * 1024 * 1024)
 	simK3s, err := smK3s.SimulateOutcome(&types.OffloadContext{
 		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
@@ -286,7 +315,8 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 		simK0s.ExpectedLatency, simK0s.ExpectedResourceCost)
 	if simK3s.ExpectedLatency == simK0s.ExpectedLatency &&
 		simK3s.ExpectedResourceCost == simK0s.ExpectedResourceCost {
-		t.Error("per-KD calibration did not reach the simulated outcome either")
+		t.Error("per-cluster calibration did not reach the simulated outcome: with levels " +
+			"observed and sensitivities differing, the projection should differ too")
 	}
 }
 
@@ -302,7 +332,10 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	t.Logf("                       latency=%.3f  resource_cost=%.3f  confidence=%.3f",
 		before.LatencyEstimate, before.ResourceCost, before.Confidence)
 
-	if err := a.ontology.Deprecate(firstSpecProp(), "scenario test"); err != nil {
+	// Through the facade: it retires the relationship in the state model as well, which
+	// is what the reasoner reads. Reaching into the ontology alone changes what
+	// Propositions() reports and no decision.
+	if err := a.sm.Deprecate(firstSpecProp(), "scenario test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -496,6 +529,7 @@ func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordi
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
 		DomainSpec:           mustSpec(),
+		StateMap:             statemap.New(statemap.Config{ConvergenceObservations: 100}, statemap.NewJournal(0)),
 		EMAAlpha:             0.5,
 		ConvergenceThreshold: 100,
 		MinTrustScore:        0.5,
@@ -590,7 +624,7 @@ func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, load float
 		t.Fatalf("no metric routes to the resource construct %q", spec.CostModel.ResourceConstruct)
 	}
 
-	const ticks = 600 // enough for confidence to dominate the neutral prior
+	const ticks = 300 // enough for the state model's confidence to be meaningful
 	for i := 0; i < ticks; i++ {
 		if err := sm.IngestSample(&types.MetricSample{
 			NodeID:        label,
@@ -834,7 +868,7 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 
 	u := minimal.NewEMAUpdater(s, 0.2, 500)
 	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	r := reasonerWithState(t, s, o)
 
 	sm := semmap.New(s, o, u, r, proposer, minimal.NewDisabledTuner())
 	_ = sm // used indirectly; proposer is wired into sm but we call proposer directly
@@ -908,7 +942,7 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	seedReasonerState(t, s, o)
 
 	u := minimal.NewEMAUpdater(s, 0.2, 500)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	r := reasonerWithState(t, s, o)
 	proposer := minimal.NewDisabledProposer()
 	tuner := minimal.NewRuleBasedTunerFromSpec(mustSpec())
 
@@ -1010,3 +1044,23 @@ func findPriorWeightsFileForScenarios(t *testing.T) string {
 	t.Skip("prior_weights.json not found — per-KD scenario skipped")
 	return ""
 }
+
+// costMetrics returns the metrics routed to either cost construct, so a scenario can
+// give an agent levels to reason about without naming a metric type.
+func costMetrics(t *testing.T) []string {
+	t.Helper()
+	spec := mustSpec()
+	want := map[string]bool{
+		spec.CostModel.ResourceConstruct: true,
+		spec.CostModel.PressureConstruct: true,
+	}
+	var out []string
+	for _, r := range spec.MetricRouting {
+		if want[r.ConstructID] {
+			out = append(out, r.MetricType)
+		}
+	}
+	return out
+}
+
+func itoaScenario(i int) string { return strconv.Itoa(i) }

@@ -299,14 +299,19 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			Provenance   string  `json:"provenance"`
 		}
 		var influences []influence
-		var sensitivity float64
+		var sensitivity, contributions float64
 		for _, rel := range b.RelationshipsInto(target) {
 			src, ok := b.Property(rel.From)
 			if !ok {
 				continue
 			}
+			// Two different quantities, reported separately because conflating them is
+			// how the cost path briefly reported a sensitivity that was really a
+			// contribution: a sensitivity is per unit change in the source, a
+			// contribution is that times the source's current value.
+			sensitivity += rel.Effective() * float64(rel.Sign)
 			contribution := rel.Effective() * float64(rel.Sign) * src.Value
-			sensitivity += contribution
+			contributions += contribution
 			influences = append(influences, influence{
 				Relationship: rel.ID, Source: rel.From, SourceValue: src.Value,
 				Strength: rel.Effective(), Sign: rel.Sign,
@@ -316,17 +321,19 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 
 		b.Note("level of %s is %.4f at confidence %.3f from %d observations",
 			target, p.Value, p.Confidence, p.NObservations)
-		b.Note("%d influences sum to %+.4f", len(influences), sensitivity)
+		b.Note("%d influences: sensitivity %+.4f per unit, contributing %+.4f at current values",
+			len(influences), sensitivity, contributions)
 		if len(influences) == 0 {
 			b.Caveat("nothing relates to %s, so the level is all the map can offer about it", target)
 		}
 
 		answer := map[string]any{
-			"target":      target,
-			"level":       p.Value,
-			"confidence":  p.Confidence,
-			"status":      string(p.Status),
-			"sensitivity": sensitivity,
+			"target":        target,
+			"level":         p.Value,
+			"confidence":    p.Confidence,
+			"status":        string(p.Status),
+			"sensitivity":   sensitivity,
+			"contributions": contributions,
 		}
 		d := b.Commit(answer)
 		writeJSON(w, map[string]any{

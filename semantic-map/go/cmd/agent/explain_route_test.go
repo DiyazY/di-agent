@@ -28,7 +28,7 @@ func (r explainerReader) Peers() *peers.Registry { return r.SemanticMap.Peers() 
 // newExplainTestAgent boots a test agent wired with the given Explainer.
 func newExplainTestAgent(t *testing.T, e explain.Explainer) (string, *semmap.SemanticMap, func()) {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t), StateMap: newTestState(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestExplainRoute_MissingContentType_Returns400(t *testing.T) {
 // reflection loop, validator, and route handler intact.
 func TestExplainRoute_EndToEnd_WithMockLLM(t *testing.T) {
 	// Build the SemanticMap first so we know a real edge to cite.
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t), StateMap: newTestState(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestExplainRoute_EndToEnd_WithMockLLM(t *testing.T) {
 // stream:true and asserts the response is line-delimited JSON terminating in
 // a single `final` event.
 func TestExplainRoute_StreamingReturnsNDJSON(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t), StateMap: newTestState(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestExplainRoute_StreamingReturnsNDJSON(t *testing.T) {
 // An unknown session_id is the CALLER's mistake. Returning 500 would send an
 // operator hunting for a server fault over an expired or mistyped session id.
 func TestExplainRoute_UnknownSessionReturns400(t *testing.T) {
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t), StateMap: newTestState(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}

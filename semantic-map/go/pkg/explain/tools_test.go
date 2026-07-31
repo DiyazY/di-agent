@@ -9,6 +9,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -22,7 +23,12 @@ func (s smReader) Peers() *peers.Registry { return s.SemanticMap.Peers() }
 // with the daemon-standard priors loaded.
 func newTestMap(t *testing.T) (explain.SemanticMapReader, *semmap.SemanticMap) {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
+	// A state model, as a daemon always attaches: cost is answered from the map, so an
+	// agent without one cannot answer get_cost at all.
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		DomainSpec: mustSpec(t),
+		StateMap:   statemap.New(statemap.Config{ConvergenceObservations: 100}, statemap.NewJournal(0)),
+	})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}

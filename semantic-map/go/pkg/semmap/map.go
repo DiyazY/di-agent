@@ -316,6 +316,42 @@ func (m *SemanticMap) propagateRelationStrengths(pairs []ConstructPair, ts int64
 	}
 }
 
+// assertStateStrength applies an operator strength adjustment to every state-model
+// relationship carrying this proposition as its label.
+//
+// A proposition maps to at most one relationship per construct pair, but resolving by
+// label rather than by a constructed ID keeps the two models' naming independent: the
+// state model is free to carry relationships the construct graph does not.
+func (m *SemanticMap) assertStateStrength(propositionID string, strength float64, actor, reason string) {
+	if m.state == nil {
+		return
+	}
+	for _, r := range m.state.Relationships("", "") {
+		if r.Label != propositionID {
+			continue
+		}
+		if err := m.state.AssertRelationshipStrength(r.ID, strength, actor, reason); err != nil {
+			log.Printf("statemap: asserting %s: %v", r.ID, err)
+		}
+	}
+}
+
+// retireStateRelationships retires every state-model relationship labelled with this
+// proposition.
+func (m *SemanticMap) retireStateRelationships(propositionID, reason, actor string) {
+	if m.state == nil {
+		return
+	}
+	for _, r := range m.state.Relationships("", "") {
+		if r.Label != propositionID {
+			continue
+		}
+		if err := m.state.RetireRelationship(r.ID, reason, actor); err != nil {
+			log.Printf("statemap: retiring %s: %v", r.ID, err)
+		}
+	}
+}
+
 // router returns the metric routing table for this map, which is the loaded
 // domain specification. Nil when the ontology carries no specification, in
 // which case ingestion is a no-op rather than a guess: routing a metric to a
@@ -422,6 +458,11 @@ func (m *SemanticMap) SetPropositionStrength(id string, strength float64) error 
 	if err := m.ontology.SetPropositionStrength(id, strength); err != nil {
 		return err
 	}
+	// The reasoner answers from the state model, so an adjustment that stops at the
+	// construct graph is an operator action with no effect on any decision. Asserting
+	// it here records the actor and reason too, which the construct graph's write-
+	// through does not carry.
+	m.assertStateStrength(id, strength, "operator", "proposition strength set")
 	edges, err := m.storage.AllEdges()
 	if err != nil {
 		return nil // ontology already updated; storage sync is best-effort
@@ -447,6 +488,10 @@ func (m *SemanticMap) Deprecate(id, reason string) error {
 	if err := m.ontology.Deprecate(id, reason); err != nil {
 		return err
 	}
+	// Retirement has to reach the state model for the same reason: the reasoner reads
+	// relationships from there, and a proposition retired only in the construct graph
+	// would keep contributing to every answer.
+	m.retireStateRelationships(id, reason, "operator")
 	edges, err := m.storage.AllEdges()
 	if err != nil {
 		return nil // ontology already updated; storage sync is best-effort
@@ -566,14 +611,12 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		return nil, nil
 	}
 
-	// Resolve current magnitudes from the storage edges, not from the ontology's
-	// proposition strengths. The two differ by construction: prior_init seeds
-	// edges from the per-distribution `distribution_edge_weights` table while
-	// the ontology carries the global `propositions` table, so on a k0s-seeded
-	// daemon P1's edge sits at 0.2138 against a proposition strength of 0.620.
-	// Tuning has to nudge the value the Reasoner actually reads — anchoring the
-	// delta to the global figure would jump a "+0.12 nudge" from 0.2138 to 0.740
-	// and discard the per-distribution calibration in a single operator action.
+	// Resolve current magnitudes from the storage edges, which carry this cluster's
+	// calibrated priors. The delta has to be anchored to the value in force, not to
+	// the cross-cluster proposition strength: anchoring to the global figure would
+	// turn a small nudge into a jump and discard the per-cluster calibration in one
+	// operator action. The state model is seeded from the same calibration, so the
+	// two agree, and SetPropositionStrength writes the result to both.
 	edges, err := m.storage.AllEdges()
 	if err != nil {
 		return nil, err
@@ -613,10 +656,11 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 
 	// Apply and collect results.
 	//
-	// This goes through the facade's SetPropositionStrength, not the ontology's,
-	// so the new magnitude reaches the storage EdgeDescriptor the Reasoner reads.
-	// Calling the ontology method directly would leave the tune visible in
-	// Propositions() and in the audit log while changing no agent decision.
+	// This goes through the facade's SetPropositionStrength, not the ontology's, so
+	// the new magnitude reaches both the storage EdgeDescriptor and the state model's
+	// relationship — the latter being what the Reasoner reads. Calling the ontology
+	// method directly would leave the tune visible in Propositions() and in the audit
+	// log while changing no agent decision.
 	var applied []*types.TuneAdjustment
 	var appliedIDs []string
 	for _, a := range adjustments {

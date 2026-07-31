@@ -556,13 +556,32 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 			return fmt.Errorf("relationship %s already asserts sign %+d; retire it before asserting %+d",
 				r.ID, existing.Sign, r.Sign)
 		}
-		if r.Status == Retired || existing.Status != Retired {
-			return nil
+		detail := map[string]any{}
+		// A re-declaration carrying a different prior updates it, unless an operator has
+		// asserted one. Ignoring the new value silently kept a stale number whenever a
+		// calibration was reloaded — the declaration looked accepted and changed
+		// nothing. An assertion outranks a seed, so it is not overwritten.
+		if r.Prior != 0 && r.Prior != existing.Prior && existing.Provenance != Asserted {
+			detail["prior_old"] = existing.Prior
+			detail["prior_new"] = r.Prior
+			existing.Prior = r.Prior
+			if existing.NObservations == 0 {
+				// Nothing observed yet, so the strength IS the prior; leaving the old one
+				// would make Effective() blend toward a number nobody supplied.
+				existing.Strength = r.Prior
+			}
 		}
-		existing.Status = Active
-		existing.RetiredReason = ""
-		m.bump(EventRelationshipDeclared, r.ID, "system",
-			map[string]any{"revived": true}, now)
+		if r.Note != "" && r.Note != existing.Note {
+			existing.Note = r.Note
+		}
+		if existing.Status == Retired && r.Status != Retired {
+			existing.Status = Active
+			existing.RetiredReason = ""
+			detail["revived"] = true
+		}
+		if len(detail) > 0 {
+			m.bump(EventRelationshipDeclared, r.ID, "system", detail, now)
+		}
 		return nil
 	}
 

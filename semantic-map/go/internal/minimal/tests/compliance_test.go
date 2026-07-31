@@ -12,6 +12,8 @@ import (
 	"github.com/DiyazY/di-agent/compliance"
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -102,7 +104,10 @@ func TestRuleEngineReasonerCompliance(t *testing.T) {
 		s := minimal.NewInMemoryStorage()
 		o := minimal.NewOntologyFromSpec(mustSpec())
 		seedReasonerState(t, s, o)
-		return minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+		r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+		r.AttachState(stateFor(t))
+		r.AttachState(stateFor(t))
+		return r
 	})
 }
 
@@ -131,16 +136,22 @@ func TestDisabledTunerCompliance(t *testing.T) {
 	})
 }
 
-// TestReasonerSkipsDeprecatedPropositions verifies the live-ontology
-// behavior end-to-end: when the Ontology deprecates a proposition, the
-// Reasoner must exclude its edge from cost computation. The graph path
-// length drops by one, and the underlying edge stays in storage (preserved
-// for audit / replay).
-func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
+// TestReasonerSkipsRetiredRelationships verifies that retirement removes a claim
+// from reasoning: the reasoner reads relationships from the state model, so a
+// retired one leaves the traversal path and stops contributing to any answer.
+//
+// The retirement is applied to the state model rather than to the ontology, because
+// the state model is what the reasoner reads. Going through the facade
+// (SemanticMap.Deprecate) does both; a caller reaching past it into the ontology
+// alone changes what Propositions() reports and no decision, which is the failure
+// mode the facade exists to prevent.
+func TestReasonerSkipsRetiredRelationships(t *testing.T) {
 	s := minimal.NewInMemoryStorage()
 	o := minimal.NewOntologyFromSpec(mustSpec())
 	seedReasonerState(t, s, o)
+	state := stateFor(t)
 	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	r.AttachState(state)
 
 	before, err := r.CostOfAction("pod-scheduling", "node_1")
 	if err != nil {
@@ -150,9 +161,19 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 		t.Fatal("expected non-empty graph path before deprecation")
 	}
 
-	// Deprecate one proposition (P1: SC→RC positive — the first one in
-	// diSelectPropositions order).
-	if err := o.Deprecate(firstSpecProp(), "spurious in this deployment"); err != nil {
+	// Retire one relationship the cost path reads.
+	var retired string
+	for _, rel := range state.Relationships("", "") {
+		if rel.To == mustSpec().CostModel.ResourceConstruct ||
+			rel.To == mustSpec().CostModel.PressureConstruct {
+			retired = rel.ID
+			break
+		}
+	}
+	if retired == "" {
+		t.Skip("no relationship terminates at a cost construct in this spec")
+	}
+	if err := state.RetireRelationship(retired, "spurious in this deployment", "operator:test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,26 +182,23 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {
-		t.Errorf("graph path should shrink by 1 after deprecation; got %d → %d",
+		t.Errorf("graph path should shrink by 1 after retirement; got %d → %d",
 			len(before.GraphPathUsed), len(after.GraphPathUsed))
 	}
 	for _, entry := range after.GraphPathUsed {
-		if contains(entry, "[P1]") {
-			t.Errorf("deprecated proposition P1 still appears in graph path: %q", entry)
+		if contains(entry, retired) {
+			t.Errorf("retired relationship %s still appears in the graph path: %q", retired, entry)
 		}
 	}
 
-	// The edge must still be in storage — soft-delete, not removal.
-	edges, _ := s.AllEdges()
-	stillPresent := false
-	for _, e := range edges {
-		if e.PropositionID == firstSpecProp() {
-			stillPresent = true
-			break
-		}
+	// Retirement is soft: the relationship stays retrievable so a decision taken
+	// before it remains reconstructible.
+	rel, ok := state.Relationship(retired)
+	if !ok {
+		t.Fatalf("retired relationship %s is gone from the map; soft deletion must keep it", retired)
 	}
-	if !stillPresent {
-		t.Error("deprecated proposition's edge was removed from storage — soft-delete must preserve it")
+	if rel.RetiredReason == "" {
+		t.Error("retired relationship carries no reason")
 	}
 }
 
@@ -260,4 +278,29 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("mustWrite %s: %v", path, err)
 	}
+}
+
+// stateFor builds a state model seeded from the spec, for fixtures that construct a
+// reasoner directly. Cost is answered from the map, so a reasoner without one is a
+// wiring error rather than a valid configuration — the same thing a real daemon
+// guarantees by always attaching one.
+// reasonerWithState builds a reasoner with the state model attached, which is what a
+// daemon always does: cost is answered from the map, so a reasoner without one cannot
+// answer at all.
+func reasonerWithState(t *testing.T, s *minimal.InMemoryStorage,
+	o *minimal.SpecOntology) *minimal.RuleEngineReasoner {
+	t.Helper()
+	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	r.AttachState(stateFor(t))
+	return r
+}
+
+func stateFor(t *testing.T) *statemap.Map {
+	t.Helper()
+	spec := mustSpec()
+	sm := statemap.New(statemap.Config{ConvergenceObservations: 500}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(sm, spec, "", ""); err != nil {
+		t.Fatalf("seeding the state model: %v", err)
+	}
+	return sm
 }

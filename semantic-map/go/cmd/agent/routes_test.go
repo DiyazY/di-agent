@@ -14,6 +14,8 @@ import (
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // newTestAgent wires a SemanticMap via the edge-minimal profile and returns
@@ -22,6 +24,7 @@ import (
 func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		StateMap:             newTestState(t),
 		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.2,
 		ConvergenceThreshold: 500,
@@ -815,42 +818,43 @@ func TestOffload_AcceptWithinBudget(t *testing.T) {
 // usable values within ~200 ticks.
 func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
 	t.Helper()
-	// Drive every edge in the loaded spec away from its prior in whichever
-	// direction increases cost. CostOfAction accumulates
-	// (effective - prior) * sign(direction), so a negative-direction edge
-	// contributes positively when its observation falls below the prior and a
-	// positive-direction edge when it rises above. Deriving the target from the
-	// spec keeps this working when the graph's scope changes; the previous
-	// version named SC->RC, MU->RC and PS->RC directly and went stale the moment
-	// two of those left the graph.
+	// Cost is the observed level of the cost constructs, read from the state model, so
+	// making it positive means giving those constructs telemetry. The previous version
+	// drove edge observations, which moved the construct graph and — once cost came
+	// from the state model — stopped affecting the answer at all.
 	spec := mustSpec(t)
-	const N = 200
-	for i := 0; i < N; i++ {
-		for _, p := range spec.Propositions {
-			// Deliberately outside [0,1]. ResourceCost uses the deviation from
-			// prior, but LatencyEstimate uses the effective weight directly, and
-			// the RC->PS conflict pair cancels at any shared observation — so a
-			// negative-direction edge needs a negative observation to contribute
-			// positively to latency. This exercises the Reasoner's arithmetic, not
-			// the ingestion invariants.
-			obs := 1.0
-			if p.Direction == "negative" {
-				obs = -1.0
-			}
-			eid := fmt.Sprintf("bias-%s-%d", p.PropositionID, i)
-			if err := sm.Ingest(p.FromConstruct, p.ToConstruct, obs, eid); err != nil {
-				t.Fatal(err)
+	targets := map[string]bool{
+		spec.CostModel.ResourceConstruct: true,
+		spec.CostModel.PressureConstruct: true,
+	}
+	var metrics []string
+	for _, r := range spec.MetricRouting {
+		if targets[r.ConstructID] {
+			metrics = append(metrics, r.MetricType)
+		}
+	}
+	if len(metrics) == 0 {
+		t.Fatal("no metric routes to either cost construct")
+	}
+	for i := 0; i < 200; i++ {
+		for _, m := range metrics {
+			if err := sm.IngestSample(&types.MetricSample{
+				NodeID:        "node_self",
+				MetricType:    types.MetricType(m),
+				Value:         0.8,
+				TimestampUnix: int64(1700000000 + i),
+				EventID:       fmt.Sprintf("bias-%s-%d", m, i),
+			}); err != nil {
+				t.Fatalf("ingesting %s: %v", m, err)
 			}
 		}
 	}
 }
 
-// newOffloadTestAgent returns a test agent tuned for the /offload reject
-// tests: alpha=0.5 and convergence=100 so 200 biasing ticks push EMAs close
-// to their targets and confidence saturates well above 0.5.
 func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		StateMap:             newTestState(t),
 		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.5,
 		ConvergenceThreshold: 100,
@@ -945,4 +949,17 @@ func TestOffload_RequiresJSON(t *testing.T) {
 	if resp.StatusCode != 400 {
 		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
 	}
+}
+
+// newTestState gives a fixture the state model a real daemon always attaches: cost is
+// answered from the map, so an agent built without one cannot answer at all.
+func newTestState(t *testing.T) *statemap.Map {
+	t.Helper()
+	// Mirrors the daemon's defaults: admission on, so a metric nobody declared still
+	// becomes a property, and a low convergence count so a fixture reaches useful
+	// confidence without thousands of samples.
+	return statemap.New(statemap.Config{
+		ConvergenceObservations: 100,
+		AdmitUnknown:            true,
+	}, statemap.NewJournal(0))
 }

@@ -2,6 +2,7 @@ package minimal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -34,13 +35,14 @@ type RuleEngineReasoner struct {
 	ontology      contracts.OntologyContract
 	minTrustScore float64
 
-	// state is the live state model. When attached, every cost estimate is answered
-	// FROM it and recorded in its journal, so an answer can be re-derived afterwards
-	// from the properties and relationships it actually read.
+	// state is the live state model, and cost is answered from it. Every estimate is
+	// recorded in its journal so the answer can be re-derived afterwards from the
+	// properties and relationships it actually read.
 	//
-	// nil falls back to reading the storage graph, which keeps a reasoner
-	// constructible without a state model — the compliance suites do that — at the
-	// cost of producing answers that carry no DecisionID and so cannot be traced.
+	// Required: a reasoner without one returns ErrNoStateModel rather than falling
+	// back to the construct graph. The fallback existed while the two coexisted, and
+	// it meant an untraceable answer could be produced by forgetting one wiring call —
+	// silently, since an empty DecisionID is easy to overlook.
 	state *statemap.Map
 
 	// peers is the live registry of remote agents this reasoner can offload
@@ -130,88 +132,20 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 	if err != nil {
 		return nil, err
 	}
-	if r.state != nil {
-		return r.costFromState(taskType, nodeID, resourceID, pressureID)
+	if r.state == nil {
+		return nil, ErrNoStateModel
 	}
-
-	deprecated, err := r.deprecatedPropositionSet()
-	if err != nil {
-		return nil, err
-	}
-
-	edges, err := r.storage.AllEdges()
-	if err != nil {
-		return nil, err
-	}
-
-	var resourceSens, pressureSens float64
-	var confidenceSum float64
-	var counted int
-	var path []string
-
-	for _, e := range edges {
-		if deprecated[e.PropositionID] {
-			continue
-		}
-		effective := blend(e)
-		path = append(path, fmt.Sprintf("%s→%s[%s](%.2f)",
-			e.FromID, e.ToID, e.PropositionID, effective))
-		confidenceSum += e.Confidence
-		counted++
-
-		switch e.ToID {
-		case resourceID:
-			resourceSens += effective * sign(e.Direction)
-		case pressureID:
-			pressureSens += effective * sign(e.Direction)
-		}
-	}
-
-	// Levels come from the construct descriptors. A construct with no observations
-	// blends to its neutral prior, which is the honest cold-start answer: the agent
-	// does not yet know this machine's resource state, and says so through the
-	// confidence it reports rather than by inventing a level.
-	resourceLevel, resourceConf, err := r.constructLevel(resourceID)
-	if err != nil {
-		return nil, err
-	}
-	pressureLevel, pressureConf, err := r.constructLevel(pressureID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Confidence averages the edges and the two cost constructs together: a caller
-	// asking how much to trust this estimate is asking about both halves, since the
-	// levels carry the magnitudes and the edges carry the sensitivities.
-	confidenceSum += resourceConf + pressureConf
-	counted += 2
-	var confidence float64
-	if counted > 0 {
-		confidence = confidenceSum / float64(counted)
-	}
-
-	who := nodeID
-	if who == "" {
-		who = "self"
-	}
-	return &types.ActionCost{
-		CPUCost:             math.Max(0, resourceLevel*0.1), // proxy until an energy collector lands
-		ResourceCost:        math.Max(0, resourceLevel),
-		EnergyCost:          0,
-		LatencyEstimate:     math.Max(0, pressureLevel),
-		Confidence:          confidence,
-		ResourceSensitivity: resourceSens,
-		PressureSensitivity: pressureSens,
-		Rationale: fmt.Sprintf(
-			"task=%s node=%s %s_level=%.4f (c=%.2f) %s_level=%.4f (c=%.2f) "+
-				"d%s/dsource=%+.4f d%s/dsource=%+.4f path=[%s]",
-			taskType, who, resourceID, resourceLevel, resourceConf,
-			pressureID, pressureLevel, pressureConf,
-			resourceID, resourceSens, pressureID, pressureSens,
-			strings.Join(path, ", ")),
-		GraphPathUsed: path,
-	}, nil
+	return r.costFromState(taskType, nodeID, resourceID, pressureID)
 }
+
+// ErrNoStateModel is returned when a reasoner is asked for a cost without a state
+// model to answer from. It is a wiring error rather than a runtime condition: the
+// construct-graph cost path was removed once the state model became the single
+// source, and falling back to it meant an untraceable answer could be produced by
+// forgetting one wiring call — silently, since an empty DecisionID is easy to miss.
+var ErrNoStateModel = errors.New(
+	"reasoner has no state model: cost is answered from the map, so an agent without " +
+		"one cannot produce a traceable answer")
 
 // costConstructs resolves the cost roles from the loaded domain specification.
 // An ontology that carries no specification cannot name them, and guessing would
@@ -474,16 +408,25 @@ func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressur
 		return p.Value, p.Confidence
 	}
 
-	// A sensitivity sums each incoming relationship's effective strength applied to
-	// its source property's current level, signed by the relationship's direction.
+	// A sensitivity is a per-unit quantity: how much the target moves for a unit
+	// change in a source construct, summed over the incoming relationships and signed
+	// by each one's direction. It deliberately does NOT multiply by the source's
+	// current value — that would make it a contribution to the current level, which
+	// the level already reports, and it would collapse the whole term to zero before
+	// any telemetry has arrived. Keeping it per-unit is what makes the calibrated
+	// priors informative at cold start, which is the one moment they are all the agent
+	// has.
+	//
+	// The source properties are still read, because the decision record should show
+	// which properties the sensitivity was assembled from even when their values do
+	// not enter the arithmetic.
 	sensitivity := func(targetID string) float64 {
 		var sum float64
 		for _, rel := range b.RelationshipsInto(targetID) {
-			src, ok := b.Property(rel.From)
-			if !ok {
+			if _, ok := b.Property(rel.From); !ok {
 				continue
 			}
-			sum += rel.Effective() * float64(rel.Sign) * src.Value
+			sum += rel.Effective() * float64(rel.Sign)
 		}
 		return sum
 	}
