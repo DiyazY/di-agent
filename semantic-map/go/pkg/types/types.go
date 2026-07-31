@@ -94,12 +94,29 @@ type OffloadContext struct {
 
 type ActionCost struct {
 	CPUCost         float64
-	ResourceCost    float64 // resource overhead derived from CPU/memory observations
+	ResourceCost    float64 // observed level of the resource construct, confidence-blended
 	EnergyCost      float64 // placeholder: zero until EnergyJoules observations are available
-	LatencyEstimate float64
+	LatencyEstimate float64 // observed level of the pressure construct, confidence-blended
 	Confidence      float64
 	Rationale       string // must reference specific node/edge IDs
 	GraphPathUsed   []string
+
+	// ResourceSensitivity and PressureSensitivity are the weighted sums over the
+	// edges terminating at each cost construct: how much the target would move per
+	// unit change in a source construct, signed by each proposition's direction.
+	//
+	// They are reported beside the levels rather than folded into them. A level
+	// answers "what is it now", which the observed construct value answers best; a
+	// sensitivity answers "what would it become if load changed", which only the
+	// relations can answer and which the level cannot contain. Adding the two was
+	// measured and made next-interval predictions monotonically worse, so the
+	// separation is empirical.
+	//
+	// Sensitivities are fully informed at cold start, since they come from the
+	// calibrated priors; levels are uninformed at cold start and accumulate. The
+	// two halves of the map are therefore useful at opposite ends of a deployment.
+	ResourceSensitivity float64
+	PressureSensitivity float64
 }
 
 type PeerRecommendation struct {

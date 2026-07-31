@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -78,17 +79,44 @@ func NewRuleEngineReasoner(
 	}
 }
 
-// CostOfAction walks every non-deprecated edge in storage and accumulates the
-// contribution of each to the agent's cost estimate. Iterating edges (not
-// propositions) is the multigraph-correct read path: conflict pairs (e.g. P2
-// negative and P3 positive on RC→PS) contribute independently with their own
-// EMA-tracked magnitudes and proposition-fixed signs.
+// CostOfAction estimates what work costs on THIS machine, and how sensitive that
+// cost is to a change in load.
+//
+// The estimate has two halves, and keeping them apart is the substance of the
+// design rather than presentation:
+//
+//	level        the confidence-blended OBSERVED value of the cost construct,
+//	             read from its node descriptor. On a node-local map that is this
+//	             machine's current resource use and current experienced pressure.
+//	sensitivity  the weighted sum over the edges terminating at that construct,
+//	             each signed by its proposition's direction. How much the target
+//	             would move per unit change in a source construct.
+//
+// An earlier version had no level at all: it summed edge weights and reported the
+// result as a latency. That quantity carried no observed magnitude, so it could not
+// distinguish a busy machine from an idle one, and a measurement over 182 replayed
+// runs found it no better than the static priors at predicting which node was about
+// to be pressured — while the observed level alone was the best predictor available.
+// The same measurement swept the coefficient on the relation term and found that
+// adding it to the level degraded the prediction monotonically. Hence: levels lead,
+// sensitivities are reported alongside, and SimulateOutcome is where a sensitivity
+// is actually applied, because a counterfactual is the question a level cannot
+// answer.
+//
+// Which construct plays which role comes from the domain specification's cost_model
+// block. This function previously hardcoded the two IDs and was the last place in
+// the daemon that knew a construct by name.
 //
 // Deprecated propositions are filtered out via a one-time lookup against the
-// Ontology before edge iteration begins. The Ontology is the source of truth
-// for what is endorsed; Storage holds descriptors regardless of endorsement
-// status so the audit trail is preserved.
+// Ontology before edge iteration begins. The Ontology is the source of truth for
+// what is endorsed; Storage holds descriptors regardless so the audit trail is
+// preserved.
 func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.ActionCost, error) {
+	resourceID, pressureID, err := r.costConstructs()
+	if err != nil {
+		return nil, err
+	}
+
 	deprecated, err := r.deprecatedPropositionSet()
 	if err != nil {
 		return nil, err
@@ -99,7 +127,7 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 		return nil, err
 	}
 
-	var cpuCost, resourceCost, latency float64
+	var resourceSens, pressureSens float64
 	var confidenceSum float64
 	var counted int
 	var path []string
@@ -115,35 +143,89 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 		counted++
 
 		switch e.ToID {
-		case "RC":
-			// Prior-relative cost: deviation from Di-Select prior, scaled by
-			// direction. Positive edge drifting above prior = more overhead than
-			// expected. Negative edge drifting below prior = less efficiency than
-			// expected. Both inflate cost; matching-prior observations contribute 0.
-			// Raw effective * sign cancels when all RC-adjacent edges converge to
-			// the same observation (they receive the same metric via the Bridge),
-			// so deviation is the only stable discriminator between agents.
-			resourceCost += (effective - e.PriorWeight) * sign(e.Direction)
-		case "PS":
-			latency += effective * sign(e.Direction)
+		case resourceID:
+			resourceSens += effective * sign(e.Direction)
+		case pressureID:
+			pressureSens += effective * sign(e.Direction)
 		}
 	}
 
+	// Levels come from the construct descriptors. A construct with no observations
+	// blends to its neutral prior, which is the honest cold-start answer: the agent
+	// does not yet know this machine's resource state, and says so through the
+	// confidence it reports rather than by inventing a level.
+	resourceLevel, resourceConf, err := r.constructLevel(resourceID)
+	if err != nil {
+		return nil, err
+	}
+	pressureLevel, pressureConf, err := r.constructLevel(pressureID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Confidence averages the edges and the two cost constructs together: a caller
+	// asking how much to trust this estimate is asking about both halves, since the
+	// levels carry the magnitudes and the edges carry the sensitivities.
+	confidenceSum += resourceConf + pressureConf
+	counted += 2
 	var confidence float64
 	if counted > 0 {
 		confidence = confidenceSum / float64(counted)
 	}
-	cpuCost = latency * 0.1 // lightweight proxy; replaced by P4 prior initialization
 
+	who := nodeID
+	if who == "" {
+		who = "self"
+	}
 	return &types.ActionCost{
-		CPUCost:         math.Max(0, cpuCost),
-		ResourceCost:    math.Max(0, resourceCost),
-		EnergyCost:      0,
-		LatencyEstimate: math.Max(0, latency),
-		Confidence:      confidence,
-		Rationale:       fmt.Sprintf("task=%s node=%s path=[%s]", taskType, nodeID, strings.Join(path, ", ")),
-		GraphPathUsed:   path,
+		CPUCost:             math.Max(0, resourceLevel*0.1), // proxy until an energy collector lands
+		ResourceCost:        math.Max(0, resourceLevel),
+		EnergyCost:          0,
+		LatencyEstimate:     math.Max(0, pressureLevel),
+		Confidence:          confidence,
+		ResourceSensitivity: resourceSens,
+		PressureSensitivity: pressureSens,
+		Rationale: fmt.Sprintf(
+			"task=%s node=%s %s_level=%.4f (c=%.2f) %s_level=%.4f (c=%.2f) "+
+				"d%s/dsource=%+.4f d%s/dsource=%+.4f path=[%s]",
+			taskType, who, resourceID, resourceLevel, resourceConf,
+			pressureID, pressureLevel, pressureConf,
+			resourceID, resourceSens, pressureID, pressureSens,
+			strings.Join(path, ", ")),
+		GraphPathUsed: path,
 	}, nil
+}
+
+// costConstructs resolves the cost roles from the loaded domain specification.
+// An ontology that carries no specification cannot name them, and guessing would
+// reintroduce exactly the hardcoding this removes.
+func (r *RuleEngineReasoner) costConstructs() (resource, pressure string, err error) {
+	carrier, ok := r.ontology.(interface{ Spec() *domain.Spec })
+	if !ok || carrier.Spec() == nil {
+		return "", "", fmt.Errorf("reasoner needs a domain specification to know which " +
+			"construct is the resource cost and which is the pressure penalty")
+	}
+	cm := carrier.Spec().CostModel
+	if cm.ResourceConstruct == "" || cm.PressureConstruct == "" {
+		return "", "", fmt.Errorf("domain specification declares no cost_model roles")
+	}
+	return cm.ResourceConstruct, cm.PressureConstruct, nil
+}
+
+// constructLevel returns the confidence-blended observed value of one construct
+// and the confidence behind it. A construct absent from storage is reported as a
+// zero-confidence 0.5 — the neutral prior — rather than as an error, so a graph
+// seeded before a construct was added still answers.
+func (r *RuleEngineReasoner) constructLevel(constructID string) (level, confidence float64, err error) {
+	node, err := r.storage.GetNode(constructID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if node == nil {
+		return 0.5, 0, nil
+	}
+	c := node.Confidence
+	return (1-c)*node.PriorValue + c*node.EMAValue, c, nil
 }
 
 // deprecatedPropositionSet returns the set of PropositionIDs that the
@@ -281,17 +363,33 @@ func (r *RuleEngineReasoner) SimulateOutcome(octx *types.OffloadContext, targetN
 		return nil, err
 	}
 
+	// A simulation is a counterfactual: the machine is not running this task yet,
+	// so its observed levels do not include the task's load. This is where the
+	// sensitivities earn their place — they convert an assumed increase in resource
+	// demand into an expected movement of each cost construct. The level answers
+	// "what is it now" and cannot answer this; the relations can, and are fully
+	// informed from the calibrated priors even at cold start.
+	//
+	// The assumed demand is deliberately crude: data size against a reference,
+	// clamped to [0,1], because the OffloadContext carries no better description of
+	// what the task will do. A collector that reported per-task demand would replace
+	// this without touching the structure — the term is `sensitivity x demand`
+	// either way.
+	demand := assumedDemand(octx)
+	expectedResource := cost.ResourceCost + cost.ResourceSensitivity*demand
+	expectedLatency := cost.LatencyEstimate + cost.PressureSensitivity*demand
+
 	var riskFlags []string
-	if octx.LatencyBudgetMs > 0 && cost.LatencyEstimate > octx.LatencyBudgetMs {
-		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", cost.LatencyEstimate, octx.LatencyBudgetMs))
+	if octx.LatencyBudgetMs > 0 && expectedLatency > octx.LatencyBudgetMs {
+		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", expectedLatency, octx.LatencyBudgetMs))
 	}
-	if octx.EnergyBudgetJoules != nil && cost.ResourceCost > *octx.EnergyBudgetJoules {
-		riskFlags = append(riskFlags, fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", cost.ResourceCost, *octx.EnergyBudgetJoules))
+	if octx.EnergyBudgetJoules != nil && expectedResource > *octx.EnergyBudgetJoules {
+		riskFlags = append(riskFlags, fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", expectedResource, *octx.EnergyBudgetJoules))
 	}
 
 	return &types.OutcomeSimulation{
-		ExpectedLatency:      cost.LatencyEstimate,
-		ExpectedResourceCost: cost.ResourceCost,
+		ExpectedLatency:      math.Max(0, expectedLatency),
+		ExpectedResourceCost: math.Max(0, expectedResource),
 		Confidence:           cost.Confidence,
 		GraphPathUsed:        cost.GraphPathUsed,
 		RiskFlags:            riskFlags,
@@ -310,4 +408,23 @@ func sign(d types.Direction) float64 {
 		return 1.0
 	}
 	return -1.0
+}
+
+// assumedDemand converts an offload request into a unit-less [0,1] increase in
+// resource demand, for the sensitivity term in SimulateOutcome.
+//
+// referenceBytes is the payload at which a task is treated as saturating the
+// machine. It is a placeholder for a real demand estimate, and it is stated as a
+// constant here rather than buried in an expression so that its arbitrariness is
+// visible: nothing in the dataset calibrates it.
+func assumedDemand(octx *types.OffloadContext) float64 {
+	const referenceBytes = 64 * 1024 * 1024
+	if octx == nil || octx.DataSizeBytes <= 0 {
+		return 0
+	}
+	d := float64(octx.DataSizeBytes) / referenceBytes
+	if d > 1 {
+		return 1
+	}
+	return d
 }

@@ -59,7 +59,8 @@ func TestValidateRejectsInconsistency(t *testing.T) {
 			MetricRouting: []MetricRoute{{MetricType: "cpu", ConstructID: "RC", Range: [2]float64{0, 1}}},
 			Propositions: []Proposition{{PropositionID: "PX", FromConstruct: "RC",
 				ToConstruct: "RC", Direction: "positive"}},
-			Policy: AdjustmentPolicy{GlobalFloor: 0.1, GlobalCeiling: 0.95},
+			Policy:    AdjustmentPolicy{GlobalFloor: 0.1, GlobalCeiling: 0.95},
+			CostModel: CostModel{ResourceConstruct: "RC", PressureConstruct: "RC"},
 		}
 	}
 	if err := base().Validate(); err != nil {
@@ -67,6 +68,12 @@ func TestValidateRejectsInconsistency(t *testing.T) {
 	}
 
 	cases := map[string]func(*Spec){
+		"cost model names an unknown construct": func(s *Spec) {
+			s.CostModel.PressureConstruct = "NOPE"
+		},
+		"cost model half declared": func(s *Spec) {
+			s.CostModel.PressureConstruct = ""
+		},
 		"metric routed to unknown construct": func(s *Spec) {
 			s.MetricRouting[0].ConstructID = "NOPE"
 		},

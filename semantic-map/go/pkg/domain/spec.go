@@ -38,6 +38,10 @@ type Spec struct {
 	Propositions  []Proposition    `json:"propositions"`
 	Policy        AdjustmentPolicy `json:"adjustment_policy"`
 	IntentRules   []IntentRule     `json:"intent_rules"`
+	// CostModel names which construct plays which role in the Reasoner's cost
+	// estimate. Without it the cost function is the last place in the daemon that
+	// hardcodes a construct ID.
+	CostModel CostModel `json:"cost_model"`
 }
 
 type Construct struct {
@@ -63,6 +67,25 @@ type Proposition struct {
 	Direction       string   `json:"direction"`
 	Description     string   `json:"description"`
 	EvidenceSources []string `json:"evidence_sources"`
+}
+
+// CostModel assigns cost-estimate roles to constructs.
+//
+// The Reasoner reports two quantities: what running work costs (the resource
+// construct) and what performance penalty is being experienced (the pressure
+// construct). Each is estimated as the confidence-blended OBSERVED value of that
+// construct, with the weighted sum over its incoming edges reported separately as
+// a sensitivity — how much the target would move if a source construct changed.
+//
+// The split is empirical rather than aesthetic: adding the relation sum into the
+// level made next-interval predictions monotonically worse, while the level alone
+// was the best available predictor. Sensitivity answers the counterfactual the
+// level cannot, which is why SimulateOutcome uses it.
+type CostModel struct {
+	Description       string `json:"description"`
+	ResourceConstruct string `json:"resource_construct"`
+	PressureConstruct string `json:"pressure_construct"`
+	LevelSource       string `json:"level_source"`
 }
 
 // AdjustmentPolicy bounds operator adjustment. PerPropositionFloor is keyed by
@@ -170,6 +193,22 @@ func (s *Spec) Validate() error {
 			if !props[pid] {
 				return fmt.Errorf("intent %q adjusts unknown proposition %q", r.Intent, pid)
 			}
+		}
+	}
+
+	// The cost model must name constructs that exist, and must name both. A
+	// half-declared cost model would leave the Reasoner reporting one quantity and
+	// silently zeroing the other, which reads as "this cluster has no pressure"
+	// rather than as a configuration error.
+	if s.CostModel.ResourceConstruct == "" || s.CostModel.PressureConstruct == "" {
+		return fmt.Errorf("cost_model must name both resource_construct and pressure_construct")
+	}
+	for role, id := range map[string]string{
+		"resource_construct": s.CostModel.ResourceConstruct,
+		"pressure_construct": s.CostModel.PressureConstruct,
+	} {
+		if !known[id] {
+			return fmt.Errorf("cost_model %s names unknown construct %q", role, id)
 		}
 	}
 	return nil

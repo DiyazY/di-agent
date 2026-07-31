@@ -116,13 +116,13 @@ maintainability and ecosystem maturity are selection-time knowledge and stay wit
 Di-Select. Reliability is genuine runtime state but no MetricType routes to it
 yet.
 
-The reason to exclude rather than seed-and-freeze is mechanical. `CostOfAction`
-accumulates `(effective − prior) × sign(direction)`, and an edge with no
-observations has `effective ≡ prior`, so its contribution is exactly zero at
-every sample count and after any operator adjustment. Frozen edges change no
-decision; what they do change is `mean_confidence`, which divides by the number
-of edges present. Carrying them makes the agent's self-report worse without
-making its decisions better.
+The reason to exclude rather than seed-and-freeze is mechanical. An edge with no
+observations has `effective ≡ prior`, so it contributes a constant to the
+sensitivity sum and nothing at all to a comparison between machines, at every
+sample count and after any operator adjustment. Frozen edges change no decision;
+what they do change is `mean_confidence`, which divides by the number of edges
+present. Carrying them makes the agent's self-report worse without making its
+decisions better.
 
 ### The agent at a glance
 
@@ -555,6 +555,38 @@ the cluster shows. `|r|` also carries no significance test, matching how the pri
 were calibrated (`p = 0.188` on the RC→PS pair), so a weak relation estimated over
 a short window can still produce a sizeable magnitude.
 
+### What a cost estimate is
+
+`CostOfAction` reports two quantities per cost construct, and keeping them apart is
+the substance of the design rather than presentation:
+
+| | source | informed at cold start | moved by |
+| --- | --- | --- | --- |
+| **level** | the construct's own descriptor, confidence-blended | no — blends to a neutral prior | telemetry only |
+| **sensitivity** | weighted sum over the edges terminating at it, signed by direction | yes — from the calibrated priors | telemetry, operator tuning, deprecation |
+
+A level answers *what is it now*; a sensitivity answers *what would it become if load
+changed*. The two halves are useful at opposite ends of a deployment: the priors
+carry the sensitivities and are fully informed on day one, while the levels
+accumulate and are worthless until they do.
+
+They are reported side by side and never summed. That is an empirical constraint,
+not a preference: over 182 replayed runs the observed level was the best available
+predictor of the next interval's ranking, adding the relation term degraded it
+monotonically, and sweeping the mixing coefficient found no interior maximum. So
+`CostOfAction` reports the level and `SimulateOutcome` — a counterfactual, which a
+level cannot answer — is where a sensitivity is multiplied by an assumed demand.
+
+An earlier version had no level at all. It summed edge weights and called the result
+a latency, which carried no observed magnitude and so could not distinguish a busy
+machine from an idle one; `/cost` returned the same numbers whatever machine it was
+asked about. The estimate is now a physical statement: on the k0s idle testbed it
+reports `RC_level = 0.0775` at c = 0.98, i.e. this machine is about 8% utilized and
+the agent has seen enough to say so.
+
+Which construct plays which role comes from `domain_spec.json`'s `cost_model` block.
+The cost function was the last place in the daemon that knew a construct by name.
+
 ### The Bridge
 
 The bridge is a stateless function wired inside the agent. It is not a contract because its logic is fully determined by the Ontology — there is nothing to swap. For each `MetricSample` it:
@@ -947,7 +979,9 @@ Two details in that flow are load-bearing and were both once wrong.
 
 **Adjustments apply through `SemanticMap.SetPropositionStrength`, not `OntologyContract.SetPropositionStrength`.** Only the facade writes through to storage. Calling the contract method directly leaves the tune visible in `Propositions()` and in the audit log while changing no agent decision — see the write-through invariant in §2.
 
-The resulting cost effect is predictable in closed form. `CostOfAction` accumulates `(effective − w_prior) · sign(direction)` over RC-adjacent edges, and effective = (1 − c)·w_prior + c·w_ema, so the deviation term is c·(w_ema − w_prior). Raising a prior by δ on a positive edge changes the estimate by exactly −c·δ. Measured on a k0s daemon after 976 idle samples (c = 0.9767 per observable edge): predicted −0.1172, observed −0.11712.
+The resulting effect is predictable in closed form, and the form is worth stating precisely because it bounds what operator tuning can do. A tune writes `PriorWeight`; the Reasoner reads `effective = (1 − c)·w_prior + c·w_ema`. A prior change of δ therefore moves the sensitivity by `(1 − c)·δ` and moves the reported *levels* not at all, since those are read from construct descriptors. At `c = 1` a tune is exactly inert — measured: on a k0s daemon after one idle run every edge reaches c = 1.000, and `prioritize performance` moves both sensitivities by 0.000000 while faithfully recording itself in the audit log.
+
+That is the intended arithmetic rather than a defect, but it is a real limitation of tuning priors as an operator instrument: the better the agent knows its machine, the less an assertion about the prior can change. Deprecation is not attenuated the same way — it removes an edge from the sensitivity sum outright, and selectively: retiring the sole edge terminating at the resource construct took `ResourceSensitivity` from −0.0576 to exactly 0 while leaving the pressure term untouched. An operator wanting to influence a converged agent has the structural path, not the magnitude path.
 
 ### Hard bounds
 

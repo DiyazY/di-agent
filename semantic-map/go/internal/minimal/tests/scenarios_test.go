@@ -233,15 +233,60 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	costK3s, _ := smK3s.CostOfAction("pod-scheduling", "node_1")
 	costK0s, _ := smK0s.CostOfAction("pod-scheduling", "node_1")
 
-	t.Log("Scenario: two agents, same query, different -kd. Decisions should diverge because the per-KD")
-	t.Log("priors land different initial weights on each edge.")
+	t.Log("Scenario: two agents, same query, different -kd. Per-cluster calibration lives on the")
+	t.Log("edges, so at cold start it shows up in the SENSITIVITIES, not in the levels: neither")
+	t.Log("agent has observed anything yet, and an honest level says so.")
 	t.Log("")
-	t.Logf("  k3s  →  latency=%.3f  resource_cost=%.3f  confidence=%.3f", costK3s.LatencyEstimate, costK3s.ResourceCost, costK3s.Confidence)
-	t.Logf("  k0s  →  latency=%.3f  resource_cost=%.3f  confidence=%.3f", costK0s.LatencyEstimate, costK0s.ResourceCost, costK0s.Confidence)
+	t.Logf("  k3s  →  level(resource)=%.3f level(pressure)=%.3f  dR=%+.4f dP=%+.4f  conf=%.3f",
+		costK3s.ResourceCost, costK3s.LatencyEstimate,
+		costK3s.ResourceSensitivity, costK3s.PressureSensitivity, costK3s.Confidence)
+	t.Logf("  k0s  →  level(resource)=%.3f level(pressure)=%.3f  dR=%+.4f dP=%+.4f  conf=%.3f",
+		costK0s.ResourceCost, costK0s.LatencyEstimate,
+		costK0s.ResourceSensitivity, costK0s.PressureSensitivity, costK0s.Confidence)
+	t.Log("")
 
-	if costK3s.LatencyEstimate == costK0s.LatencyEstimate &&
-		costK3s.ResourceCost == costK0s.ResourceCost {
-		t.Errorf("k3s and k0s agents produced identical cost estimates — per-KD seeding is not steering behavior")
+	if costK3s.ResourceSensitivity == costK0s.ResourceSensitivity &&
+		costK3s.PressureSensitivity == costK0s.PressureSensitivity {
+		t.Errorf("k3s and k0s agents produced identical sensitivities — per-KD seeding is not "+
+			"steering behaviour (dR %.6f vs %.6f, dP %.6f vs %.6f)",
+			costK3s.ResourceSensitivity, costK0s.ResourceSensitivity,
+			costK3s.PressureSensitivity, costK0s.PressureSensitivity)
+	}
+
+	// The levels must agree, and that is the point rather than a shortcoming: two
+	// agents that have observed nothing know nothing about their machines' state,
+	// whatever their calibration says about how the constructs relate.
+	if costK3s.ResourceCost != costK0s.ResourceCost {
+		t.Errorf("cold-start levels differ (%.6f vs %.6f); with no observations on either "+
+			"machine the observed level cannot be cluster-specific",
+			costK3s.ResourceCost, costK0s.ResourceCost)
+	}
+	if costK3s.Confidence != 0 || costK0s.Confidence != 0 {
+		t.Errorf("cold-start confidence should be zero; got %.4f and %.4f",
+			costK3s.Confidence, costK0s.Confidence)
+	}
+
+	// A simulation applies the sensitivity to an assumed demand, which is where the
+	// calibration reaches a decision at cold start.
+	size := int64(16 * 1024 * 1024)
+	simK3s, err := smK3s.SimulateOutcome(&types.OffloadContext{
+		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	simK0s, err := smK0s.SimulateOutcome(&types.OffloadContext{
+		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("  simulated with a %d MiB task:", size/(1024*1024))
+	t.Logf("    k3s  →  expected_latency=%.4f expected_resource=%.4f",
+		simK3s.ExpectedLatency, simK3s.ExpectedResourceCost)
+	t.Logf("    k0s  →  expected_latency=%.4f expected_resource=%.4f",
+		simK0s.ExpectedLatency, simK0s.ExpectedResourceCost)
+	if simK3s.ExpectedLatency == simK0s.ExpectedLatency &&
+		simK3s.ExpectedResourceCost == simK0s.ExpectedResourceCost {
+		t.Error("per-KD calibration did not reach the simulated outcome either")
 	}
 }
 
@@ -516,54 +561,45 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	})
 }
 
-// biasEnergyTo drives the agent's CostOfAction ResourceCost by pushing every
-// RC-terminating edge away from its prior in the cost-increasing direction:
-// the reasoner scores resource cost as (effective − prior) × sign(direction),
-// so a positive edge climbing above its prior and a negative edge falling below
-// it both inflate cost, and an edge sitting at its prior contributes nothing.
+// biasEnergyTo drives an agent's reported resource cost by feeding it telemetry,
+// which is the only thing that moves a cost level now.
 //
-// `frac` is that deviation as a fraction of the headroom the edge actually has
-// (0 = sit at the prior, 1 = ride the cost-increasing bound), so the helper
-// cannot ask for an observation outside [0,1] no matter what the priors are.
-// The edges are read from live storage rather than named here, so the helper
-// follows the domain spec instead of pinning a graph scope. Confidence blending
-// scales the realised deviation below the requested one, which is why the
-// scenario asserts the ordering of costs and not their magnitudes.
-func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, frac float64) {
+// The cost estimate reports the confidence-blended OBSERVED value of the resource
+// construct, so making one agent look busier than another means giving it busier
+// telemetry — not adjusting its edges. An earlier version of this helper pushed edge
+// weights around, which stopped differentiating the agents the moment levels came
+// from construct descriptors, and rightly so: an edge weight says how constructs
+// relate, not how loaded a machine is.
+//
+// `load` is the utilization to report, on the [0,1] scale every routed metric uses.
+func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, load float64) {
 	t.Helper()
 
-	edges, err := sm.AllEdges()
-	if err != nil {
-		t.Fatal(err)
-	}
-	type target struct {
-		from, to string
-		obs      float64
-	}
-	var targets []target
-	for _, e := range edges {
-		if e.ToID != "RC" {
-			continue
+	spec := mustSpec()
+	// Any metric routed to the resource construct will do; take the first the
+	// specification declares so the helper follows the model rather than naming a
+	// metric type.
+	var metric string
+	for _, r := range spec.MetricRouting {
+		if r.ConstructID == spec.CostModel.ResourceConstruct {
+			metric = r.MetricType
+			break
 		}
-		// Headroom differs per direction: a positive edge can climb to 1.0, a
-		// negative edge can fall to 0.0.
-		obs := e.PriorWeight + frac*(1.0-e.PriorWeight)
-		if e.Direction == types.Negative {
-			obs = e.PriorWeight * (1.0 - frac)
-		}
-		targets = append(targets, target{e.FromID, e.ToID, clamp01(obs)})
 	}
-	if len(targets) == 0 {
-		t.Fatal("no RC-terminating edge in storage: the offload scenario has no cost lever")
+	if metric == "" {
+		t.Fatalf("no metric routes to the resource construct %q", spec.CostModel.ResourceConstruct)
 	}
 
-	const ticks = 200
+	const ticks = 600 // enough for confidence to dominate the neutral prior
 	for i := 0; i < ticks; i++ {
-		for _, tg := range targets {
-			ev := fmt.Sprintf("%s-%s-%s-%d", label, tg.from, tg.to, i)
-			if err := sm.Ingest(tg.from, tg.to, tg.obs, ev); err != nil {
-				t.Fatal(err)
-			}
+		if err := sm.IngestSample(&types.MetricSample{
+			NodeID:        label,
+			MetricType:    types.MetricType(metric),
+			Value:         clamp01(load),
+			TimestampUnix: int64(1700000000 + i),
+			EventID:       fmt.Sprintf("%s-%s-%d", label, metric, i),
+		}); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
@@ -627,9 +663,9 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 
 	// ── Bias each agent so CostOfAction returns a distinguishable energy cost ──
 
-	biasEnergyTo(t, a.sm, "A", 0.10) // barely off its prior — cheapest
-	biasEnergyTo(t, b.sm, "B", 0.90) // near the cost-increasing bound — priciest
-	biasEnergyTo(t, c.sm, "C", 0.50) // in between
+	biasEnergyTo(t, a.sm, "A", 0.05) // nearly idle — the attractive destination
+	biasEnergyTo(t, b.sm, "B", 0.90) // heavily loaded — wants to shed work
+	biasEnergyTo(t, c.sm, "C", 0.45) // in between
 
 	// ── Pre-flight: print each agent's self-cost ────────────────────────────────
 
