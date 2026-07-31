@@ -139,8 +139,10 @@ semantic-map/
     │   │   └── openai.go       OpenAI-compatible client; planner→answer→critic loop
     │   ├── semmap/
     │   │   ├── map.go          SemanticMap Go facade (includes peer registry + client)
-    │   │   └── bridge.go       MetricType → construct fan-out (stateless, NOT a contract;
-    │   │                       the routing table itself is spec data)
+    │   │   ├── bridge.go       MetricType → construct fan-out (stateless, NOT a contract;
+    │   │   │                   the routing table itself is spec data)
+    │   │   └── pairing.go      latest observation per (node, construct); forms the paired
+    │   │                       observations the relational updater consumes
     │   └── profiles/           Profile factory
     │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
     │
@@ -153,6 +155,10 @@ semantic-map/
     │       ├── ontology.go     SpecOntology           (constructs + propositions from domain_spec.json;
     │       │                                           live audit log)
     │       ├── updater.go      EMAUpdater             (idempotency, reset; multigraph-aware)
+    │       ├── updater_relational.go
+    │       │                   RelationalEMAUpdater   (learns |r| from paired endpoint
+    │       │                                          observations; sign-gated by the edge's
+    │       │                                          declared direction; -relational)
     │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips deprecated)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
@@ -399,6 +405,32 @@ agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 # Run locally (development)
 go run ./cmd/agent -profile edge-minimal -domain ../domain_spec.json
 ```
+
+### Choosing how edges learn
+
+`-relational` switches the updater from tracking one endpoint's magnitude to
+learning the association between both endpoints. The two answer different
+questions and are not interchangeable:
+
+| | default (endpoint EMA) | `-relational` |
+| --- | --- | --- |
+| What the weight means | the magnitude of one construct | the strength of the association between the two, on the prior's scale |
+| When an edge advances | every routed sample | only when both endpoints were observed within `-pair-window` |
+| Conflict pairs | both siblings get the identical observation and cannot separate | evidence for one sibling's direction is evidence against the other |
+| Confidence tracks | the raw sample rate | paired coverage |
+
+```bash
+agent -profile edge-minimal -domain ../domain_spec.json \
+  -priors ../prior_weights.json -kd k0s \
+  -relational -pair-window 15 -pair-support 8 -pair-history 60
+```
+
+`-pair-window` is a tolerance, not smoothing: collectors sample on independent
+grids (`system.*` on 0, 5, 10 …, PSI on 2, 6, 12 …), so without it no pair ever
+forms. `-pair-support` is how many pairs an edge needs before its weight moves at
+all — below that, `n_observations` stays at zero, because confidence has to keep
+reporting that nothing has been learned. See ARCHITECTURE.md §5 for what the mode
+does and does not claim.
 
 `-domain` is mandatory. The daemon carries no constructs, propositions, metric
 routes, adjustment bounds or tuner keywords of its own, so without a

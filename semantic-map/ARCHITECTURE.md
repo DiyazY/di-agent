@@ -20,6 +20,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [5. Telemetry Pipeline](#5-telemetry-pipeline)
   - [CollectorContract](#collectorcontract)
   - [MetricType catalogue](#metrictype-catalogue)
+  - [Two ways to learn an edge weight](#two-ways-to-learn-an-edge-weight)
   - [The Bridge](#the-bridge)
   - [Planned collector implementations](#planned-collector-implementations)
 - [6. Automatic Graph Extension](#6-automatic-graph-extension)
@@ -154,7 +155,7 @@ What each piece is for, when it runs, and whether it is required.
 |---|---|---|---|---|
 | **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest` works without one |
 | **Bridge** | `pkg/semmap` | Route one `MetricSample` to its construct, then to every edge touching it | Every sample | Yes (stateless, not a contract) |
-| **Updater** | `internal/minimal` | Fold the observation into each edge's EMA; bump confidence | Every routed sample | Yes |
+| **Updater** | `internal/minimal` | Fold the observation into each edge's EMA; bump confidence. In relational mode, fold the paired observation of both endpoints into the learned association strength | Every routed sample; in relational mode, every sample that finds a fresh counterpart | Yes |
 | **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
 | **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
@@ -271,6 +272,7 @@ The rule we hold to: **no new contract without a second implementation that need
 | **Storage**   | Read/write node and edge descriptors                        | Atomic writes; `nil` on miss, never raises. **Multigraph:** edges keyed by `(from, to, proposition_id)` — `GetEdgesByPair` returns all edges between two constructs; `GetEdge` returns one deterministic pick |
 | **Ontology**  | Live structural knowledge — constructs, propositions, validation, audit | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs are append-only; propositions are soft-deleted via `Deprecate` (never removed or direction-reversed); every mutation appends to an audit log readable via `GetHistory` |
 | **Updater**   | Incorporate telemetry into edge/node descriptors            | Idempotent per `(edge, event_id)` — one observation updates every edge in a `(from, to)` pair, each tracking its own EMA. `Reset` restores prior without deleting |
+| **Updater** (optional extension: `RelationalUpdaterContract`) | Learn an edge's weight from a paired observation of both endpoints | Same idempotency on the paired event ID; an implementation may withhold updates until it has enough pairs, in which case `n_observations` must not advance; the learned strength must stay on the scale `PriorWeight` lives on, since the Reasoner blends the two |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing graph path; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone edges   | Never modifies Storage or Ontology directly; `Reject` permanently suppresses within session               |
 | **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
@@ -475,6 +477,57 @@ evenly between two constructs, each edge sees half the samples and
 `mean_confidence` saturates at `2 × N_converge` samples rather than at
 `N_converge`. This is worth knowing before setting `N_converge` from an expected
 deployment length.
+
+### Two ways to learn an edge weight
+
+An edge asserts that one construct influences another with some strength. There are
+two defensible readings of what a telemetry sample says about that strength, and
+the daemon implements both because they answer different questions.
+
+**Endpoint EMA** (`EMAUpdater`, default). Every sample updates every edge incident
+to its construct, and the edge's EMA tracks that construct's magnitude. Cheap, and
+every sample carries information, so confidence grows with the raw sample rate.
+The weight is a proxy: the utilization of RC is not a measurement of how strongly
+RC influences PS.
+
+**Relational** (`RelationalEMAUpdater`, `-relational`). An edge advances only when
+both endpoints have been observed within the pairing window. The weight learned is
+`|r|`, the magnitude of the Pearson correlation over a sliding window of pairs,
+which is the same quantity the priors were calibrated as — `prior_weights.json`
+records `spearman_rho` per proposition — so prior and evidence are finally on one
+scale and the confidence blend interpolates between comparable numbers.
+
+Two properties follow that the endpoint path cannot have:
+
+- **Conflict pairs separate.** P2 and P3 share `RC→PS` with opposite directions.
+  Under the endpoint path both receive the identical observation and their EMAs
+  move identically, so the "evidence-distinguishable mechanisms" claim of §2 was
+  not actually testable. Under the relational path, evidence whose sign matches
+  one sibling's declared direction drives the other toward zero: a stream with
+  r = 0.9 leaves the positive sibling at 0.88 and the negative one at 0.00.
+- **The learned sign can contradict the backbone.** A proposition asserts a
+  direction; when the cluster shows the opposite sign, that is evidence against
+  *that* proposition rather than evidence of a weaker relation. Measured on the
+  testbed, which sibling of `RC→PS` a cluster supports depends on the workload
+  regime, which is the same non-stationarity the P6 evaluation reports.
+
+**Where pairing happens.** In the facade, not the Bridge: pairing needs the latest
+value per `(node, construct)`, and the Bridge is stateless by design. Two details
+are load-bearing. Collectors sample on independent grids — in the dissertation
+testbed `system.*` lands on 0, 5, 10 … and PSI on 2, 6, 12 …, so the two never
+share a timestamp — hence a tolerance window (default 15 s) rather than an exact
+match. And the tracker keys on node as well as construct: a cluster streams every
+node's telemetry into one graph, so keying on construct alone pairs the master's
+CPU reading with a worker's pressure reading and learns from series with no
+mechanical relationship. The edge stays cluster-wide; each pair comes from one
+node.
+
+**What it does not claim.** Correlation is not causation. The edge's existence and
+direction come from the grounded-theory backbone; what is learned is the magnitude
+of the association this cluster exhibits and whether the declared sign is the sign
+the cluster shows. `|r|` also carries no significance test, matching how the priors
+were calibrated (`p = 0.188` on the RC→PS pair), so a weak relation estimated over
+a short window can still produce a sizeable magnitude.
 
 ### The Bridge
 
