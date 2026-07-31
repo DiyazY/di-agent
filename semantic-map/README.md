@@ -143,8 +143,16 @@ semantic-map/
     │   │   │                   the routing table itself is spec data)
     │   │   └── pairing.go      latest observation per (node, construct); forms the paired
     │   │                       observations the relational updater consumes
+    │   ├── statemap/           The state model — what THIS system exhibits (concrete, NOT a contract)
+    │   │   ├── property.go     Property + Relationship + Map: kinds, lifecycle, observe, retire
+    │   │   ├── learn.go        Paired estimator — relationships learn their own strength
+    │   │   ├── query.go        State(Query) + Explain(id) — census-carrying views
+    │   │   ├── journal.go      Bounded change log + DecisionBuilder (records inputs as read)
+    │   │   ├── persist.go      Versioned, owner-stamped snapshots (atomic write, refuses foreign)
+    │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
-    │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
+    │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
+    │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties, calibrated priors
     │
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
@@ -186,6 +194,8 @@ semantic-map/
     ├── cmd/agent/              Daemon binary
     │   ├── main.go             Flag parsing + profile build + ListenAndServe
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
+    │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
+    │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
     │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
     │   ├── static.go           //go:embed all:static + staticHandler()
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
@@ -372,6 +382,24 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=`         | State model |
+| GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
+| POST | `/state/properties`                 | `Property`                                               | State model |
+| DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
+| GET  | `/state/relationships`              | `?from=&to=`                                             | State model |
+| POST | `/state/relationships`              | `Relationship`                                           | State model |
+| DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
+| POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
+| GET  | `/state/estimate`                   | `?target=&id=` — answers from the map, returns a decision id | State model |
+| GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
+| GET  | `/state/decisions`                  | `?limit=`                                                | State model |
+| GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
+| POST | `/state/sweep`                      | —                                                        | State model |
+| GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
+| GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
+| GET  | `/state/peers/{id}`                 | path only                                                | Peer state |
+| POST | `/state/peers/refresh`              | — poll every peer now                                    | Peer state |
+| GET  | `/state/where`                      | `?property=` — per-node answers, deliberately not averaged | Peer state |
 
 `POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `-explain-provider=none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
 
@@ -443,8 +471,9 @@ marks a property stale (`-stale-after`) and optionally retires it (`-retire-afte
 The map is node-local: each agent models the machine it runs on, and its graph holds
 that machine's evidence. `-node-id` is its identity (falling back to the hostname),
 and the default `-ingest-scope=self` rejects telemetry labelled with another
-machine's ID rather than folding it in. Cluster-level questions go to peers via
-`/peers` and `/cost`, so no agent needs everyone else's raw telemetry.
+machine's ID rather than folding it in. Every map is stamped with its owner, so a
+property is attributable once state crosses a node boundary, and a snapshot copied
+from another host is refused instead of adopted as local history.
 
 ```bash
 # A deployment: one agent per node, modelling that node
@@ -458,6 +487,40 @@ agent -profile edge-minimal -domain ../domain_spec.json -ingest-scope=any
 the resulting edge weights are means over machines that may be different physical
 systems. `GET /cost?node=X` returns 409 when X is not this agent, pointing at that
 machine's own endpoint when it is a known peer.
+
+### Asking other nodes
+
+A node-local map means any question wider than one machine is a question for other
+agents. Each agent fetches its peers' maps (`-peer-state-poll`, default 30s) and holds
+them under the owner each peer reported.
+
+```bash
+agent -domain ../domain_spec.json -node-id node_1 -peers http://node_2:8080
+
+# this node and every peer, side by side
+curl -s localhost:8080/state/cluster | jq '.cluster.self_id, .cluster.peers | keys, .stale_peers'
+
+# who has this property, and what do they say it is
+curl -s 'localhost:8080/state/where?property=cpu_utilization' | jq '.holders'
+# → [{"node":"node_1","local":true,"value":0.15,…},
+#    {"node":"node_2","local":false,"value":0.88,"age_seconds":1.8,…}]
+
+curl -s localhost:8080/state/peers | jq            # who, when, how much, last error
+curl -s -X POST localhost:8080/state/peers/refresh # poll now instead of waiting
+```
+
+Peer state is never merged into the local map. A property with the same ID on two
+nodes describes two systems, and folding them together would make every "this system"
+answer a claim about some union of machines. So answers stay per node and are not
+averaged — the reason to ask several nodes is to be able to pick one.
+
+Three failure modes are reported rather than smoothed over. A peer that answered
+before and cannot be reached now keeps its last snapshot and is listed under
+`unreachable`, because during a partition that snapshot is all this agent has. An
+address that never identified itself appears under `silent` and does not become a node,
+since inventing one from a URL would put a machine that may not exist into the cluster
+view. And a snapshot older than `-peer-state-stale` (default 90s) is labelled history
+rather than withheld.
 
 ### Choosing how edges learn
 
@@ -608,6 +671,23 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
+
+**State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
+
+| Flag                     | Default | Meaning                                                                            |
+| ------------------------ | ------- | ---------------------------------------------------------------------------------- |
+| `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
+| `-retire-after`          | `0`     | Silence after which a property is retired automatically. `0` leaves retirement to an operator. Retirement is soft and cascades to relationships that reference the property. |
+| `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
+| `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
+| `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at its seeded prior with confidence 0 — an honest report that nothing has been learned, and a map that never improves on what it was told. |
+| `-pair-window-seconds`   | `15`    | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
+| `-state-file`            | `""`    | Path to persist the map and its journal. Empty keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
+| `-save-interval`         | `1m`    | Snapshot cadence when `-state-file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses. |
+| `-journal-size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
+| `-ingest-scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
+| `-peer-state-poll`       | `30s`   | How often to fetch each peer's map. `0` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
+| `-peer-state-stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `-explain-provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
@@ -762,6 +842,8 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 | `POST` | `/offload` | `{task_type,source_node_id,data_size_bytes,latency_budget_ms,energy_budget_joules?}` | `200 {accepted,reason,expected_latency,expected_energy}` |
 
 `/offload` is the peer side of the protocol: it runs `CostOfAction` on the local graph and accepts when the result fits the requested budgets. It does not actually schedule any work — that is a P7 (execution) concern. The expected latency/energy in the response let the source agent record an outcome and adjust trust.
+
+These three endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
 
 ### `mapctl peers`
 

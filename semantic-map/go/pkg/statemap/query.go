@@ -36,6 +36,11 @@ type Query struct {
 // comparing two views needs to know whether they are looking at one system at two
 // times or two answers to the same question.
 type StateView struct {
+	// Owner is the system these properties describe. It travels with the view because
+	// a view is the thing that crosses node boundaries, and a property arriving
+	// without a subject is not usable: a reader cannot tell whose CPU it is.
+	Owner string `json:"owner,omitempty"`
+
 	Revision      uint64         `json:"revision"`
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
@@ -97,7 +102,7 @@ func (m *Map) State(q Query) StateView {
 		}
 	}
 
-	view := StateView{Revision: m.revision, Counts: m.censusLocked()}
+	view := StateView{Owner: m.owner, Revision: m.revision, Counts: m.censusLocked()}
 	selected := map[string]bool{}
 	for _, p := range m.properties {
 		if !wantStatus[p.Status] {

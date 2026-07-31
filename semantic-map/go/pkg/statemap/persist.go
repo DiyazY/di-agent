@@ -28,11 +28,21 @@ import (
 // SnapshotVersion identifies the on-disk format. A snapshot from a different version
 // is refused rather than guessed at: restoring a misread field would put wrong values
 // into a model the agent then reasons from, which is worse than starting cold.
-const SnapshotVersion = 1
+// Version 2 named the property and relationship fields explicitly. A version 1 file
+// would half-load under those names — Go's decoder matches "ID" to "id"
+// case-insensitively but not "NObservations" to "n_observations" — so the values would
+// arrive and the observation counts and timestamps would not. That is the silent
+// partial restore this field exists to prevent, so the version moved with the format.
+const SnapshotVersion = 2
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
-	Version  int       `json:"version"`
+	Version int `json:"version"`
+
+	// Owner is the system the snapshot describes, so a snapshot moved between hosts
+	// can be recognised as foreign instead of adopted as local history.
+	Owner string `json:"owner,omitempty"`
+
 	SavedAt  time.Time `json:"saved_at"`
 	Revision uint64    `json:"revision"`
 
@@ -55,6 +65,7 @@ func (m *Map) Snapshot() Snapshot {
 
 	s := Snapshot{
 		Version:  SnapshotVersion,
+		Owner:    m.owner,
 		SavedAt:  m.now(),
 		Revision: m.revision,
 	}
@@ -125,6 +136,19 @@ func (m *Map) Load(path string) (bool, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// A snapshot from another system is refused. Restoring it would give this agent a
+	// week of another machine's observations as its own history, at high confidence,
+	// and nothing downstream could tell the difference — the values are plausible and
+	// the provenance says "observed". This happens for mundane reasons: a state file
+	// copied with a config directory, an image built from a running node.
+	if snap.Owner != "" && m.owner != "" && snap.Owner != m.owner {
+		return false, fmt.Errorf(
+			"snapshot at %s describes %q but this agent models %q: refusing to adopt "+
+				"another system's observations as this one's history",
+			path, snap.Owner, m.owner)
+	}
+
 	if len(m.properties) > 0 || len(m.relationships) > 0 {
 		return false, fmt.Errorf("refusing to load a snapshot into a map that already "+
 			"holds %d properties and %d relationships: load before seeding, so "+

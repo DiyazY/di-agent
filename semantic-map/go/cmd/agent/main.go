@@ -127,6 +127,16 @@ func main() {
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
 			"these by trust-weighted savings. Additional peers can be added at "+
 			"runtime via POST /peers.")
+	peerStatePoll := flag.Duration("peer-state-poll", 30*time.Second,
+		"how often to fetch each peer's semantic map. 0 disables polling, leaving "+
+			"GET /state/cluster to report only what a manual POST /state/peers/refresh "+
+			"collected — an empty cluster view then means nobody asked, not that the "+
+			"peers have no state.")
+	peerStateStale := flag.Duration("peer-state-stale", 90*time.Second,
+		"how old a peer's snapshot may be before the cluster view marks it history. "+
+			"Nothing is deleted at this age: during a partition the last snapshot is "+
+			"the only thing this agent has about that node, and it is labelled rather "+
+			"than withheld.")
 	domainPath := flag.String("domain", "",
 		"path to domain_spec.json: the constructs, metric routing, propositions, "+
 			"adjustment policy and operator vocabulary the agent reasons over. "+
@@ -260,6 +270,10 @@ func main() {
 	// fresh agent should see the model it will fill in, not an empty map — and
 	// admission is on, so a metric nobody declared still becomes a property.
 	state := statemap.New(statemap.Config{
+		// The map is owned by this node, and says so. Everything it reports about
+		// itself is attributable once state starts crossing node boundaries, and a
+		// snapshot from another machine is refused rather than adopted.
+		Owner:                   *nodeID,
 		StaleAfter:              *staleAfter,
 		RetireAfter:             *retireAfter,
 		ConvergenceObservations: int(*convergence),
@@ -322,9 +336,22 @@ func main() {
 	}
 	defer explainer.Close()
 
+	// What this agent has heard from other agents, kept apart from what it observes
+	// itself. This is how a cluster-level question is answered without pretending the
+	// answer came from local observation.
+	peerState := statemap.NewPeerStore(*nodeID, *peerStateStale)
+	peerFetcher := &peerStateFetcher{
+		// The registry, not the -peers list: a peer added at runtime via POST /peers is
+		// then polled without a restart.
+		registry: sm.Peers(),
+		client:   peers.NewClient(5 * time.Second),
+		store:    peerState,
+	}
+
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)
 	registerStateRoutes(mux, state)
+	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 
 	srv := &http.Server{Addr: *addr, Handler: mux}
 
@@ -347,6 +374,7 @@ func main() {
 	// /state/sweep, and a quiet property would keep being reported as current.
 	startSweepLoop(ctx, state, sweepEvery(*sweepInterval, *staleAfter))
 	startSaveLoop(ctx, state, *stateFile, *saveInterval)
+	startPeerStateLoop(ctx, peerFetcher, *peerStatePoll)
 
 	startCollectionLoop(ctx, sm, collector, *collectInterval)
 

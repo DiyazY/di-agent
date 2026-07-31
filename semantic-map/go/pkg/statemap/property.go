@@ -81,44 +81,50 @@ const (
 )
 
 // Property is one thing the system exhibits.
+//
+// The JSON names are explicit because this struct is a wire contract in two
+// directions: it is what one agent sends another when asked for its state, and what a
+// snapshot holds across a restart. Leaving the names to Go's field-name default made
+// them a consequence of the source rather than an agreement, so a rename would have
+// silently changed the format both ends parse.
 type Property struct {
-	ID   string
-	Kind Kind
+	ID   string `json:"id"`
+	Kind Kind   `json:"kind"`
 
 	// Unit and Range describe the value's meaning. Range is the interval the value
 	// is expected to occupy; a value outside it is recorded but flagged, because
 	// silently clipping an out-of-range reading hides a broken collector.
-	Unit  string
-	Range [2]float64
+	Unit  string     `json:"unit,omitempty"`
+	Range [2]float64 `json:"range"`
 
 	// Value is the current estimate: the EMA of observations for an observed
 	// property, the aggregate of members for a derived one.
-	Value float64
+	Value float64 `json:"value"`
 
 	// Confidence is how much of Value rests on observation rather than on its
 	// starting assumption, in [0,1]. A property with no observations reports 0 —
 	// which is the difference between "idle" and "not yet known".
-	Confidence float64
+	Confidence float64 `json:"confidence"`
 
-	Prior         float64
-	NObservations int
+	Prior         float64 `json:"prior"`
+	NObservations int     `json:"n_observations"`
 
 	// Source names where an observed property's data comes from — a metric type, a
 	// collector — so a reader can find out why a property exists.
-	Source string
+	Source string `json:"source,omitempty"`
 
 	// Members are the properties a derived property aggregates.
-	Members []string
+	Members []string `json:"members,omitempty"`
 
-	Status        Status
-	FirstObserved time.Time
-	LastObserved  time.Time
-	RetiredReason string
+	Status        Status    `json:"status"`
+	FirstObserved time.Time `json:"first_observed,omitzero"`
+	LastObserved  time.Time `json:"last_observed,omitzero"`
+	RetiredReason string    `json:"retired_reason,omitempty"`
 
 	// OutOfRange counts readings outside Range. Non-zero means the collector and
 	// the declared range disagree, which is a configuration fault worth surfacing
 	// rather than absorbing.
-	OutOfRange int
+	OutOfRange int `json:"out_of_range,omitempty"`
 }
 
 // Provenance says where a relationship's strength came from. It is data, not a
@@ -139,32 +145,32 @@ const (
 
 // Relationship is a directed association between two properties.
 type Relationship struct {
-	ID   string // stable identity, unique per (From, To, Label)
-	From string
-	To   string
+	ID   string `json:"id"` // stable identity, unique per (From, To, Label)
+	From string `json:"from"`
+	To   string `json:"to"`
 
 	// Label distinguishes several relationships over the same endpoints. Two
 	// mechanisms can relate the same pair in opposite directions, and collapsing
 	// them would make the pair unable to represent a disagreement it is observing.
-	Label string
+	Label string `json:"label,omitempty"`
 
 	// Sign is +1 when From rising accompanies To rising, -1 for the converse.
-	Sign int
+	Sign int `json:"sign"`
 
 	// Strength is the current estimate in [0,1], and Confidence how much of it
 	// rests on observation of this system.
-	Strength   float64
-	Prior      float64
-	Confidence float64
+	Strength   float64 `json:"strength"`
+	Prior      float64 `json:"prior"`
+	Confidence float64 `json:"confidence"`
 
-	NObservations int
-	Provenance    Provenance
+	NObservations int        `json:"n_observations"`
+	Provenance    Provenance `json:"provenance"`
 
-	Status        Status
-	FirstObserved time.Time
-	LastObserved  time.Time
-	RetiredReason string
-	Note          string
+	Status        Status    `json:"status"`
+	FirstObserved time.Time `json:"first_observed,omitzero"`
+	LastObserved  time.Time `json:"last_observed,omitzero"`
+	RetiredReason string    `json:"retired_reason,omitempty"`
+	Note          string    `json:"note,omitempty"`
 }
 
 // Effective is the strength the agent should reason with: the prior until this
@@ -177,6 +183,16 @@ func (r *Relationship) Effective() float64 {
 
 // Config bounds the lifecycle. Zero values fall back to the defaults below.
 type Config struct {
+	// Owner names the system this map models — one machine, since one agent runs per
+	// machine and models what it can observe locally.
+	//
+	// It is not decoration. Once state crosses a node boundary, a property without an
+	// owner cannot be attributed: a reader holding two properties with the same ID
+	// cannot tell whether they describe two machines or one machine twice. Snapshots
+	// carry the owner for the same reason, so a snapshot copied to another host is
+	// refused rather than adopted as that host's own history.
+	Owner string
+
 	// StaleAfter is the silence that marks a property stale. It should exceed the
 	// slowest collector's interval by enough margin that a missed sample is not
 	// mistaken for a departed property.
@@ -230,6 +246,10 @@ type Map struct {
 	mu  sync.RWMutex
 	cfg Config
 
+	// owner is the system this map models. Fixed at construction: a map that could be
+	// reassigned to another system would carry the first one's history into the second.
+	owner string
+
 	properties    map[string]*Property
 	relationships map[string]*Relationship
 
@@ -260,6 +280,7 @@ func New(cfg Config, journal *Journal) *Map {
 	}
 	return &Map{
 		cfg:           c,
+		owner:         c.Owner,
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		latest:        make(map[string]observation),
@@ -277,6 +298,9 @@ func (m *Map) SetClock(f func() time.Time) {
 	m.now = f
 	m.mu.Unlock()
 }
+
+// Owner returns the system this map models.
+func (m *Map) Owner() string { return m.owner }
 
 // Revision returns the current revision.
 func (m *Map) Revision() uint64 {

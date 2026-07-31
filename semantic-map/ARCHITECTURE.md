@@ -572,12 +572,65 @@ the arithmetic are exactly the ones the journal holds — a separate "log what w
 pass would be free to disagree with what was used, and that disagreement is invisible
 in precisely the cases where it matters. Every cost answer therefore carries a
 `DecisionID` and its caveats, and `GET /state/decisions/{id}` reproduces the inputs
-afterwards. A reasoner constructed without a state model falls back to the storage
-graph and returns an empty `DecisionID`, which is the signal that the answer is not
-traceable rather than that nothing happened.
+afterwards. A reasoner constructed without a state model has no cost path at all and
+returns `ErrNoStateModel`, so an untraceable answer is not a thing the agent can
+produce.
 
 `GET /state/estimate?target=` does the same for any property, not only the cost
 constructs.
+
+**The map survives the process.** `-state-file` persists properties, relationships and
+the journal; the write is to a temporary file and renamed, because a half-written
+snapshot read back on the next start would look like knowledge. Two things follow from
+persisting at all. A restarted agent is not back at cold start on a system it has
+already watched for a week, and "why did you do that yesterday" stays answerable —
+without this the audit trail is an artefact of one process lifetime rather than of the
+agent. The shutdown save is synchronous in `main` rather than in the save goroutine:
+cancelling the context and returning let the process exit mid-write, so a clean restart
+silently dropped everything since the last periodic save.
+
+What is deliberately not persisted: the estimator's pair windows. Restoring them would
+restore a claim of simultaneity between observations taken before a restart and after
+it, across a gap of unknown length. The learned strengths and their confidences survive,
+so the estimator resumes from what it concluded rather than from what it was mid-way
+through concluding. The snapshot carries a format version and an owner, and a mismatch
+in either is refused rather than guessed at — a version 1 file half-loads under version
+2's field names, and a snapshot copied from another host would install that machine's
+observations as this one's history at full confidence.
+
+### Peer state: knowledge crossing a node boundary
+
+A node-local map means every question wider than one machine is a question for another
+agent. Until `pkg/statemap.PeerStore` and `peers.Client.State`, the only things that
+crossed a node boundary were a cost number, a health probe and an offload request: an
+agent could not ask a peer what properties it has, which of them have gone quiet, or
+what it believes about a relation. "Cluster-level questions go to peers" meant "ask a
+peer for one number".
+
+Each agent now fetches its peers' maps on a timer and holds them under the owner each
+peer *reported* — not the URL it was reached at, so a peer reachable at two addresses is
+one peer and a proxy in front of several is not mistaken for one. `GET /state/cluster`
+returns this node's state and every peer's, side by side; `GET /state/where?property=`
+answers "who has this, and what do they say it is".
+
+**Nothing is merged, and that is the whole design.** A `PeerStore` is a separate type
+from `Map` precisely so a question about "this system" cannot be answered with a peer's
+property by accident. Merging would produce a map whose properties belong to no definite
+system, and confidence — the claim that a value rests on observation — would stop having
+a subject. For the same reason `/state/where` returns per-node answers and does not
+average them: a mean across machines describes none of them, and the reason to ask
+several nodes is to be able to pick one.
+
+Three refusals and three distinctions hold the boundary. State naming no owner is
+refused at the client, because unattributed properties are the one kind that could
+quietly be read as this machine's. State claiming *this* agent's identity is refused at
+the store, since a proxy loop would otherwise make one machine appear twice in every
+cluster view. A peer that answered before and cannot be reached now keeps its last
+snapshot and is listed as unreachable — during a partition that snapshot is all this
+agent has. An address that has never identified itself is reported as silent and does
+not become a node, because inventing one from a URL would put a machine that may not
+exist into the cluster view. And a snapshot older than `-peer-state-stale` is labelled
+history rather than withheld, so the caller decides whether to act on it.
 
 ### Two ways to learn an edge weight
 
@@ -968,6 +1021,8 @@ Collapsing them — e.g. embedding HTML rendering inside Go handlers, or buildin
 ## 10. Coordination
 
 The dissertation calls this work a *Context-Aware Agentic Framework for **Decentralized** Edge Computing*. Single-agent EMA convergence is the mechanism; multi-agent coordination is the spine. Without it, `RecommendPeer` is dead code, "decentralized" is aspirational, and P7 has nothing to build on.
+
+This section covers the registry and the trust mechanics that decide *where work goes*. What peers know about their own systems — and why it is held apart from local state rather than merged into it — is [§5, Peer state](#peer-state-knowledge-crossing-a-node-boundary).
 
 ### The peer registry — concrete, not a contract
 
