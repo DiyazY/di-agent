@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -24,6 +25,13 @@ type SemanticMapReader interface {
 	CostOfAction(taskType, nodeID string) (*types.ActionCost, error)
 	RecommendPeer(ctx *types.OffloadContext) (*types.PeerRecommendation, error)
 	Peers() *peers.Registry
+
+	// State is the model the agent actually reasons from, and the authority a
+	// natural-language answer has to cite. Nil is permitted for a reader that has no
+	// state model, in which case the state tools report that rather than falling
+	// silently back to the construct graph — a citation checked against a model no
+	// decision uses is worse than no citation.
+	State() *statemap.Map
 }
 
 // ToolSchema is the LLM-visible descriptor for one tool. The wire shape mirrors
@@ -107,6 +115,35 @@ var toolSchemas = []ToolSchema{
 		},
 	},
 	{
+		Name: "get_state",
+		Description: "The properties this system currently exhibits, with each one's " +
+			"value, confidence, lifecycle status and source. This is the model the agent " +
+			"reasons from: prefer it over get_graph. Optional filters: kind " +
+			"(observed|derived), status (active|stale|retired), min_confidence.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"kind":           map[string]any{"type": "string"},
+				"status":         map[string]any{"type": "string"},
+				"min_confidence": map[string]any{"type": "number"},
+			},
+		},
+	},
+	{
+		Name: "explain_property",
+		Description: "Everything the map holds about one property: its value and " +
+			"confidence, how it was sourced, what it aggregates if derived, and every " +
+			"relationship into and out of it with each one's provenance. Use this to " +
+			"answer why a property is where it is.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"property": map[string]any{"type": "string"},
+			},
+			"required": []string{"property"},
+		},
+	},
+	{
 		Name:        "get_graph",
 		Description: "Return the full graph snapshot (all constructs, propositions, and edges). Prefer get_edges or get_cost when the question is narrow — get_graph is expensive to reason over.",
 		Parameters: map[string]any{
@@ -142,6 +179,10 @@ func Dispatch(reader SemanticMapReader, name string, args map[string]any) (*Tool
 		return dispatchGetRecommend(reader, args)
 	case "get_graph":
 		return dispatchGetGraph(reader)
+	case "get_state":
+		return dispatchGetState(reader, args)
+	case "explain_property":
+		return dispatchExplainProperty(reader, args)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownTool, name)
 	}
@@ -353,5 +394,95 @@ func dispatchGetGraph(r SemanticMapReader) (*ToolResult, error) {
 	return &ToolResult{
 		Payload: payload,
 		Digest:  fmt.Sprintf("graph constructs=%d propositions=%d", len(constructs), len(propositions)),
+	}, nil
+}
+
+// ── State tools ──────────────────────────────────────────────────────────────
+//
+// These read the model the agent reasons from. The construct-graph tools above are
+// retained because a caller may still want to see the backbone, but an answer about
+// what the system is doing has to come from here: citing a model no decision uses
+// would make the validator's check meaningless.
+
+func dispatchGetState(r SemanticMapReader, args map[string]any) (*ToolResult, error) {
+	sm := r.State()
+	if sm == nil {
+		return nil, fmt.Errorf("this agent has no state model, so it cannot report what " +
+			"the system is currently doing")
+	}
+	q := statemap.Query{}
+	if s, ok := args["kind"].(string); ok && s != "" {
+		q.Kinds = append(q.Kinds, statemap.Kind(s))
+	}
+	if s, ok := args["status"].(string); ok && s != "" {
+		q.Statuses = append(q.Statuses, statemap.Status(s))
+	}
+	if f, ok := args["min_confidence"].(float64); ok {
+		q.MinConfidence = f
+	}
+	view := sm.State(q)
+
+	// A compact shape: the LLM needs the values and the lifecycle, not the timestamps.
+	type propOut struct {
+		ID         string  `json:"id"`
+		Kind       string  `json:"kind"`
+		Value      float64 `json:"value"`
+		Confidence float64 `json:"confidence"`
+		Status     string  `json:"status"`
+		N          int     `json:"n_observations"`
+		Source     string  `json:"source,omitempty"`
+	}
+	out := struct {
+		Revision   uint64               `json:"revision"`
+		Counts     statemap.StateCounts `json:"counts"`
+		Properties []propOut            `json:"properties"`
+	}{Revision: view.Revision, Counts: view.Counts}
+	for _, p := range view.Properties {
+		out.Properties = append(out.Properties, propOut{
+			ID: p.ID, Kind: string(p.Kind), Value: p.Value, Confidence: p.Confidence,
+			Status: string(p.Status), N: p.NObservations, Source: p.Source,
+		})
+	}
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	return &ToolResult{
+		Payload: payload,
+		Digest: fmt.Sprintf("state rev=%d properties=%d active=%d stale=%d retired=%d",
+			view.Revision, len(view.Properties), view.Counts.PropertiesActive,
+			view.Counts.PropertiesStale, view.Counts.PropertiesRetired),
+	}, nil
+}
+
+func dispatchExplainProperty(r SemanticMapReader, args map[string]any) (*ToolResult, error) {
+	sm := r.State()
+	if sm == nil {
+		return nil, fmt.Errorf("this agent has no state model, so it has nothing to " +
+			"explain about a property")
+	}
+	id, _ := args["property"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("explain_property needs a property name")
+	}
+	text, err := sm.Explain(id)
+	if err != nil {
+		return nil, err
+	}
+	p, _ := sm.Property(id)
+	payload, err := json.Marshal(map[string]any{
+		"property":      p,
+		"explanation":   text,
+		"influenced_by": sm.Relationships("", id),
+		"influences":    sm.Relationships(id, ""),
+		"revision":      sm.Revision(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ToolResult{
+		Payload: payload,
+		Digest: fmt.Sprintf("explain %s value=%.4f c=%.2f %s",
+			p.ID, p.Value, p.Confidence, p.Status),
 	}, nil
 }

@@ -211,8 +211,13 @@ type CriticVerdict struct {
 // validator confirms that each citation exists and that the recorded values
 // match the current graph state within a small epsilon.
 type Citation struct {
-	Kind          string  `json:"kind"` // "edge"|"proposition"|"peer"|"event"|"construct"
-	ID            string  `json:"id"`   // proposition_id / peer_id / construct_id / event_target
+	Kind string `json:"kind"` // "property"|"edge"|"proposition"|"peer"|"event"|"construct"
+	ID   string `json:"id"`   // property / proposition_id / peer_id / construct_id / event_target
+
+	// Value is the cited value of a property, checked against the state model — the
+	// model the agent reasons from. Citing a property is the form an answer about
+	// what the system is currently doing should take.
+	Value         float64 `json:"value,omitempty"`
 	EMAWeight     float64 `json:"ema_weight,omitempty"`
 	PriorWeight   float64 `json:"prior_weight,omitempty"`
 	Confidence    float64 `json:"confidence,omitempty"`
