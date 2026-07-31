@@ -11,6 +11,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -32,6 +33,15 @@ type RuleEngineReasoner struct {
 	storage       contracts.StorageContract
 	ontology      contracts.OntologyContract
 	minTrustScore float64
+
+	// state is the live state model. When attached, every cost estimate is answered
+	// FROM it and recorded in its journal, so an answer can be re-derived afterwards
+	// from the properties and relationships it actually read.
+	//
+	// nil falls back to reading the storage graph, which keeps a reasoner
+	// constructible without a state model — the compliance suites do that — at the
+	// cost of producing answers that carry no DecisionID and so cannot be traced.
+	state *statemap.Map
 
 	// peers is the live registry of remote agents this reasoner can offload
 	// to. nil is permitted (and equivalent to an empty registry): RecommendPeer
@@ -79,6 +89,10 @@ func NewRuleEngineReasoner(
 	}
 }
 
+// AttachState gives this reasoner the live state model to answer from. Answers
+// produced afterwards carry a DecisionID that reproduces their inputs.
+func (r *RuleEngineReasoner) AttachState(s *statemap.Map) { r.state = s }
+
 // CostOfAction estimates what work costs on THIS machine, and how sensitive that
 // cost is to a change in load.
 //
@@ -115,6 +129,9 @@ func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.Actio
 	resourceID, pressureID, err := r.costConstructs()
 	if err != nil {
 		return nil, err
+	}
+	if r.state != nil {
+		return r.costFromState(taskType, nodeID, resourceID, pressureID)
 	}
 
 	deprecated, err := r.deprecatedPropositionSet()
@@ -427,4 +444,89 @@ func assumedDemand(octx *types.OffloadContext) float64 {
 		return 1
 	}
 	return d
+}
+
+// costFromState answers a cost query from the state model and records the answer
+// with the state that produced it.
+//
+// Reading through the DecisionBuilder is what makes the record trustworthy: the
+// properties and relationships that reach the arithmetic are exactly the ones the
+// journal ends up holding, because the reading produces the record. A separate
+// "log what we used" pass would be free to disagree with what was actually used, and
+// that disagreement is invisible in exactly the cases where it matters.
+func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressureID string) (*types.ActionCost, error) {
+	who := nodeID
+	if who == "" {
+		who = "self"
+	}
+	// The decision id has to be unique per answer and derivable by the caller, so a
+	// client can fetch the trace without the daemon inventing an opaque handle.
+	id := fmt.Sprintf("cost-%d-%s-%s", r.state.Revision(), taskType, who)
+	b := r.state.Decide(id, fmt.Sprintf("cost of %s on %s", taskType, who))
+
+	level := func(propertyID string) (float64, float64) {
+		p, ok := b.Property(propertyID)
+		if !ok {
+			// Absent rather than unobserved: the caveat the builder already recorded
+			// says so, and a neutral level keeps the answer computable.
+			return 0.5, 0
+		}
+		return p.Value, p.Confidence
+	}
+
+	// A sensitivity sums each incoming relationship's effective strength applied to
+	// its source property's current level, signed by the relationship's direction.
+	sensitivity := func(targetID string) float64 {
+		var sum float64
+		for _, rel := range b.RelationshipsInto(targetID) {
+			src, ok := b.Property(rel.From)
+			if !ok {
+				continue
+			}
+			sum += rel.Effective() * float64(rel.Sign) * src.Value
+		}
+		return sum
+	}
+
+	resourceLevel, resourceConf := level(resourceID)
+	pressureLevel, pressureConf := level(pressureID)
+	resourceSens := sensitivity(resourceID)
+	pressureSens := sensitivity(pressureID)
+
+	// Deprecated propositions are excluded by construction here: the builder reads
+	// the state model's relationships, and retirement removes them from that view.
+	// The storage path needs an explicit filter for the same effect.
+	b.Note("%s level %.4f (c=%.2f), sensitivity %+.4f", resourceID, resourceLevel, resourceConf, resourceSens)
+	b.Note("%s level %.4f (c=%.2f), sensitivity %+.4f", pressureID, pressureLevel, pressureConf, pressureSens)
+
+	confidence := (resourceConf + pressureConf) / 2
+
+	d := b.Commit(map[string]any{
+		"task_type":            taskType,
+		"node":                 who,
+		"resource_cost":        math.Max(0, resourceLevel),
+		"latency_estimate":     math.Max(0, pressureLevel),
+		"resource_sensitivity": resourceSens,
+		"pressure_sensitivity": pressureSens,
+		"confidence":           confidence,
+	})
+
+	path := make([]string, 0, len(d.RelationshipsRead))
+	for i := range d.RelationshipsRead {
+		path = append(path, d.RelationshipsRead[i].String())
+	}
+
+	return &types.ActionCost{
+		CPUCost:             math.Max(0, resourceLevel*0.1),
+		ResourceCost:        math.Max(0, resourceLevel),
+		EnergyCost:          0,
+		LatencyEstimate:     math.Max(0, pressureLevel),
+		Confidence:          confidence,
+		ResourceSensitivity: resourceSens,
+		PressureSensitivity: pressureSens,
+		DecisionID:          d.ID,
+		Caveats:             d.Caveats,
+		Rationale:           d.Rationale,
+		GraphPathUsed:       path,
+	}, nil
 }

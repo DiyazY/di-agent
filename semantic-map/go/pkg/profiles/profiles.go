@@ -13,6 +13,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -131,6 +132,12 @@ type Config struct {
 	// means the built-in defaults (8 and 60).
 	PairMinSupport int
 	PairWindow     int
+
+	// StateMap is the live state model this agent reasons from. When set, the
+	// reasoner answers cost queries from it and records each answer in its journal,
+	// so every answer carries a DecisionID that reproduces its inputs. Nil leaves the
+	// reasoner reading the storage graph, whose answers are not traceable.
+	StateMap *statemap.Map
 
 	// AcceptForeignSamples lets this agent ingest telemetry labelled with other
 	// machines' IDs into its own graph. The map is node-local by design (one agent
@@ -316,6 +323,13 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 
 	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
 	sm.SetIdentity(cfg.NodeID, cfg.AcceptForeignSamples)
+	if cfg.StateMap != nil {
+		// Both halves need it: the facade feeds observations into the model, and the
+		// reasoner answers from it. Attaching only one would give a model that fills up
+		// and never gets read, or a reasoner reading a model nothing updates.
+		sm.AttachState(cfg.StateMap)
+		reasoner.AttachState(cfg.StateMap)
+	}
 	if cfg.Relational && cfg.PairWindowSeconds > 0 {
 		sm.SetPairWindow(cfg.PairWindowSeconds)
 	}

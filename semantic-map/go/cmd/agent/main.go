@@ -232,6 +232,28 @@ func main() {
 		PairWindow:           *pairHistory,
 	}
 
+	// The state model: what this system exhibits, updated by every sample. It is
+	// seeded from the domain specification so the properties the agent already knows
+	// how to interpret exist before any telemetry arrives — an operator inspecting a
+	// fresh agent should see the model it will fill in, not an empty map — and
+	// admission is on, so a metric nobody declared still becomes a property.
+	state := statemap.New(statemap.Config{
+		StaleAfter:              *staleAfter,
+		RetireAfter:             *retireAfter,
+		ConvergenceObservations: int(*convergence),
+		Alpha:                   *alpha,
+		AdmitUnknown:            !*noAdmit,
+	}, statemap.NewJournal(*journalSize))
+	if n, err := seedStateFromSpec(state, spec); err != nil {
+		log.Fatalf("failed to seed the state model: %v", err)
+	} else {
+		log.Printf("state model: %d properties seeded from the domain spec, "+
+			"admission of undeclared properties %s", n,
+			map[bool]string{true: "on", false: "off"}[!*noAdmit])
+	}
+
+	cfg.StateMap = state
+
 	sm, collector, err := profiles.Build(*profileName, cfg)
 	if err != nil {
 		log.Fatalf("failed to build profile %q: %v", *profileName, err)
@@ -255,27 +277,6 @@ func main() {
 		log.Fatalf("failed to build explainer: %v", err)
 	}
 	defer explainer.Close()
-
-	// The state model: what this system exhibits, updated by every sample. It is
-	// seeded from the domain specification so the properties the agent already knows
-	// how to interpret exist before any telemetry arrives — an operator inspecting a
-	// fresh agent should see the model it will fill in, not an empty map — and
-	// admission is on, so a metric nobody declared still becomes a property.
-	state := statemap.New(statemap.Config{
-		StaleAfter:              *staleAfter,
-		RetireAfter:             *retireAfter,
-		ConvergenceObservations: int(*convergence),
-		Alpha:                   *alpha,
-		AdmitUnknown:            !*noAdmit,
-	}, statemap.NewJournal(*journalSize))
-	if n, err := seedStateFromSpec(state, spec); err != nil {
-		log.Fatalf("failed to seed the state model: %v", err)
-	} else {
-		log.Printf("state model: %d properties seeded from the domain spec, "+
-			"admission of undeclared properties %s", n,
-			map[bool]string{true: "on", false: "off"}[!*noAdmit])
-	}
-	sm.AttachState(state)
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, sm, explainer)

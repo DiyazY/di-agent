@@ -117,6 +117,21 @@ type ActionCost struct {
 	// two halves of the map are therefore useful at opposite ends of a deployment.
 	ResourceSensitivity float64
 	PressureSensitivity float64
+
+	// DecisionID identifies this answer in the state map's journal. Fetching it
+	// returns the properties and relationships the answer was computed from, at the
+	// values they held — so "why did the agent say that" is answerable after the
+	// system has moved on, rather than only from a rationale string that cannot be
+	// checked against anything.
+	//
+	// Empty when the reasoner has no state map attached, which is the signal that
+	// this answer is not traceable rather than that nothing happened.
+	DecisionID string
+
+	// Caveats name the reasons this answer may be weak: inputs that are stale, that
+	// have never been observed, or that are missing. An agent that reports these is
+	// reviewable; one that reports only its conclusion is not.
+	Caveats []string
 }
 
 type PeerRecommendation struct {

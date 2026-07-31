@@ -2,6 +2,9 @@ package profiles
 
 import (
 	"testing"
+	"time"
+
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 // TestBuildAppliesPerKDPriors exercises the path the daemon actually uses —
@@ -168,5 +171,83 @@ func TestBuildKeepsOntologyAndStorageInAgreement(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBuildMakesCostAnswersTraceable pins the property that makes the map
+// load-bearing: an answer the agent gives must be re-derivable from the state it
+// read. Without it the rationale is prose that nothing can be checked against.
+func TestBuildMakesCostAnswersTraceable(t *testing.T) {
+	state := statemap.New(statemap.Config{
+		ConvergenceObservations: 4,
+		AdmitUnknown:            true,
+	}, statemap.NewJournal(0))
+
+	cfg := DefaultConfig()
+	cfg.DomainSpec = mustSpec()
+	cfg.StateMap = state
+
+	sm, _, err := Build("edge-minimal", cfg)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// A property the cost path reads, so the answer has something to stand on.
+	spec := mustSpec()
+	target := spec.CostModel.ResourceConstruct
+	var metric string
+	for _, route := range spec.MetricRouting {
+		if route.ConstructID == target {
+			metric = route.MetricType
+			break
+		}
+	}
+	if metric == "" {
+		t.Fatalf("no metric routes to the resource construct %q", target)
+	}
+	if err := state.DeclareProperty(statemap.Property{
+		ID: target, Kind: statemap.Derived, Members: []string{metric},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := state.Observe(metric, 0.6, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cost, err := sm.CostOfAction("placement", "self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost.DecisionID == "" {
+		t.Fatal("cost answer carries no DecisionID: it was computed without the state " +
+			"model, so nothing can reproduce it")
+	}
+	d, ok := state.Journal().Decision(cost.DecisionID)
+	if !ok {
+		t.Fatalf("decision %s is not in the journal", cost.DecisionID)
+	}
+	if len(d.PropertiesRead) == 0 {
+		t.Error("the recorded decision lists no properties, so the answer cannot be re-derived")
+	}
+	// The answer in the record must match the answer returned, or the trace is of a
+	// different computation than the one the caller saw.
+	if rc, okv := d.Answer["resource_cost"].(float64); !okv || rc != cost.ResourceCost {
+		t.Errorf("recorded resource_cost %v does not match the returned %.6f",
+			d.Answer["resource_cost"], cost.ResourceCost)
+	}
+	var sawTarget bool
+	for _, p := range d.PropertiesRead {
+		if p.ID == target {
+			sawTarget = true
+			if p.Value != cost.ResourceCost {
+				t.Errorf("recorded %s=%.6f but the answer reported %.6f",
+					target, p.Value, cost.ResourceCost)
+			}
+		}
+	}
+	if !sawTarget {
+		t.Errorf("the decision does not record reading %s, the property it answered about", target)
 	}
 }

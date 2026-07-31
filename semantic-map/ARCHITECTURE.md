@@ -548,10 +548,18 @@ journal is bounded and reports what it dropped, so an absence is never mistaken 
 evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 
-`GET /state/estimate?target=` is where this becomes load-bearing rather than
-descriptive: the answer is assembled from the map through the builder and returned
-with its decision id, and `GET /state/decisions/{id}` reproduces the inputs
-afterwards.
+**The Reasoner answers from it.** `CostOfAction` reads the cost constructs' levels and
+their incoming relationships through a DecisionBuilder, so the properties that reach
+the arithmetic are exactly the ones the journal holds — a separate "log what we used"
+pass would be free to disagree with what was used, and that disagreement is invisible
+in precisely the cases where it matters. Every cost answer therefore carries a
+`DecisionID` and its caveats, and `GET /state/decisions/{id}` reproduces the inputs
+afterwards. A reasoner constructed without a state model falls back to the storage
+graph and returns an empty `DecisionID`, which is the signal that the answer is not
+traceable rather than that nothing happened.
+
+`GET /state/estimate?target=` does the same for any property, not only the cost
+constructs.
 
 ### Two ways to learn an edge weight
 

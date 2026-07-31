@@ -418,9 +418,13 @@ curl -s localhost:8080/state | jq '.counts'
 # one property, readable in a terminal
 curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 
-# answer a question FROM the map, and keep the trace
+# every cost answer is grounded in the map and carries its trace
+curl -s 'localhost:8080/cost?task=placement' | jq '.ResourceCost, .DecisionID, .Caveats'
+curl -s localhost:8080/state/decisions/$(curl -s 'localhost:8080/cost?task=placement' | jq -r .DecisionID) \
+  | jq '.revision, .properties_read, .relationships_read'
+
+# or ask about any property
 curl -s 'localhost:8080/state/estimate?target=PS&id=why-slow' | jq '.answer, .influences, .caveats'
-curl -s localhost:8080/state/decisions/why-slow | jq '.revision, .properties_read'
 
 # lifecycle
 curl -s -X DELETE 'localhost:8080/state/properties/gpu_util?reason=device+removed&actor=me'
