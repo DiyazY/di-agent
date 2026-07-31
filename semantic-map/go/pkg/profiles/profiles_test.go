@@ -77,8 +77,8 @@ func TestPerKDSeedingMatchesPriorWeights(t *testing.T) {
 			// All 15 Di-Select propositions (P1–P15) must be present after
 			// seeding — the multigraph storage holds one descriptor per
 			// proposition, including the three conflict pairs.
-			if matched < 15 {
-				t.Errorf("expected ≥15 matched edges (P1–P15) after multigraph seeding; got %d", matched)
+			if want := len(mustSpec().Propositions); matched < want {
+				t.Errorf("expected %d matched edges (one per proposition in the domain spec) after multigraph seeding; got %d", want, matched)
 			}
 		})
 	}

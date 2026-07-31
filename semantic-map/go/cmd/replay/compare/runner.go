@@ -38,6 +38,7 @@ import (
 	"github.com/DiyazY/di-agent/cmd/replay/mapping"
 	rp "github.com/DiyazY/di-agent/cmd/replay/parquet"
 	"github.com/DiyazY/di-agent/cmd/replay/playback"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -46,6 +47,11 @@ import (
 // Options drives one compare invocation. Run() applies sensible defaults
 // for the zero-value tuning fields.
 type Options struct {
+	// DomainSpec is the domain model the compared agents reason over. Required:
+	// profiles.Build refuses a nil spec, since an agent with no constructs has
+	// nothing to compare.
+	DomainSpec *domain.Spec
+
 	// DataDir is the parquet root (e.g. multidimensional-analysis/data/raw).
 	// {DataDir}/{kd}/{test_type}_run{N}.parquet is the file layout.
 	DataDir string
@@ -322,6 +328,7 @@ func buildMap(opts Options, kd string) (*semmap.SemanticMap, error) {
 		ConvergenceThreshold: opts.ConvergenceThreshold,
 		PriorWeightsPath:     opts.PriorWeightsPath,
 		KD:                   kd,
+		DomainSpec:           opts.DomainSpec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("profiles.Build %s: %w", kd, err)

@@ -58,14 +58,14 @@ func TestGetGraph_ReturnsSevenConstructsAndFifteenPropositions(t *testing.T) {
 	defer cleanup()
 	var snap GraphSnapshot
 	getJSON(t, base+"/graph", &snap)
-	if len(snap.Constructs) != 7 {
-		t.Errorf("constructs: got %d, want 7", len(snap.Constructs))
+	if want := len(mustSpec(t).Constructs); len(snap.Constructs) != want {
+		t.Errorf("constructs: got %d, want %d", len(snap.Constructs), want)
 	}
-	if len(snap.Propositions) != 15 {
-		t.Errorf("propositions: got %d, want 15", len(snap.Propositions))
+	if want := len(mustSpec(t).Propositions); len(snap.Propositions) != want {
+		t.Errorf("propositions: got %d, want %d", len(snap.Propositions), want)
 	}
-	if len(snap.Edges) != 15 {
-		t.Errorf("edges: got %d, want 15", len(snap.Edges))
+	if want := len(mustSpec(t).Propositions); len(snap.Edges) != want {
+		t.Errorf("edges: got %d, want %d", len(snap.Edges), want)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestGetEdges_NoFilterReturnsFifteen(t *testing.T) {
 	defer cleanup()
 	var edges []EdgeDTO
 	getJSON(t, base+"/edges", &edges)
-	if len(edges) != 15 {
-		t.Errorf("/edges: got %d, want 15", len(edges))
+	if want := len(mustSpec(t).Propositions); len(edges) != want {
+		t.Errorf("/edges: got %d, want %d", len(edges), want)
 	}
 }
 
@@ -124,7 +124,7 @@ func TestGetHistory_RespectsRFC3339Since(t *testing.T) {
 		t.Errorf("future since: got %d events, want 0", len(events))
 	}
 	// Trigger a mutation, then query with zero time — must include it.
-	if err := sm.SetPropositionStrength("P1", 0.77); err != nil {
+	if err := sm.SetPropositionStrength(firstProp(t), 0.77); err != nil {
 		t.Fatal(err)
 	}
 	getJSON(t, base+"/history", &events)
@@ -136,7 +136,7 @@ func TestGetHistory_RespectsRFC3339Since(t *testing.T) {
 func TestGetHistory_RespectsDurationSince(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
-	if err := sm.SetPropositionStrength("P1", 0.5); err != nil {
+	if err := sm.SetPropositionStrength(firstProp(t), 0.5); err != nil {
 		t.Fatal(err)
 	}
 	var events []OntologyEventDTO
@@ -167,27 +167,44 @@ func TestVersion_ReturnsStructWithCounts(t *testing.T) {
 	if v.GoVersion == "" {
 		t.Error("go_version empty")
 	}
-	if v.SemmapConstructs != 7 {
-		t.Errorf("semmap_constructs: got %d, want 7", v.SemmapConstructs)
+	// Counts come from the loaded domain spec rather than from literals, so a
+	// change to the graph's scope surfaces as a spec change rather than as a
+	// test failure that has to be hand-reconciled.
+	spec := mustSpec(t)
+	if v.SemmapConstructs != len(spec.Constructs) {
+		t.Errorf("semmap_constructs: got %d, want %d", v.SemmapConstructs, len(spec.Constructs))
 	}
-	if v.SemmapPropositions != 15 {
-		t.Errorf("semmap_propositions: got %d, want 15", v.SemmapPropositions)
+	if v.SemmapPropositions != len(spec.Propositions) {
+		t.Errorf("semmap_propositions: got %d, want %d", v.SemmapPropositions, len(spec.Propositions))
 	}
 }
 
 func TestGetNeighbors_ReturnsTargetConstructs(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	// SC has propositions P1 (→RC), P4 (→RR), P12 (→MU).
+	// Derive the expectation from the spec: a construct's neighbours are the
+	// targets of every proposition it sources.
+	spec := mustSpec(t)
+	source := spec.Constructs[0].ConstructID
+	want := map[string]bool{}
+	for _, p := range spec.Propositions {
+		if p.FromConstruct == source {
+			want[p.ToConstruct] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Skipf("construct %s sources no propositions in the spec", source)
+	}
+
 	var neighbors []string
-	getJSON(t, base+"/neighbors?node=SC", &neighbors)
+	getJSON(t, base+"/neighbors?node="+source, &neighbors)
 	got := map[string]bool{}
 	for _, n := range neighbors {
 		got[n] = true
 	}
-	for _, want := range []string{"RC", "RR", "MU"} {
-		if !got[want] {
-			t.Errorf("SC neighbors missing %s; got %v", want, neighbors)
+	for w := range want {
+		if !got[w] {
+			t.Errorf("%s neighbors missing %s; got %v", source, w, neighbors)
 		}
 	}
 }
@@ -239,7 +256,7 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	resp := postJSON(t, base+"/ontology/strength", SetStrengthRequest{
-		PropositionID: "P1",
+		PropositionID: firstProp(t),
 		Strength:      0.95,
 	})
 	if resp.StatusCode != 204 {
@@ -250,7 +267,7 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 	var props []PropositionDTO
 	getJSON(t, base+"/propositions", &props)
 	for _, p := range props {
-		if p.PropositionID == "P1" {
+		if p.PropositionID == firstProp(t) {
 			if p.PriorStrength != 0.95 {
 				t.Errorf("P1 strength after set: got %.3f, want 0.95", p.PriorStrength)
 			}
@@ -265,7 +282,7 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 	if events[0].Kind != "proposition_strength_set" {
 		t.Errorf("event kind: got %q, want proposition_strength_set", events[0].Kind)
 	}
-	if events[0].TargetID != "P1" {
+	if events[0].TargetID != firstProp(t) {
 		t.Errorf("event target: got %q, want P1", events[0].TargetID)
 	}
 }
@@ -280,7 +297,7 @@ func TestDeprecate_FlagsPropositionAndReasonerSkipsIt(t *testing.T) {
 	}
 
 	resp := postJSON(t, base+"/ontology/deprecate", DeprecateRequest{
-		PropositionID: "P1",
+		PropositionID: firstProp(t),
 		Reason:        "http test",
 	})
 	if resp.StatusCode != 204 {
@@ -292,7 +309,7 @@ func TestDeprecate_FlagsPropositionAndReasonerSkipsIt(t *testing.T) {
 	getJSON(t, base+"/propositions", &props)
 	var p1 *PropositionDTO
 	for i := range props {
-		if props[i].PropositionID == "P1" {
+		if props[i].PropositionID == firstProp(t) {
 			p1 = &props[i]
 		}
 	}
@@ -416,7 +433,7 @@ func TestResetEdge_RestoresPriorAfterUpdates(t *testing.T) {
 func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	resp := postRaw(t, base+"/ontology/strength", `{"proposition_id":"P1","strength":0.5}`)
+	resp := postRaw(t, base+"/ontology/strength", `{"proposition_id":firstProp(t),"strength":0.5}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
@@ -537,9 +554,9 @@ func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
 	// before SC→RC (P1) are the most direct proof: a Bridge that ignored the
 	// sample would leave them at n=0.
 	var edges []EdgeDTO
-	getJSON(t, base+"/edges?from=SC&to=RC", &edges)
+	getJSON(t, base+"/edges?from="+pairFrom(t)+"&to="+pairTo(t), &edges)
 	if len(edges) == 0 {
-		t.Fatal("SC→RC returned no edges; ontology missing P1?")
+		t.Fatalf("%s→%s returned no edges", pairFrom(t), pairTo(t))
 	}
 	for _, e := range edges {
 		if e.NObservations < 1 {
@@ -789,23 +806,32 @@ func TestOffload_AcceptWithinBudget(t *testing.T) {
 // usable values within ~200 ticks.
 func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
 	t.Helper()
+	// Drive every edge in the loaded spec away from its prior in whichever
+	// direction increases cost. CostOfAction accumulates
+	// (effective - prior) * sign(direction), so a negative-direction edge
+	// contributes positively when its observation falls below the prior and a
+	// positive-direction edge when it rises above. Deriving the target from the
+	// spec keeps this working when the graph's scope changes; the previous
+	// version named SC->RC, MU->RC and PS->RC directly and went stale the moment
+	// two of those left the graph.
+	spec := mustSpec(t)
 	const N = 200
 	for i := 0; i < N; i++ {
-		// RC inputs: drive the one positive (P1: SC→RC) high, the two
-		// negatives (P8: MU→RC, P10: PS→RC) low.
-		if err := sm.Ingest("SC", "RC", 0.95, fmt.Sprintf("bias-sc-rc-%d", i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("MU", "RC", 0.05, fmt.Sprintf("bias-mu-rc-%d", i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("PS", "RC", 0.05, fmt.Sprintf("bias-ps-rc-%d", i)); err != nil {
-			t.Fatal(err)
-		}
-		// PS inputs: CO→PS (P13, negative) at -1.0 → contribution = +1.0.
-		// RC→PS conflict pair cancels at any observed value.
-		if err := sm.Ingest("CO", "PS", -1.0, fmt.Sprintf("bias-co-ps-%d", i)); err != nil {
-			t.Fatal(err)
+		for _, p := range spec.Propositions {
+			// Deliberately outside [0,1]. ResourceCost uses the deviation from
+			// prior, but LatencyEstimate uses the effective weight directly, and
+			// the RC->PS conflict pair cancels at any shared observation — so a
+			// negative-direction edge needs a negative observation to contribute
+			// positively to latency. This exercises the Reasoner's arithmetic, not
+			// the ingestion invariants.
+			obs := 1.0
+			if p.Direction == "negative" {
+				obs = -1.0
+			}
+			eid := fmt.Sprintf("bias-%s-%d", p.PropositionID, i)
+			if err := sm.Ingest(p.FromConstruct, p.ToConstruct, obs, eid); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 }

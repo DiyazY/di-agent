@@ -36,7 +36,7 @@ type evolutionAgent struct {
 }
 
 // newEvolutionAgent wires the same edge-minimal stack a production daemon
-// would (InMemoryStorage + StaticDiSelectOntology + EMAUpdater +
+// would (InMemoryStorage + SpecOntology + EMAUpdater +
 // RuleEngineReasoner + Proposer) and seeds storage from the ontology bootstrap.
 // If proposer is nil, wires DisabledProposer.
 func newEvolutionAgent(t *testing.T, collector *scripted.ScriptedCollector, proposer contracts.ProposerContract) *evolutionAgent {
@@ -158,7 +158,7 @@ func allSnaps(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology)
 	return out
 }
 
-// propLessNumeric sorts "P1","P2",…"P9","P10",…"P15" by their numeric tail.
+// propLessNumeric sorts firstSpecProp(),"P2",…"P9","P10",…"P15" by their numeric tail.
 func propLessNumeric(a, b string) bool {
 	return propNum(a) < propNum(b)
 }
@@ -525,14 +525,14 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 		}
 	}
 
-	p5snap := snap(t, a.storage, a.ontology, "P5")
+	p5snap := snap(t, a.storage, a.ontology, firstSpecProp())
 	t.Logf("  P5 before deprecation: %s", p5snap)
 	if advisoryAt < 0 {
 		t.Error("expected at least one advisory line to fire before deprecation")
 	}
 
 	// Operator action: deprecate P5.
-	if err := a.ontology.Deprecate("P5", "EMA contradicts prior direction after evidence accumulation"); err != nil {
+	if err := a.ontology.Deprecate(firstSpecProp(), "EMA contradicts prior direction after evidence accumulation"); err != nil {
 		t.Fatalf("deprecate failed: %v", err)
 	}
 	t.Log("  Operator deprecates P5.")
@@ -549,7 +549,7 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 	props, _ := a.ontology.Propositions()
 	foundDeprecated := false
 	for _, p := range props {
-		if p.PropositionID == "P5" && p.Deprecated {
+		if p.PropositionID == firstSpecProp() && p.Deprecated {
 			foundDeprecated = true
 		}
 	}
@@ -560,7 +560,7 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 	all, _ := a.storage.AllEdges()
 	stillThere := false
 	for _, e := range all {
-		if e.PropositionID == "P5" {
+		if e.PropositionID == firstSpecProp() {
 			stillThere = true
 			break
 		}

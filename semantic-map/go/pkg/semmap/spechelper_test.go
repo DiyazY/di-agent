@@ -18,3 +18,23 @@ func mustSpec() *domain.Spec {
 }
 
 var _ = testing.Short
+
+// specProp names a proposition that exists in the loaded spec.
+func specProp(t *testing.T) string {
+	t.Helper()
+	s := mustSpec()
+	if len(s.Propositions) == 0 {
+		t.Fatal("domain spec declares no propositions")
+	}
+	return s.Propositions[0].PropositionID
+}
+
+func pairFrom(t *testing.T) string {
+	t.Helper()
+	return mustSpec().Propositions[0].FromConstruct
+}
+
+func pairTo(t *testing.T) string {
+	t.Helper()
+	return mustSpec().Propositions[0].ToConstruct
+}

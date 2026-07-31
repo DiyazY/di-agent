@@ -160,11 +160,11 @@ func TestValidate_RejectsProposalWithMissingPayload(t *testing.T) {
 	r, _ := newTestMap(t)
 	resp := &explain.ExplainResponse{
 		Answer:    "You should deprecate P1.",
-		Citations: []explain.Citation{{Kind: "edge", ID: "P1"}},
+		Citations: []explain.Citation{{Kind: "edge", ID: firstProp(t)}},
 		Proposal: &explain.Proposal{
 			Kind:      "deprecate",
 			Endpoint:  "POST /ontology/deprecate",
-			Payload:   map[string]any{"proposition_id": "P1"}, // missing "reason"
+			Payload:   map[string]any{"proposition_id": firstProp(t)}, // missing "reason"
 			Rationale: "Stale for 6 runs.",
 		},
 	}
@@ -178,11 +178,11 @@ func TestValidate_AcceptsWellFormedProposal(t *testing.T) {
 	r, _ := newTestMap(t)
 	resp := &explain.ExplainResponse{
 		Answer:    "You should deprecate P1.",
-		Citations: []explain.Citation{{Kind: "edge", ID: "P1"}},
+		Citations: []explain.Citation{{Kind: "edge", ID: firstProp(t)}},
 		Proposal: &explain.Proposal{
 			Kind:      "deprecate",
 			Endpoint:  "POST /ontology/deprecate",
-			Payload:   map[string]any{"proposition_id": "P1", "reason": "6 runs stale"},
+			Payload:   map[string]any{"proposition_id": firstProp(t), "reason": "6 runs stale"},
 			Rationale: "P1 has n_observations=0 across all recent runs.",
 		},
 	}

@@ -18,3 +18,20 @@ func mustSpec() *domain.Spec {
 }
 
 var _ = testing.Short
+
+// firstSpecProp, specPair and firstSpecKeyword name elements that exist in the
+// loaded spec, so scenario narration does not hardcode a graph scope.
+func firstSpecProp() string { return mustSpec().Propositions[0].PropositionID }
+
+func specPair() (string, string) {
+	p := mustSpec().Propositions[0]
+	return p.FromConstruct, p.ToConstruct
+}
+
+func firstSpecKeyword() string {
+	s := mustSpec()
+	if len(s.IntentRules) == 0 || len(s.IntentRules[0].Keywords) == 0 {
+		return "performance"
+	}
+	return s.IntentRules[0].Keywords[0]
+}

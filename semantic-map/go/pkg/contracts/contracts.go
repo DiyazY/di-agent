@@ -47,8 +47,9 @@ type StorageContract interface {
 // stale ones, and new domains may add constructs.
 //
 // Guarantees:
-//   - Bootstrap minimum: Constructs() returns ≥7 (Di-Select baseline) and
-//     Propositions() returns ≥15 (P1–P15), regardless of runtime extensions.
+//   - Non-empty: Constructs() and Propositions() are both non-empty, with every
+//     proposition endpoint a declared construct. The counts follow the loaded
+//     domain specification; the contract fixes no particular scope.
 //   - Soft-delete only: existing propositions are never structurally removed
 //     and their Direction never reverses. Deprecate marks a proposition as
 //     no-longer-endorsed but keeps it in Propositions() for history/replay.

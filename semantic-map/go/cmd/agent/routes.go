@@ -96,7 +96,7 @@ func registerStaticRoutes(mux *http.ServeMux) {
 // They are kept in their own function so the diff against pre-expansion
 // behavior is obvious to reviewers.
 func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
-	// POST /ingest  {"from_id":"SC","to_id":"RC","observation":0.7,"event_id":"evt-1"}
+	// POST /ingest  {"from_id":"PS","to_id":"RC","observation":0.7,"event_id":"evt-1"}
 	mux.HandleFunc("POST /ingest", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			FromID      string  `json:"from_id"`

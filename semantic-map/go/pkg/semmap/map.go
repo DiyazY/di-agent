@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -330,18 +331,32 @@ func (m *SemanticMap) ResetEdge(from, to string) error {
 
 // ── Operator tuning ───────────────────────────────────────────────────────────
 
-// tuneFloor returns the minimum allowed strength for a proposition.
-// SC-related propositions have a higher floor so security stays meaningful
-// even under resource pressure. This duplicates the logic in
-// internal/minimal/tuner.go — the two packages cannot import each other, so
-// the function is intentionally duplicated here.
-func tuneFloor(propID string) float64 {
-	switch propID {
-	case "P1", "P4", "P11", "P14":
-		return 0.30
-	default:
-		return 0.10
+// tuneFloor returns the minimum allowed strength for a proposition, from the
+// domain specification the ontology carries.
+//
+// This was previously a hardcoded switch naming four propositions, duplicated
+// from internal/minimal/tuner.go because the two packages cannot import each
+// other. Both copies named propositions that a later change to the graph's scope
+// removed, so both became dead policy that still looked authoritative. Reading
+// the spec removes the duplication and the staleness together: a proposition
+// added at runtime gets a floor without either package being rebuilt.
+// tuneCeiling mirrors tuneFloor for the upper bound.
+func (m *SemanticMap) tuneCeiling() float64 {
+	if o, ok := m.ontology.(interface{ Spec() *domain.Spec }); ok {
+		if s := o.Spec(); s != nil {
+			return s.Policy.GlobalCeiling
+		}
 	}
+	return 0.95
+}
+
+func (m *SemanticMap) tuneFloor(propID string) float64 {
+	if o, ok := m.ontology.(interface{ Spec() *domain.Spec }); ok {
+		if s := o.Spec(); s != nil {
+			return s.FloorFor(propID)
+		}
+	}
+	return 0.10 // conservative fallback for an ontology that exposes no spec
 }
 
 // Tune parses the operator's natural-language intent, resolves current
@@ -390,12 +405,12 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		if !ok {
 			continue // proposition not found — skip silently
 		}
-		floor := tuneFloor(intent.PropositionID)
+		floor := m.tuneFloor(intent.PropositionID)
 		newS := old + intent.Delta
 		if newS < floor {
 			newS = floor
 		}
-		if newS > 0.95 {
+		if newS > m.tuneCeiling() {
 			newS = 0.95
 		}
 		adjustments = append(adjustments, &types.TuneAdjustment{

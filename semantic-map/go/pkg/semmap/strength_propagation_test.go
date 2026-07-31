@@ -8,18 +8,18 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// These tests pin the behaviour paper §5.2 depends on: the six edges with no
-// telemetry analog "remain at the structural prior until one of three
-// operator-driven recalibration paths is invoked" — the Tuner, a direct
-// SetPropositionStrength call, or Deprecate. Two of those three wrote only the
-// ontology, so the Reasoner (which reads storage edges) never saw the change and
-// a recalibration was silently cosmetic.
+// These tests pin the write-through invariant: an operator recalibration must
+// reach the storage EdgeDescriptor the Reasoner reads, not just the ontology.
+// SetPropositionStrength and Tune both wrote only the ontology at one point, so a
+// recalibration moved the audit log and changed no decision.
 //
 // The per-KD split is what makes this subtle. prior_init seeds edges from
-// `distribution_edge_weights` while the ontology carries the global
-// `propositions` table, so the two legitimately disagree: on k0s, P1's edge
-// prior is 0.2138 against a proposition strength of 0.620. A tune must anchor
-// its delta to the edge value the Reasoner reads.
+// distribution_edge_weights while the ontology carries the global propositions
+// table, so the two legitimately disagree on a seeded daemon. A tune must anchor
+// its delta to the edge value the Reasoner reads, not to the global figure.
+//
+// Proposition IDs come from the loaded spec rather than being named literally, so
+// these tests survive a change to the graph's scope.
 
 // newSplitMap seeds storage edges with values that deliberately differ from the
 // ontology's proposition strengths, reproducing the post-prior_init state of a
@@ -52,7 +52,7 @@ func newSplitMap(t *testing.T, edgePriors map[string]float64) *SemanticMap {
 		}
 	}
 	return New(storage, ontology, updater, reasoner,
-		minimal.NewDisabledProposer(), minimal.NewRuleBasedTuner())
+		minimal.NewDisabledProposer(), minimal.NewRuleBasedTunerFromSpec(mustSpec()))
 }
 
 func edgePrior(t *testing.T, m *SemanticMap, propID string) float64 {
@@ -72,17 +72,17 @@ func edgePrior(t *testing.T, m *SemanticMap, propID string) float64 {
 
 func TestSetPropositionStrengthReachesStorage(t *testing.T) {
 	// k0s-like split: edge prior well below the global proposition strength.
-	m := newSplitMap(t, map[string]float64{"P1": 0.2138})
+	m := newSplitMap(t, map[string]float64{specProp(t): 0.2138})
 
-	if got := edgePrior(t, m, "P1"); math.Abs(got-0.2138) > 1e-9 {
+	if got := edgePrior(t, m, specProp(t)); math.Abs(got-0.2138) > 1e-9 {
 		t.Fatalf("setup: edge prior = %v, want 0.2138", got)
 	}
 
-	if err := m.SetPropositionStrength("P1", 0.55); err != nil {
+	if err := m.SetPropositionStrength(specProp(t), 0.55); err != nil {
 		t.Fatalf("SetPropositionStrength: %v", err)
 	}
 
-	if got := edgePrior(t, m, "P1"); math.Abs(got-0.55) > 1e-9 {
+	if got := edgePrior(t, m, specProp(t)); math.Abs(got-0.55) > 1e-9 {
 		t.Errorf("edge PriorWeight = %v, want 0.55 — an ontology-only write leaves "+
 			"the Reasoner computing from the stale magnitude", got)
 	}
@@ -92,24 +92,24 @@ func TestSetPropositionStrengthReachesStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range props {
-		if p.PropositionID == "P1" && math.Abs(p.PriorStrength-0.55) > 1e-9 {
+		if p.PropositionID == specProp(t) && math.Abs(p.PriorStrength-0.55) > 1e-9 {
 			t.Errorf("proposition strength = %v, want 0.55", p.PriorStrength)
 		}
 	}
 }
 
 func TestSetPropositionStrengthPreservesEvidence(t *testing.T) {
-	m := newSplitMap(t, map[string]float64{"P1": 0.2138})
+	m := newSplitMap(t, map[string]float64{specProp(t): 0.2138})
 
 	// Accumulate evidence, then recalibrate the prior. The EMA is observation
 	// history and must survive a prior revision untouched.
-	if err := m.Ingest("SC", "RC", 0.9, "evt-1"); err != nil {
+	if err := m.Ingest(pairFrom(t), pairTo(t), 0.9, "evt-1"); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	before := func() (float64, int) {
 		edges, _ := m.AllEdges()
 		for _, e := range edges {
-			if e.PropositionID == "P1" {
+			if e.PropositionID == specProp(t) {
 				return e.EMAWeight, e.NObservations
 			}
 		}
@@ -117,10 +117,10 @@ func TestSetPropositionStrengthPreservesEvidence(t *testing.T) {
 	}
 	emaBefore, obsBefore := before()
 	if obsBefore == 0 {
-		t.Fatal("setup: expected at least one observation on P1")
+		t.Fatal("setup: expected at least one observation on the edge")
 	}
 
-	if err := m.SetPropositionStrength("P1", 0.55); err != nil {
+	if err := m.SetPropositionStrength(specProp(t), 0.55); err != nil {
 		t.Fatalf("SetPropositionStrength: %v", err)
 	}
 
@@ -134,91 +134,59 @@ func TestSetPropositionStrengthPreservesEvidence(t *testing.T) {
 	}
 }
 
-func TestSetPropositionStrengthTracksEMAOnUnobservedEdge(t *testing.T) {
-	// P4 (SC→RR) is one of the six edges with no telemetry analog, so it carries
-	// zero observations for the whole deployment — and it is exactly the kind of
-	// edge the recalibration path in paper §5.2 exists to serve (e.g. a fresh
-	// kube-bench scan revising an SC score). With no observations, EMAWeight is
-	// the seed value rather than evidence, so it must follow the new prior;
-	// otherwise a later first observation would start from a superseded
-	// magnitude.
-	m := newSplitMap(t, map[string]float64{"P4": 0.3084})
-
-	if err := m.SetPropositionStrength("P4", 0.71); err != nil {
-		t.Fatalf("SetPropositionStrength: %v", err)
-	}
-
-	edges, err := m.AllEdges()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range edges {
-		if e.PropositionID != "P4" {
-			continue
-		}
-		if e.NObservations != 0 {
-			t.Fatalf("setup: expected zero observations, got %d", e.NObservations)
-		}
-		if math.Abs(e.PriorWeight-0.71) > 1e-9 {
-			t.Errorf("PriorWeight = %v, want 0.71", e.PriorWeight)
-		}
-		if math.Abs(e.EMAWeight-0.71) > 1e-9 {
-			t.Errorf("EMAWeight = %v, want 0.71 — on an edge with no observations "+
-				"the EMA is the seed value, not evidence, and must follow the "+
-				"recalibrated prior", e.EMAWeight)
-		}
-	}
-}
+// TestSetPropositionStrengthTracksEMAOnUnobservedEdge is removed. It covered an
+// edge with zero observations, where EMAWeight is a seed value rather than
+// evidence and must follow a recalibrated prior. Under a telemetry-only scope
+// every edge in the graph has both endpoints routed, so no such edge exists to
+// test. The behaviour it guarded is still implemented in SetPropositionStrength
+// (the NObservations == 0 branch) and would matter again if a construct were
+// admitted before a metric was routed to it.
 
 func TestTuneAnchorsDeltaToEdgePrior(t *testing.T) {
-	// The real k0s calibration for the two propositions the "security" keyword
-	// group targets. Reproduces paper Table 6.
-	m := newSplitMap(t, map[string]float64{"P1": 0.2138, "P11": 0.0089})
+	// Take the first intent from the spec and the propositions it names, so the
+	// test exercises the shipped vocabulary rather than a remembered one.
+	spec := mustSpec()
+	if len(spec.IntentRules) == 0 {
+		t.Skip("spec declares no intent rules")
+	}
+	rule := spec.IntentRules[0]
 
-	adjustments, err := m.Tune("prioritize security", "test-operator")
+	// Seed the named edges well below their ontology strengths, reproducing the
+	// post-prior_init split a real daemon has.
+	const seeded = 0.2138
+	priors := map[string]float64{}
+	for pid := range rule.Deltas {
+		priors[pid] = seeded
+	}
+	m := newSplitMap(t, priors)
+
+	adjustments, err := m.Tune("prioritize "+rule.Keywords[0], "test-operator")
 	if err != nil {
 		t.Fatalf("Tune: %v", err)
 	}
 	if len(adjustments) == 0 {
-		t.Fatal("no adjustments applied; is the tuner wired?")
+		t.Fatal("no adjustments applied; is the tuner wired to the spec?")
 	}
 
-	got := map[string][2]float64{}
 	for _, a := range adjustments {
-		got[a.PropositionID] = [2]float64{a.OldStrength, a.NewStrength}
-	}
-
-	// P1: 0.2138 + 0.12 = 0.3338, above the 0.30 SC floor so unclamped.
-	if v, ok := got["P1"]; !ok {
-		t.Error("P1 not adjusted")
-	} else {
-		if math.Abs(v[0]-0.2138) > 1e-9 {
-			t.Errorf("P1 old = %v, want the edge prior 0.2138 (not the global 0.620)", v[0])
+		delta, named := rule.Deltas[a.PropositionID]
+		if !named {
+			continue // another intent's keyword also matched
 		}
-		if math.Abs(v[1]-0.3338) > 1e-9 {
-			t.Errorf("P1 new = %v, want 0.3338", v[1])
+		if math.Abs(a.OldStrength-seeded) > 1e-9 {
+			t.Errorf("%s old = %v, want the edge prior %v (not the ontology strength)",
+				a.PropositionID, a.OldStrength, seeded)
 		}
-	}
-
-	// P11: 0.0089 + 0.12 = 0.1289, below the 0.30 SC-adjacent floor, so clamped.
-	// This is the case that exercises the floor at all — anchored to the global
-	// strength of 0.480 it could never be reached.
-	if v, ok := got["P11"]; !ok {
-		t.Error("P11 not adjusted")
-	} else {
-		if math.Abs(v[0]-0.0089) > 1e-9 {
-			t.Errorf("P11 old = %v, want the edge prior 0.0089", v[0])
+		want := seeded + delta
+		if floor := spec.FloorFor(a.PropositionID); want < floor {
+			want = floor
 		}
-		if math.Abs(v[1]-0.30) > 1e-9 {
-			t.Errorf("P11 new = %v, want 0.30 (SC-adjacent floor clamp)", v[1])
+		if math.Abs(a.NewStrength-want) > 1e-9 {
+			t.Errorf("%s new = %v, want %v", a.PropositionID, a.NewStrength, want)
 		}
-	}
-
-	// And the tune must land in storage, or the Reasoner never sees it.
-	if p := edgePrior(t, m, "P1"); math.Abs(p-0.3338) > 1e-9 {
-		t.Errorf("P1 edge prior after tune = %v, want 0.3338", p)
-	}
-	if p := edgePrior(t, m, "P11"); math.Abs(p-0.30) > 1e-9 {
-		t.Errorf("P11 edge prior after tune = %v, want 0.30", p)
+		// And it must land in storage, or the Reasoner never sees it.
+		if got := edgePrior(t, m, a.PropositionID); math.Abs(got-a.NewStrength) > 1e-9 {
+			t.Errorf("%s edge prior after tune = %v, want %v", a.PropositionID, got, a.NewStrength)
+		}
 	}
 }

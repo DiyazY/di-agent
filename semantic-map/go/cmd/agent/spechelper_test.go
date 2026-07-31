@@ -17,3 +17,26 @@ func mustSpec(t *testing.T) *domain.Spec {
 	}
 	return s
 }
+
+// firstProp returns a proposition ID that exists in the loaded spec, for tests
+// that need to name one without caring which.
+func firstProp(t *testing.T) string {
+	t.Helper()
+	s := mustSpec(t)
+	if len(s.Propositions) == 0 {
+		t.Fatal("domain spec declares no propositions")
+	}
+	return s.Propositions[0].PropositionID
+}
+
+// pairFrom and pairTo name an endpoint pair that carries at least one edge in the
+// loaded spec, for tests that need a real pair without depending on which.
+func pairFrom(t *testing.T) string {
+	t.Helper()
+	return mustSpec(t).Propositions[0].FromConstruct
+}
+
+func pairTo(t *testing.T) string {
+	t.Helper()
+	return mustSpec(t).Propositions[0].ToConstruct
+}

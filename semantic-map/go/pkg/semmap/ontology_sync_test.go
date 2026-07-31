@@ -44,7 +44,7 @@ func newTestMap(t *testing.T) *SemanticMap {
 	}
 
 	return New(storage, ontology, updater, reasoner,
-		minimal.NewDisabledProposer(), minimal.NewRuleBasedTuner())
+		minimal.NewDisabledProposer(), minimal.NewRuleBasedTunerFromSpec(mustSpec()))
 }
 
 func TestAddValidatedPropositionMaterializesEdge(t *testing.T) {
@@ -57,8 +57,8 @@ func TestAddValidatedPropositionMaterializesEdge(t *testing.T) {
 
 	p := &types.Proposition{
 		PropositionID: "P90",
-		FromConstruct: "MU",
-		ToConstruct:   "PS",
+		FromConstruct: mustSpec().Constructs[0].ConstructID,
+		ToConstruct:   mustSpec().Constructs[0].ConstructID,
 		Direction:     types.Positive,
 		PriorStrength: 0.42,
 	}
@@ -123,7 +123,7 @@ func TestAddConstructMaterializesNode(t *testing.T) {
 func TestDeprecateSyncsFlagToStorage(t *testing.T) {
 	m := newTestMap(t)
 
-	if err := m.Deprecate("P4", "no resilience telemetry"); err != nil {
+	if err := m.Deprecate(specProp(t), "retired for this test"); err != nil {
 		t.Fatalf("Deprecate: %v", err)
 	}
 	edges, err := m.AllEdges()
@@ -134,18 +134,18 @@ func TestDeprecateSyncsFlagToStorage(t *testing.T) {
 	// evidence record accumulated before the operator retired the claim.
 	seen := false
 	for _, e := range edges {
-		if e.PropositionID != "P4" {
+		if e.PropositionID != specProp(t) {
 			continue
 		}
 		seen = true
 		if !e.Deprecated {
-			t.Error("P4 edge not flagged deprecated in storage")
+			t.Error("edge not flagged deprecated in storage")
 		}
 		if e.DeprecatedReason == "" {
-			t.Error("P4 edge missing DeprecatedReason")
+			t.Error("edge missing DeprecatedReason")
 		}
 	}
 	if !seen {
-		t.Error("P4 edge removed from storage; deprecation must be a soft delete")
+		t.Error("edge removed from storage; deprecation must be a soft delete")
 	}
 }

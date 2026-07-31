@@ -80,10 +80,11 @@ func TestRun_TwoSyntheticKDs(t *testing.T) {
 	writeFakeParquet(t, dir, "fake-b", "idle", 1, 30.0) // 70% utilization
 
 	opts := Options{
-		DataDir:  dir,
-		TestType: "idle",
-		Run:      1,
-		KDs:      []string{"fake-a", "fake-b"},
+		DomainSpec: mustSpec(t),
+		DataDir:    dir,
+		TestType:   "idle",
+		Run:        1,
+		KDs:        []string{"fake-a", "fake-b"},
 		// PriorWeightsPath empty → no per-KD priors; profiles.Build accepts
 		// any KD string when no file is loaded.
 	}
@@ -132,10 +133,10 @@ func TestRun_TwoSyntheticKDs(t *testing.T) {
 			emaA)
 	}
 
-	// Divergence array should have one entry per P1..P15 (15 props) and
-	// at least one with Range > 0 (since fake-a and fake-b differ).
-	if len(r.Divergence) != 15 {
-		t.Errorf("Divergence count: got %d, want 15", len(r.Divergence))
+	// One divergence entry per proposition in the loaded domain spec, and at least
+	// one with Range > 0 since fake-a and fake-b differ.
+	if want := len(mustSpec(t).Propositions); len(r.Divergence) != want {
+		t.Errorf("Divergence count: got %d, want %d", len(r.Divergence), want)
 	}
 	maxRange := 0.0
 	for _, d := range r.Divergence {
@@ -161,10 +162,11 @@ func TestRunMultiRunAveraging(t *testing.T) {
 
 	// Single-run results (run=1 — the highest idle case).
 	singleOpts := Options{
-		DataDir:  dir,
-		TestType: "idle",
-		Run:      1,
-		KDs:      []string{"fake-a"},
+		DomainSpec: mustSpec(t),
+		DataDir:    dir,
+		TestType:   "idle",
+		Run:        1,
+		KDs:        []string{"fake-a"},
 	}
 	singleR, err := Run(singleOpts)
 	if err != nil {
@@ -173,10 +175,11 @@ func TestRunMultiRunAveraging(t *testing.T) {
 
 	// 5-run average results.
 	avgOpts := Options{
-		DataDir:  dir,
-		TestType: "idle",
-		Run:      0, // 0 = all 5 runs averaged
-		KDs:      []string{"fake-a"},
+		DomainSpec: mustSpec(t),
+		DataDir:    dir,
+		TestType:   "idle",
+		Run:        0, // 0 = all 5 runs averaged
+		KDs:        []string{"fake-a"},
 	}
 	avgR, err := Run(avgOpts)
 	if err != nil {
@@ -225,6 +228,7 @@ func TestRun_HostFilterRestrictsIngestion(t *testing.T) {
 	writeFakeParquet(t, dir, "fake-a", "idle", 1, 99.0)
 
 	opts := Options{
+		DomainSpec: mustSpec(t),
 		DataDir:    dir,
 		TestType:   "idle",
 		Run:        1,
@@ -246,10 +250,11 @@ func TestRun_HostFilterRestrictsIngestion(t *testing.T) {
 // producing empty results.
 func TestRun_MissingDataDir(t *testing.T) {
 	opts := Options{
-		DataDir:  "/nonexistent/path/that/does/not/exist",
-		TestType: "idle",
-		Run:      1,
-		KDs:      []string{"fake-a"},
+		DomainSpec: mustSpec(t),
+		DataDir:    "/nonexistent/path/that/does/not/exist",
+		TestType:   "idle",
+		Run:        1,
+		KDs:        []string{"fake-a"},
 	}
 	if _, err := Run(opts); err == nil {
 		t.Error("Run with missing data dir should return error")

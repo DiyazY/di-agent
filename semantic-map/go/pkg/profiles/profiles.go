@@ -252,7 +252,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 
 	var tuner contracts.TunerContract
 	if cfg.UseRuleBasedTuner {
-		tuner = minimal.NewRuleBasedTuner()
+		tuner = minimal.NewRuleBasedTunerFromSpec(cfg.DomainSpec)
 	} else {
 		tuner = minimal.NewDisabledTuner()
 	}

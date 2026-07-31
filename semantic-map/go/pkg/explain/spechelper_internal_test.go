@@ -17,3 +17,9 @@ func mustSpec(t *testing.T) *domain.Spec {
 	}
 	return s
 }
+
+// firstProp names a proposition that exists in the loaded spec, so citation
+// tests do not hardcode a graph scope.
+func firstProp(t *testing.T) string {
+	return mustSpec(t).Propositions[0].PropositionID
+}

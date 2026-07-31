@@ -51,12 +51,22 @@ func TestBridge_KnownMetricTypeUpdatesRelatedEdges(t *testing.T) {
 		t.Fatalf("Bridge: unexpected error %v", err)
 	}
 
-	wantPairs := map[string]bool{
-		"SC->RC": false,
-		"RC->PS": false,
-		"PS->RC": false,
-		"MU->RC": false,
-		"RC->SC": false,
+	// Derive the expectation from the spec: a sample routed to a construct must
+	// reach every unique endpoint pair incident to it. Hardcoding the pairs made
+	// this test assert a graph scope rather than the Bridge's fan-out behaviour.
+	spec := mustSpec()
+	target, ok := spec.ConstructForMetric("cpu_utilization")
+	if !ok {
+		t.Fatal("spec routes no construct for cpu_utilization")
+	}
+	wantPairs := map[string]bool{}
+	for _, p := range spec.Propositions {
+		if p.FromConstruct == target || p.ToConstruct == target {
+			wantPairs[p.FromConstruct+"->"+p.ToConstruct] = false
+		}
+	}
+	if len(wantPairs) == 0 {
+		t.Fatalf("no proposition is incident to %s", target)
 	}
 	for _, c := range upd.calls {
 		key := c.from + "->" + c.to

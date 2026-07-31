@@ -200,20 +200,25 @@ func TestMICorrelationProposer_NoDuplicateCandidate(t *testing.T) {
 // ── Coverage check: existing same-direction proposition blocks emission ───────
 
 func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
-	// P1 is SC→RC positive in the bootstrap. Same-direction proposals on the
-	// same pair must be blocked; opposite-direction (conflict-pair sibling)
-	// proposals are permitted (multigraph behavior).
+	// The spec's first proposition already occupies its (from, to) pair in one
+	// direction. Same-direction proposals on that pair must be blocked;
+	// opposite-direction (conflict-pair sibling) proposals are permitted
+	// (multigraph behavior).
+	from, to, sign := specPair()
+	if from == "" {
+		t.Skip("spec covers every pair in both directions; no free direction to test")
+	}
 	{
 		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
-			y := 0.95 * x // strong positive
-			_ = p.Observe("SC", "RC", x, y)
+			y := sameDirectionSeries(sign, x)
+			_ = p.Observe(from, to, x, y)
 		}
 		cs, _ := p.GetCandidates()
 		if len(cs) != 0 {
-			t.Errorf("expected no candidate (SC→RC + already in P1); got %d", len(cs))
+			t.Errorf("expected no candidate (pair already in the backbone); got %d", len(cs))
 		}
 	}
 	{
@@ -221,15 +226,15 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
-			y := 1.0 - 0.95*x // strong negative
-			_ = p.Observe("SC", "RC", x, y)
+			y := sameDirectionSeries(flipDir(sign), x)
+			_ = p.Observe(from, to, x, y)
 		}
 		cs, _ := p.GetCandidates()
 		if len(cs) != 1 {
-			t.Fatalf("expected 1 candidate for SC→RC negative (free direction); got %d", len(cs))
+			t.Fatalf("expected 1 candidate on the free direction of %s→%s; got %d", from, to, len(cs))
 		}
-		if cs[0].Direction != types.Negative {
-			t.Errorf("expected Negative direction; got %v", cs[0].Direction)
+		if wantDir := oppositeOf(sign); cs[0].Direction != wantDir {
+			t.Errorf("expected %v direction; got %v", wantDir, cs[0].Direction)
 		}
 	}
 }

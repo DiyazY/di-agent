@@ -72,7 +72,7 @@ func netdataFakeHandler(t *testing.T) http.Handler {
 	return mux
 }
 
-func TestStaticDiSelectOntologyCompliance(t *testing.T) {
+func TestSpecOntologyCompliance(t *testing.T) {
 	compliance.RunOntologyCompliance(t, func(t *testing.T) contracts.OntologyContract {
 		return minimal.NewOntologyFromSpec(mustSpec())
 	})
@@ -105,7 +105,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 
 func TestRuleBasedTunerCompliance(t *testing.T) {
 	compliance.RunTunerCompliance(t, func(t *testing.T) contracts.TunerContract {
-		return minimal.NewRuleBasedTuner()
+		return minimal.NewRuleBasedTunerFromSpec(mustSpec())
 	})
 }
 
@@ -136,7 +136,7 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 
 	// Deprecate one proposition (P1: SC→RC positive — the first one in
 	// diSelectPropositions order).
-	if err := o.Deprecate("P1", "spurious in this deployment"); err != nil {
+	if err := o.Deprecate(firstSpecProp(), "spurious in this deployment"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,7 +158,7 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 	edges, _ := s.AllEdges()
 	stillPresent := false
 	for _, e := range edges {
-		if e.PropositionID == "P1" {
+		if e.PropositionID == firstSpecProp() {
 			stillPresent = true
 			break
 		}

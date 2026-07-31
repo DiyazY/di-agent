@@ -51,7 +51,7 @@ type scenarioAgent struct {
 }
 
 // newScenarioAgent wires the same edge-minimal stack a production daemon
-// would (InMemoryStorage + StaticDiSelectOntology + EMAUpdater +
+// would (InMemoryStorage + SpecOntology + EMAUpdater +
 // RuleEngineReasoner + DisabledProposer) and seeds storage from the
 // ontology's default Di-Select bootstrap. It returns the SemanticMap plus
 // raw handles so scenarios can call ontology mutations and inspect storage
@@ -120,8 +120,8 @@ func TestScenario_ColdStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(edges) != 15 {
-		t.Fatalf("expected 15 seeded edges (P1–P15); got %d", len(edges))
+	if want := len(mustSpec().Propositions); len(edges) != want {
+		t.Fatalf("expected %d seeded edges (one per spec proposition); got %d", want, len(edges))
 	}
 
 	sort.Slice(edges, func(i, j int) bool { return edges[i].PropositionID < edges[j].PropositionID })
@@ -257,7 +257,7 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	t.Logf("                       latency=%.3f  resource_cost=%.3f  confidence=%.3f",
 		before.LatencyEstimate, before.ResourceCost, before.Confidence)
 
-	if err := a.ontology.Deprecate("P1", "scenario test"); err != nil {
+	if err := a.ontology.Deprecate(firstSpecProp(), "scenario test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -275,7 +275,7 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	all, _ := a.storage.AllEdges()
 	stillPresent := false
 	for _, e := range all {
-		if e.PropositionID == "P1" {
+		if e.PropositionID == firstSpecProp() {
 			stillPresent = true
 			break
 		}
@@ -288,7 +288,7 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	props, _ := a.ontology.Propositions()
 	foundDeprecated := false
 	for _, p := range props {
-		if p.PropositionID == "P1" {
+		if p.PropositionID == firstSpecProp() {
 			if !p.Deprecated {
 				t.Error("P1 not flagged Deprecated in ontology after Deprecate()")
 			}
@@ -373,7 +373,7 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ontology.Deprecate("P15", "scenario test deprecation"); err != nil {
+	if err := a.ontology.Deprecate(firstSpecProp(), "scenario test deprecation"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -516,39 +516,66 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	})
 }
 
-// biasEnergyTo drives the agent's CostOfAction ResourceCost toward a chosen
-// level by ingesting the same constant on each of the three edges that feed
-// into RC (the reasoner's resource-cost aggregator). Drives the EMA close enough to
-// the target that conf×ema dominates the (1-conf)×prior term — 200 ticks at
-// alpha=0.5 / convergence=100 saturates confidence at 1.0.
+// biasEnergyTo drives the agent's CostOfAction ResourceCost by pushing every
+// RC-terminating edge away from its prior in the cost-increasing direction:
+// the reasoner scores resource cost as (effective − prior) × sign(direction),
+// so a positive edge climbing above its prior and a negative edge falling below
+// it both inflate cost, and an edge sitting at its prior contributes nothing.
 //
-//	target ≈ +0.85 → high-cost agent (the one that wants to offload)
-//	target ≈ +0.10 → low-cost agent  (the attractive offload destination)
-//	target ≈ +0.50 → medium-cost agent
-//
-// The shape is: P1 SC→RC (+, prior 0.6) contribution = +obs.
-//
-//	P8  MU→RC (−, prior 0.5) contribution = −obs.
-//	P10 PS→RC (−, prior 0.5) contribution = −obs.
-//	Net energy ≈ +obs_sc − obs_mu − obs_ps.
-//
-// To hit +0.85 we set sc=0.95, mu=0.05, ps=0.05 → 0.85.
-// To hit +0.10 we set sc=0.20, mu=0.05, ps=0.05 → 0.10.
-// To hit +0.50 we set sc=0.60, mu=0.05, ps=0.05 → 0.50.
-func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, scObs, mu, ps float64) {
+// `frac` is that deviation as a fraction of the headroom the edge actually has
+// (0 = sit at the prior, 1 = ride the cost-increasing bound), so the helper
+// cannot ask for an observation outside [0,1] no matter what the priors are.
+// The edges are read from live storage rather than named here, so the helper
+// follows the domain spec instead of pinning a graph scope. Confidence blending
+// scales the realised deviation below the requested one, which is why the
+// scenario asserts the ordering of costs and not their magnitudes.
+func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, frac float64) {
 	t.Helper()
+
+	edges, err := sm.AllEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	type target struct {
+		from, to string
+		obs      float64
+	}
+	var targets []target
+	for _, e := range edges {
+		if e.ToID != "RC" {
+			continue
+		}
+		// Headroom differs per direction: a positive edge can climb to 1.0, a
+		// negative edge can fall to 0.0.
+		obs := e.PriorWeight + frac*(1.0-e.PriorWeight)
+		if e.Direction == types.Negative {
+			obs = e.PriorWeight * (1.0 - frac)
+		}
+		targets = append(targets, target{e.FromID, e.ToID, clamp01(obs)})
+	}
+	if len(targets) == 0 {
+		t.Fatal("no RC-terminating edge in storage: the offload scenario has no cost lever")
+	}
+
 	const ticks = 200
 	for i := 0; i < ticks; i++ {
-		if err := sm.Ingest("SC", "RC", scObs, fmt.Sprintf("%s-sc-%d", label, i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("MU", "RC", mu, fmt.Sprintf("%s-mu-%d", label, i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("PS", "RC", ps, fmt.Sprintf("%s-ps-%d", label, i)); err != nil {
-			t.Fatal(err)
+		for _, tg := range targets {
+			ev := fmt.Sprintf("%s-%s-%s-%d", label, tg.from, tg.to, i)
+			if err := sm.Ingest(tg.from, tg.to, tg.obs, ev); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
+}
+
+func clamp01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // decodeJSON / writeJSONBody are tiny helpers so registerScenarioHTTP does not
@@ -600,9 +627,9 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 
 	// ── Bias each agent so CostOfAction returns a distinguishable energy cost ──
 
-	biasEnergyTo(t, a.sm, "A", 0.20, 0.05, 0.05) // → ≈ 0.10 (low)
-	biasEnergyTo(t, b.sm, "B", 0.95, 0.05, 0.05) // → ≈ 0.85 (high)
-	biasEnergyTo(t, c.sm, "C", 0.60, 0.05, 0.05) // → ≈ 0.50 (medium)
+	biasEnergyTo(t, a.sm, "A", 0.10) // barely off its prior — cheapest
+	biasEnergyTo(t, b.sm, "B", 0.90) // near the cost-increasing bound — priciest
+	biasEnergyTo(t, c.sm, "C", 0.50) // in between
 
 	// ── Pre-flight: print each agent's self-cost ────────────────────────────────
 
@@ -813,8 +840,8 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(props) != 16 {
-		t.Errorf("expected 16 propositions after confirm; got %d", len(props))
+	if want := len(mustSpec().Propositions) + 1; len(props) != want {
+		t.Errorf("expected %d propositions after confirm; got %d", want, len(props))
 	}
 
 	// Verified: a new proposition covering CE↔RC exists and is not deprecated.
@@ -835,7 +862,8 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 //
 // Verifies the full operator-tuning pipeline:
 //  1. Build an SM with the RuleBasedTuner.
-//  2. Tune "prioritize security" — expect P1 and/or P11 to increase.
+//  2. Tune on the spec's first intent rule — expect every proposition that rule
+//     names to move in the direction the rule's delta declares.
 //  3. Verify the history contains an "operator-tune" event with the intent text.
 //  4. Verify that CostOfAction after tuning is traversable without error.
 func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
@@ -846,7 +874,7 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	u := minimal.NewEMAUpdater(s, 0.2, 500)
 	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
 	proposer := minimal.NewDisabledProposer()
-	tuner := minimal.NewRuleBasedTuner()
+	tuner := minimal.NewRuleBasedTunerFromSpec(mustSpec())
 
 	sm := semmap.New(s, o, u, r, proposer, tuner)
 
@@ -855,27 +883,40 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applied, err := sm.Tune("prioritize security", "test-operator")
+	applied, err := sm.Tune("prioritize "+firstSpecKeyword(), "test-operator")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(applied) == 0 {
-		t.Fatal("expected at least one adjustment for 'prioritize security'")
+		t.Fatal("expected at least one adjustment for the spec's first intent")
 	}
 
-	// P1 or P11 must be in the applied list and must have increased.
-	found := false
+	// Every proposition the rule names must move in the direction its delta
+	// declares — unless the floor or ceiling already pinned it there, in which
+	// case standing still is the correct outcome.
+	rule := mustSpec().IntentRules[0]
+	seen := map[string]bool{}
 	for _, a := range applied {
-		if a.PropositionID == "P1" || a.PropositionID == "P11" {
-			found = true
-			if a.NewStrength <= a.OldStrength {
-				t.Errorf("%s: expected strength to increase; got %.3f → %.3f",
-					a.PropositionID, a.OldStrength, a.NewStrength)
-			}
+		delta, named := rule.Deltas[a.PropositionID]
+		if !named {
+			t.Errorf("%s adjusted but intent %q does not name it", a.PropositionID, rule.Intent)
+			continue
+		}
+		seen[a.PropositionID] = true
+		moved := a.NewStrength - a.OldStrength
+		switch {
+		case delta > 0 && moved < 0:
+			t.Errorf("%s: intent raises it by %.2f but strength fell %.3f → %.3f",
+				a.PropositionID, delta, a.OldStrength, a.NewStrength)
+		case delta < 0 && moved > 0:
+			t.Errorf("%s: intent lowers it by %.2f but strength rose %.3f → %.3f",
+				a.PropositionID, delta, a.OldStrength, a.NewStrength)
 		}
 	}
-	if !found {
-		t.Error("expected P1 or P11 in applied adjustments for 'prioritize security'")
+	for propID := range rule.Deltas {
+		if !seen[propID] {
+			t.Errorf("intent %q names %s but no adjustment was applied to it", rule.Intent, propID)
+		}
 	}
 
 	// Audit trail: history must contain "operator-tune" event.
@@ -893,7 +934,7 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	if tuneEvent == nil {
 		t.Fatal("expected 'operator-tune' event in history")
 	}
-	if tuneEvent.Detail["intent"] != "prioritize security" {
+	if tuneEvent.Detail["intent"] != "prioritize "+firstSpecKeyword() {
 		t.Errorf("operator-tune event has wrong intent: %v", tuneEvent.Detail["intent"])
 	}
 	if tuneEvent.Actor != "test-operator" {

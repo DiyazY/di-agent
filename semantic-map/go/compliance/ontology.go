@@ -16,7 +16,10 @@ type OntologyFactory func(t *testing.T) contracts.OntologyContract
 
 // RunOntologyCompliance verifies the behavioral guarantees of OntologyContract:
 //
-//   - Bootstrap minimum: ≥7 constructs and ≥15 propositions (Di-Select baseline).
+//   - Non-empty and internally consistent: at least one construct and one
+//     proposition, and every proposition's endpoints are declared constructs.
+//     The suite deliberately does not assert a size, because the graph's scope
+//     comes from whatever domain specification the implementation loaded.
 //   - Uniqueness: every proposition has a unique PropositionID.
 //   - Relationships is a filter over Propositions.
 //   - ValidateProposition is pure (no state change).
@@ -24,27 +27,47 @@ type OntologyFactory func(t *testing.T) contracts.OntologyContract
 func RunOntologyCompliance(t *testing.T, factory OntologyFactory) {
 	t.Helper()
 
-	// ── Bootstrap minimum ─────────────────────────────────────────────────────
+	// ── Non-empty and internally consistent ───────────────────────────────────
 
-	t.Run("HasAtLeastSevenConstructs", func(t *testing.T) {
+	t.Run("IsNotEmpty", func(t *testing.T) {
 		o := factory(t)
 		cs, err := o.Constructs()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(cs) < 7 {
-			t.Errorf("expected ≥7 constructs (Di-Select baseline); got %d", len(cs))
+		if len(cs) == 0 {
+			t.Error("ontology exposes no constructs")
 		}
-	})
-
-	t.Run("HasAtLeastFifteenPropositions", func(t *testing.T) {
-		o := factory(t)
 		ps, err := o.Propositions()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(ps) < 15 {
-			t.Errorf("expected ≥15 propositions (P1–P15 baseline); got %d", len(ps))
+		if len(ps) == 0 {
+			t.Error("ontology exposes no propositions")
+		}
+	})
+
+	t.Run("PropositionEndpointsAreDeclaredConstructs", func(t *testing.T) {
+		o := factory(t)
+		cs, err := o.Constructs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		declared := make(map[string]bool, len(cs))
+		for _, c := range cs {
+			declared[c.ConstructID] = true
+		}
+		ps, err := o.Propositions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range ps {
+			if !declared[p.FromConstruct] {
+				t.Errorf("proposition %s starts at undeclared construct %q", p.PropositionID, p.FromConstruct)
+			}
+			if !declared[p.ToConstruct] {
+				t.Errorf("proposition %s ends at undeclared construct %q", p.PropositionID, p.ToConstruct)
+			}
 		}
 	})
 

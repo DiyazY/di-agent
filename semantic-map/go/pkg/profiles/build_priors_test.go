@@ -28,6 +28,7 @@ func TestBuildAppliesPerKDPriors(t *testing.T) {
 		kd := kd
 		t.Run(kd, func(t *testing.T) {
 			cfg := Config{
+				DomainSpec:           mustSpec(),
 				EMAAlpha:             0.2,
 				ConvergenceThreshold: 500,
 				MinTrustScore:        0.5,
@@ -77,8 +78,8 @@ func TestBuildAppliesPerKDPriors(t *testing.T) {
 				}
 				checked++
 			}
-			if checked != 15 {
-				t.Errorf("checked %d edges, want 15", checked)
+			if want := len(pw.Propositions); checked != want {
+				t.Errorf("checked %d edges, want %d", checked, want)
 			}
 		})
 	}
@@ -95,6 +96,7 @@ func TestBuildWithoutKDUsesGlobalPriors(t *testing.T) {
 	}
 
 	cfg := DefaultConfig()
+	cfg.DomainSpec = mustSpec()
 	cfg.PriorWeightsPath = pwPath
 	cfg.KD = ""
 

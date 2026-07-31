@@ -53,6 +53,7 @@ import (
 	"github.com/DiyazY/di-agent/cmd/replay/compare"
 	"github.com/DiyazY/di-agent/cmd/replay/parquet"
 	"github.com/DiyazY/di-agent/cmd/replay/playback"
+	"github.com/DiyazY/di-agent/pkg/domain"
 )
 
 const (
@@ -699,7 +700,12 @@ func cmdCompare(args []string) error {
 		}
 	}
 
+	spec, err := domain.LoadFound()
+	if err != nil {
+		return fmt.Errorf("domain spec: %w (pass -domain, or run from within the repo)", err)
+	}
 	opts := compare.Options{
+		DomainSpec:       spec,
 		DataDir:          dataDir,
 		TestType:         f.test,
 		Run:              f.run,
