@@ -527,6 +527,55 @@ evenly between two constructs, each edge sees half the samples and
 `N_converge`. This is worth knowing before setting `N_converge` from an expected
 deployment length.
 
+### The state model: properties, relationships, trace
+
+`pkg/statemap` is the map as a model of the system rather than of a framework. It
+exists because an agent that decides anything about its own system needs a model that
+is current, answerable and attributable, and none of those follow from a schema fixed
+at build time.
+
+**Vertices are properties.** An OBSERVED property is fed by telemetry and holds what
+the system is doing. A DERIVED property aggregates members and is recomputed rather
+than stored, so a summary can never disagree with what it summarises. A framework's
+evaluation constructs live here as derived properties over the metrics that evidence
+them, which keeps prior knowledge without the graph being about the framework.
+
+**Edges are relationships**, each carrying its provenance: `seeded` from prior
+knowledge, `learned` from observing this system, `asserted` by an operator. An agent
+that cannot say why it believes an edge cannot be audited, so provenance is data.
+
+**Lifecycle is the substance.** An observation of an unknown property admits it and
+journals the admission, so the map follows a system that changes rather than a schema
+someone wrote down. Silence marks a property stale and can retire it, because a model
+that keeps reporting a departed metric's last value asserts what it cannot support.
+Retiring a property cascades to the relationships referencing it, since an edge to
+something absent cannot be evaluated. Retirement is soft: an earlier decision has to
+stay reconstructible.
+
+The ordering in `IngestSample` matters: the state model records a sample BEFORE the
+routing table is consulted. The table says what the agent knows how to summarise, not
+what the system is allowed to exhibit.
+
+**Queryable.** `State(Query)` answers "what is this system doing" with no arguments
+and narrows by kind, status, confidence or one-hop neighbourhood. A view never
+contains a dangling edge, and every response carries a census of the whole map so a
+filtered view cannot be mistaken for the whole. `Explain(id)` renders one property's
+neighbourhood as text, because the first question after a surprising decision is
+"what did it think was going on" and that should not require a client.
+
+**Traceable.** Every mutation advances a revision. A `DecisionBuilder` records the
+state a decision reads *as it reads it*, so the record cannot drift from the reading,
+and inputs are copied so a decision cannot silently become a description of a later
+system. Caveats name stale inputs, unobserved values and absent properties. The
+journal is bounded and reports what it dropped, so an absence is never mistaken for
+evidence that nothing happened, and a decision evicted by that bound answers 410
+rather than 404.
+
+`GET /state/estimate?target=` is where this becomes load-bearing rather than
+descriptive: the answer is assembled from the map through the builder and returned
+with its decision id, and `GET /state/decisions/{id}` reproduces the inputs
+afterwards.
+
 ### Two ways to learn an edge weight
 
 An edge asserts that one construct influences another with some strength. There are

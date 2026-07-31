@@ -257,13 +257,12 @@ def compute_construct_scores(root_dir: str | None = None) -> dict[str, dict[str,
     mu = _norm_inv(SETUP_TIME_HOURS)
 
     # ── RC: Resource Constraints & Cost ───────────────────────────────────
-    # energy_per_pod_j: lower = better resource efficiency
-    epod = {kd: energy[kd]["energy_per_pod_j"] or 15.0 for kd in KDS}
-    epod_inv = _norm_inv(epod)
-    # cp_overhead_w: lower = better
+    # Control-plane power overhead only. The energy-per-pod figure was dropped: it
+    # comes from a DVFS model of one hardware class, and applying it to a system
+    # whose energy was never measured produces a number with no referent. What is
+    # left is an overhead measurement, which is what the constructs's name claims.
     overhead = {kd: energy[kd]["cp_overhead_w"] or 0.35 for kd in KDS}
-    overhead_inv = _norm_inv(overhead)
-    rc = _blend(epod_inv, overhead_inv, w_a=0.6)
+    rc = _norm_inv(overhead)
 
     # ── CO: Connectivity & Offline Resilience ─────────────────────────────
     # offline preservation + inverted interrupt amplification (lower amp = less overhead)

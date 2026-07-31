@@ -406,6 +406,34 @@ agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 go run ./cmd/agent -profile edge-minimal -domain ../domain_spec.json
 ```
 
+### The state model
+
+The map holds what the system exhibits and how those properties relate, updated by
+every sample, queryable and traceable.
+
+```bash
+# what is this system doing right now
+curl -s localhost:8080/state | jq '.counts'
+
+# one property, readable in a terminal
+curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
+
+# answer a question FROM the map, and keep the trace
+curl -s 'localhost:8080/state/estimate?target=PS&id=why-slow' | jq '.answer, .influences, .caveats'
+curl -s localhost:8080/state/decisions/why-slow | jq '.revision, .properties_read'
+
+# lifecycle
+curl -s -X DELETE 'localhost:8080/state/properties/gpu_util?reason=device+removed&actor=me'
+curl -s -X POST localhost:8080/state/sweep | jq
+curl -s 'localhost:8080/state/journal?limit=10' | jq '.held, .dropped'
+```
+
+A metric the specification never declared still becomes a property: `/ingest-sample`
+answers 202 with `routed:false` rather than rejecting it, because a reading the system
+produced is not a typo to discard, and the journal records the admission. Silence
+marks a property stale (`-stale-after`) and optionally retires it (`-retire-after`);
+`-no-admit` closes the model for a deployment that wants that.
+
 ### One agent per machine
 
 The map is node-local: each agent models the machine it runs on, and its graph holds

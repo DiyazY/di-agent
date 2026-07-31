@@ -57,15 +57,6 @@
       ]
     },
     {
-      "metric_type": "energy_joules",
-      "construct_id": "RC",
-      "unit": "fraction",
-      "range": [
-        0,
-        1
-      ]
-    },
-    {
       "metric_type": "network_rx_bps",
       "construct_id": "CO",
       "unit": "fraction",
