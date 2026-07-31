@@ -16,17 +16,17 @@ import (
 func TestPairTracker_OnlyPairsWithinTheWindow(t *testing.T) {
 	tr := newPairTracker(15)
 
-	tr.record("RC", constructObservation{value: 0.4, ts: 1000, eventID: "rc-1"})
+	tr.record("node_1", "RC", constructObservation{value: 0.4, ts: 1000, eventID: "rc-1"})
 
-	if fresh := tr.record("PS", constructObservation{value: 0.1, ts: 1012, eventID: "ps-1"}); len(fresh) != 1 {
+	if fresh := tr.record("node_1", "PS", constructObservation{value: 0.1, ts: 1012, eventID: "ps-1"}); len(fresh) != 1 {
 		t.Errorf("12s apart is inside a 15s window but produced %d counterparts", len(fresh))
 	}
-	if fresh := tr.record("PS", constructObservation{value: 0.1, ts: 1100, eventID: "ps-2"}); len(fresh) != 0 {
+	if fresh := tr.record("node_1", "PS", constructObservation{value: 0.1, ts: 1100, eventID: "ps-2"}); len(fresh) != 0 {
 		t.Errorf("88s after the RC reading is outside the window but produced %d counterparts", len(fresh))
 	}
 	// Order does not matter: an earlier counterpart is as valid as a later one.
-	tr.record("CO", constructObservation{value: 0.2, ts: 1105, eventID: "co-1"})
-	if fresh := tr.record("PS", constructObservation{value: 0.1, ts: 1095, eventID: "ps-3"}); len(fresh) == 0 {
+	tr.record("node_1", "CO", constructObservation{value: 0.2, ts: 1105, eventID: "co-1"})
+	if fresh := tr.record("node_1", "PS", constructObservation{value: 0.1, ts: 1095, eventID: "ps-3"}); len(fresh) == 0 {
 		t.Error("a counterpart 10s in the future should still pair; the window is symmetric")
 	}
 }
@@ -37,10 +37,10 @@ func TestPairTracker_OnlyPairsWithinTheWindow(t *testing.T) {
 // fill with repeats of the same point.
 func TestPairTracker_KeepsOnlyTheLatestPerConstruct(t *testing.T) {
 	tr := newPairTracker(60)
-	tr.record("RC", constructObservation{value: 0.1, ts: 1000, eventID: "rc-1"})
-	tr.record("RC", constructObservation{value: 0.9, ts: 1005, eventID: "rc-2"})
+	tr.record("node_1", "RC", constructObservation{value: 0.1, ts: 1000, eventID: "rc-1"})
+	tr.record("node_1", "RC", constructObservation{value: 0.9, ts: 1005, eventID: "rc-2"})
 
-	fresh := tr.record("PS", constructObservation{value: 0.5, ts: 1010, eventID: "ps-1"})
+	fresh := tr.record("node_1", "PS", constructObservation{value: 0.5, ts: 1010, eventID: "ps-1"})
 	if len(fresh) != 1 {
 		t.Fatalf("expected one counterpart construct, got %d", len(fresh))
 	}
@@ -156,5 +156,28 @@ func TestIngestPaired_SkipsEdgesWithNoFreshCounterpart(t *testing.T) {
 	}
 	if n != 0 || len(upd.calls) != 0 {
 		t.Errorf("a counterpart 60s stale in a 5s window produced %d paired updates", n)
+	}
+}
+
+// TestPairTracker_DoesNotPairAcrossNodes pins the property that keeps a learned
+// association mechanical. A cluster streams every node's telemetry into one
+// graph, so a tracker keyed on construct alone pairs the master's CPU reading
+// with a worker's pressure reading — two series with no causal connection — and
+// the edge learns from noise. The edge stays cluster-wide; each pair does not.
+func TestPairTracker_DoesNotPairAcrossNodes(t *testing.T) {
+	tr := newPairTracker(15)
+
+	tr.record("master", "RC", constructObservation{value: 0.9, ts: 1000, eventID: "m-rc"})
+	if fresh := tr.record("node_1", "PS", constructObservation{value: 0.1, ts: 1002, eventID: "n1-ps"}); len(fresh) != 0 {
+		t.Errorf("paired a node_1 reading against master's: %v", fresh)
+	}
+
+	tr.record("node_1", "RC", constructObservation{value: 0.2, ts: 1004, eventID: "n1-rc"})
+	fresh := tr.record("node_1", "PS", constructObservation{value: 0.1, ts: 1006, eventID: "n1-ps2"})
+	if len(fresh) != 1 {
+		t.Fatalf("same-node counterpart not offered: %v", fresh)
+	}
+	if got := fresh["RC"]; got.eventID != "n1-rc" {
+		t.Errorf("paired against %q; want node_1's own RC reading", got.eventID)
 	}
 }
