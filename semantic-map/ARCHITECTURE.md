@@ -548,7 +548,25 @@ journal is bounded and reports what it dropped, so an absence is never mistaken 
 evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 
-**The Reasoner answers from it.** `CostOfAction` reads the cost constructs' levels and
+**The Reasoner answers from it, and only from it.** A reasoner without a state model
+returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
+as a fallback, because a fallback meant an untraceable answer could be produced by
+forgetting one wiring call, silently, since an empty `DecisionID` is easy to miss.
+
+**The operator surface reaches it too.** `Tune` and `SetPropositionStrength` assert the
+strength on the state model's matching relationships, recording actor and reason;
+`Deprecate` retires them so a withdrawn claim leaves the traversal path. An operator
+action that stopped at the construct graph would change what `Propositions()` reports
+and no decision — which is what it did until this was wired.
+
+**Level and sensitivity are different quantities.** A level is the observed value of a
+cost construct. A sensitivity is per unit change in a source construct — the signed sum
+of effective strengths, NOT multiplied by the source's current value. Multiplying would
+duplicate what the level already reports and would collapse the term to zero before any
+telemetry arrived, which is precisely when the calibrated priors are all the agent has.
+`/state/estimate` reports both, and calls the value-weighted one a contribution.
+
+**Details.** `CostOfAction` reads the cost constructs' levels and
 their incoming relationships through a DecisionBuilder, so the properties that reach
 the arithmetic are exactly the ones the journal holds — a separate "log what we used"
 pass would be free to disagree with what was used, and that disagreement is invisible
