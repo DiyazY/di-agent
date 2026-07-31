@@ -104,6 +104,14 @@ func main() {
 			"(half, floored at 5s). Without a sweep, staleness and retirement only "+
 			"happen when something asks for them, which makes -stale-after a setting "+
 			"that describes nothing.")
+	stateFile := flag.String("state-file", "",
+		"path to persist the map and its journal. Empty keeps everything in memory, which "+
+			"means a restart returns the agent to cold start on a system it has already "+
+			"watched, and makes the audit trail an artefact of one process lifetime.")
+	saveInterval := flag.Duration("save-interval", time.Minute,
+		"how often to snapshot when -state-file is set. A snapshot is also written on "+
+			"shutdown, so this bounds what an unclean exit loses rather than what a clean "+
+			"one does.")
 	journalSize := flag.Int("journal-size", 0,
 		"entries of change and decision history to hold in memory (0 = default)")
 	ingestScope := flag.String("ingest-scope", "self",
@@ -264,6 +272,26 @@ func main() {
 			Window:            orDefault(*pairHistory, 60),
 		},
 	}, statemap.NewJournal(*journalSize))
+	// Load before seeding. A snapshot holds what this agent learned; seeding holds what
+	// the specification declares. Loading second would refuse (the map would be
+	// populated), and merging blindly would silently pick a winner per property — so the
+	// order is: restore, then let seeding re-declare, where the rules are explicit and
+	// journalled.
+	if *stateFile != "" {
+		loaded, err := state.Load(*stateFile)
+		if err != nil {
+			log.Fatalf("restoring state from %s: %v", *stateFile, err)
+		}
+		if loaded {
+			c := state.Census()
+			log.Printf("state model: restored %d properties and %d relationships from %s "+
+				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, *stateFile,
+				state.Revision())
+		} else {
+			log.Printf("state model: no snapshot at %s, starting cold", *stateFile)
+		}
+	}
+
 	// Seeding happens inside profiles.Build, which holds the calibration as well as
 	// the specification, so relationships get this cluster's priors rather than a
 	// placeholder.
@@ -318,6 +346,7 @@ func main() {
 	// -stale-after and -retire-after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
 	startSweepLoop(ctx, state, sweepEvery(*sweepInterval, *staleAfter))
+	startSaveLoop(ctx, state, *stateFile, *saveInterval)
 
 	startCollectionLoop(ctx, sm, collector, *collectInterval)
 
@@ -326,6 +355,18 @@ func main() {
 	<-quit
 	log.Println("shutting down")
 	cancel()
+
+	// The final save happens HERE, synchronously, not in the save loop. Cancelling the
+	// context and returning let the process exit while the goroutine was still racing to
+	// write, so the shutdown snapshot was usually lost and a clean restart silently
+	// dropped everything since the last periodic save.
+	if *stateFile != "" {
+		if err := state.Save(*stateFile); err != nil {
+			log.Printf("state model: shutdown save failed: %v", err)
+		} else {
+			log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
+		}
+	}
 }
 
 // regimePreset bundles the alpha and convergence values for a named dynamics regime.
@@ -626,6 +667,42 @@ func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duratio
 					log.Printf("state model: %d properties retired for silence: %v",
 						len(retired), retired)
 				}
+			}
+		}
+	}()
+}
+
+// startSaveLoop snapshots the map on a ticker and once more when the context ends.
+//
+// This loop only does the periodic saves, which bound what an UNCLEAN exit costs. The
+// save that makes a clean restart lossless is done synchronously by main after the
+// context is cancelled, because a goroutine racing process exit loses the race often
+// enough to be useless. A failed save is logged rather than fatal — an agent that
+// cannot write its snapshot should keep answering questions about the system it can
+// still see.
+func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every time.Duration) {
+	if state == nil || path == "" {
+		return
+	}
+	if every <= 0 {
+		every = time.Minute
+	}
+	log.Printf("state model: persisting to %s every %s", path, every)
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// The shutdown save is main's job, done synchronously so the process
+				// cannot exit before it lands.
+				return
+			case <-t.C:
+				if err := state.Save(path); err != nil {
+					log.Printf("state model: periodic save failed: %v", err)
+					continue
+				}
+				log.Printf("state model: saved at revision %d (periodic)", state.Revision())
 			}
 		}
 	}()

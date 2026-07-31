@@ -1,6 +1,7 @@
 package statemap
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -678,4 +679,118 @@ func itoa(i int) string {
 		return string(rune('0' + i))
 	}
 	return string(rune('0'+i/10)) + string(rune('0'+i%10))
+}
+
+// TestSnapshotSurvivesRestart is the reliability property: an agent that has watched a
+// system for a while must not return to cold start because its process restarted. It
+// checks the two things that matter — what it learned, and the record of how.
+func TestSnapshotSurvivesRestart(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+
+	m1, c1 := newTestMap(t, Config{
+		ConvergenceObservations: 20, Alpha: 0.5, Learn: true,
+		LearnConfig: LearnConfig{PairWindowSeconds: 15, MinSupport: 6, Window: 30},
+	})
+	for _, id := range []string{"a", "b"} {
+		if err := m1.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m1.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Prior: 0.3}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		c1.advance(5 * time.Second)
+		x := float64(i%10) / 10.0
+		if err := m1.ObserveEvent("a", x, c1.now(), "a"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c1.advance(time.Second)
+		if err := m1.ObserveEvent("b", 0.9*x, c1.now(), "b"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := m1.Decide("dec-before-restart", "how is b?")
+	pb, _ := b.Property("b")
+	b.Commit(map[string]any{"b": pb.Value})
+
+	relID := RelationshipID("a", "b", "")
+	learned, _ := m1.Relationship(relID)
+	if learned.NObservations == 0 {
+		t.Fatal("nothing was learned before the snapshot, so the test proves nothing")
+	}
+	if err := m1.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	m2, _ := newTestMap(t, Config{ConvergenceObservations: 20, Learn: true})
+	loaded, err := m2.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded {
+		t.Fatal("Load reported nothing restored")
+	}
+
+	got, ok := m2.Relationship(relID)
+	if !ok {
+		t.Fatal("the learned relationship did not survive")
+	}
+	if got.Strength != learned.Strength || got.NObservations != learned.NObservations {
+		t.Errorf("restored strength %.6f/%d, had %.6f/%d — an agent that forgets what it "+
+			"learned is back at cold start on a system it has already watched",
+			got.Strength, got.NObservations, learned.Strength, learned.NObservations)
+	}
+	if got.Provenance != learned.Provenance {
+		t.Errorf("restored provenance %s, had %s", got.Provenance, learned.Provenance)
+	}
+
+	// The audit trail has to survive too, or "why did you do that yesterday" becomes
+	// unanswerable after a restart.
+	d, ok := m2.Journal().Decision("dec-before-restart")
+	if !ok {
+		t.Fatal("a decision taken before the restart is no longer retrievable")
+	}
+	if len(d.PropertiesRead) == 0 {
+		t.Error("the restored decision lost its inputs, so it can no longer justify itself")
+	}
+
+	// Pair windows are deliberately not restored: simultaneity cannot span a restart
+	// of unknown length.
+	if n := m2.PairSupport(relID); n != 0 {
+		t.Errorf("pair support %d after restore; the estimator should resume from its "+
+			"conclusions, not from a window spanning the restart", n)
+	}
+}
+
+// TestLoadRefusesAmbiguity covers the cases where guessing would put wrong values into
+// a model the agent then reasons from.
+func TestLoadRefusesAmbiguity(t *testing.T) {
+	dir := t.TempDir()
+
+	m, _ := newTestMap(t, Config{})
+	loaded, err := m.Load(dir + "/absent.json")
+	if err != nil || loaded {
+		t.Errorf("a missing snapshot should be a quiet first start; got loaded=%v err=%v", loaded, err)
+	}
+
+	bad := dir + "/future.json"
+	if err := os.WriteFile(bad, []byte(`{"version":999,"revision":5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Load(bad); err == nil {
+		t.Error("a snapshot from an unknown version was accepted")
+	}
+
+	good := dir + "/good.json"
+	if err := m.Save(good); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{})
+	if err := m2.DeclareProperty(Property{ID: "already-here"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m2.Load(good); err == nil {
+		t.Error("loading into a populated map was accepted; the merge would be invisible")
+	}
 }
