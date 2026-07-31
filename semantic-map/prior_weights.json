@@ -357,8 +357,8 @@
     },
     "provenance": {
       "PS": {
-        "control-plane": "class-specific: pod-startup latency, a control-plane operation timed against the API server (P1)",
-        "worker": "class-specific: data-plane throughput, memtier against Redis pods running on workers (P1)"
+        "control-plane": "inherited: the available performance constants are pod-startup latency, timed end to end across client, API server, scheduler, kubelet and runtime, and data-plane throughput, measured against worker-hosted processes. Neither measures the control-plane host's local behaviour. Routing latency here was tried and measured worse: the master's divergence grew 6.2-9.5% on all nine k0s workloads.",
+        "worker": "class-specific: data-plane throughput, memtier against Redis processes executing on workers (P1). Measured better: the worker's divergence shrank 6.3-8.8% on all nine k0s workloads."
       },
       "RC": {
         "control-plane": "inherited: every quantity feeding RC is worker-measured (P4's Cortex-A72 DVFS model, P5's node_2 cgroups). The campaign contains no control-plane-side energy measurement, so no class-specific score exists.",
@@ -373,7 +373,7 @@
   "machine_class_construct_scores": {
     "k3s": {
       "control-plane": {
-        "PS": 1.0,
+        "PS": 0.9123,
         "SC": 0.0,
         "RR": 0.6,
         "MU": 1.0,
@@ -393,7 +393,7 @@
     },
     "k0s": {
       "control-plane": {
-        "PS": 0.9831,
+        "PS": 0.9214,
         "SC": 0.3448,
         "RR": 0.54,
         "MU": 1.0,
@@ -413,7 +413,7 @@
     },
     "k8s": {
       "control-plane": {
-        "PS": 0.9705,
+        "PS": 0.9852,
         "SC": 1.0,
         "RR": 0.36,
         "MU": 0.6957,
@@ -453,7 +453,7 @@
     },
     "openYurt": {
       "control-plane": {
-        "PS": 0.903,
+        "PS": 0.7936,
         "SC": 1.0,
         "RR": 0.4,
         "MU": 0.0,
@@ -498,8 +498,8 @@
           "to_id": "RC",
           "proposition_id": "P10",
           "direction": "negative",
-          "prior_weight": 0.7,
-          "ema_weight": 0.7,
+          "prior_weight": 0.6386,
+          "ema_weight": 0.6386,
           "calibrated": true
         },
         "CO\u2192PS:P13": {
@@ -576,8 +576,8 @@
           "to_id": "RC",
           "proposition_id": "P10",
           "direction": "negative",
-          "prior_weight": 0.6882,
-          "ema_weight": 0.6882,
+          "prior_weight": 0.645,
+          "ema_weight": 0.645,
           "calibrated": true
         },
         "CO\u2192PS:P13": {
@@ -654,8 +654,8 @@
           "to_id": "RC",
           "proposition_id": "P10",
           "direction": "negative",
-          "prior_weight": 0.6794,
-          "ema_weight": 0.6794,
+          "prior_weight": 0.6896,
+          "ema_weight": 0.6896,
           "calibrated": true
         },
         "CO\u2192PS:P13": {
@@ -810,8 +810,8 @@
           "to_id": "RC",
           "proposition_id": "P10",
           "direction": "negative",
-          "prior_weight": 0.6321,
-          "ema_weight": 0.6321,
+          "prior_weight": 0.5555,
+          "ema_weight": 0.5555,
           "calibrated": true
         },
         "CO\u2192PS:P13": {

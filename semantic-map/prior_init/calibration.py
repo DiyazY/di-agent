@@ -146,11 +146,20 @@ def _spearman_strength(x: list[float], y: list[float]) -> float:
 #       control-plane class inherits — and the gap is recorded rather than hidden
 #       behind a uniform prior.
 #
-#   PS  splits genuinely. Pod-startup latency is a control-plane operation, timed
-#       by a k-bench client against the API server; data-plane throughput is
-#       memtier against Redis pods, which run on workers. So the control-plane
-#       class takes the latency component and the worker class the throughput
-#       component, instead of both classes taking a 50/50 blend of the two.
+#   PS  worker only, after measurement corrected a first attempt. The test for a
+#       class-specific score is whether the constant measures THAT CLASS'S LOCAL
+#       BEHAVIOUR — not merely whether the class participates in the operation. Data
+#       -plane throughput passes: memtier drives Redis processes that execute on
+#       workers. Pod-startup latency fails: it is timed end to end across client,
+#       API server, scheduler, kubelet and container runtime, so it characterises a
+#       cluster-wide path rather than the control-plane host's local resource
+#       behaviour.
+#
+#       The first version of this file routed latency to the control-plane class on
+#       provenance grounds alone, and the A/B measured the consequence: on all nine
+#       k0s workloads the master's divergence from its prior GREW by 6.2-9.5%, while
+#       the worker's shrank by 6.3-8.8% from the throughput-derived score. More
+#       specific provenance is not automatically a better prior.
 #
 #   CO  cross-class. Offline message preservation is architectural — a property of
 #       the distribution's edge design, not of a host — and the interrupt
@@ -177,8 +186,6 @@ def compute_construct_scores_by_class(
     """
     cross = compute_construct_scores(root_dir)
 
-    # PS split: latency is a control-plane measurement, throughput a worker one.
-    latency_inv = _norm_inv(POD_STARTUP_LATENCY_MS)
     throughput_n = _norm(DP_THROUGHPUT_OPS)
 
     by_class: dict[str, dict[str, dict[str, float]]] = {}
@@ -186,18 +193,28 @@ def compute_construct_scores_by_class(
         by_class[kd] = {}
         for cls in MACHINE_CLASSES:
             scores = dict(cross[kd])  # start from the cross-class figures
-            if cls == "control-plane":
-                scores["PS"] = round(latency_inv[kd], 4)
-            else:
+            if cls == "worker":
+                # Data-plane throughput is measured against processes that run here.
                 scores["PS"] = round(throughput_n[kd], 4)
+            # The control-plane class inherits every construct: nothing in the
+            # campaign measures its local behaviour. Saying so is the point — a
+            # uniform number presented as class-specific would be worse than an
+            # acknowledged inheritance.
             by_class[kd][cls] = {k: round(v, 4) for k, v in scores.items()}
 
     provenance = {
         "PS": {
-            "control-plane": "class-specific: pod-startup latency, a control-plane "
-                             "operation timed against the API server (P1)",
+            "control-plane": "inherited: the available performance constants are "
+                             "pod-startup latency, timed end to end across client, API "
+                             "server, scheduler, kubelet and runtime, and data-plane "
+                             "throughput, measured against worker-hosted processes. "
+                             "Neither measures the control-plane host's local "
+                             "behaviour. Routing latency here was tried and measured "
+                             "worse: the master's divergence grew 6.2-9.5% on all nine "
+                             "k0s workloads.",
             "worker": "class-specific: data-plane throughput, memtier against Redis "
-                      "pods running on workers (P1)",
+                      "processes executing on workers (P1). Measured better: the "
+                      "worker's divergence shrank 6.3-8.8% on all nine k0s workloads.",
         },
         "RC": {
             "control-plane": "inherited: every quantity feeding RC is worker-measured "
