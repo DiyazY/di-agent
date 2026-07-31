@@ -221,8 +221,8 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	// system is doing, so it becomes a property here — journalled as an admission —
 	// where the construct path below would drop it.
 	if m.state != nil {
-		if serr := m.state.Observe(string(sample.MetricType), sample.Value,
-			time.Unix(sample.TimestampUnix, 0)); serr != nil {
+		if serr := m.state.ObserveEvent(string(sample.MetricType), sample.Value,
+			time.Unix(sample.TimestampUnix, 0), sample.EventID); serr != nil {
 			log.Printf("statemap: %v", serr)
 		}
 	}
@@ -250,11 +250,9 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		// Relational mode: a single construct's value is not an observation of any
 		// edge's strength, so the edge waits for a counterpart observation of its
 		// other endpoint.
-		pairs, perr := ingestPaired(sample, construct, m.ontology, rel, m.pairs)
-		if perr != nil && err == nil {
+		if _, perr := ingestPaired(sample, construct, m.ontology, rel, m.pairs); perr != nil && err == nil {
 			err = perr
 		}
-		m.propagateRelationStrengths(pairs, sample.TimestampUnix)
 	} else if berr := Bridge(sample, router, m.ontology, m.updater); berr != nil && err == nil {
 		err = berr
 	}
@@ -277,51 +275,12 @@ func (m *SemanticMap) RoutedConstruct(metricType string) (string, bool) {
 	return router.ConstructForMetric(metricType)
 }
 
-// propagateRelationStrengths copies newly-estimated relation strengths into the
-// state model, so a relationship there stops sitting at its seeded prior once this
-// system has actually been observed.
-//
-// The estimate is the relational updater's, not a second one computed here: the
-// updater IS the estimator, and the state model records what it estimated. Having
-// the state model compute its own would give two numbers for one relation, and no
-// way to say which the agent used.
-//
-// Only relational mode reaches this. In endpoint mode an edge tracks a construct's
-// magnitude rather than an association strength, and feeding that in as a relation
-// strength would put a utilization fraction where a strength belongs. Relationships
-// therefore stay at their priors with confidence 0 in endpoint mode, which is the
-// honest report: nothing has been learned about them.
-func (m *SemanticMap) propagateRelationStrengths(pairs []ConstructPair, ts int64) {
-	if m.state == nil || len(pairs) == 0 {
-		return
-	}
-	at := time.Unix(ts, 0)
-	for _, p := range pairs {
-		edges, err := m.storage.GetEdgesByPair(p.From, p.To)
-		if err != nil {
-			continue
-		}
-		for _, e := range edges {
-			if e == nil || e.Deprecated {
-				continue
-			}
-			id := statemap.RelationshipID(e.FromID, e.ToID, e.PropositionID)
-			if serr := m.state.ObserveRelationship(id, e.EMAWeight, at); serr != nil {
-				// A relationship absent from the state model is not an error: the model's
-				// scope is its own, and a construct pair it does not carry simply has no
-				// relationship to update.
-				continue
-			}
-		}
-	}
-}
-
 // assertStateStrength applies an operator strength adjustment to every state-model
 // relationship carrying this proposition as its label.
 //
-// A proposition maps to at most one relationship per construct pair, but resolving by
-// label rather than by a constructed ID keeps the two models' naming independent: the
-// state model is free to carry relationships the construct graph does not.
+// Resolving by label rather than by a constructed ID keeps the two naming schemes
+// independent: the state model is free to carry relationships the construct graph
+// does not.
 func (m *SemanticMap) assertStateStrength(propositionID string, strength float64, actor, reason string) {
 	if m.state == nil {
 		return
@@ -337,7 +296,7 @@ func (m *SemanticMap) assertStateStrength(propositionID string, strength float64
 }
 
 // retireStateRelationships retires every state-model relationship labelled with this
-// proposition.
+// proposition, so a withdrawn claim leaves the reasoning path.
 func (m *SemanticMap) retireStateRelationships(propositionID, reason, actor string) {
 	if m.state == nil {
 		return

@@ -272,17 +272,25 @@ func TestIngestSample_RecordsConstructStateInBothModes(t *testing.T) {
 	}
 }
 
-// TestRelationalObservationsReachTheStateModel closes the gap that made the state
-// model's relationships permanently prior-derived: nothing propagated the learned
-// estimate into it, so confidence stayed at 0 however long the agent ran, and every
-// sensitivity the reasoner reported came from the seed.
-func TestRelationalObservationsReachTheStateModel(t *testing.T) {
+// TestStateModelLearnsFromIngestedTelemetry checks the whole ingest path: a sample
+// arrives, becomes a property observation, and the state model's own estimator moves
+// the relationships between the affected properties.
+//
+// It used to test a propagation step — a second model computed the estimate and copied
+// it across — and the step is gone. The map estimates for itself, so there is one model
+// of the system rather than two kept in step.
+func TestStateModelLearnsFromIngestedTelemetry(t *testing.T) {
 	spec := mustSpec()
 	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(spec)
 	seedForPairing(t, storage, spec)
 
-	state := statemap.New(statemap.Config{ConvergenceObservations: 10}, statemap.NewJournal(0))
+	state := statemap.New(statemap.Config{
+		ConvergenceObservations: 10,
+		Alpha:                   0.5,
+		Learn:                   true,
+		LearnConfig:             statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 6, Window: 40},
+	}, statemap.NewJournal(0))
 	if err := seedStateForPairing(state, spec); err != nil {
 		t.Fatal(err)
 	}

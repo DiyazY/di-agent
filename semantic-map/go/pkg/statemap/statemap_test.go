@@ -539,3 +539,143 @@ func seed(t *testing.T, m *Map, c *clock) {
 		t.Fatal(err)
 	}
 }
+
+// TestMapLearnsRelationshipStrengthItself is the point of folding the estimator in:
+// the map improves on what it was told without a second model computing the estimate
+// and copying it over. Two representations of the same relations, kept in step by a
+// propagation call, can disagree — and a reader then has to ask which one an answer
+// came from.
+func TestMapLearnsRelationshipStrengthItself(t *testing.T) {
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 20,
+		Alpha:                   0.5,
+		Learn:                   true,
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 40},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A conflict pair: two mechanisms over the same endpoints, opposite signs.
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "raises", Sign: 1, Prior: 0.5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "relieves", Sign: -1, Prior: 0.5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pressure rises with resource: evidence for "raises", against "relieves".
+	for i := 0; i < 40; i++ {
+		c.advance(5 * time.Second)
+		x := float64(i%10) / 10.0
+		if err := m.ObserveEvent("resource", x, c.now(), "r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(2 * time.Second)
+		if err := m.ObserveEvent("pressure", 0.9*x+0.02, c.now(), "p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raises, _ := m.Relationship(RelationshipID("resource", "pressure", "raises"))
+	relieves, _ := m.Relationship(RelationshipID("resource", "pressure", "relieves"))
+
+	if raises.NObservations == 0 {
+		t.Fatal("the map learned nothing: no pair was folded into the relationship")
+	}
+	if raises.Provenance != Learned {
+		t.Errorf("provenance %s after learning; a strength from this system must not "+
+			"still claim to be seeded", raises.Provenance)
+	}
+	if !(raises.Strength > 0.5) {
+		t.Errorf("the supported mechanism learned strength %.4f; a stream where pressure "+
+			"tracks resource should support it", raises.Strength)
+	}
+	if relieves.Strength != 0 {
+		t.Errorf("the contradicted mechanism learned strength %.4f; evidence of the "+
+			"opposite sign is evidence against it, not a weaker version of it",
+			relieves.Strength)
+	}
+	if !(raises.Effective() > relieves.Effective()) {
+		t.Errorf("the pair did not separate: raises=%.4f relieves=%.4f",
+			raises.Effective(), relieves.Effective())
+	}
+}
+
+// TestLearningIsIdempotentUnderReplay guards the estimator against its own inputs:
+// replaying a batch must not inflate a strength by folding the same points again.
+func TestLearningIsIdempotentUnderReplay(t *testing.T) {
+	build := func() (*Map, *clock) {
+		m, c := newTestMap(t, Config{
+			ConvergenceObservations: 20, Alpha: 0.5, Learn: true,
+			LearnConfig: LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 40},
+		})
+		for _, id := range []string{"a", "b"} {
+			if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := m.DeclareRelationship(Relationship{
+			From: "a", To: "b", Sign: 1, Prior: 0.5,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return m, c
+	}
+	drive := func(m *Map, c *clock, rounds int) {
+		for r := 0; r < rounds; r++ {
+			for i := 0; i < 20; i++ {
+				c.advance(5 * time.Second)
+				x := float64(i%10) / 10.0
+				if err := m.ObserveEvent("a", x, c.now(), "a"+itoa(i)); err != nil {
+					t.Fatal(err)
+				}
+				c.advance(time.Second)
+				if err := m.ObserveEvent("b", 0.8*x, c.now(), "b"+itoa(i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+
+	once, c1 := build()
+	drive(once, c1, 1)
+	twice, c2 := build()
+	drive(twice, c2, 2) // identical event IDs the second time round
+
+	id := RelationshipID("a", "b", "")
+	r1, _ := once.Relationship(id)
+	r2, _ := twice.Relationship(id)
+
+	// Folding the same batch again must not double the evidence. It is allowed to add
+	// at most one pair: concatenating the batch puts its first observation next to the
+	// previous batch's last one, and at that moment that really was the freshest
+	// counterpart. That boundary pair is new evidence, not a re-fold.
+	if r2.NObservations > r1.NObservations+1 {
+		t.Errorf("replaying the same telemetry folded %d extra pairs (%d -> %d); "+
+			"at most the one boundary pair should be new",
+			r2.NObservations-r1.NObservations, r1.NObservations, r2.NObservations)
+	}
+	if r2.NObservations >= 2*r1.NObservations {
+		t.Errorf("observations doubled on replay (%d -> %d): duplicates are not being "+
+			"recognised at all", r1.NObservations, r2.NObservations)
+	}
+	// The strength may shift slightly for the same reason; it must not move as though
+	// the whole batch had arrived twice.
+	if diff := r2.Strength - r1.Strength; diff > 0.05 || diff < -0.05 {
+		t.Errorf("replay moved the strength by %.4f (%.4f -> %.4f), more than one "+
+			"boundary pair can explain", diff, r1.Strength, r2.Strength)
+	}
+}
+
+func itoa(i int) string {
+	if i < 10 {
+		return string(rune('0' + i))
+	}
+	return string(rune('0'+i/10)) + string(rune('0'+i%10))
+}

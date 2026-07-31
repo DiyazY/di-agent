@@ -86,6 +86,15 @@ func main() {
 		"silence after which a property is retired automatically. 0 leaves retirement "+
 			"to an operator, which is the safer default for a system whose collectors "+
 			"restart.")
+	noLearn := flag.Bool("no-learn", false,
+		"stop relationships learning their strength from paired observations of both "+
+			"endpoints. They then stay at their seeded priors with confidence 0, which is "+
+			"the honest report when nothing has been learned — but the map never improves "+
+			"on what it was told.")
+	pairWindowS := flag.Int("pair-window-seconds", 15,
+		"how far apart two observations may be and still count as simultaneous for "+
+			"learning. A tolerance, not smoothing: collectors sample on independent grids, "+
+			"so without one no pair ever forms.")
 	noAdmit := flag.Bool("no-admit", false,
 		"reject observations of properties that were never declared. Off by default: a "+
 			"model of a changing system that cannot represent something new is a model "+
@@ -248,6 +257,12 @@ func main() {
 		ConvergenceObservations: int(*convergence),
 		Alpha:                   *alpha,
 		AdmitUnknown:            !*noAdmit,
+		Learn:                   !*noLearn,
+		LearnConfig: statemap.LearnConfig{
+			PairWindowSeconds: *pairWindowS,
+			MinSupport:        orDefault(*pairSupport, 8),
+			Window:            orDefault(*pairHistory, 60),
+		},
 	}, statemap.NewJournal(*journalSize))
 	// Seeding happens inside profiles.Build, which holds the calibration as well as
 	// the specification, so relationships get this cluster's priors rather than a

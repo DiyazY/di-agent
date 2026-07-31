@@ -196,6 +196,15 @@ type Config struct {
 	// it. On by default, because a model of a changing system that cannot represent
 	// something new is a model of the system as it was when someone wrote it down.
 	AdmitUnknown bool
+
+	// Learn enables the paired estimator: relationships learn their strength from
+	// simultaneous observations of both endpoints. Off leaves every relationship at
+	// its seeded prior with confidence 0 — the honest report when nothing has been
+	// learned, but it means the map never improves on what it was told.
+	Learn bool
+
+	// LearnConfig tunes the estimator. Ignored when Learn is off.
+	LearnConfig LearnConfig
 }
 
 func (c Config) withDefaults() Config {
@@ -224,6 +233,15 @@ type Map struct {
 	properties    map[string]*Property
 	relationships map[string]*Relationship
 
+	// latest holds the most recent observation per property, windows the paired
+	// observations per relationship. Together they are the estimator's memory: the map
+	// learns strengths itself rather than recording an estimate computed elsewhere, so
+	// there is one model of the system rather than two kept in step.
+	latest   map[string]observation
+	windows  map[string]*pairWindow
+	learning bool
+	learn    LearnConfig
+
 	// revision advances on every mutation. A decision records the revision it read
 	// so its inputs can be identified later even though the map has moved on.
 	revision uint64
@@ -244,6 +262,10 @@ func New(cfg Config, journal *Journal) *Map {
 		cfg:           c,
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
+		latest:        make(map[string]observation),
+		windows:       make(map[string]*pairWindow),
+		learning:      c.Learn,
+		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
 		now:           time.Now,
 	}
@@ -353,6 +375,13 @@ func (m *Map) DeclareProperty(p Property) error {
 // someone wrote down. The admission is journalled, so a property that appears in
 // production is discoverable afterwards.
 func (m *Map) Observe(id string, value float64, at time.Time) error {
+	return m.ObserveEvent(id, value, at, "")
+}
+
+// ObserveEvent is Observe with the observation's event identity, which the paired
+// estimator uses to recognise a pair it has already folded in. A caller replaying
+// telemetry must supply it, or the replay inflates every estimate with its own points.
+func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID string) error {
 	if id == "" {
 		return fmt.Errorf("observation needs a property id")
 	}
@@ -402,7 +431,34 @@ func (m *Map) Observe(id string, value float64, at time.Time) error {
 	}
 	m.revision++
 	m.recomputeDerivedLocked(at)
+
+	// Record for pairing, then learn from whatever this can pair with. Derived
+	// properties are recomputed above first, so a relationship between two summaries
+	// pairs two fresh values rather than one fresh and one from the previous tick.
+	obs := observation{value: p.Value, at: at, eventID: eventID}
+	m.latest[id] = obs
+	m.learnFromObservationLocked(id, obs)
+	for _, d := range m.properties {
+		if d.Kind != Derived || d.Status != Active || d.NObservations == 0 {
+			continue
+		}
+		if !containsString(d.Members, id) {
+			continue
+		}
+		dobs := observation{value: d.Value, at: at, eventID: eventID + ":" + d.ID}
+		m.latest[d.ID] = dobs
+		m.learnFromObservationLocked(d.ID, dobs)
+	}
 	return nil
+}
+
+func containsString(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // RetireProperty withdraws a property from reasoning, keeping its record.
