@@ -307,6 +307,12 @@ func applyPriorWeights(ontology *minimal.SpecOntology, pw *priorWeightsFile) {
 //     and the file are provided);
 //  2. proposition PriorStrength from the ontology (which may have been
 //     overwritten by applyPriorWeights from the global pw.Propositions table).
+//
+// Whichever value wins is written back to the ontology as well. Without that,
+// the two layers disagree for the whole cold-start period: the Reasoner reads
+// the per-KD weight from storage while GET /propositions reports the global
+// strength, and the first operator tune records a change from a number the
+// agent never used.
 func seedFromOntology(
 	storage *minimal.InMemoryStorage,
 	ontology *minimal.SpecOntology,
@@ -332,6 +338,7 @@ func seedFromOntology(
 		prior := p.PriorStrength
 		if e, ok := perKD[edgeKey(p.FromConstruct, p.ToConstruct, p.PropositionID)]; ok {
 			prior = e.PriorWeight
+			_ = ontology.SetPropositionStrength(p.PropositionID, prior)
 		}
 		_ = storage.PutEdge(&types.EdgeDescriptor{
 			FromID:        p.FromConstruct,

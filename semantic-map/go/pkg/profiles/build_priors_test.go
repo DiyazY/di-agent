@@ -119,3 +119,54 @@ func TestBuildWithoutKDUsesGlobalPriors(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildKeepsOntologyAndStorageInAgreement pins the invariant that the prior
+// a caller reads from GET /propositions is the one the Reasoner traverses. Per-KD
+// seeding writes storage edges; before this was fixed it left the ontology's
+// proposition strengths at the global values, so the two disagreed until the
+// first tune and the audit trail recorded a transition from an unused number.
+func TestBuildKeepsOntologyAndStorageInAgreement(t *testing.T) {
+	pwPath := findPriorWeightsFile(t)
+	pw, err := loadPriorWeights(pwPath)
+	if err != nil {
+		t.Fatalf("loadPriorWeights: %v", err)
+	}
+
+	for _, kd := range pw.Distributions {
+		kd := kd
+		t.Run(kd, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DomainSpec = mustSpec()
+			cfg.PriorWeightsPath = pwPath
+			cfg.KD = kd
+
+			sm, _, err := Build("edge-minimal", cfg)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			edges, err := sm.AllEdges()
+			if err != nil {
+				t.Fatalf("AllEdges: %v", err)
+			}
+			props, err := sm.Propositions()
+			if err != nil {
+				t.Fatalf("Propositions: %v", err)
+			}
+			strength := make(map[string]float64, len(props))
+			for _, p := range props {
+				strength[p.PropositionID] = p.PriorStrength
+			}
+			for _, e := range edges {
+				got, ok := strength[e.PropositionID]
+				if !ok {
+					t.Errorf("edge %s has no matching proposition", e.PropositionID)
+					continue
+				}
+				if diff := got - e.PriorWeight; diff > 1e-9 || diff < -1e-9 {
+					t.Errorf("%s: proposition strength %.6f, edge PriorWeight %.6f",
+						e.PropositionID, got, e.PriorWeight)
+				}
+			}
+		})
+	}
+}
