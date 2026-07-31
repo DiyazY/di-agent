@@ -406,6 +406,27 @@ agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 go run ./cmd/agent -profile edge-minimal -domain ../domain_spec.json
 ```
 
+### One agent per machine
+
+The map is node-local: each agent models the machine it runs on, and its graph holds
+that machine's evidence. `-node-id` is its identity (falling back to the hostname),
+and the default `-ingest-scope=self` rejects telemetry labelled with another
+machine's ID rather than folding it in. Cluster-level questions go to peers via
+`/peers` and `/cost`, so no agent needs everyone else's raw telemetry.
+
+```bash
+# A deployment: one agent per node, modelling that node
+agent -profile edge-minimal -domain ../domain_spec.json -node-id node_1
+
+# Replaying a whole testbed into one daemon — an aggregate, not a deployment
+agent -profile edge-minimal -domain ../domain_spec.json -ingest-scope=any
+```
+
+`-ingest-scope=any` exists for exactly that replay case and logs a startup warning:
+the resulting edge weights are means over machines that may be different physical
+systems. `GET /cost?node=X` returns 409 when X is not this agent, pointing at that
+machine's own endpoint when it is a known peer.
+
 ### Choosing how edges learn
 
 `-relational` switches the updater from tracking one endpoint's magnitude to

@@ -3,6 +3,8 @@
 package semmap
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -30,7 +32,46 @@ type SemanticMap struct {
 	// can form paired observations across collectors that sample on different
 	// grids. Unused when the updater is not relational.
 	pairs *pairTracker
+
+	// selfID is the machine this map models. The map is node-local: one agent
+	// runs per machine and its graph holds that machine's evidence, which is why
+	// storage needs no machine dimension — the whole store IS one machine's
+	// evidence layer. Cluster-level questions are answered by asking peers, not
+	// by one agent accumulating everyone's telemetry.
+	//
+	// Empty means the identity was never set, in which case the map cannot tell
+	// its own samples from a peer's and foreign-sample rejection is disabled.
+	selfID string
+
+	// acceptForeign lets one map ingest telemetry labelled with other machines'
+	// IDs, aggregating them into a single graph. Off by default because the
+	// resulting edge weights are means over machines that may be different
+	// physical systems — a Cortex-A72 worker and an x86 control-plane host do not
+	// share a resource-to-pressure relation. The replay harness sets it
+	// deliberately, and says so, because its dataset is a whole testbed.
+	acceptForeign bool
 }
+
+// SetIdentity declares which machine this map models, and whether it may ingest
+// samples belonging to other machines.
+func (m *SemanticMap) SetIdentity(selfID string, acceptForeign bool) {
+	m.selfID = selfID
+	m.acceptForeign = acceptForeign
+}
+
+// SelfID returns the machine this map models, or "" if no identity was set.
+func (m *SemanticMap) SelfID() string { return m.selfID }
+
+// AcceptsForeignSamples reports whether this map aggregates other machines'
+// telemetry. Exposed so an API boundary can explain a rejection.
+func (m *SemanticMap) AcceptsForeignSamples() bool { return m.acceptForeign }
+
+// ErrForeignSample is returned by IngestSample for a sample belonging to another
+// machine while the map is in self-only scope. It is a configuration answer, not
+// a transient failure: the caller should send the sample to that machine's own
+// agent.
+var ErrForeignSample = errors.New(
+	"sample belongs to another machine: this map is node-local and models only its own")
 
 // New constructs a SemanticMap without peer coordination. The facade still
 // satisfies its peer-facing methods (Peers, PeerClient) by lazily allocating
@@ -155,20 +196,31 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	if !routed {
 		return nil
 	}
+	if m.selfID != "" && !m.acceptForeign && sample.NodeID != "" && sample.NodeID != m.selfID {
+		return fmt.Errorf("%w: sample node_id=%q, this agent is %q",
+			ErrForeignSample, sample.NodeID, m.selfID)
+	}
 
 	var err error
+
+	// A construct's observed magnitude belongs on the construct's own descriptor,
+	// in both learning modes. Because the map is node-local, that descriptor is
+	// this machine's current value for the construct — which is the state a
+	// reasoner needs to answer "how pressured am I right now" without inferring
+	// it through an edge. It was previously written only in relational mode, so
+	// the state existed on some deployments and not others.
+	if _, nerr := m.updater.UpdateNode(construct, sample.Value, sample.EventID); nerr != nil {
+		err = nerr
+	}
+
 	if rel, ok := m.updater.(contracts.RelationalUpdaterContract); ok {
-		// Relational mode: the edge weight is learned from paired observations of
-		// both endpoints, so a single construct's value is not an observation of
-		// any edge. It updates the construct's own node descriptor — that is
-		// where a construct's magnitude belongs — and waits for a counterpart.
-		if _, nerr := rel.UpdateNode(construct, sample.Value, sample.EventID); nerr != nil {
-			err = nerr
-		}
+		// Relational mode: a single construct's value is not an observation of any
+		// edge's strength, so the edge waits for a counterpart observation of its
+		// other endpoint.
 		if _, perr := ingestPaired(sample, construct, m.ontology, rel, m.pairs); perr != nil && err == nil {
 			err = perr
 		}
-	} else if berr := Bridge(sample, router, m.ontology, m.updater); berr != nil {
+	} else if berr := Bridge(sample, router, m.ontology, m.updater); berr != nil && err == nil {
 		err = berr
 	}
 

@@ -80,6 +80,32 @@ compliance suites assert against whatever specification is loaded — non-emptin
 and referential integrity of every proposition's endpoints — not against a fixed
 count.
 
+**Whose state is this?** One agent per machine, and its graph holds that machine's
+evidence. That is why storage has no machine dimension and needs none: the store
+*is* one machine's evidence layer, keyed only by construct and proposition. The
+backbone stays construct-level because the causal claims do not differ by host —
+one graph shape, one evidence layer per agent.
+
+Cluster-level questions are answered by asking peers (§6), not by one agent
+accumulating everyone's telemetry. The alternative — every agent modelling the whole
+cluster — requires telemetry fan-out and, worse, averages relations across machines
+that may be different physical systems: an x86 control-plane host and a Cortex-A72
+worker do not share a resource-to-pressure relation, so one edge spanning both is a
+mean over incomparable mechanisms. The effect is measurable rather than theoretical.
+When the pair tracker briefly keyed on construct alone and mixed nodes, the conflict
+pair on RC→PS separated the opposite way under load; per-node pairing reversed the
+conclusion.
+
+Two mechanisms enforce this. `-node-id` is the agent's identity, not merely the label
+it stamps on its own samples, and `-ingest-scope=self` (the default) rejects samples
+belonging to another machine with a distinguishable error. `GET /cost?node=X` answers
+409 when X is not this agent, naming that machine's own URL if it is a known peer,
+because returning local numbers under a peer's name is a fabrication — and ignoring
+the parameter, which is what the route did before, was exactly that. Replaying a
+whole testbed into one daemon is legitimate and available via `-ingest-scope=any`,
+which logs at startup that the resulting graph is an aggregate and not a deployment
+topology.
+
 **Which constructs belong here.** A quantity that cannot change while the cluster
 runs is not state; it is a property of the platform, fixed when the platform was
 chosen. The committed specification therefore declares the three constructs a

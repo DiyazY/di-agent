@@ -131,6 +131,14 @@ type Config struct {
 	// means the built-in defaults (8 and 60).
 	PairMinSupport int
 	PairWindow     int
+
+	// AcceptForeignSamples lets this agent ingest telemetry labelled with other
+	// machines' IDs into its own graph. The map is node-local by design (one agent
+	// per machine, its graph holding that machine's evidence), so the default is
+	// off: an aggregate over machines that are different physical systems produces
+	// edge weights that are means over incomparable mechanisms. A whole-testbed
+	// replay is the legitimate exception and sets this explicitly.
+	AcceptForeignSamples bool
 }
 
 func DefaultConfig() Config {
@@ -307,6 +315,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	seedFromOntology(storage, ontology, pw, cfg.KD)
 
 	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
+	sm.SetIdentity(cfg.NodeID, cfg.AcceptForeignSamples)
 	if cfg.Relational && cfg.PairWindowSeconds > 0 {
 		sm.SetPairWindow(cfg.PairWindowSeconds)
 	}

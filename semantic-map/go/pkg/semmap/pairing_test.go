@@ -1,6 +1,7 @@
 package semmap
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
@@ -179,5 +180,91 @@ func TestPairTracker_DoesNotPairAcrossNodes(t *testing.T) {
 	}
 	if got := fresh["RC"]; got.eventID != "n1-rc" {
 		t.Errorf("paired against %q; want node_1's own RC reading", got.eventID)
+	}
+}
+
+// TestIngestSample_RejectsForeignSamplesInSelfScope pins the boundary that makes
+// the map node-local. Without it, a daemon silently accumulates whatever telemetry
+// arrives, and its edge weights become means over machines that may be different
+// physical systems — the testbed pairs an x86 control-plane host with Cortex-A72
+// workers, which do not share a resource-to-pressure relation. The whole-testbed
+// replay is the legitimate exception and has to ask for it.
+func TestIngestSample_RejectsForeignSamplesInSelfScope(t *testing.T) {
+	sm, _ := newIdentityMap(t)
+	sm.SetIdentity("node_1", false)
+
+	own := &types.MetricSample{NodeID: "node_1", MetricType: types.CPUUtilization,
+		Value: 0.4, TimestampUnix: 1000, EventID: "own-1"}
+	if err := sm.IngestSample(own); err != nil {
+		t.Fatalf("own sample rejected: %v", err)
+	}
+
+	foreign := &types.MetricSample{NodeID: "node_2", MetricType: types.CPUUtilization,
+		Value: 0.9, TimestampUnix: 1001, EventID: "foreign-1"}
+	err := sm.IngestSample(foreign)
+	if err == nil {
+		t.Fatal("a sample from another machine was accepted in self scope")
+	}
+	if !errors.Is(err, ErrForeignSample) {
+		t.Errorf("got %v; want ErrForeignSample so a caller can tell configuration "+
+			"from a transient failure", err)
+	}
+
+	// An unlabelled sample is this machine's by default: collectors that do not
+	// stamp an ID are not thereby foreign.
+	unlabelled := &types.MetricSample{MetricType: types.CPUUtilization,
+		Value: 0.4, TimestampUnix: 1002, EventID: "unlabelled-1"}
+	if err := sm.IngestSample(unlabelled); err != nil {
+		t.Errorf("unlabelled sample rejected: %v", err)
+	}
+}
+
+// TestIngestSample_AggregatesWhenAsked covers the replay case: one daemon, a whole
+// testbed's telemetry, explicitly requested.
+func TestIngestSample_AggregatesWhenAsked(t *testing.T) {
+	sm, _ := newIdentityMap(t)
+	sm.SetIdentity("node_1", true)
+
+	for i, host := range []string{"node_1", "node_2", "master"} {
+		s := &types.MetricSample{NodeID: host, MetricType: types.CPUUtilization,
+			Value: 0.3, TimestampUnix: int64(1000 + i), EventID: "evt-" + host}
+		if err := sm.IngestSample(s); err != nil {
+			t.Errorf("sample from %s rejected with ingest-scope=any: %v", host, err)
+		}
+	}
+}
+
+// TestIngestSample_RecordsConstructStateInBothModes pins the state RQ4 identified
+// as missing from the cost path. A construct's observed magnitude belongs on its
+// own descriptor — which, on a node-local map, is this machine's current value for
+// that construct — and it was previously written only when the updater happened to
+// be relational.
+func TestIngestSample_RecordsConstructStateInBothModes(t *testing.T) {
+	for _, mode := range []string{"endpoint", "relational"} {
+		t.Run(mode, func(t *testing.T) {
+			sm, storage := newIdentityMap(t)
+			if mode == "relational" {
+				sm2, st2 := newRelationalMap(t)
+				sm, storage = sm2, st2
+			}
+			sm.SetIdentity("node_1", false)
+
+			s := &types.MetricSample{NodeID: "node_1", MetricType: types.CPUUtilization,
+				Value: 0.42, TimestampUnix: 1000, EventID: "state-1"}
+			if err := sm.IngestSample(s); err != nil {
+				t.Fatal(err)
+			}
+			node, err := storage.GetNode("RC")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if node == nil {
+				t.Fatal("no descriptor for the routed construct")
+			}
+			if node.NObservations != 1 {
+				t.Errorf("construct RC recorded %d observations; want 1 — without this the "+
+					"reasoner cannot read the state it is estimating", node.NObservations)
+			}
+		})
 	}
 }

@@ -120,9 +120,39 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	})
 
 	// GET /cost?task=pod-scheduling&node=node_1
+	//
+	// `node` names the machine the question is about, and this agent can only
+	// answer for itself: the map is node-local, so its graph holds this machine's
+	// evidence and nothing else. Asking about another machine is answered with 409
+	// and that machine's own URL when it is a known peer, because returning local
+	// numbers under a peer's name would be a fabrication — and the previous
+	// behaviour, ignoring the parameter and computing locally regardless, was
+	// exactly that.
+	//
+	// `node_id` is accepted as an alias: callers and demo scripts used both
+	// spellings, and the unrecognised one silently became the empty string.
 	mux.HandleFunc("GET /cost", func(w http.ResponseWriter, r *http.Request) {
 		task := r.URL.Query().Get("task")
+		if task == "" {
+			task = r.URL.Query().Get("task_type")
+		}
 		node := r.URL.Query().Get("node")
+		if node == "" {
+			node = r.URL.Query().Get("node_id")
+		}
+		if self := sm.SelfID(); node != "" && self != "" && node != self &&
+			!sm.AcceptsForeignSamples() {
+			msg := fmt.Sprintf("this agent models %q and cannot answer for %q; ask that "+
+				"machine's own agent", self, node)
+			for _, p := range knownPeers(sm) {
+				if p.ID == node || strings.Contains(p.URL, node) {
+					msg += fmt.Sprintf(" at %s/cost", p.URL)
+					break
+				}
+			}
+			writeError(w, http.StatusConflict, msg)
+			return
+		}
 		result, err := sm.CostOfAction(task, node)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -882,4 +912,15 @@ func statusForIngestError(err error) int {
 		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
+}
+
+// knownPeers returns the registered peers, or nil when the registry is empty or
+// unavailable. Used only to enrich an error message, so a failure to read it is
+// not worth propagating.
+func knownPeers(sm *semmap.SemanticMap) []*peers.Descriptor {
+	list, err := sm.Peers().List()
+	if err != nil {
+		return nil
+	}
+	return list
 }

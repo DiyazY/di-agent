@@ -73,7 +73,16 @@ func main() {
 	cgroupRoot := flag.String("cgroup-root", "/sys/fs/cgroup",
 		"filesystem root the cgroup collector reads from; empty string disables the loop")
 	nodeID := flag.String("node-id", "",
-		"identifier this agent uses in MetricSamples; empty falls back to os.Hostname()")
+		"the machine this agent models. Used both to stamp its own MetricSamples and "+
+			"as its identity: the map is node-local, so samples labelled with another "+
+			"machine's ID are rejected unless -ingest-scope=any. Empty falls back to "+
+			"os.Hostname()")
+	ingestScope := flag.String("ingest-scope", "self",
+		"self: ingest only this machine's samples, which is what a node-local map means. "+
+			"any: aggregate every machine's telemetry into one graph — correct for "+
+			"replaying a whole testbed into a single daemon, wrong for a deployment, "+
+			"because the resulting weights average over machines that may be different "+
+			"physical systems")
 	netdataURL := flag.String("netdata-url", "",
 		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
 	peersFlag := flag.String("peers", "",
@@ -163,6 +172,15 @@ func main() {
 	}
 	log.Printf("domain model: %d constructs, %d propositions, %d routed metrics",
 		len(spec.Constructs), len(spec.Propositions), len(spec.MetricRouting))
+	switch *ingestScope {
+	case "self":
+		log.Printf("identity: %s (node-local: foreign samples rejected)", *nodeID)
+	case "any":
+		log.Printf("identity: %s (ingest-scope=any: this graph will be an aggregate over "+
+			"every machine whose telemetry arrives, which is not a deployment topology)", *nodeID)
+	default:
+		log.Fatalf("invalid -ingest-scope %q (valid: self, any)", *ingestScope)
+	}
 	if relational {
 		log.Printf("updater: relational (paired endpoints; pair window %ds, support %d, history %d)",
 			pairWindowOrDefault(*pairWindow), orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
@@ -190,12 +208,13 @@ func main() {
 		// returned HTTP 200 with an empty applied[] — accepting the request and
 		// doing nothing — which is indistinguishable from an intent that matched
 		// no keyword group.
-		UseRuleBasedTuner: useTuner,
-		DomainSpec:        spec,
-		Relational:        relational,
-		PairWindowSeconds: *pairWindow,
-		PairMinSupport:    *pairSupport,
-		PairWindow:        *pairHistory,
+		UseRuleBasedTuner:    useTuner,
+		DomainSpec:           spec,
+		Relational:           relational,
+		AcceptForeignSamples: *ingestScope == "any",
+		PairWindowSeconds:    *pairWindow,
+		PairMinSupport:       *pairSupport,
+		PairWindow:           *pairHistory,
 	}
 
 	sm, collector, err := profiles.Build(*profileName, cfg)
