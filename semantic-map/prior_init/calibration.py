@@ -21,7 +21,8 @@ PS  – Performance & Scalability:  inverted pod-startup latency + throughput
 SC  – Security & Compliance:       CIS security score
 RR  – Reliability & Resilience:    inverted recovery time + offline preservation
 MU  – Maintainability & Usability: inverted setup time
-RC  – Resource Constraints & Cost: inverted energy_per_pod_j + inverted cp_overhead_w
+RC  – Resource Constraints & Cost: inverted cp_overhead_w (energy_per_pod_j dropped —
+                                   see build_construct_scores)
 CO  – Connectivity & Offline:      offline_preservation + inverted cp_amplification
 CE  – Community & Ecosystem:       normalised GitHub stars
 """
