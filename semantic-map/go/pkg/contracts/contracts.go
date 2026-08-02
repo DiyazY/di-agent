@@ -1,8 +1,16 @@
-// Package contracts defines the six interface contracts of the Semantic Map.
+// Package contracts defines the interface contracts of the Semantic Map:
+// Collector, Ontology, Reasoner, Proposer and Tuner.
 //
 // Behavioral guarantees are documented on each interface. All implementations
 // must satisfy these guarantees and pass the shared compliance suite in
 // github.com/DiyazY/di-agent/compliance.
+//
+// Storage and Updater used to be here as well, and they described the second model:
+// a graph of construct edges with its own estimator, kept beside the state model and
+// learning the same relations from the same telemetry. The state model in
+// pkg/statemap holds the properties, the relationships and the estimator, so the two
+// contracts had no subject left — a StorageContract implementation would be a place
+// to put numbers nothing reads.
 package contracts
 
 import (
@@ -10,34 +18,6 @@ import (
 
 	"github.com/DiyazY/di-agent/pkg/types"
 )
-
-// ── Storage ───────────────────────────────────────────────────────────────────
-
-// StorageContract persists node and edge descriptors.
-//
-// The edge graph is a multigraph: two propositions may share the same
-// (fromID, toID) endpoints with opposite directions (e.g. Di-Select's P2/P3
-// both span RC→PS). Storage must therefore key edges by the full triple
-// (fromID, toID, propositionID), not by endpoints alone.
-//
-// Guarantees:
-//   - Atomicity: Put operations either fully succeed or leave prior state intact.
-//   - Nil safety: Get operations return (nil, nil) for unknown IDs; they never
-//     return a non-nil error for a simple miss.
-//   - Empty-safe: Neighbors, AllEdges, and GetEdgesByPair return empty slices,
-//     never nil.
-//   - Multigraph: GetEdgesByPair returns every edge between (fromID, toID).
-//     GetEdge returns one — the entry with the lexicographically smallest
-//     PropositionID — for backward-compatible simple-graph access.
-type StorageContract interface {
-	GetNode(nodeID string) (*types.NodeDescriptor, error)
-	PutNode(d *types.NodeDescriptor) error
-	GetEdge(fromID, toID string) (*types.EdgeDescriptor, error)
-	GetEdgesByPair(fromID, toID string) ([]*types.EdgeDescriptor, error)
-	PutEdge(d *types.EdgeDescriptor) error
-	Neighbors(nodeID string) ([]string, error)
-	AllEdges() ([]*types.EdgeDescriptor, error)
-}
 
 // ── Ontology ──────────────────────────────────────────────────────────────────
 
@@ -94,50 +74,6 @@ type OntologyContract interface {
 // ErrNotImplemented is returned by an OntologyContract implementation that
 // intentionally does not support a particular mutation in its profile.
 var ErrNotImplemented = contractError("operation not implemented by this ontology profile")
-
-// ── Updater ───────────────────────────────────────────────────────────────────
-
-// UpdaterContract incorporates telemetry into edge and node descriptors.
-//
-// Guarantees:
-//   - Idempotency: calling UpdateEdge or UpdateNode twice with the same eventID
-//     leaves stored state identical to what it was after the first call.
-//   - No-panic on valid input: out-of-range observations are clipped silently.
-//   - Reset semantics: Reset restores EMAWeight = PriorWeight, NObservations = 0,
-//     Confidence = 0.0 without deleting the edge.
-type UpdaterContract interface {
-	UpdateEdge(fromID, toID string, observation float64, eventID string) (*types.EdgeDescriptor, error)
-	UpdateNode(nodeID string, observation float64, eventID string) (*types.NodeDescriptor, error)
-	Reset(fromID, toID string) error
-}
-
-// RelationalUpdaterContract is an optional extension for updaters that learn an
-// edge's weight from paired observations of its two endpoints rather than from a
-// single construct's value.
-//
-// The distinction is semantic, not cosmetic. An edge asserts that one construct
-// influences another with some strength; a single construct's value is a proxy
-// for that strength at best, and it cannot distinguish a conflict pair — two
-// propositions on the same endpoints with opposite directions — because both
-// receive the identical observation. A paired observation can: evidence whose
-// sign matches one sibling's declared direction is evidence against the other.
-//
-// Additional guarantees beyond UpdaterContract:
-//   - Same idempotency rule, keyed on the paired eventID: a replayed pair leaves
-//     both the stored edge and the implementation's pairing state unchanged.
-//   - Support threshold: an implementation may decline to move the weight until
-//     it holds enough pairs, in which case n_observations must not advance —
-//     confidence has to keep reporting that nothing has been learned yet.
-//   - Scale: the emitted strength must be comparable to PriorWeight, because the
-//     Reasoner blends the two. An implementation that learns on a different
-//     scale breaks the blend silently.
-//
-// Callers detect support with a type assertion; the facade falls back to the
-// single-value path when an updater does not implement this.
-type RelationalUpdaterContract interface {
-	UpdaterContract
-	UpdateEdgeRelation(fromID, toID string, fromValue, toValue float64, eventID string) (*types.EdgeDescriptor, error)
-}
 
 // ── Reasoner ──────────────────────────────────────────────────────────────────
 

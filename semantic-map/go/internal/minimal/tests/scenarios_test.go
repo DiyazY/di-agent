@@ -47,39 +47,27 @@ func newJSONEncoder(w io.Writer) *json.Encoder     { return json.NewEncoder(w) }
 
 type scenarioAgent struct {
 	sm       *semmap.SemanticMap
-	storage  *minimal.InMemoryStorage
+	state    *statemap.Map
 	ontology *minimal.SpecOntology
-	updater  *minimal.EMAUpdater
 }
 
-// newScenarioAgent wires the same edge-minimal stack a production daemon
-// would (InMemoryStorage + SpecOntology + EMAUpdater +
-// RuleEngineReasoner + DisabledProposer) and seeds storage from the
-// ontology's default Di-Select bootstrap. It returns the SemanticMap plus
-// raw handles so scenarios can call ontology mutations and inspect storage
-// state directly — operations the facade intentionally hides from agent code.
+// newScenarioAgent wires the same edge-minimal stack a production daemon would — a
+// state model seeded from the specification, the ontology as the declaration layer, a
+// reasoner that reads the model, and a disabled proposer. It returns the SemanticMap
+// plus the model and the ontology so scenarios can drive mutations and inspect state
+// directly, which the facade intentionally hides from agent code.
 func newScenarioAgent(t *testing.T) *scenarioAgent {
 	t.Helper()
-	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
 	// ONE state model for the facade and the reasoner. Two would let a facade-level
 	// retirement land in a model the reasoner never reads.
 	state := stateFor(t)
 	reasoner := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	reasoner.AttachState(state)
-	proposer := minimal.NewDisabledProposer()
 
-	seedReasonerState(t, storage, ontology)
-
-	sm := semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner())
+	sm := semmap.New(ontology, reasoner, minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
 	sm.AttachState(state)
-	return &scenarioAgent{
-		sm:       sm,
-		storage:  storage,
-		ontology: ontology,
-		updater:  updater,
-	}
+	return &scenarioAgent{sm: sm, state: state, ontology: ontology}
 }
 
 // edgeSnapshot is a frozen view of one edge's state at a moment in time.
@@ -95,24 +83,24 @@ func (s edgeSnapshot) String() string {
 		s.FromID, s.ToID, s.PropID, s.PriorWeight, s.EMAWeight, s.Confidence, s.Effective, s.NObservations)
 }
 
-func snapEdgeByPropID(t *testing.T, s *minimal.InMemoryStorage, propID string) edgeSnapshot {
+func snapEdgeByPropID(t *testing.T, state *statemap.Map, propID string) edgeSnapshot {
 	t.Helper()
-	edges, _ := s.AllEdges()
-	for _, e := range edges {
-		if e.PropositionID == propID {
-			return edgeSnapshot{
-				FromID:        e.FromID,
-				ToID:          e.ToID,
-				PropID:        e.PropositionID,
-				PriorWeight:   e.PriorWeight,
-				EMAWeight:     e.EMAWeight,
-				Effective:     (1-e.Confidence)*e.PriorWeight + e.Confidence*e.EMAWeight,
-				Confidence:    e.Confidence,
-				NObservations: e.NObservations,
-			}
+	for _, r := range state.Relationships("", "") {
+		if r.Label != propID {
+			continue
+		}
+		return edgeSnapshot{
+			FromID:        r.From,
+			ToID:          r.To,
+			PropID:        r.Label,
+			PriorWeight:   r.Prior,
+			EMAWeight:     r.Strength,
+			Effective:     r.Effective(),
+			Confidence:    r.Confidence,
+			NObservations: r.NObservations,
 		}
 	}
-	t.Fatalf("propID %q not in storage", propID)
+	t.Fatalf("no relationship carries proposition %q", propID)
 	return edgeSnapshot{}
 }
 
@@ -124,25 +112,29 @@ func TestScenario_ColdStart(t *testing.T) {
 	t.Log("Scenario: cold start — ontology bootstrapped, no observations yet.")
 	t.Log("Expected: confidence=0 on every edge, effective value equals the prior, EMA equals the prior.")
 
-	edges, err := a.storage.AllEdges()
-	if err != nil {
-		t.Fatal(err)
+	// Every relationship the specification declares between observable constructs. A
+	// proposition naming a construct nothing routes to is deliberately absent: seeding
+	// does not invent a property to hang it on, so the count is bounded by the spec
+	// rather than equal to it.
+	rels := a.state.Relationships("", "")
+	if len(rels) == 0 {
+		t.Fatal("no relationships after seeding")
 	}
-	if want := len(mustSpec().Propositions); len(edges) != want {
-		t.Fatalf("expected %d seeded edges (one per spec proposition); got %d", want, len(edges))
+	if want := len(mustSpec().Propositions); len(rels) > want {
+		t.Fatalf("seeded %d relationships from %d propositions", len(rels), want)
 	}
 
-	sort.Slice(edges, func(i, j int) bool { return edges[i].PropositionID < edges[j].PropositionID })
-	for _, e := range edges {
-		if e.Confidence != 0.0 {
-			t.Errorf("edge %s starts with confidence=%.3f; expected 0.0", e.PropositionID, e.Confidence)
+	sort.Slice(rels, func(i, j int) bool { return rels[i].ID < rels[j].ID })
+	for _, r := range rels {
+		if r.Confidence != 0.0 {
+			t.Errorf("%s starts with confidence=%.3f; expected 0.0", r.ID, r.Confidence)
 		}
-		if e.EMAWeight != e.PriorWeight {
-			t.Errorf("edge %s EMA=%.3f != prior=%.3f at cold start",
-				e.PropositionID, e.EMAWeight, e.PriorWeight)
+		if r.Effective() != r.Prior {
+			t.Errorf("%s effective=%.3f != prior=%.3f at cold start — with no evidence the "+
+				"prior IS the estimate", r.ID, r.Effective(), r.Prior)
 		}
-		if e.NObservations != 0 {
-			t.Errorf("edge %s NObservations=%d at cold start; expected 0", e.PropositionID, e.NObservations)
+		if r.NObservations != 0 {
+			t.Errorf("%s has %d observations at cold start; expected 0", r.ID, r.NObservations)
 		}
 	}
 
@@ -154,7 +146,7 @@ func TestScenario_ColdStart(t *testing.T) {
 		t.Errorf("aggregate confidence at cold start = %.3f; expected 0.0", cost.Confidence)
 	}
 	t.Logf("T=0 (cold start)")
-	t.Logf("  edges seeded: %d", len(edges))
+	t.Logf("  relationships seeded: %d", len(rels))
 	t.Logf("  aggregate confidence: %.3f", cost.Confidence)
 	t.Logf("  decision latency estimate: %.3f  resource cost: %.3f", cost.LatencyEstimate, cost.ResourceCost)
 	t.Logf("  graph path length: %d (all edges contribute via priors)", len(cost.GraphPathUsed))
@@ -177,21 +169,21 @@ func TestScenario_ConvergenceOnOneEdge(t *testing.T) {
 
 	for i := 0; i < totalObs; i++ {
 		if cpIdx < len(checkpoints) && i == checkpoints[cpIdx] {
-			snap := snapEdgeByPropID(t, a.storage, target)
+			snap := snapEdgeByPropID(t, a.state, target)
 			t.Logf("  T=%-4d  %s", i, snap)
 			cpIdx++
 		}
 		// Find an edge with target propID to discover its (from, to).
 		if i == 0 {
-			snap := snapEdgeByPropID(t, a.storage, target)
+			snap := snapEdgeByPropID(t, a.state, target)
 			a.streamObservation(t, snap.FromID, snap.ToID, observed, i)
 			continue
 		}
-		snap := snapEdgeByPropID(t, a.storage, target)
+		snap := snapEdgeByPropID(t, a.state, target)
 		a.streamObservation(t, snap.FromID, snap.ToID, observed, i)
 	}
 
-	final := snapEdgeByPropID(t, a.storage, target)
+	final := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  T=%-4d  %s", totalObs, final)
 
 	// Invariants.
@@ -207,12 +199,27 @@ func TestScenario_ConvergenceOnOneEdge(t *testing.T) {
 	}
 }
 
-// streamObservation is a tiny convenience for the per-iteration ingest with a
-// deterministic eventID. Errors fail the test fast.
+// streamObservation records one observation OF a relationship's strength, which is what
+// the removed POST /ingest did: it named a pair and a magnitude directly.
+//
+// The daemon no longer exposes that. Telemetry now observes properties, and strengths
+// are estimated from paired observations of both endpoints — a single number about a
+// pair is an assertion, not a measurement, and the only caller that had one was a test.
+// The scenarios below still want to drive a relationship's evidence in isolation, so they
+// reach the model directly rather than through a wire endpoint that would invite the same
+// confusion again.
 func (a *scenarioAgent) streamObservation(t *testing.T, fromID, toID string, value float64, i int) {
 	t.Helper()
-	if err := a.sm.Ingest(fromID, toID, value, fmt.Sprintf("evt-%s→%s-%d", fromID, toID, i)); err != nil {
-		t.Fatalf("ingest failed at i=%d: %v", i, err)
+	rels := a.state.Relationships(fromID, toID)
+	if len(rels) == 0 {
+		t.Fatalf("no relationship from %s to %s", fromID, toID)
+	}
+	at := time.Unix(1700000000+int64(i), 0)
+	for _, r := range rels {
+		event := fmt.Sprintf("evt-%s→%s-%d", fromID, toID, i)
+		if err := a.state.ObserveRelationshipEvent(r.ID, value, at, event); err != nil {
+			t.Fatalf("observing %s at i=%d: %v", r.ID, i, err)
+		}
 	}
 }
 
@@ -349,17 +356,21 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 			len(before.GraphPathUsed), len(after.GraphPathUsed))
 	}
 
-	// Storage must still hold the deprecated edge — soft delete only.
-	all, _ := a.storage.AllEdges()
+	// The model must still hold the withdrawn claim, marked — soft delete only, so a
+	// decision taken before the retirement stays reconstructible.
 	stillPresent := false
-	for _, e := range all {
-		if e.PropositionID == firstSpecProp() {
+	for _, r := range a.state.Relationships("", "") {
+		if r.Label == firstSpecProp() {
 			stillPresent = true
+			if r.Status != statemap.Retired {
+				t.Errorf("%s is still %s after Deprecate()", r.Label, r.Status)
+			}
 			break
 		}
 	}
 	if !stillPresent {
-		t.Error("deprecated edge P1 disappeared from storage — Deprecate must be soft-delete, not removal")
+		t.Error("the deprecated relationship disappeared from the model — Deprecate must be " +
+			"soft-delete, not removal")
 	}
 
 	// Ontology surface still includes the deprecated proposition (flagged).
@@ -388,20 +399,20 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 	t.Log("")
 
 	const target = "P10" // PS→RC
-	startSnap := snapEdgeByPropID(t, a.storage, target)
+	startSnap := snapEdgeByPropID(t, a.state, target)
 
 	// First pass.
 	for i := 0; i < 200; i++ {
 		a.streamObservation(t, startSnap.FromID, startSnap.ToID, 0.7, i)
 	}
-	afterFirst := snapEdgeByPropID(t, a.storage, target)
+	afterFirst := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  after first pass (200 obs):   %s", afterFirst)
 
 	// Replay — same eventIDs.
 	for i := 0; i < 200; i++ {
 		a.streamObservation(t, startSnap.FromID, startSnap.ToID, 0.7, i)
 	}
-	afterReplay := snapEdgeByPropID(t, a.storage, target)
+	afterReplay := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  after replay (same evtIDs):   %s", afterReplay)
 
 	if afterReplay.NObservations != afterFirst.NObservations ||
@@ -414,7 +425,7 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 	for i := 1000; i < 1200; i++ {
 		a.streamObservation(t, startSnap.FromID, startSnap.ToID, 0.7, i)
 	}
-	afterNew := snapEdgeByPropID(t, a.storage, target)
+	afterNew := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  after 200 new evtIDs:         %s", afterNew)
 
 	if afterNew.NObservations == afterFirst.NObservations {
@@ -862,16 +873,15 @@ func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descript
 //  4. Operator Confirms the candidate → backbone grows to 16 propositions.
 //  5. Verified: a new non-deprecated proposition covering CE↔RC exists.
 func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
-	s := minimal.NewInMemoryStorage()
 	o := minimal.NewOntologyFromSpec(mustSpec())
-	seedReasonerState(t, s, o)
-
-	u := minimal.NewEMAUpdater(s, 0.2, 500)
 	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
-	r := reasonerWithState(t)
+	state := stateFor(t)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	r.AttachState(state)
 
-	sm := semmap.New(s, o, u, r, proposer, minimal.NewDisabledTuner())
-	_ = sm // used indirectly; proposer is wired into sm but we call proposer directly
+	sm := semmap.New(o, r, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	_ = sm // wired for realism; this scenario drives the proposer directly
 
 	// Ingest 60 samples driving CE↔RC correlation:
 	// CE (community ecosystem) and RC (resource constraints) are not linked
@@ -937,16 +947,14 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 //  3. Verify the history contains an "operator-tune" event with the intent text.
 //  4. Verify that CostOfAction after tuning is traversable without error.
 func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
-	s := minimal.NewInMemoryStorage()
 	o := minimal.NewOntologyFromSpec(mustSpec())
-	seedReasonerState(t, s, o)
-
-	u := minimal.NewEMAUpdater(s, 0.2, 500)
-	r := reasonerWithState(t)
-	proposer := minimal.NewDisabledProposer()
+	state := stateFor(t)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	r.AttachState(state)
 	tuner := minimal.NewRuleBasedTunerFromSpec(mustSpec())
 
-	sm := semmap.New(s, o, u, r, proposer, tuner)
+	sm := semmap.New(o, r, minimal.NewDisabledProposer(), tuner)
+	sm.AttachState(state)
 
 	costBefore, err := r.CostOfAction("pod-scheduling", "node_1")
 	if err != nil {

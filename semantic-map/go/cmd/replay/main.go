@@ -16,23 +16,8 @@
 //	replay list    [--data-dir D]
 //	               Inventory of every {kd}/{test}_runN.parquet under data-dir.
 //
-//	replay compare --test T [--run N | --runs-all] [--kds K1,K2,...] [--data-dir D]
-//	               [--priors PATH] [--json|--csv] [--node-filter h1,h2]
-//	               DEBUG / INSPECTION side-tool. Replays one (or all 5) runs
-//	               of T for several KDs in-process and prints a per-edge ×
-//	               per-KD inspection table. Use for spotting mapping bugs
-//	               and verifying mechanism consistency across recorded
-//	               inputs. NOT a production-decision artifact: the parquets
-//	               are synthetic benchmark loads, so any "divergence" the
-//	               table flags reflects the recorded test harness, not
-//	               natural deployment behavior.
-//
-// All subcommands except `compare` speak HTTP. `compare` runs in-process
-// (per-KD inspection needs isolated SemanticMaps; see cmd/replay/compare
-// for the rationale). The binary builds standalone
-// (no daemon dependency at build time) and imports the wire DTOs in
-// cmd/replay/client plus the in-process Build+IngestSample path used by
-// compare via pkg/profiles + pkg/semmap.
+// All subcommands speak HTTP: the binary builds standalone (no daemon dependency
+// at build time) and imports the wire DTOs in cmd/replay/client.
 //
 // Default --data-dir is multidimensional-analysis/data/raw resolved by
 // walking up from the current working directory until found. Default
@@ -50,10 +35,8 @@ import (
 	"syscall"
 
 	"github.com/DiyazY/di-agent/cmd/replay/client"
-	"github.com/DiyazY/di-agent/cmd/replay/compare"
 	"github.com/DiyazY/di-agent/cmd/replay/parquet"
 	"github.com/DiyazY/di-agent/cmd/replay/playback"
-	"github.com/DiyazY/di-agent/pkg/domain"
 )
 
 const (
@@ -100,8 +83,6 @@ func main() {
 		err = cmdProbe(args)
 	case "list":
 		err = cmdList(args)
-	case "compare":
-		err = cmdCompare(args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -124,10 +105,6 @@ Usage:
   replay all     --kd K [--speed S] [--addr URL] [--data-dir D] [--node-filter h1,h2]
   replay probe   --kd K --test T --run N [--data-dir D]
   replay list    [--data-dir D]
-  replay compare --test T [--run N | --runs-all] [--kds K1,K2,...] [--data-dir D]
-                 [--priors PATH] [--json|--csv] [--node-filter h1,h2]
-                 (DEBUG / INSPECTION TOOL — not a production-decision artifact;
-                  see cmd/replay/compare for the role boundary)
 
 Examples:
   replay run --kd k0s --test idle --run 1 --speed 60
@@ -135,26 +112,17 @@ Examples:
   replay all --kd k0s --speed 0
   replay probe --kd k0s --test idle --run 1 | head -40
   replay list
-  replay compare --test idle --run 1                       # inspection table
-  replay compare --test idle --runs-all --json | jq '.divergence[0:3]'
-  replay compare --test cp_heavy_12client --kds k0s,k3s,k8s --csv > compare.csv
 
 Flags (per subcommand):
   --kd            k0s | k3s | k8s | kubeEdge | openYurt
-  --kds           comma-separated KDs for compare (default: all five)
   --test          idle | cp_light_1client | cp_heavy_8client | cp_heavy_12client |
                   dp_redis_density | reliability-control | reliability-control-no-pressure-long |
                   reliability-worker | reliability-worker-no-pressure-long
   --run           1..5
-  --runs-all      compare only: replay all 5 runs per KD and average snapshots
   --speed         0 = max throughput, 1.0 = real-time, N = N× faster (default 1.0)
-  --addr          daemon address (default http://localhost:8080); ignored by compare
+  --addr          daemon address (default http://localhost:8080)
   --data-dir      root of {kd}/{test}_runN.parquet (default: multidimensional-analysis/data/raw,
                   resolved by walking up from cwd)
-  --priors        path to prior_weights.json (compare only; resolved by walking up from cwd
-                  if omitted; comparison falls back to Di-Select defaults when not found)
-  --json          compare only: emit JSON instead of table
-  --csv           compare only: emit CSV (long format, one row per KD × edge)
   --node-filter   comma-separated hostnames to keep (e.g. master,node_1)
 `)
 }
@@ -509,221 +477,4 @@ func cmdList(args []string) error {
 		}
 	}
 	return nil
-}
-
-// ── compare ─────────────────────────────────────────────────────────────────
-
-// compareFlags is the parsed shape of `replay compare ...`.
-type compareFlags struct {
-	test       string
-	run        int
-	runsAll    bool
-	kds        string
-	dataDir    string
-	priors     string
-	nodeFilter string
-	asJSON     bool
-	asCSV      bool
-}
-
-func parseCompareFlags(args []string) (compareFlags, error) {
-	f := compareFlags{run: 1}
-	i := 0
-	for i < len(args) {
-		a := args[i]
-		consume := func() (string, error) {
-			if i+1 >= len(args) {
-				return "", fmt.Errorf("%s requires a value", a)
-			}
-			i++
-			return args[i], nil
-		}
-		switch a {
-		case "--test":
-			v, err := consume()
-			if err != nil {
-				return f, err
-			}
-			f.test = v
-		case "--run":
-			v, err := consume()
-			if err != nil {
-				return f, err
-			}
-			n := 0
-			if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-				return f, fmt.Errorf("--run %q: not an int", v)
-			}
-			f.run = n
-		case "--runs-all":
-			f.runsAll = true
-		case "--kds":
-			v, err := consume()
-			if err != nil {
-				return f, err
-			}
-			f.kds = v
-		case "--data-dir":
-			v, err := consume()
-			if err != nil {
-				return f, err
-			}
-			f.dataDir = v
-		case "--priors":
-			v, err := consume()
-			if err != nil {
-				return f, err
-			}
-			f.priors = v
-		case "--node-filter":
-			v, err := consume()
-			if err != nil {
-				return f, err
-			}
-			f.nodeFilter = v
-		case "--json":
-			f.asJSON = true
-		case "--csv":
-			f.asCSV = true
-		case "--addr":
-			// Accept and ignore --addr so dev.sh's auto-injected flag
-			// doesn't break compare (which is in-process).
-			if _, err := consume(); err != nil {
-				return f, err
-			}
-		default:
-			return f, fmt.Errorf("unknown flag for compare: %s", a)
-		}
-		i++
-	}
-	return f, nil
-}
-
-// resolvePriorsPath returns an absolute path to prior_weights.json. If
-// override is set, it's used verbatim. Otherwise we walk up from cwd
-// looking for `semantic-map/prior_weights.json` or `prior_weights.json`.
-// Returns "" with no error if nothing was found — compare's caller will
-// warn and fall back to uncalibrated defaults.
-func resolvePriorsPath(override string) (string, error) {
-	if override != "" {
-		abs, err := filepath.Abs(override)
-		if err != nil {
-			return "", err
-		}
-		if _, err := os.Stat(abs); err != nil {
-			return "", fmt.Errorf("priors file %s does not exist", abs)
-		}
-		return abs, nil
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	d := cwd
-	for i := 0; i < 8; i++ {
-		for _, sub := range []string{"prior_weights.json", "semantic-map/prior_weights.json"} {
-			cand := filepath.Join(d, sub)
-			if _, err := os.Stat(cand); err == nil {
-				return cand, nil
-			}
-		}
-		parent := filepath.Dir(d)
-		if parent == d {
-			break
-		}
-		d = parent
-	}
-	return "", nil
-}
-
-// cmdCompare drives replay/compare.Run() and emits the requested format.
-func cmdCompare(args []string) error {
-	f, err := parseCompareFlags(args)
-	if err != nil {
-		return err
-	}
-	if f.test == "" {
-		return fmt.Errorf("--test is required")
-	}
-	if err := validateTest(f.test); err != nil {
-		return err
-	}
-	if f.asJSON && f.asCSV {
-		return fmt.Errorf("--json and --csv are mutually exclusive")
-	}
-	if f.runsAll {
-		f.run = 0
-	}
-	if !f.runsAll && (f.run < 1 || f.run > 5) {
-		return fmt.Errorf("--run must be 1..5; got %d", f.run)
-	}
-
-	// Resolve --kds (default = all five).
-	selectedKDs := append([]string(nil), kds...)
-	if strings.TrimSpace(f.kds) != "" {
-		selectedKDs = nil
-		for _, k := range strings.Split(f.kds, ",") {
-			k = strings.TrimSpace(k)
-			if k == "" {
-				continue
-			}
-			if err := validateKD(k); err != nil {
-				return err
-			}
-			selectedKDs = append(selectedKDs, k)
-		}
-		if len(selectedKDs) == 0 {
-			return fmt.Errorf("--kds must list at least one KD")
-		}
-	}
-
-	dataDir, err := resolveDataDir(f.dataDir)
-	if err != nil {
-		return err
-	}
-	priors, err := resolvePriorsPath(f.priors)
-	if err != nil {
-		return err
-	}
-	if priors == "" {
-		fmt.Fprintln(os.Stderr,
-			"warning: prior_weights.json not found — compare will use uncalibrated Di-Select defaults; cross-KD divergence will be data-driven only.")
-	}
-
-	var nodeFilter []string
-	if s := strings.TrimSpace(f.nodeFilter); s != "" {
-		for _, h := range strings.Split(s, ",") {
-			h = strings.TrimSpace(h)
-			if h != "" {
-				nodeFilter = append(nodeFilter, h)
-			}
-		}
-	}
-
-	spec, err := domain.LoadFound()
-	if err != nil {
-		return fmt.Errorf("domain spec: %w (pass -domain, or run from within the repo)", err)
-	}
-	opts := compare.Options{
-		DomainSpec:       spec,
-		DataDir:          dataDir,
-		TestType:         f.test,
-		Run:              f.run,
-		KDs:              selectedKDs,
-		PriorWeightsPath: priors,
-		NodeFilter:       nodeFilter,
-	}
-	result, err := compare.Run(opts)
-	if err != nil {
-		return err
-	}
-
-	switch {
-	case f.asJSON:
-		return compare.FormatJSON(os.Stdout, result)
-	case f.asCSV:
-		return compare.FormatCSV(os.Stdout, result)
-	default:
-		return compare.FormatTable(os.Stdout, result)
-	}
 }

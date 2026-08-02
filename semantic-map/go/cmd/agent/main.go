@@ -151,18 +151,14 @@ func main() {
 		"enable the RuleBasedTuner behind POST /agent/tune (disable to wire DisabledTuner, "+
 			"which accepts requests and applies nothing)")
 
-	var relational bool
-	flag.BoolVar(&relational, "relational", false,
-		"learn each edge's weight from paired observations of both endpoints (the strength "+
-			"of the relation, on the same scale as the calibrated prior) instead of from "+
-			"whichever endpoint a sample observed")
-	pairWindow := flag.Int("pair-window", 0,
-		"seconds within which two construct observations count as simultaneous "+
-			"(relational mode only; 0 uses the built-in default)")
 	pairSupport := flag.Int("pair-support", 0,
-		"pairs an edge needs before the relational updater emits a strength (0 = default 8)")
+		"paired observations a relationship needs before its strength moves at all "+
+			"(0 = default 8). Below it the pair is buffered and confidence keeps "+
+			"reporting that nothing has been learned.")
 	pairHistory := flag.Int("pair-history", 0,
-		"sliding window length in pairs for the relational updater (0 = default 60)")
+		"recent pairs the strength estimate is computed over (0 = default 60). Older "+
+			"pairs fall out, which is what lets a relationship follow a system whose "+
+			"behaviour changes rather than averaging its whole history.")
 
 	explainProvider := flag.String("explain-provider", "none",
 		"natural-language explain provider: none (disabled) or openai-compatible "+
@@ -228,12 +224,8 @@ func main() {
 	default:
 		log.Fatalf("invalid -ingest-scope %q (valid: self, any)", *ingestScope)
 	}
-	if relational {
-		log.Printf("updater: relational (paired endpoints; pair window %ds, support %d, history %d)",
-			pairWindowOrDefault(*pairWindow), orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
-	} else {
-		log.Printf("updater: endpoint EMA (each sample updates every incident edge)")
-	}
+	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
+		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
 
 	peerURLs := parsePeerURLs(*peersFlag)
 
@@ -257,9 +249,8 @@ func main() {
 		// no keyword group.
 		UseRuleBasedTuner:    useTuner,
 		DomainSpec:           spec,
-		Relational:           relational,
 		AcceptForeignSamples: *ingestScope == "any",
-		PairWindowSeconds:    *pairWindow,
+		PairWindowSeconds:    *pairWindowS,
 		PairMinSupport:       *pairSupport,
 		PairWindow:           *pairHistory,
 	}
@@ -639,15 +630,8 @@ func checkNoPositionalArgs(n int, first string) error {
 		"is silently ignored", first)
 }
 
-// pairWindowOrDefault and orDefault report the values actually in force, so the
-// startup log is a record of the configuration rather than of the flags typed.
-func pairWindowOrDefault(v int) int {
-	if v <= 0 {
-		return semmap.DefaultPairWindowSeconds
-	}
-	return v
-}
-
+// orDefault reports the value actually in force, so the startup log is a record of
+// the configuration rather than of the flags typed.
 func orDefault(v, def int) int {
 	if v <= 0 {
 		return def

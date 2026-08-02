@@ -1,64 +1,41 @@
-package semmap
+package semmap_test
 
 import (
 	"testing"
 
-	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// The ontology and storage are two records of the same graph. seedFromOntology
-// syncs them at startup; every runtime mutation must keep them in sync too.
-// Before these tests, only Deprecate did: AddValidatedProposition and
-// AddConstruct wrote the ontology alone, so a confirmed candidate edge existed
-// in Propositions() but not in AllEdges() — invisible to the Reasoner, which
-// iterates edges. The result was a propose-then-confirm flow that appeared to
-// succeed and changed nothing.
+// A declaration and the model are two records of the same graph, and every mutation of
+// the declaration has to reach the model — because the model is what every answer is
+// read from.
+//
+// This is the invariant these tests have always guarded; what counted as "the model"
+// changed. It used to be a storage graph, and AddValidatedProposition and AddConstruct
+// wrote only the ontology, so a confirmed candidate appeared in Propositions() and in
+// no traversal: a propose-then-confirm flow that appeared to succeed and changed
+// nothing. The same failure is available today one layer over, so the assertions now
+// look at the state model.
 
-// newTestMap wires an edge-minimal SemanticMap and seeds storage from the
-// ontology, mirroring what profiles.Build does at startup. Seeding matters here:
-// without it AllEdges() is empty and a test asserting an edge survived
-// deprecation would pass or fail for the wrong reason.
-func newTestMap(t *testing.T) *SemanticMap {
-	t.Helper()
-	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
-	reasoner := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
-
-	propositions, err := ontology.Propositions()
-	if err != nil {
-		t.Fatalf("Propositions: %v", err)
-	}
-	for _, p := range propositions {
-		if err := storage.PutEdge(&types.EdgeDescriptor{
-			FromID:        p.FromConstruct,
-			ToID:          p.ToConstruct,
-			PropositionID: p.PropositionID,
-			Direction:     p.Direction,
-			PriorWeight:   p.PriorStrength,
-			EMAWeight:     p.PriorStrength,
-		}); err != nil {
-			t.Fatalf("PutEdge: %v", err)
-		}
-	}
-
-	return New(storage, ontology, updater, reasoner,
-		minimal.NewDisabledProposer(), minimal.NewRuleBasedTunerFromSpec(mustSpec()))
-}
-
-func TestAddValidatedPropositionMaterializesEdge(t *testing.T) {
-	m := newTestMap(t)
+func TestAddValidatedPropositionReachesTheModel(t *testing.T) {
+	m, state := newMap(t)
 
 	before, err := m.AllEdges()
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// A self-loop is refused by the state model, so relate two distinct constructs —
+	// which is also what a confirmed candidate always is.
+	spec := mustSpec()
+	if len(spec.Constructs) < 2 {
+		t.Skip("spec declares fewer than two constructs")
+	}
 	p := &types.Proposition{
 		PropositionID: "P90",
-		FromConstruct: mustSpec().Constructs[0].ConstructID,
-		ToConstruct:   mustSpec().Constructs[0].ConstructID,
+		FromConstruct: spec.Constructs[0].ConstructID,
+		ToConstruct:   spec.Constructs[1].ConstructID,
 		Direction:     types.Positive,
 		PriorStrength: 0.42,
 	}
@@ -71,67 +48,76 @@ func TestAddValidatedPropositionMaterializesEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(after) != len(before)+1 {
-		t.Fatalf("edge count %d -> %d, want +1: the proposition was added to the "+
-			"ontology but no EdgeDescriptor reached storage, so the Reasoner "+
-			"cannot traverse it", len(before), len(after))
+		t.Fatalf("relation count %d -> %d, want +1: the proposition was added to the "+
+			"declaration but no relationship reached the state model, so no answer can "+
+			"traverse it", len(before), len(after))
 	}
 
-	var found *types.EdgeDescriptor
-	for _, e := range after {
-		if e.PropositionID == "P90" {
-			found = e
-		}
+	rel := relationshipFor(t, state, "P90")
+	if rel.Prior != 0.42 {
+		t.Errorf("prior = %v, want 0.42", rel.Prior)
 	}
-	if found == nil {
-		t.Fatal("P90 edge absent from storage")
+	// Cold-start invariant: a freshly declared relationship carries no evidence, so its
+	// effective strength is the prior until telemetry arrives.
+	if rel.Confidence != 0 || rel.NObservations != 0 {
+		t.Errorf("new relationship should carry no evidence, got confidence=%v n=%d",
+			rel.Confidence, rel.NObservations)
 	}
-	if found.PriorWeight != 0.42 {
-		t.Errorf("PriorWeight = %v, want 0.42", found.PriorWeight)
+	if rel.Effective() != 0.42 {
+		t.Errorf("effective strength %v at cold start, want the prior 0.42", rel.Effective())
 	}
-	// Cold-start invariant: a freshly seeded edge has EMA == prior and no
-	// evidence, so effective(e) == prior until telemetry arrives.
-	if found.EMAWeight != found.PriorWeight {
-		t.Errorf("EMAWeight = %v, want == PriorWeight %v (cold start)",
-			found.EMAWeight, found.PriorWeight)
-	}
-	if found.Confidence != 0 || found.NObservations != 0 {
-		t.Errorf("new edge should carry no evidence, got confidence=%v n_obs=%d",
-			found.Confidence, found.NObservations)
+	if rel.Provenance != statemap.Seeded {
+		t.Errorf("provenance %s on a relationship nothing has observed, want seeded",
+			rel.Provenance)
 	}
 }
 
-func TestAddConstructMaterializesNode(t *testing.T) {
-	m := newTestMap(t)
+func TestAddConstructReachesTheModel(t *testing.T) {
+	m, state := newMap(t)
 
 	c := &types.Construct{ConstructID: "AU", Name: "AuditConstruct"}
 	if err := m.AddConstruct(c); err != nil {
 		t.Fatalf("AddConstruct: %v", err)
 	}
 
-	node, err := m.storage.GetNode("AU")
-	if err != nil {
-		t.Fatalf("GetNode: %v", err)
+	p, ok := state.Property("AU")
+	if !ok {
+		t.Fatal("construct added to the declaration but no property in the state model, " +
+			"so nothing can be said about it")
 	}
-	if node == nil {
-		t.Fatal("construct added to ontology but no NodeDescriptor in storage")
+	// Observed, not derived: nothing routes to a construct added at runtime, and a
+	// derived property with no members would be a summary of nothing.
+	if p.Kind != statemap.Observed {
+		t.Errorf("construct property is %s, want observed while nothing routes to it", p.Kind)
 	}
-	if node.ConstructType != "AuditConstruct" {
-		t.Errorf("ConstructType = %q, want %q", node.ConstructType, "AuditConstruct")
+	if p.Confidence != 0 || p.NObservations != 0 {
+		t.Errorf("a construct nothing routes to yet reports confidence %v from %d "+
+			"observations, want zero of both", p.Confidence, p.NObservations)
 	}
 }
 
-func TestDeprecateSyncsFlagToStorage(t *testing.T) {
-	m := newTestMap(t)
+func TestDeprecateRetiresInTheModel(t *testing.T) {
+	m, state := newMap(t)
 
 	if err := m.Deprecate(specProp(t), "retired for this test"); err != nil {
 		t.Fatalf("Deprecate: %v", err)
 	}
+
+	rel := relationshipFor(t, state, specProp(t))
+	if rel.Status != statemap.Retired {
+		t.Errorf("relationship status %s after deprecation; a claim that stays active "+
+			"keeps contributing to every answer", rel.Status)
+	}
+	if rel.RetiredReason == "" {
+		t.Error("retirement recorded no reason, so the withdrawal cannot be audited")
+	}
+
+	// Soft delete: it stays retrievable and shows on the graph surfaces as deprecated,
+	// because a decision taken before the retirement must remain reconstructible.
 	edges, err := m.AllEdges()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Soft delete: the edge stays, flagged. Retirement must not destroy the
-	// evidence record accumulated before the operator retired the claim.
 	seen := false
 	for _, e := range edges {
 		if e.PropositionID != specProp(t) {
@@ -139,13 +125,13 @@ func TestDeprecateSyncsFlagToStorage(t *testing.T) {
 		}
 		seen = true
 		if !e.Deprecated {
-			t.Error("edge not flagged deprecated in storage")
+			t.Error("the graph surface does not report the relation as deprecated")
 		}
 		if e.DeprecatedReason == "" {
-			t.Error("edge missing DeprecatedReason")
+			t.Error("the graph surface reports no reason for the deprecation")
 		}
 	}
 	if !seen {
-		t.Error("edge removed from storage; deprecation must be a soft delete")
+		t.Error("the relation vanished from the graph surface; deprecation is a soft delete")
 	}
 }

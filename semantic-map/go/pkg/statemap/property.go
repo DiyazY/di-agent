@@ -269,6 +269,12 @@ type Map struct {
 	learning bool
 	learn    LearnConfig
 
+	// seenEvents recognises an observation the map has already applied, so a replayed
+	// archive or a retried post does not inflate the confidence behind a value.
+	// seenOrder bounds it in insertion order — see admitEventLocked.
+	seenEvents map[string]struct{}
+	seenOrder  []string
+
 	// revision advances on every mutation. A decision records the revision it read
 	// so its inputs can be identified later even though the map has moved on.
 	revision uint64
@@ -406,9 +412,17 @@ func (m *Map) Observe(id string, value float64, at time.Time) error {
 	return m.ObserveEvent(id, value, at, "")
 }
 
-// ObserveEvent is Observe with the observation's event identity, which the paired
-// estimator uses to recognise a pair it has already folded in. A caller replaying
-// telemetry must supply it, or the replay inflates every estimate with its own points.
+// ObserveEvent is Observe with the observation's event identity.
+//
+// The identity does two jobs. The paired estimator uses it to recognise a pair it has
+// already folded in, and this method uses it to recognise the observation itself: an
+// event already seen is a no-op. Both matter for the same reason — a caller replaying an
+// archive, or a collector that re-sends after a timeout, would otherwise inflate
+// confidence, which is a claim about how much observation stands behind a value. The
+// value would barely move (the same number re-averaged is the same number) while the
+// count behind it doubled, so the map would report certainty it had not earned.
+//
+// An observation with no event identity cannot be recognised and is always applied.
 func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID string) error {
 	if id == "" {
 		return fmt.Errorf("observation needs a property id")
@@ -422,6 +436,13 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Keyed by property as well as event, because an event identity is only unique
+	// within the reading it names: one collector tick can carry several metrics, and
+	// some collectors number them from a shared counter.
+	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
+		return nil
+	}
 
 	p, ok := m.properties[id]
 	if !ok {
@@ -691,6 +712,12 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 // depends on what the properties mean, and hard-coding one here would make the
 // state model responsible for a modelling choice that belongs to its caller.
 func (m *Map) ObserveRelationship(id string, strength float64, at time.Time) error {
+	return m.ObserveRelationshipEvent(id, strength, at, "")
+}
+
+// ObserveRelationshipEvent is ObserveRelationship with the observation's event
+// identity, so a replay of the same evidence is a no-op rather than a second vote.
+func (m *Map) ObserveRelationshipEvent(id string, strength float64, at time.Time, eventID string) error {
 	if math.IsNaN(strength) || math.IsInf(strength, 0) {
 		return fmt.Errorf("relationship %q observed with non-finite strength", id)
 	}
@@ -700,6 +727,10 @@ func (m *Map) ObserveRelationship(id string, strength float64, at time.Time) err
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
+		return nil
+	}
 
 	r, ok := m.relationships[id]
 	if !ok {
@@ -753,6 +784,56 @@ func (m *Map) AssertRelationshipStrength(id string, strength float64, actor, rea
 	return nil
 }
 
+// ResetRelationship discards what was learned about a relationship on this system,
+// returning it to its prior with no observations behind it.
+//
+// The operation an operator wants when a relationship learned something from a period
+// they now know to have been unrepresentative — a load test, a broken collector, a
+// misconfigured neighbour. It is deliberately not a delete: the relationship is still
+// asserted to exist, and the prior is still the best available estimate of its
+// strength. What goes is the evidence, and with it the confidence that rested on it.
+//
+// The reset is journalled with what it discarded, because "this edge has no
+// observations" and "this edge's observations were thrown away at 14:20 by an operator
+// who said the collector was broken" are different states of knowledge, and only one of
+// them is reconstructible from a count of zero.
+func (m *Map) ResetRelationship(id, actor, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	r, ok := m.relationships[id]
+	if !ok {
+		return fmt.Errorf("relationship %q not found", id)
+	}
+	discarded := r.NObservations
+	oldStrength, oldConfidence := r.Strength, r.Confidence
+
+	r.Strength = 0
+	r.Confidence = 0
+	r.NObservations = 0
+	r.FirstObserved = time.Time{}
+	r.LastObserved = time.Time{}
+	if r.Provenance == Learned {
+		// Back to seeded: the strength in force is the prior again, and provenance has to
+		// say so or the next reader will treat an unobserved edge as a measured one.
+		r.Provenance = Seeded
+	}
+	// The estimator's window goes too. Leaving it would let the next single pair
+	// complete a window built from the very observations that were just discarded.
+	delete(m.windows, id)
+
+	m.bump(EventRelationshipAsserted, id, actor, map[string]any{
+		"reset": true, "reason": reason,
+		"discarded_observations": discarded,
+		"strength_before":        oldStrength,
+		"confidence_before":      oldConfidence,
+		"prior":                  r.Prior,
+		"note": "evidence discarded; the prior stands as the estimate and the pair " +
+			"window was cleared so nothing from before the reset can complete it",
+	}, m.now())
+	return nil
+}
+
 // RetireRelationship withdraws a relationship from reasoning, keeping its record.
 func (m *Map) RetireRelationship(id, reason, actor string) error {
 	m.mu.Lock()
@@ -770,6 +851,38 @@ func (m *Map) RetireRelationship(id, reason, actor string) error {
 	m.bump(EventRelationshipRetired, id, actor, map[string]any{"reason": reason}, m.now())
 	return nil
 }
+
+// admitEventLocked reports whether an event identity is new, recording it if so.
+// Caller holds the write lock.
+//
+// The set is bounded and evicted in insertion order. An unbounded one would grow with
+// every sample for the lifetime of the process, which on an edge node is the wrong
+// trade: what matters is recognising the duplicates that arrive close together — a
+// retried post, a replayed batch — not remembering last week. Eviction is stated here
+// rather than hidden because it means idempotency is guaranteed over a window, not
+// forever, and a caller replaying an archive larger than the window will re-apply its
+// oldest observations.
+func (m *Map) admitEventLocked(key string) bool {
+	if m.seenEvents == nil {
+		m.seenEvents = make(map[string]struct{}, seenEventCapacity)
+	}
+	if _, dup := m.seenEvents[key]; dup {
+		return false
+	}
+	if len(m.seenOrder) >= seenEventCapacity {
+		delete(m.seenEvents, m.seenOrder[0])
+		m.seenOrder = m.seenOrder[1:]
+	}
+	m.seenEvents[key] = struct{}{}
+	m.seenOrder = append(m.seenOrder, key)
+	return true
+}
+
+// seenEventCapacity is how many recent observations the map can recognise as repeats.
+// Sized for a few thousand samples: comfortably more than any retry or batch replay a
+// collector produces in one burst, and small enough to be invisible in an edge node's
+// memory budget.
+const seenEventCapacity = 8192
 
 // bump advances the revision and appends a journal entry. Caller holds the lock.
 func (m *Map) bump(kind EventKind, target, actor string, detail map[string]any, at time.Time) {

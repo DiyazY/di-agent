@@ -24,14 +24,10 @@ const (
 
 // ── Graph primitives ──────────────────────────────────────────────────────────
 
-type NodeDescriptor struct {
-	NodeID        string
-	ConstructType string
-	PriorValue    float64
-	EMAValue      float64
-	Confidence    float64 // 0.0 = prior-dominated, 1.0 = evidence-dominated
-	NObservations int
-}
+// NodeDescriptor is gone with the storage graph it belonged to: a construct's current
+// value and the confidence behind it live on the state model's property for that
+// construct, where they are recomputed from the metrics routed to it rather than stored
+// as a second copy.
 
 type EdgeDescriptor struct {
 	FromID           string

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
@@ -15,13 +16,17 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// SemanticMap wires the six contracts and exposes the agent API. It also
-// holds the peer coordination handles (peers.Registry, peers.Client) so the
-// HTTP layer and the reasoner share a single source of truth for peers.
+// SemanticMap wires the contracts and exposes the agent API. It also holds the peer
+// coordination handles (peers.Registry, peers.Client) so the HTTP layer and the
+// reasoner share a single source of truth for peers.
+//
+// It used to hold a storage graph and an updater as well, and they were the second
+// model of the same relations: both learned from every sample, and after cost,
+// estimates and explanations moved to the state model, only the storage copy's numbers
+// were still being displayed. One model now — the state model — and the graph surfaces
+// project it (see projection.go).
 type SemanticMap struct {
-	storage  contracts.StorageContract
 	ontology contracts.OntologyContract
-	updater  contracts.UpdaterContract
 	reasoner contracts.ReasonerContract
 	proposer contracts.ProposerContract
 	tuner    contracts.TunerContract
@@ -30,24 +35,19 @@ type SemanticMap struct {
 	peerc *peers.Client
 
 	// state is the live state model: the properties this system exhibits and the
-	// relationships between them. Every ingested sample updates it, so it holds what
-	// the system is doing now rather than what a schema said it would do.
+	// relationships between them. Every ingested sample updates it, and every answer
+	// is read from it, so it holds what the system is doing now rather than what a
+	// schema said it would do.
 	//
-	// Nil is permitted: an agent built without one still ingests and reasons over the
-	// construct graph, which keeps the state model an addition rather than a
-	// precondition for every caller.
+	// Required in practice — profiles.Build always attaches one, because an agent
+	// without it can answer nothing.
 	state *statemap.Map
 
-	// pairs tracks the latest observation per construct so a relational updater
-	// can form paired observations across collectors that sample on different
-	// grids. Unused when the updater is not relational.
-	pairs *pairTracker
-
 	// selfID is the machine this map models. The map is node-local: one agent
-	// runs per machine and its graph holds that machine's evidence, which is why
-	// storage needs no machine dimension — the whole store IS one machine's
-	// evidence layer. Cluster-level questions are answered by asking peers, not
-	// by one agent accumulating everyone's telemetry.
+	// runs per machine and its map holds that machine's evidence, which is why
+	// nothing here has a machine dimension — the whole model IS one machine's
+	// state. Cluster-level questions are answered by asking peers, not by one
+	// agent accumulating everyone's telemetry.
 	//
 	// Empty means the identity was never set, in which case the map cannot tell
 	// its own samples from a peer's and foreign-sample rejection is disabled.
@@ -88,21 +88,16 @@ var ErrForeignSample = errors.New(
 // an empty registry + default client on first access — preserving backward
 // compatibility for callers that don't yet wire peers explicitly.
 func New(
-	storage contracts.StorageContract,
 	ontology contracts.OntologyContract,
-	updater contracts.UpdaterContract,
 	reasoner contracts.ReasonerContract,
 	proposer contracts.ProposerContract,
 	tuner contracts.TunerContract,
 ) *SemanticMap {
 	return &SemanticMap{
-		storage:  storage,
 		ontology: ontology,
-		updater:  updater,
 		reasoner: reasoner,
 		proposer: proposer,
 		tuner:    tuner,
-		pairs:    newPairTracker(DefaultPairWindowSeconds),
 	}
 }
 
@@ -110,9 +105,7 @@ func New(
 // peerRegistry and peerClient may be nil — Peers() and PeerClient() lazily
 // fall back to fresh instances in that case.
 func NewWithPeers(
-	storage contracts.StorageContract,
 	ontology contracts.OntologyContract,
-	updater contracts.UpdaterContract,
 	reasoner contracts.ReasonerContract,
 	proposer contracts.ProposerContract,
 	tuner contracts.TunerContract,
@@ -120,15 +113,12 @@ func NewWithPeers(
 	peerClient *peers.Client,
 ) *SemanticMap {
 	return &SemanticMap{
-		storage:  storage,
 		ontology: ontology,
-		updater:  updater,
 		reasoner: reasoner,
 		proposer: proposer,
 		tuner:    tuner,
 		peers:    peerRegistry,
 		peerc:    peerClient,
-		pairs:    newPairTracker(DefaultPairWindowSeconds),
 	}
 }
 
@@ -138,12 +128,6 @@ func (m *SemanticMap) AttachState(s *statemap.Map) { m.state = s }
 
 // State returns the attached state model, or nil.
 func (m *SemanticMap) State() *statemap.Map { return m.state }
-
-// SetPairWindow overrides how far apart two construct observations may be and
-// still form a pair. Only meaningful with a relational updater.
-func (m *SemanticMap) SetPairWindow(seconds int) {
-	m.pairs = newPairTracker(seconds)
-}
 
 // Peers returns the peer registry attached to this map. If no registry was
 // wired at construction time, a fresh empty one is allocated and cached so
@@ -181,86 +165,52 @@ func (m *SemanticMap) SimulateOutcome(ctx *types.OffloadContext, targetNodeID st
 
 // ── Telemetry ingestion ───────────────────────────────────────────────────────
 
-// Ingest feeds one telemetry observation into the evidence layer.
-// It updates the edge descriptor and notifies the proposer.
-func (m *SemanticMap) Ingest(fromID, toID string, observation float64, eventID string) error {
-	if _, err := m.updater.UpdateEdge(fromID, toID, observation, eventID); err != nil {
-		return err
-	}
-	return m.proposer.Observe(fromID, toID, observation, observation)
-}
-
-// IngestSample feeds one MetricSample through the Bridge. The Bridge maps the
-// metric type to its primary construct, looks up every relationship that
-// touches that construct, and calls UpdateEdge on each unique (from, to)
-// pair. Idempotency is per-edge — replaying the same sample is a no-op.
+// IngestSample records one MetricSample in the state model, and notifies the proposer
+// about the construct that summarises it.
 //
-// After the Bridge runs, the proposer is notified via ObserveConstruct so it
-// can pair the new value against every other construct it has seen. Errors
-// from ObserveConstruct are intentionally swallowed — the proposer is advisory
-// and must not block telemetry ingestion.
+// The whole path is now: observe the property, let the map recompute whatever derives
+// from it, and let the map's own estimator fold the observation into the relationships
+// incident to it. There used to be a second path alongside — the Bridge, fanning the
+// sample out to every construct edge in a storage graph, with its own idempotency, its
+// own EMA and its own relational variant. It learned the same relations from the same
+// samples into a different structure, which is one structure too many.
 //
-// Returns nil even when the metric type has no mapping (forward-compat with
-// future MetricTypes). Per-edge errors are returned (first one wins) so the
-// caller can decide whether to keep looping; the Bridge itself processes
-// every reachable edge regardless of individual failures.
+// The order that survives from that arrangement, because it was the substantive part:
+// the state model records the observation BEFORE the routing table is consulted. The
+// routing table says what this agent knows how to summarise; it does not say what the
+// system is allowed to exhibit. A metric nobody has mapped is still something the
+// system is doing, so it becomes a property — journalled as an admission — where the
+// construct path would have dropped it.
+//
+// Errors from the proposer are swallowed: it is advisory, and must not block telemetry.
 func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
-	router := m.router()
-	if sample == nil || router == nil {
+	if sample == nil {
 		return nil
 	}
 	if m.selfID != "" && !m.acceptForeign && sample.NodeID != "" && sample.NodeID != m.selfID {
 		return fmt.Errorf("%w: sample node_id=%q, this agent is %q",
 			ErrForeignSample, sample.NodeID, m.selfID)
 	}
-
-	// The state model records the observation BEFORE the routing table is consulted,
-	// and that order is the substance rather than a detail. The routing table says
-	// what this agent knows how to summarise; it does not say what the system is
-	// allowed to exhibit. A metric nobody has mapped yet is still something the
-	// system is doing, so it becomes a property here — journalled as an admission —
-	// where the construct path below would drop it.
-	if m.state != nil {
-		if serr := m.state.ObserveEvent(string(sample.MetricType), sample.Value,
-			time.Unix(sample.TimestampUnix, 0), sample.EventID); serr != nil {
-			log.Printf("statemap: %v", serr)
-		}
+	if m.state == nil {
+		return ErrNoStateModel
 	}
 
-	construct, routed := router.ConstructForMetric(string(sample.MetricType))
-	if !routed {
-		// Nothing further to do: the sample is in the state model, and no construct
-		// summarises it.
-		return nil
+	if err := m.state.ObserveEvent(string(sample.MetricType), sample.Value,
+		time.Unix(sample.TimestampUnix, 0), sample.EventID); err != nil {
+		return err
 	}
 
-	var err error
-
-	// A construct's observed magnitude belongs on the construct's own descriptor,
-	// in both learning modes. Because the map is node-local, that descriptor is
-	// this machine's current value for the construct — which is the state a
-	// reasoner needs to answer "how pressured am I right now" without inferring
-	// it through an edge. It was previously written only in relational mode, so
-	// the state existed on some deployments and not others.
-	if _, nerr := m.updater.UpdateNode(construct, sample.Value, sample.EventID); nerr != nil {
-		err = nerr
-	}
-
-	if rel, ok := m.updater.(contracts.RelationalUpdaterContract); ok {
-		// Relational mode: a single construct's value is not an observation of any
-		// edge's strength, so the edge waits for a counterpart observation of its
-		// other endpoint.
-		if _, perr := ingestPaired(sample, construct, m.ontology, rel, m.pairs); perr != nil && err == nil {
-			err = perr
-		}
-	} else if berr := Bridge(sample, router, m.ontology, m.updater); berr != nil && err == nil {
-		err = berr
-	}
-
+	// The proposer looks for relations the backbone does not declare, and it pairs
+	// construct values, so it needs the routed construct rather than the raw metric.
+	// An unrouted metric is simply not something it can propose about yet.
 	if m.proposer != nil {
-		_ = m.proposer.ObserveConstruct(construct, sample.Value)
+		if router := m.router(); router != nil {
+			if construct, routed := router.ConstructForMetric(string(sample.MetricType)); routed {
+				_ = m.proposer.ObserveConstruct(construct, sample.Value)
+			}
+		}
 	}
-	return err
+	return nil
 }
 
 // RoutedConstruct reports which construct a metric type is routed to by the
@@ -311,11 +261,22 @@ func (m *SemanticMap) retireStateRelationships(propositionID, reason, actor stri
 	}
 }
 
+// MetricRouter maps a metric type to the construct that summarises it.
+type MetricRouter interface {
+	ConstructForMetric(metricType string) (string, bool)
+}
+
+// SpecCarrier is implemented by ontologies built from a domain specification. The
+// facade uses it to recover the routing table without threading the spec through
+// every constructor.
+type SpecCarrier interface {
+	Spec() *domain.Spec
+}
+
 // router returns the metric routing table for this map, which is the loaded
-// domain specification. Nil when the ontology carries no specification, in
-// which case ingestion is a no-op rather than a guess: routing a metric to a
-// construct the deployment did not declare would put evidence on an edge the
-// operator never asked to be tracked.
+// domain specification. Nil when the ontology carries no specification, in which
+// case the proposer simply hears nothing: a metric routed to a construct the
+// deployment never declared would put evidence under a name nobody asked for.
 func (m *SemanticMap) router() MetricRouter {
 	if c, ok := m.ontology.(SpecCarrier); ok {
 		if s := c.Spec(); s != nil {
@@ -360,21 +321,50 @@ func (m *SemanticMap) Propositions() ([]*types.Proposition, error) {
 	return m.ontology.Propositions()
 }
 
-// AllEdges returns every edge descriptor currently held in storage.
+// AllEdges returns every relation the agent holds, rendered as edge descriptors.
+//
+// Read from the state model, which is where relations live and learn. It read from
+// storage until the state model became the single source of every answer, at which
+// point this surface was showing an operator numbers that entered no decision — see
+// projection.go for why that is worse than showing nothing.
 func (m *SemanticMap) AllEdges() ([]*types.EdgeDescriptor, error) {
-	return m.storage.AllEdges()
+	if m.state == nil {
+		return nil, ErrNoStateModel
+	}
+	return m.projectedEdges(), nil
 }
 
-// EdgesByPair returns every edge between (from, to). Conflict-pair endpoints
-// (e.g. RC→PS for P2/P3) yield more than one descriptor.
+// EdgesByPair returns every relation between (from, to). Endpoints carrying a conflict
+// pair — two claims in opposite directions over the same pair — yield more than one
+// descriptor, which is the case the multigraph exists for.
 func (m *SemanticMap) EdgesByPair(from, to string) ([]*types.EdgeDescriptor, error) {
-	return m.storage.GetEdgesByPair(from, to)
+	if m.state == nil {
+		return nil, ErrNoStateModel
+	}
+	rels := m.state.Relationships(from, to)
+	out := make([]*types.EdgeDescriptor, 0, len(rels))
+	for _, r := range rels {
+		out = append(out, edgeFromRelationship(r))
+	}
+	return out, nil
 }
 
-// Neighbors returns the set of construct IDs reachable from nodeID via one
-// outgoing edge.
+// Neighbors returns the properties reachable from nodeID via one outgoing relation.
 func (m *SemanticMap) Neighbors(nodeID string) ([]string, error) {
-	return m.storage.Neighbors(nodeID)
+	if m.state == nil {
+		return nil, ErrNoStateModel
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range m.state.Relationships(nodeID, "") {
+		if r.Status == statemap.Retired || seen[r.To] {
+			continue
+		}
+		seen[r.To] = true
+		out = append(out, r.To)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // History returns ontology mutation events appended at or after `since`.
@@ -417,25 +407,10 @@ func (m *SemanticMap) SetPropositionStrength(id string, strength float64) error 
 	if err := m.ontology.SetPropositionStrength(id, strength); err != nil {
 		return err
 	}
-	// The reasoner answers from the state model, so an adjustment that stops at the
-	// construct graph is an operator action with no effect on any decision. Asserting
-	// it here records the actor and reason too, which the construct graph's write-
-	// through does not carry.
+	// The assertion on the state model is the operative half: it is what every answer
+	// reads. The ontology write above keeps the declaration layer and its audit log in
+	// step, and records that the operator acted.
 	m.assertStateStrength(id, strength, "operator", "proposition strength set")
-	edges, err := m.storage.AllEdges()
-	if err != nil {
-		return nil // ontology already updated; storage sync is best-effort
-	}
-	for _, e := range edges {
-		if e.PropositionID != id {
-			continue
-		}
-		e.PriorWeight = strength
-		if e.NObservations == 0 {
-			e.EMAWeight = strength
-		}
-		_ = m.storage.PutEdge(e)
-	}
 	return nil
 }
 
@@ -447,75 +422,105 @@ func (m *SemanticMap) Deprecate(id, reason string) error {
 	if err := m.ontology.Deprecate(id, reason); err != nil {
 		return err
 	}
-	// Retirement has to reach the state model for the same reason: the reasoner reads
-	// relationships from there, and a proposition retired only in the construct graph
-	// would keep contributing to every answer.
+	// Retirement in the state model is what actually withdraws the claim: it leaves the
+	// traversal, so it stops contributing to every answer and shows as deprecated on
+	// the graph surfaces, which project the model.
 	m.retireStateRelationships(id, reason, "operator")
-	edges, err := m.storage.AllEdges()
-	if err != nil {
-		return nil // ontology already updated; storage sync is best-effort
-	}
-	for _, e := range edges {
-		if e.PropositionID == id {
-			e.Deprecated = true
-			e.DeprecatedReason = reason
-			_ = m.storage.PutEdge(e)
-		}
-	}
 	return nil
 }
 
-// AddConstruct appends a new construct to the ontology and materializes its
-// node descriptor in storage.
+// AddConstruct appends a new construct to the ontology and declares the matching
+// property in the state model.
 //
-// The storage write is not optional bookkeeping: the Reasoner and the Updater
-// address constructs through storage, so an ontology-only construct is
-// invisible to every read path that matters. Constructs added at startup get
-// their node from seedFromOntology; one added at runtime needs the same
-// treatment, at the neutral 0.5 prior seedFromOntology uses.
+// The state-model write is the operative half, for the same reason as everywhere else:
+// a construct that exists only as a declaration appears in Propositions() and in
+// GET /graph and takes part in no answer.
+//
+// It is declared as observed rather than derived, which is not a technicality. A
+// derived property must have members, and nothing routes to a construct added at
+// runtime — the routing table is specification data, so it cannot gain members until
+// the spec changes. Declaring it derived and memberless would make it a summary of
+// nothing. Observed says the truthful thing instead: its value can only come from
+// outside, and until something supplies one it reports zero at zero confidence. If a
+// later specification routes metrics to it, seeding re-declares it as derived with
+// those members.
 func (m *SemanticMap) AddConstruct(c *types.Construct) error {
 	if err := m.ontology.AddConstruct(c); err != nil {
 		return err
 	}
-	return m.storage.PutNode(&types.NodeDescriptor{
-		NodeID:        c.ConstructID,
-		ConstructType: c.Name,
-		PriorValue:    0.5,
-		EMAValue:      0.5,
-		Confidence:    0.0,
-		NObservations: 0,
+	if m.state == nil {
+		return nil
+	}
+	return m.state.DeclareProperty(statemap.Property{
+		ID:     c.ConstructID,
+		Kind:   statemap.Observed,
+		Range:  [2]float64{0, 1},
+		Source: "operator: " + c.Name + " (no metric routed yet)",
 	})
 }
 
-// AddValidatedProposition appends a new proposition after the ontology has
-// validated it against the existing backbone, and seeds the corresponding
-// EdgeDescriptor in storage.
+// AddValidatedProposition appends a new proposition after the ontology has validated it
+// against the existing backbone, and declares the matching relationship in the state
+// model.
 //
-// Without the storage write the proposition exists only in the ontology: it
-// appears in Propositions() and in GET /graph's proposition list, but the
-// Reasoner iterates AllEdges() and would never traverse it, so a confirmed
-// candidate edge silently fails to participate in any cost computation. The
-// edge starts at EMAWeight == PriorWeight with zero confidence, matching the
-// cold-start invariant every seeded edge satisfies (§4.3 of the paper).
+// The second half is what makes a confirmed candidate mean anything. Without it the
+// proposition appears in Propositions() and in GET /graph's proposition list while
+// every answer is computed from relationships that have never heard of it — so a
+// candidate an operator confirmed would sit in the backbone influencing nothing. It
+// starts at its prior with zero confidence, which is the cold-start state every seeded
+// relationship is in.
 func (m *SemanticMap) AddValidatedProposition(p *types.Proposition) error {
 	if err := m.ontology.AddValidatedProposition(p); err != nil {
 		return err
 	}
-	return m.storage.PutEdge(&types.EdgeDescriptor{
-		FromID:        p.FromConstruct,
-		ToID:          p.ToConstruct,
-		PropositionID: p.PropositionID,
-		Direction:     p.Direction,
-		PriorWeight:   p.PriorStrength,
-		EMAWeight:     p.PriorStrength,
-		Confidence:    0.0,
-		NObservations: 0,
+	if m.state == nil {
+		return nil
+	}
+	// Both endpoints have to exist as properties before a relationship between them can
+	// be declared. Seeding skips a construct nothing routes to — correctly, since it
+	// would summarise nothing — so a proposition an operator adds may name one. Declaring
+	// the missing endpoint here keeps the declaration and the model from diverging, which
+	// is the failure this whole path exists to prevent. It is observed, for the reason
+	// AddConstruct gives: its value can only come from outside, and until something
+	// supplies one it reports zero at zero confidence.
+	for _, id := range []string{p.FromConstruct, p.ToConstruct} {
+		if _, exists := m.state.Property(id); exists {
+			continue
+		}
+		if err := m.state.DeclareProperty(statemap.Property{
+			ID: id, Kind: statemap.Observed, Range: [2]float64{0, 1},
+			Source: "endpoint of proposition " + p.PropositionID + " (no metric routed)",
+		}); err != nil {
+			return err
+		}
+	}
+	sign := 1
+	if p.Direction == types.Negative {
+		sign = -1
+	}
+	return m.state.DeclareRelationship(statemap.Relationship{
+		From: p.FromConstruct, To: p.ToConstruct, Label: p.PropositionID,
+		Sign: sign, Prior: p.PriorStrength, Provenance: statemap.Seeded,
+		Note: "[prior: proposition " + p.PropositionID + " as declared]",
 	})
 }
 
-// ResetEdge restores every edge between (from, to) to its prior state.
+// ResetEdge discards what was learned about every relationship between (from, to),
+// leaving each at its prior.
 func (m *SemanticMap) ResetEdge(from, to string) error {
-	return m.updater.Reset(from, to)
+	if m.state == nil {
+		return ErrNoStateModel
+	}
+	rels := m.state.Relationships(from, to)
+	if len(rels) == 0 {
+		return fmt.Errorf("no relationship from %q to %q", from, to)
+	}
+	for _, r := range rels {
+		if err := m.state.ResetRelationship(r.ID, "operator", "reset requested"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ── Operator tuning ───────────────────────────────────────────────────────────
@@ -570,19 +575,20 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		return nil, nil
 	}
 
-	// Resolve current magnitudes from the storage edges, which carry this cluster's
-	// calibrated priors. The delta has to be anchored to the value in force, not to
-	// the cross-cluster proposition strength: anchoring to the global figure would
-	// turn a small nudge into a jump and discard the per-cluster calibration in one
-	// operator action. The state model is seeded from the same calibration, so the
-	// two agree, and SetPropositionStrength writes the result to both.
-	edges, err := m.storage.AllEdges()
-	if err != nil {
-		return nil, err
+	// Resolve current magnitudes from the state model's relationships, which carry this
+	// cluster's calibrated priors. The delta has to be anchored to the value in force,
+	// not to the cross-cluster proposition strength: anchoring to the global figure
+	// would turn a small nudge into a jump and discard the per-cluster calibration in
+	// one operator action.
+	if m.state == nil {
+		return nil, ErrNoStateModel
 	}
-	strengthByID := make(map[string]float64, len(edges))
-	for _, e := range edges {
-		strengthByID[e.PropositionID] = e.PriorWeight
+	strengthByID := map[string]float64{}
+	for _, r := range m.state.Relationships("", "") {
+		if r.Status == statemap.Retired || r.Label == "" {
+			continue
+		}
+		strengthByID[r.Label] = r.Prior
 	}
 
 	// Build bounded adjustments.

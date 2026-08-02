@@ -21,6 +21,7 @@ import (
 	"github.com/DiyazY/di-agent/internal/scripted"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -28,17 +29,23 @@ import (
 
 type evolutionAgent struct {
 	sm        *semmap.SemanticMap
-	storage   *minimal.InMemoryStorage
+	state     *statemap.Map
 	ontology  *minimal.SpecOntology
-	updater   *minimal.EMAUpdater
 	proposer  contracts.ProposerContract
 	collector *scripted.ScriptedCollector
 }
 
-// newEvolutionAgent wires the same edge-minimal stack a production daemon
-// would (InMemoryStorage + SpecOntology + EMAUpdater +
-// RuleEngineReasoner + Proposer) and seeds storage from the ontology bootstrap.
+// newEvolutionAgent wires the same edge-minimal stack a production daemon would — a
+// state model seeded from the specification, the ontology as the declaration layer, a
+// reasoner reading the model, and a proposer — and drives it with a scripted collector.
 // If proposer is nil, wires DisabledProposer.
+//
+// The stack used to include a storage graph and an EMA updater, and the scenarios below
+// watched edge weights converge there. They watch the state model's relationships now:
+// same story, one model. The visible difference is that a relationship advances on a
+// PAIRED observation of both its endpoints rather than on any single sample, so a
+// scenario driving only one endpoint moves properties and leaves relations at their
+// priors — which is the honest reading, and was the reason for the change.
 func newEvolutionAgent(t *testing.T, collector *scripted.ScriptedCollector, proposer contracts.ProposerContract) *evolutionAgent {
 	return newEvolutionAgentWithConvergence(t, collector, proposer, 500)
 }
@@ -48,29 +55,24 @@ func newEvolutionAgent(t *testing.T, collector *scripted.ScriptedCollector, prop
 // a shorter observation window (used by the deprecation scenario).
 func newEvolutionAgentWithConvergence(t *testing.T, collector *scripted.ScriptedCollector, proposer contracts.ProposerContract, convergence float64) *evolutionAgent {
 	t.Helper()
-	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	updater := minimal.NewEMAUpdater(storage, 0.2, convergence)
 	// ONE state model, shared by the facade and the reasoner. Two would let a
 	// facade-level retirement land in a model the reasoner never reads, which is the
 	// bug this fixture had: cost is answered from the reasoner's map and mutated
 	// through the facade's.
-	state := stateFor(t)
+	state := stateForConvergence(t, convergence)
 	reasoner := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	reasoner.AttachState(state)
 	if proposer == nil {
 		proposer = minimal.NewDisabledProposer()
 	}
 
-	seedReasonerState(t, storage, ontology)
-
-	sm := semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner())
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
 	sm.AttachState(state)
 	return &evolutionAgent{
 		sm:        sm,
-		storage:   storage,
+		state:     state,
 		ontology:  ontology,
-		updater:   updater,
 		proposer:  proposer,
 		collector: collector,
 	}
@@ -112,38 +114,7 @@ func (s edgeSnap) String() string {
 		s.PropID, s.From, s.To, s.Direction, s.Prior, s.EMA, s.Confidence, s.Effective, s.Delta, s.NObservations)
 }
 
-func snap(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology, propID string) edgeSnap {
-	t.Helper()
-	edges, _ := s.AllEdges()
-	props, _ := o.Propositions()
-	deprecated := false
-	for _, p := range props {
-		if p.PropositionID == propID && p.Deprecated {
-			deprecated = true
-		}
-	}
-	for _, e := range edges {
-		if e.PropositionID == propID {
-			effective := (1-e.Confidence)*e.PriorWeight + e.Confidence*e.EMAWeight
-			return edgeSnap{
-				PropID:        e.PropositionID,
-				From:          e.FromID,
-				To:            e.ToID,
-				Direction:     directionString(e.Direction),
-				Prior:         e.PriorWeight,
-				EMA:           e.EMAWeight,
-				Effective:     effective,
-				Confidence:    e.Confidence,
-				NObservations: e.NObservations,
-				Delta:         effective - e.PriorWeight,
-				Deprecated:    deprecated,
-			}
-		}
-	}
-	t.Fatalf("propID %q not in storage", propID)
-	return edgeSnap{}
-}
-
+// directionString renders a Direction for the narrated tables.
 func directionString(d types.Direction) string {
 	if d == types.Positive {
 		return "+"
@@ -151,14 +122,45 @@ func directionString(d types.Direction) string {
 	return "-"
 }
 
+func snap(t *testing.T, state *statemap.Map, propID string) edgeSnap {
+	t.Helper()
+	for _, r := range state.Relationships("", "") {
+		if r.Label != propID {
+			continue
+		}
+		dir := "+"
+		if r.Sign < 0 {
+			dir = "-"
+		}
+		return edgeSnap{
+			PropID:        r.Label,
+			From:          r.From,
+			To:            r.To,
+			Direction:     dir,
+			Prior:         r.Prior,
+			EMA:           r.Strength,
+			Effective:     r.Effective(),
+			Confidence:    r.Confidence,
+			NObservations: r.NObservations,
+			Delta:         r.Effective() - r.Prior,
+			Deprecated:    r.Status == statemap.Retired,
+		}
+	}
+	t.Fatalf("no relationship carries proposition %q", propID)
+	return edgeSnap{}
+}
+
 // allSnaps returns every edge's snapshot, sorted by PropositionID
 // (P1, P2, …, P10, P11, …).
-func allSnaps(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology) []edgeSnap {
+func allSnaps(t *testing.T, state *statemap.Map) []edgeSnap {
 	t.Helper()
-	props, _ := o.Propositions()
-	out := make([]edgeSnap, 0, len(props))
-	for _, p := range props {
-		out = append(out, snap(t, s, o, p.PropositionID))
+	rels := state.Relationships("", "")
+	out := make([]edgeSnap, 0, len(rels))
+	for _, r := range rels {
+		if r.Label == "" {
+			continue
+		}
+		out = append(out, snap(t, state, r.Label))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return propLessNumeric(out[i].PropID, out[j].PropID)
@@ -186,10 +188,10 @@ func propNum(p string) int {
 // emitAdvisories scans edges and prints "ADVISORY" lines via t.Logf when
 // (a) confidence > 0.7 AND |Δeff| > 0.25 (suggests deprecation review), or
 // (b) confidence > 0.95 (suggests promotion). Returns the count emitted.
-func emitAdvisories(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology, tag string) int {
+func emitAdvisories(t *testing.T, state *statemap.Map, tag string) int {
 	t.Helper()
 	count := 0
-	for _, e := range allSnaps(t, s, o) {
+	for _, e := range allSnaps(t, state) {
 		if e.Deprecated {
 			continue
 		}
@@ -207,9 +209,9 @@ func emitAdvisories(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOnt
 }
 
 // printSummary prints the EVOLUTION SUMMARY block at the end of each scenario.
-func printSummary(t *testing.T, name string, s *minimal.InMemoryStorage, o *minimal.SpecOntology) {
+func printSummary(t *testing.T, name string, state *statemap.Map) {
 	t.Helper()
-	all := allSnaps(t, s, o)
+	all := allSnaps(t, state)
 
 	adapted := 0
 	converged := 0
@@ -230,7 +232,7 @@ func printSummary(t *testing.T, name string, s *minimal.InMemoryStorage, o *mini
 		rows = append(rows, edgeRow{PropID: e.PropID, Delta: e.Delta})
 	}
 	avgAbsDelta := totalAbsDelta / float64(len(all))
-	advisories := emitAdvisories(t, s, o, name)
+	advisories := emitAdvisories(t, state, name)
 
 	sort.Slice(rows, func(i, j int) bool { return math.Abs(rows[i].Delta) > math.Abs(rows[j].Delta) })
 
@@ -245,23 +247,31 @@ func printSummary(t *testing.T, name string, s *minimal.InMemoryStorage, o *mini
 		limit = len(rows)
 	}
 	for i := 0; i < limit; i++ {
-		e := snap(t, s, o, rows[i].PropID)
+		e := snap(t, state, rows[i].PropID)
 		t.Logf("  %-4s %s→%s(%s)  Δ=%+0.3f", e.PropID, e.From, e.To, e.Direction, e.Delta)
 	}
 }
 
 // printRows is a small helper to dump a focused set of edges as a checkpoint
 // table.
-func printRows(t *testing.T, label string, s *minimal.InMemoryStorage, o *minimal.SpecOntology, propIDs []string) {
+func printRows(t *testing.T, label string, state *statemap.Map, propIDs []string) {
 	t.Helper()
 	t.Logf("  %s", label)
 	for _, id := range propIDs {
-		t.Logf("    %s", snap(t, s, o, id).String())
+		t.Logf("    %s", snap(t, state, id).String())
 	}
 }
 
 // ── Scenario 1: cold-to-warm convergence ─────────────────────────────────────
 
+// Scenario 1 is now about what ONE metric can and cannot establish.
+//
+// It used to assert that 500 constant CPU samples converged every relationship touching
+// the construct CPU routes to. That was the endpoint-EMA reading: a single construct's
+// magnitude was folded into each incident edge as though it were evidence about the
+// association. It is not, and the scenario now demonstrates the distinction — the
+// property converges, and the relationships stay exactly where prior knowledge put them,
+// because nothing has been observed about any pair.
 func TestEvolution_ColdToWarmConvergence(t *testing.T) {
 	col := scripted.New("node_1",
 		scripted.ConstantPattern{
@@ -270,8 +280,15 @@ func TestEvolution_ColdToWarmConvergence(t *testing.T) {
 	)
 	a := newEvolutionAgent(t, col, nil)
 
+	construct, routed := a.sm.RoutedConstruct(string(types.CPUUtilization))
+	if !routed {
+		t.Skip("the loaded spec routes cpu_utilization nowhere")
+	}
+
 	t.Log("Scenario 1: cold-to-warm — constant CPU=0.8 for 500 ticks.")
-	t.Log("Tracks RC-touching edges (P2, P3, P10); shows EMA convergence and confidence climb.")
+	t.Logf("Tracks the metric property, the construct %s that summarises it, and the", construct)
+	t.Log("relationships incident to that construct — which must NOT move: one endpoint")
+	t.Log("observed is not an observation of any association.")
 	t.Log("")
 
 	focus := []string{"P2", "P3", "P10"}
@@ -279,25 +296,45 @@ func TestEvolution_ColdToWarmConvergence(t *testing.T) {
 	cursor := 0
 	for tick := 0; tick < 500; tick++ {
 		if cursor < len(checkpoints) && tick == checkpoints[cursor] {
-			printRows(t, fmt.Sprintf("T=%d", tick), a.storage, a.ontology, focus)
+			p, _ := a.state.Property(construct)
+			t.Logf("  T=%-4d %s = %.3f (conf %.3f from %d observations)",
+				tick, construct, p.Value, p.Confidence, p.NObservations)
+			printRows(t, "        relations", a.state, focus)
 			cursor++
 		}
 		a.runTicks(t, 1)
 	}
-	printRows(t, "T=500 (final)", a.storage, a.ontology, focus)
 
-	// Invariants.
+	// The property converged: it holds what the system is doing, at full confidence.
+	p, ok := a.state.Property(construct)
+	if !ok {
+		t.Fatalf("no property for the routed construct %s", construct)
+	}
+	t.Logf("  T=500 (final) %s = %.3f (conf %.3f from %d observations)",
+		construct, p.Value, p.Confidence, p.NObservations)
+	if math.Abs(p.Value-0.8) > 0.01 {
+		t.Errorf("%s should converge to the observed 0.8; got %.3f", construct, p.Value)
+	}
+	if p.Confidence < 0.999 {
+		t.Errorf("%s confidence should be ≈1.0 after 500 observations; got %.3f",
+			construct, p.Confidence)
+	}
+
+	// The relationships did not: their strength is still what was seeded, and their
+	// confidence still reports that nothing has been learned here.
 	for _, id := range focus {
-		s := snap(t, a.storage, a.ontology, id)
-		if s.Confidence < 0.999 {
-			t.Errorf("%s confidence should be ≈1.0 at T=500; got %.3f", id, s.Confidence)
+		s := snap(t, a.state, id)
+		if s.NObservations != 0 || s.Confidence != 0 {
+			t.Errorf("%s advanced to n=%d conf=%.3f on one endpoint's observations; a "+
+				"strength must wait for pairs", id, s.NObservations, s.Confidence)
 		}
-		if math.Abs(s.EMA-0.8) > 0.01 {
-			t.Errorf("%s EMA should converge to 0.8; got %.3f", id, s.EMA)
+		if s.Effective != s.Prior {
+			t.Errorf("%s effective %.3f drifted from its prior %.3f with no evidence",
+				id, s.Effective, s.Prior)
 		}
 	}
 
-	printSummary(t, "cold-to-warm", a.storage, a.ontology)
+	printSummary(t, "cold-to-warm", a.state)
 }
 
 // ── Scenario 2: regime change ────────────────────────────────────────────────
@@ -321,7 +358,7 @@ func TestEvolution_RegimeChange(t *testing.T) {
 	cursor := 0
 	for tick := 0; tick <= 800; tick++ {
 		if cursor < len(checkpoints) && tick == checkpoints[cursor] {
-			printRows(t, fmt.Sprintf("T=%d  regime-target=%.2f", tick, regimeAt(tick)), a.storage, a.ontology, focus)
+			printRows(t, fmt.Sprintf("T=%d  regime-target=%.2f", tick, regimeAt(tick)), a.state, focus)
 			cursor++
 		}
 		if tick < 800 {
@@ -330,7 +367,7 @@ func TestEvolution_RegimeChange(t *testing.T) {
 	}
 
 	// Invariants.
-	p2at300 := snap(t, a.storage, a.ontology, "P2")
+	p2at300 := snap(t, a.state, "P2")
 	// At tick 300 we have observed 300 samples at 0.3. EMA converged.
 	// (Note: tick==300 prints BEFORE the next runTicks call, so we already
 	// have 300 ticks worth — checkpoint sequencing matches.)
@@ -339,7 +376,7 @@ func TestEvolution_RegimeChange(t *testing.T) {
 		// with runTicks, so the captured value is after 300 ticks of obs.
 	}
 
-	final := snap(t, a.storage, a.ontology, "P2")
+	final := snap(t, a.state, "P2")
 	if final.EMA > 0.55 {
 		t.Errorf("at T=800 EMA should be moving back toward 0.3 (regime 3); got %.3f", final.EMA)
 	}
@@ -347,7 +384,7 @@ func TestEvolution_RegimeChange(t *testing.T) {
 		t.Errorf("at T=800 EMA should not have undershot 0.3; got %.3f", final.EMA)
 	}
 
-	printSummary(t, "regime-change", a.storage, a.ontology)
+	printSummary(t, "regime-change", a.state)
 }
 
 func regimeAt(tick int) float64 {
@@ -382,8 +419,8 @@ func TestEvolution_ConflictPairCoupling(t *testing.T) {
 	cursor := 0
 	for tick := 0; tick <= 500; tick++ {
 		if cursor < len(checkpoints) && tick == checkpoints[cursor] {
-			p2 := snap(t, a.storage, a.ontology, "P2")
-			p3 := snap(t, a.storage, a.ontology, "P3")
+			p2 := snap(t, a.state, "P2")
+			p3 := snap(t, a.state, "P3")
 			t.Logf("  T=%d", tick)
 			t.Logf("    %s", p2)
 			t.Logf("    %s", p3)
@@ -415,154 +452,232 @@ func TestEvolution_ConflictPairCoupling(t *testing.T) {
 	// separating on evidence rather than moving together — is covered by
 	// TestRelationalObservationsReachTheStateModel in pkg/semmap.
 
-	printSummary(t, "conflict-pair", a.storage, a.ontology)
+	printSummary(t, "conflict-pair", a.state)
 }
 
 // ── Scenario 4: multi-construct stress ───────────────────────────────────────
 
+// Scenario 4 asks what a system with several moving parts lets the map learn.
+//
+// The patterns vary, and that is the point: the four metrics used to be constants,
+// which under endpoint EMA still advanced every incident edge — a strength climbing to
+// full confidence on a signal that never changed. A constant series carries no
+// association, so the estimator now declines to move on it, and a scenario that wants
+// relationships to learn has to drive something that actually varies.
 func TestEvolution_MultiConstructStress(t *testing.T) {
 	col := scripted.New("node_1",
-		scripted.ConstantPattern{Metric: types.CPUUtilization, Value: 0.6, Node: "node_1", EndTick: -1},
-		scripted.ConstantPattern{Metric: types.MemoryUtilization, Value: 0.5, Node: "node_1", EndTick: -1},
-		scripted.ConstantPattern{Metric: types.NetworkRxBps, Value: 0.4, Node: "node_1", EndTick: -1},
-		scripted.ConstantPattern{Metric: types.PodStartupMs, Value: 0.7, Node: "node_1", EndTick: -1},
+		// CPU and pod-startup move together; memory moves against them; network drifts
+		// independently. Which of those the map can confirm is bounded by what the
+		// specification routes.
+		scripted.SineWavePattern{Metric: types.CPUUtilization, Node: "node_1",
+			Mid: 0.5, Amp: 0.3, PeriodTicks: 40, EndTick: -1},
+		scripted.SineWavePattern{Metric: types.PodStartupMs, Node: "node_1",
+			Mid: 0.5, Amp: 0.25, PeriodTicks: 40, EndTick: -1},
+		scripted.SineWavePattern{Metric: types.MemoryUtilization, Node: "node_1",
+			Mid: 0.5, Amp: 0.2, PeriodTicks: 40, StartTick: 20, EndTick: -1},
+		scripted.RampPattern{Metric: types.NetworkRxBps, Node: "node_1",
+			From: 0.1, To: 0.9, StartTick: 0, EndTick: 500},
 	)
 	a := newEvolutionAgent(t, col, nil)
 
-	t.Log("Scenario 4: multi-construct stress — four simultaneous patterns drive RC, CO, PS.")
-	t.Log("Every edge that touches an observed construct must accumulate observations.")
+	t.Log("Scenario 4: multi-construct stress — four varying patterns.")
+	t.Log("A relationship can only learn when BOTH its endpoints are observed, so what")
+	t.Log("moves is bounded by the specification's routing.")
 	t.Log("")
 
 	a.runTicks(t, 500)
 
-	all := allSnaps(t, a.storage, a.ontology)
-	t.Log("  Final state of all 15 edges:")
+	// Which constructs the specification can actually observe here.
+	observed := map[string]bool{}
+	for _, r := range mustSpec().MetricRouting {
+		if p, ok := a.state.Property(r.MetricType); ok && p.NObservations > 0 {
+			observed[r.ConstructID] = true
+		}
+	}
+	t.Logf("  observed constructs: %v", sortedKeys(observed))
+
+	all := allSnaps(t, a.state)
+	t.Log("  Final state of every relationship:")
 	for _, e := range all {
 		t.Logf("    %s", e)
 	}
 
-	// Invariants.
-	// Per the Bridge contract, only edges touching one of the observed
-	// constructs (RC, PS, CO — the constructs with MetricType mappings)
-	// receive updates. SC/MU/CE/RR have no MetricType wired, so propositions
-	// confined to those four (P4, P7, P9, P11, P12, P15) stay at their prior.
-	observed := map[string]bool{"RC": true, "PS": true, "CO": true}
+	// A relationship whose endpoints were both observed had the chance to learn; one
+	// that reaches an unobserved construct must not have moved, because nothing about
+	// it was measured.
+	learned := 0
 	for _, e := range all {
-		touchesObserved := observed[e.From] || observed[e.To]
-		if touchesObserved && e.NObservations == 0 {
-			t.Errorf("%s touches an observed construct but NObservations=0", e.PropID)
+		bothObserved := observed[e.From] && observed[e.To]
+		if bothObserved && e.NObservations > 0 {
+			learned++
 		}
-		if !touchesObserved && e.NObservations != 0 {
-			t.Errorf("%s confined to non-observed constructs but NObservations=%d (Bridge leaked)", e.PropID, e.NObservations)
-		}
-	}
-	// Every observed construct should produce at least one edge with ≈1.0 confidence.
-	confidentFor := map[string]bool{"RC": false, "PS": false, "CO": false}
-	for _, e := range all {
-		if e.Confidence > 0.999 {
-			if e.From == "RC" || e.To == "RC" {
-				confidentFor["RC"] = true
-			}
-			if e.From == "PS" || e.To == "PS" {
-				confidentFor["PS"] = true
-			}
-			if e.From == "CO" || e.To == "CO" {
-				confidentFor["CO"] = true
-			}
+		if !bothObserved && e.NObservations != 0 {
+			t.Errorf("%s reaches an unobserved construct but recorded %d observations — "+
+				"evidence appeared for a pair that was never both observed",
+				e.PropID, e.NObservations)
 		}
 	}
-	for c, ok := range confidentFor {
-		if !ok {
-			t.Errorf("no edge touching %s reached confidence ≈1.0", c)
-		}
+	if learned == 0 {
+		t.Error("no relationship between two observed constructs learned anything from 500 " +
+			"ticks of varying telemetry")
 	}
+	t.Logf("  relationships that learned: %d of %d", learned, len(all))
 
-	printSummary(t, "multi-construct", a.storage, a.ontology)
+	printSummary(t, "multi-construct", a.state)
+}
+
+// sortedKeys returns a map's keys in order, for stable narration.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ── Scenario 5: deprecation from contradiction ───────────────────────────────
 
 func TestEvolution_DeprecationFromContradiction(t *testing.T) {
-	// P5 is CO→RR positive ("offline autonomy improves continuity").
-	// We emit a low NetworkRxBps signal (0.05) — CO observations stay low,
-	// contradicting P5's "high CO → high RR" prior. After 200 ticks of low
-	// CO evidence the advisor notes the contradiction and we deprecate P5.
-	col := scripted.New("node_1",
-		scripted.ConstantPattern{
-			Metric: types.NetworkRxBps, Value: 0.05, Node: "node_1", EndTick: -1,
-		},
-	)
-	// Tight convergence threshold so 150 observations saturate confidence
-	// and the |Δ|+confidence advisor threshold can fire within the scenario.
-	a := newEvolutionAgentWithConvergence(t, col, nil, 150)
+	// A contradiction now means what it says: the two endpoints move together in the
+	// direction OPPOSITE to the one the proposition declares. The scenario used to drive
+	// a single low signal and call the resulting drift a contradiction, which it was not
+	// — one endpoint sitting low says nothing about whether the pair is related.
+	spec := mustSpec()
+	target, aMetric, bMetric := contradictablePair(t)
+	rel := relFor(t, stateFor(t), target)
+	t.Logf("Scenario 5: deprecation from contradiction (%s: %s→%s, declared %+d).",
+		target, rel.From, rel.To, rel.Sign)
 
-	t.Log("Scenario 5: deprecation from contradiction.")
-	t.Log("Low CO evidence (0.05) for 200 ticks pushes P5 EMA away from its 0.7 prior;")
-	t.Log("when |Δeff| exceeds the advisor threshold, an operator deprecates P5.")
+	// Anti-correlate the two endpoints relative to the declared sign, so the evidence is
+	// evidence AGAINST this proposition rather than a weaker version of it.
+	amp := 0.3
+	if rel.Sign < 0 {
+		amp = -0.3 // a negative claim is contradicted by the endpoints moving together
+	}
+	col := scripted.New("node_1",
+		scripted.SineWavePattern{Metric: types.MetricType(aMetric), Node: "node_1",
+			Mid: 0.5, Amp: 0.3, PeriodTicks: 40, EndTick: -1},
+		scripted.SineWavePattern{Metric: types.MetricType(bMetric), Node: "node_1",
+			Mid: 0.5, Amp: -amp, PeriodTicks: 40, EndTick: -1},
+	)
+	// Tight convergence threshold so 200 pairs saturate confidence and the
+	// |Δ|-plus-confidence advisor threshold can fire within the scenario.
+	a := newEvolutionAgentWithConvergence(t, col, nil, 150)
+	_ = spec
+
+	t.Log("Evidence contradicts the declared direction, so the learned strength falls to")
+	t.Log("zero while confidence rises — which is what makes the advisory meaningful.")
 	t.Log("")
 
 	before, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
-	t.Logf("  before: graph path length = %d, latency=%.3f, resource_cost=%.3f, confidence=%.3f",
-		len(before.GraphPathUsed), before.LatencyEstimate, before.ResourceCost, before.Confidence)
+	t.Logf("  before: graph path length = %d, resource_cost=%.3f, confidence=%.3f",
+		len(before.GraphPathUsed), before.ResourceCost, before.Confidence)
 
 	advisoryAt := -1
 	for tick := 0; tick < 200; tick++ {
 		a.runTicks(t, 1)
 		if (tick+1)%50 == 0 {
-			n := emitAdvisories(t, a.storage, a.ontology, fmt.Sprintf("T=%d", tick+1))
+			n := emitAdvisories(t, a.state, fmt.Sprintf("T=%d", tick+1))
 			if n > 0 && advisoryAt < 0 {
 				advisoryAt = tick + 1
 			}
 		}
 	}
 
-	p5snap := snap(t, a.storage, a.ontology, firstSpecProp())
-	t.Logf("  P5 before deprecation: %s", p5snap)
+	contradicted := snap(t, a.state, target)
+	t.Logf("  %s before deprecation: %s", target, contradicted)
+	if contradicted.NObservations == 0 {
+		t.Fatalf("%s never paired, so nothing could contradict it", target)
+	}
+	if contradicted.EMA > 0.1 {
+		t.Errorf("%s learned strength %.3f from evidence of the opposite sign; evidence "+
+			"against a claim is not a weaker version of it", target, contradicted.EMA)
+	}
 	if advisoryAt < 0 {
 		t.Error("expected at least one advisory line to fire before deprecation")
 	}
 
 	// Operator action: deprecate through the FACADE, not the ontology. The facade
-	// retires the relationship in the state model as well, which is what the reasoner
+	// retires the relationship in the state model as well, which is what every answer
 	// reads; reaching past it changes what Propositions() reports and no decision.
-	if err := a.sm.Deprecate(firstSpecProp(), "EMA contradicts prior direction after evidence accumulation"); err != nil {
+	if err := a.sm.Deprecate(target, "evidence contradicts the declared direction"); err != nil {
 		t.Fatalf("deprecate failed: %v", err)
 	}
-	t.Log("  Operator deprecates P5.")
+	t.Logf("  Operator deprecates %s.", target)
 
 	after, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
-	t.Logf("  after:  graph path length = %d, latency=%.3f, resource_cost=%.3f, confidence=%.3f",
-		len(after.GraphPathUsed), after.LatencyEstimate, after.ResourceCost, after.Confidence)
+	t.Logf("  after:  graph path length = %d, resource_cost=%.3f, confidence=%.3f",
+		len(after.GraphPathUsed), after.ResourceCost, after.Confidence)
 
-	// Invariants.
-	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {
-		t.Errorf("graph path should shrink by exactly 1; before=%d after=%d",
+	if len(after.GraphPathUsed) > len(before.GraphPathUsed) {
+		t.Errorf("graph path grew after a deprecation: before=%d after=%d",
 			len(before.GraphPathUsed), len(after.GraphPathUsed))
 	}
 	props, _ := a.ontology.Propositions()
 	foundDeprecated := false
 	for _, p := range props {
-		if p.PropositionID == firstSpecProp() && p.Deprecated {
+		if p.PropositionID == target && p.Deprecated {
 			foundDeprecated = true
 		}
 	}
 	if !foundDeprecated {
-		t.Error("P5 not flagged Deprecated in ontology after Deprecate() call")
+		t.Errorf("%s not flagged Deprecated in the declaration layer after Deprecate()", target)
 	}
-	// Edge descriptor must still be present in storage.
-	all, _ := a.storage.AllEdges()
+	// The relationship must still be retrievable: a soft delete withdraws a claim from
+	// reasoning and keeps its record, so a decision taken before it stays reconstructible.
 	stillThere := false
-	for _, e := range all {
-		if e.PropositionID == firstSpecProp() {
+	for _, r := range a.state.Relationships("", "") {
+		if r.Label == target {
 			stillThere = true
+			if r.Status != statemap.Retired {
+				t.Errorf("%s is still %s after deprecation; it would keep contributing to "+
+					"every answer", r.Label, r.Status)
+			}
 			break
 		}
 	}
 	if !stillThere {
-		t.Error("P5 edge descriptor disappeared from storage — soft delete must preserve it")
+		t.Error("the relationship vanished from the model — a soft delete must preserve it")
 	}
 
-	printSummary(t, "deprecation", a.storage, a.ontology)
+	printSummary(t, "deprecation", a.state)
+}
+
+// contradictablePair finds a proposition whose two endpoint constructs both have routed
+// metrics, so evidence can be produced for or against it, and returns the proposition
+// with those two metrics. A proposition whose endpoints cannot both be observed is not a
+// claim this deployment can contradict.
+func contradictablePair(t *testing.T) (propID, aMetric, bMetric string) {
+	t.Helper()
+	spec := mustSpec()
+	routed := map[string]string{}
+	for _, r := range spec.MetricRouting {
+		if _, seen := routed[r.ConstructID]; !seen {
+			routed[r.ConstructID] = r.MetricType
+		}
+	}
+	for _, p := range spec.Propositions {
+		am, aok := routed[p.FromConstruct]
+		bm, bok := routed[p.ToConstruct]
+		if aok && bok {
+			return p.PropositionID, am, bm
+		}
+	}
+	t.Skip("no proposition in this spec has both endpoints routed to metrics")
+	return "", "", ""
+}
+
+// relFor returns the relationship carrying a proposition ID.
+func relFor(t *testing.T, state *statemap.Map, propID string) statemap.Relationship {
+	t.Helper()
+	for _, r := range state.Relationships("", "") {
+		if r.Label == propID {
+			return r
+		}
+	}
+	t.Fatalf("no relationship carries proposition %q", propID)
+	return statemap.Relationship{}
 }
 
 // ── Scenario 6: propose-then-confirm ─────────────────────────────────────────
@@ -588,8 +703,9 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	state := stateFor(t)
 	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	r.AttachState(state)
-	a.sm = semmap.New(a.storage, ontology, a.updater, r, proposer, minimal.NewDisabledTuner())
+	a.sm = semmap.New(ontology, r, proposer, minimal.NewDisabledTuner())
 	a.sm.AttachState(state)
+	a.state = state
 
 	t.Log("Scenario 6: propose-then-confirm.")
 	t.Log("Drive 150 strongly correlated MU↔PS observations directly to the proposer;")

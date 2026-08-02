@@ -96,29 +96,6 @@ func registerStaticRoutes(mux *http.ServeMux) {
 // They are kept in their own function so the diff against pre-expansion
 // behavior is obvious to reviewers.
 func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
-	// POST /ingest  {"from_id":"PS","to_id":"RC","observation":0.7,"event_id":"evt-1"}
-	mux.HandleFunc("POST /ingest", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			FromID      string  `json:"from_id"`
-			ToID        string  `json:"to_id"`
-			Observation float64 `json:"observation"`
-			EventID     string  `json:"event_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := sm.Ingest(req.FromID, req.ToID, req.Observation, req.EventID); err != nil {
-			// An unknown (from_id, to_id) pair is the caller naming a construct
-			// pair that carries no edge — a client error, not a server fault.
-			// Returning 500 here made a malformed request indistinguishable
-			// from a genuine internal failure.
-			writeError(w, statusForIngestError(err), err.Error())
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-
 	// GET /cost?task=pod-scheduling&node=node_1
 	//
 	// `node` names the machine the question is about, and this agent can only

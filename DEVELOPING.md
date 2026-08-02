@@ -119,7 +119,7 @@ The full flag table is in [README §3](semantic-map/README.md#3-running-the-edge
 
 - **`-kd`** selects per-distribution priors from `-priors`. Omit it and you get the global Di-Select strengths. This is the difference between "an agent that knows it is on k0s" and "an agent that knows it is on *some* Kubernetes".
 - **`-regime`** (`stable`/`default`/`bursty`/`volatile`) sets `-alpha` and `-convergence` to a pre-characterised bundle. Calibrated against the k0s workload matrix; prefer it over tuning the two numbers by hand.
-- **`-collect-interval 0`** disables the autonomous collection loop. The manual `POST /ingest` path still works — useful for replay and tests.
+- **`-collect-interval 0`** disables the autonomous collection loop. The manual `POST /ingest-sample` path still works — useful for replay and tests.
 - **`-proposer=false`** on low-CPU nodes. The MI proposer keeps ring buffers per construct pair.
 
 `poc/` has a Multipass-based 3-VM deployment (`make -C poc all`) if you want a real multi-node mesh; see [ARCHITECTURE §12](semantic-map/ARCHITECTURE.md#12-poc-deployment-poc).
@@ -172,7 +172,7 @@ func TestMyCollectorCompliance(t *testing.T) {
 }
 ```
 
-Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. (`UpdaterFactory` is the exception: it returns `(UpdaterContract, StorageContract)`, because the updater's guarantees can only be checked against the storage it writes to.) `internal/scripted/collector_test.go` is the shortest working example to copy.
+Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *testing.T) contracts.XContract`, so it can call `t.TempDir()` or `t.Fatalf` while constructing. `internal/scripted/collector_test.go` is the shortest working example to copy.
 
 **The rule: your implementation is valid if and only if it passes the compliance suite.** That is the definition, not a check on top of one.
 
@@ -186,7 +186,7 @@ Note the factory takes `*testing.T` — every `compliance.*Factory` is `func(t *
 | - | ---- | ------------ |
 | 1 | `pkg/types/types.go` — the `MetricType` constant block | it does not compile |
 | 2 | `pkg/semmap/bridge.go` — `metricTypeToConstruct` | the Bridge silently ignores the sample; no edge ever updates |
-| 3 | `cmd/agent/dto.go` — `knownMetricTypes` | `POST /ingest-sample` rejects it with `400 unknown metric_type`, even though the Bridge would have routed it fine |
+| 3 | `cmd/agent/dto.go` — `knownMetricTypes` | `POST /ingest-sample` rejects it with `400 unknown metric_type`, even though the routing table would have handled it fine |
 
 ```go
 // 1. pkg/types/types.go
@@ -205,7 +205,7 @@ Then update the MetricType catalogue in [ARCHITECTURE §5](semantic-map/ARCHITEC
 
 > Three copies of one enum is a smell, not a design. The right fix is a single registry that the Bridge and the DTO validator both read, which is the same refactor the deferred `metric_types.json` work would do. Until then, the third edit is load-bearing.
 
-The catalogue is **compile-time closed on purpose**: `POST /ingest-sample` rejects any type not in the enum, so a misconfigured collector fails loudly instead of poisoning the graph with silent unknowns. Externalising it to a config file is a known, deliberately deferred design item — see the open gap in `research-docs/SEMANTIC-MAP-STATUS.md` (private repo) for the chosen approach and why it waits for a real driver.
+The catalogue is **compile-time closed on purpose**: `POST /ingest-sample` rejects any type not in the enum, so a misconfigured collector fails loudly instead of poisoning the model with silent unknowns. Externalising it to a config file is a known, deliberately deferred design item — see the open gap in `research-docs/SEMANTIC-MAP-STATUS.md` (private repo) for the chosen approach and why it waits for a real driver.
 
 ### 4.3 Swap a contract implementation
 

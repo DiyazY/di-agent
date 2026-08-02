@@ -14,7 +14,6 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/statemap"
-	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // defaultPeerTimeout caps a single peer HTTP call in v1. LAN-local peers
@@ -104,39 +103,31 @@ type Config struct {
 	// Set false to disable operator tuning entirely.
 	UseRuleBasedTuner bool
 
-	// Relational selects the RelationalEMAUpdater, which learns each edge's
-	// weight from paired observations of its two endpoints instead of from
-	// whichever endpoint a sample observed. The two modes answer different
-	// questions and are not interchangeable:
+	// PairWindowSeconds, PairMinSupport and PairWindow tune the state model's paired
+	// estimator: how far apart two observations may be and still count as
+	// simultaneous, how many pairs a relationship needs before its strength moves,
+	// and how many recent pairs the estimate is computed over. Zero means the
+	// estimator's own defaults (15s, 8, 60).
 	//
-	//   endpoint (default) — the weight tracks the magnitude of one construct.
-	//                        Every sample moves an edge, so confidence grows with
-	//                        the raw sample rate.
-	//   relational        — the weight tracks the strength of the association
-	//                        between the endpoints, on the same scale as the
-	//                        calibrated prior. An edge advances only when both
-	//                        endpoints have been observed within the pairing
-	//                        window, so confidence grows with paired coverage.
-	//
-	// Default stays endpoint so previously reported measurements remain
-	// reproducible from the same flags.
-	Relational bool
-
-	// PairWindowSeconds is how far apart two construct observations may be and
-	// still form a pair. Only used when Relational is set. Zero means
-	// semmap.DefaultPairWindowSeconds.
+	// There used to be a Relational flag beside these, selecting between two
+	// estimators — one that moved an edge on any single endpoint observation, and one
+	// that waited for both. Only the paired reading was defensible (a single
+	// construct's magnitude is not an observation of an association's strength), and
+	// it is what the state model does; the choice went with the second model.
 	PairWindowSeconds int
+	PairMinSupport    int
+	PairWindow        int
 
-	// PairMinSupport is the number of pairs an edge needs before the relational
-	// updater emits a strength; PairWindow is the sliding window length. Zero
-	// means the built-in defaults (8 and 60).
-	PairMinSupport int
-	PairWindow     int
-
-	// StateMap is the live state model this agent reasons from. When set, the
-	// reasoner answers cost queries from it and records each answer in its journal,
-	// so every answer carries a DecisionID that reproduces its inputs. Nil leaves the
-	// reasoner reading the storage graph, whose answers are not traceable.
+	// StateMap is the live state model this agent reasons from: every answer is read
+	// from it and recorded in its journal, so each one carries a DecisionID that
+	// reproduces its inputs.
+	//
+	// Nil is allowed and means "build one with the defaults" rather than "run without
+	// one". There is nothing left for an agent without a state model to do — cost,
+	// estimates, explanations and the graph surfaces are all read from it — so a
+	// half-wired agent is a wiring mistake that used to surface much later as an empty
+	// answer. A caller that wants control over the lifecycle (persistence, sweeps,
+	// injected clock) passes its own, which is what the daemon does.
 	StateMap *statemap.Map
 
 	// AcceptForeignSamples lets this agent ingest telemetry labelled with other
@@ -228,12 +219,21 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	}
 	switch profileName {
 	case "edge-minimal":
+		// A caller that did not supply a state model gets one. Everything this profile
+		// answers is read from it, so building the agent without one produces something
+		// that looks assembled and cannot answer.
+		if cfg.StateMap == nil {
+			cfg.StateMap = statemap.New(statemap.Config{
+				ConvergenceObservations: int(cfg.ConvergenceThreshold),
+				Alpha:                   cfg.EMAAlpha,
+				AdmitUnknown:            true,
+				Learn:                   true,
+			}, statemap.NewJournal(0))
+		}
 		// Seed the state model here, where both the specification and the calibration are
 		// in hand: relationships get this cluster's priors instead of a placeholder.
-		if cfg.StateMap != nil {
-			if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
-				return nil, nil, err
-			}
+		if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
+			return nil, nil, err
 		}
 		sm, coll := buildEdgeMinimal(cfg, pw)
 		return sm, coll, nil
@@ -258,21 +258,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 }
 
 func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
-	storage := minimal.NewInMemoryStorage()
 	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
-
-	var updater contracts.UpdaterContract = minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
-	if cfg.Relational {
-		minSupport, window := cfg.PairMinSupport, cfg.PairWindow
-		if minSupport <= 0 {
-			minSupport = 8
-		}
-		if window <= 0 {
-			window = 60
-		}
-		updater = minimal.NewRelationalEMAUpdater(storage, cfg.EMAAlpha,
-			cfg.ConvergenceThreshold, minSupport, window)
-	}
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
 	// network I/O) so the reasoner has a place to look up peers even when
@@ -320,26 +306,21 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		tuner = minimal.NewDisabledTuner()
 	}
 
-	// Apply calibrated proposition strengths from the pipeline before seeding
-	// storage. Per-KD edge weights (if any) are applied during seeding.
+	// Calibrated proposition strengths reach the declaration layer so /propositions
+	// reports what this cluster was calibrated to. The operative copy is in the state
+	// model, seeded from the same file in seedStateMap.
 	if pw != nil {
 		applyPriorWeights(ontology, pw)
+		reconcilePropositionStrengths(ontology, pw, cfg.KD)
 	}
 
-	seedFromOntology(storage, ontology, pw, cfg.KD)
-
-	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
+	sm := semmap.NewWithPeers(ontology, reasoner, proposer, tuner, peerRegistry, peerClient)
 	sm.SetIdentity(cfg.NodeID, cfg.AcceptForeignSamples)
-	if cfg.StateMap != nil {
-		// Both halves need it: the facade feeds observations into the model, and the
-		// reasoner answers from it. Attaching only one would give a model that fills up
-		// and never gets read, or a reasoner reading a model nothing updates.
-		sm.AttachState(cfg.StateMap)
-		reasoner.AttachState(cfg.StateMap)
-	}
-	if cfg.Relational && cfg.PairWindowSeconds > 0 {
-		sm.SetPairWindow(cfg.PairWindowSeconds)
-	}
+	// Both halves need it: the facade feeds observations into the model, and the
+	// reasoner answers from it. Attaching only one would give a model that fills up
+	// and never gets read, or a reasoner reading a model nothing updates.
+	sm.AttachState(cfg.StateMap)
+	reasoner.AttachState(cfg.StateMap)
 
 	// Build collector(s): Netdata, Cgroup, or both via MultiCollector.
 	// Empty CgroupRoot/NodeID or empty NetdataURL disables the respective
@@ -374,56 +355,27 @@ func applyPriorWeights(ontology *minimal.SpecOntology, pw *priorWeightsFile) {
 	}
 }
 
-// seedFromOntology pre-populates storage with one node per construct and one
-// edge per proposition. Edge prior_weight selection precedence:
+// reconcilePropositionStrengths writes each proposition's per-cluster calibrated prior
+// back into the declaration layer, where a per-KD entry exists for it.
 //
-//  1. pw.DistributionEdgeWeights[cfg.KD][edgeKey] (per-KD calibrated, if both KD
-//     and the file are provided);
-//  2. proposition PriorStrength from the ontology (which may have been
-//     overwritten by applyPriorWeights from the global pw.Propositions table).
+// Without this the two layers disagree for the whole cold-start period: the state model
+// holds the per-KD weight the agent reasons with, while GET /propositions reports the
+// global strength, and the first operator tune records a change from a number the agent
+// never used.
 //
-// Whichever value wins is written back to the ontology as well. Without that,
-// the two layers disagree for the whole cold-start period: the Reasoner reads
-// the per-KD weight from storage while GET /propositions reports the global
-// strength, and the first operator tune records a change from a number the
-// agent never used.
-func seedFromOntology(
-	storage *minimal.InMemoryStorage,
-	ontology *minimal.SpecOntology,
-	pw *priorWeightsFile,
-	kd string,
-) {
-	constructs, _ := ontology.Constructs()
-	for _, c := range constructs {
-		_ = storage.PutNode(&types.NodeDescriptor{
-			NodeID:        c.ConstructID,
-			ConstructType: c.Name,
-			PriorValue:    0.5, // neutral prior; per-distribution values seeded by Netdata adapter
-			EMAValue:      0.5,
-			Confidence:    0.0,
-			NObservations: 0,
-		})
-	}
-
+// It used to also populate a storage graph with a node per construct and an edge per
+// proposition — the seeding half of a second model. What remains is the reconciliation,
+// which is the part that was ever about agreement rather than duplication.
+func reconcilePropositionStrengths(ontology *minimal.SpecOntology, pw *priorWeightsFile, kd string) {
 	perKD := perKDEdgeWeights(pw, kd)
-
+	if len(perKD) == 0 {
+		return
+	}
 	propositions, _ := ontology.Propositions()
 	for _, p := range propositions {
-		prior := p.PriorStrength
 		if e, ok := perKD[edgeKey(p.FromConstruct, p.ToConstruct, p.PropositionID)]; ok {
-			prior = e.PriorWeight
-			_ = ontology.SetPropositionStrength(p.PropositionID, prior)
+			_ = ontology.SetPropositionStrength(p.PropositionID, e.PriorWeight)
 		}
-		_ = storage.PutEdge(&types.EdgeDescriptor{
-			FromID:        p.FromConstruct,
-			ToID:          p.ToConstruct,
-			PropositionID: p.PropositionID,
-			Direction:     p.Direction,
-			PriorWeight:   prior,
-			EMAWeight:     prior, // starts equal to prior
-			Confidence:    0.0,
-			NObservations: 0,
-		})
 	}
 }
 

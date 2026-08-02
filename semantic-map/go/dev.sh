@@ -406,9 +406,6 @@ ${BOLD}Examples:${RESET}
   ./dev.sh replay run   --kd k0s --test idle --run 1 --speed 60
   ./dev.sh replay run   --kd k0s --test idle --run 1 --speed 0   # max throughput
   ./dev.sh replay all   --kd k0s --speed 0                       # all 9 tests x 5 runs
-  ./dev.sh replay compare --test idle --run 1                    # debug/inspection only
-  ./dev.sh replay compare --test idle --runs-all --json          # JSON; 5-run averages
-  ./dev.sh replay compare --test cp_heavy_12client --csv > out.csv  # CSV for notebooks
   ./dev.sh ui                      # browser viewer (starts daemon if needed)
   KD=k0s ./dev.sh restart          # use per-KD priors
   PORT=9000 ./dev.sh start         # custom port

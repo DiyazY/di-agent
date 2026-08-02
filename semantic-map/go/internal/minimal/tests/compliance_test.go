@@ -14,38 +14,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/statemap"
-	"github.com/DiyazY/di-agent/pkg/types"
 )
-
-func TestInMemoryStorageCompliance(t *testing.T) {
-	compliance.RunStorageCompliance(t, func(t *testing.T) contracts.StorageContract {
-		return minimal.NewInMemoryStorage()
-	})
-}
-
-func TestEMAUpdaterCompliance(t *testing.T) {
-	compliance.RunUpdaterCompliance(t, func(t *testing.T) (contracts.UpdaterContract, contracts.StorageContract) {
-		s := minimal.NewInMemoryStorage()
-		u := minimal.NewEMAUpdater(s, 0.2, 500)
-		return u, s
-	})
-}
-
-// The relational updater must satisfy the base suite as well as the paired one:
-// it is an UpdaterContract first, and the paired path is an extension rather
-// than a replacement.
-func TestRelationalEMAUpdaterCompliance(t *testing.T) {
-	compliance.RunUpdaterCompliance(t, func(t *testing.T) (contracts.UpdaterContract, contracts.StorageContract) {
-		s := minimal.NewInMemoryStorage()
-		u := minimal.NewRelationalEMAUpdater(s, 0.2, 500, 8, 60)
-		return u, s
-	})
-	compliance.RunRelationalUpdaterCompliance(t, func(t *testing.T) (contracts.RelationalUpdaterContract, contracts.StorageContract) {
-		s := minimal.NewInMemoryStorage()
-		u := minimal.NewRelationalEMAUpdater(s, 0.2, 500, 8, 60)
-		return u, s
-	})
-}
 
 func TestCgroupCollectorCompliance(t *testing.T) {
 	compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
@@ -207,47 +176,6 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
-// seedReasonerState seeds storage with one node per construct and one edge per
-// proposition, mirroring what profiles.seedFromOntology does at daemon startup.
-//
-// Despite the name it no longer has anything to do with the reasoner, which reads the
-// state model. It remains because the facade's graph surfaces — /graph, /edges,
-// /history and the updater — still read this storage, and a test exercising those needs
-// it populated.
-func seedReasonerState(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology) {
-	t.Helper()
-	cs, err := o.Constructs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range cs {
-		if err := s.PutNode(&types.NodeDescriptor{
-			NodeID:        c.ConstructID,
-			ConstructType: c.Name,
-			PriorValue:    0.5,
-			EMAValue:      0.5,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ps, err := o.Propositions()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range ps {
-		if err := s.PutEdge(&types.EdgeDescriptor{
-			FromID:        p.FromConstruct,
-			ToID:          p.ToConstruct,
-			PropositionID: p.PropositionID,
-			Direction:     p.Direction,
-			PriorWeight:   p.PriorStrength,
-			EMAWeight:     p.PriorStrength,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 // newFakeCgroupRoot creates a temp directory with valid cgroups v2 files
 // so CgroupCollector can be exercised without a real kernel cgroup mount.
 func newFakeCgroupRoot(t *testing.T) string {
@@ -290,9 +218,22 @@ func reasonerWithState(t *testing.T) *minimal.RuleEngineReasoner {
 // at startup.
 func stateFor(t *testing.T) *statemap.Map {
 	t.Helper()
-	spec := mustSpec()
-	sm := statemap.New(statemap.Config{ConvergenceObservations: 500}, statemap.NewJournal(0))
-	if _, err := profiles.SeedStateMap(sm, spec, "", ""); err != nil {
+	return stateForConvergence(t, 500)
+}
+
+// stateForConvergence is the same with a chosen convergence target, so a scenario can
+// let confidence saturate inside a short observation window.
+func stateForConvergence(t *testing.T, convergence float64) *statemap.Map {
+	t.Helper()
+	sm := statemap.New(statemap.Config{
+		Owner:                   "scenario-node",
+		ConvergenceObservations: int(convergence),
+		Alpha:                   0.2,
+		AdmitUnknown:            true,
+		Learn:                   true,
+		LearnConfig:             statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 4, Window: 60},
+	}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(sm, mustSpec(), "", ""); err != nil {
 		t.Fatalf("seeding the state model: %v", err)
 	}
 	return sm

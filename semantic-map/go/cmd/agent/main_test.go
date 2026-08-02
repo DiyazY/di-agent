@@ -25,14 +25,15 @@ func TestFlagsReachConfig(t *testing.T) {
 	// Each entry is a flag and the Config field its value must reach. Extend this
 	// when adding a flag that configures the profile.
 	wiring := map[string]string{
-		"ingest-scope": "AcceptForeignSamples:",
-		"relational":   "Relational:",
-		"pair-window":  "PairWindowSeconds:",
-		"tuner":        "UseRuleBasedTuner:",
-		"proposer":     "UseProposer:",
-		"kd":           "KD:",
-		"priors":       "PriorWeightsPath:",
-		"domain":       "DomainSpec:",
+		"ingest-scope":        "AcceptForeignSamples:",
+		"pair-window-seconds": "PairWindowSeconds:",
+		"pair-support":        "PairMinSupport:",
+		"pair-history":        "PairWindow:",
+		"tuner":               "UseRuleBasedTuner:",
+		"proposer":            "UseProposer:",
+		"kd":                  "KD:",
+		"priors":              "PriorWeightsPath:",
+		"domain":              "DomainSpec:",
 	}
 	for flagName, field := range wiring {
 		if !strings.Contains(body, `"`+flagName+`"`) {

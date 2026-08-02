@@ -13,7 +13,7 @@ If you are changing code, read [`DEVELOPING.md`](DEVELOPING.md) instead. If you 
 | Assumption | Consequence for you |
 | ---------- | ------------------- |
 | **No authentication on any endpoint.** No TLS, no bearer tokens, no middleware. | Anyone who can reach the port can read the graph *and mutate it* — deprecate propositions, reset edges, retune weights. Treat the listen address as fully trusted. |
-| **All state is in memory.** `InMemoryStorage`; nothing is written to disk. | A restart discards every learned EMA weight, confidence score, and audit-log entry. The agent returns to cold-start priors. |
+| **State is in memory unless `-state-file` is set.** | Without it, a restart discards every learned strength, confidence and journal entry, and the agent returns to cold-start priors. With it, the map and its journal are snapshotted periodically and on shutdown, and a snapshot naming a different owner is refused. |
 | **`-addr :8080` binds every interface.** | On a multi-homed host this is reachable from anywhere routable. Bind explicitly. |
 
 None of these are oversights — they are recorded scope decisions ([ARCHITECTURE §10](semantic-map/ARCHITECTURE.md#10-coordination)) for a lab-network deployment, with production hardening deferred to P7. But they mean the deployment rule is simple:
@@ -127,7 +127,7 @@ Everything is command-line flags — there is no config file. The full table is 
 | Flag | Guidance |
 | ---- | -------- |
 | `-regime` | `stable` / `default` / `bursty` / `volatile`. Sets `-alpha` and `-convergence` to a bundle calibrated against the k0s workload matrix. **Prefer this over tuning the two numbers by hand.** Use `stable` for steady IoT nodes, `bursty` for control-plane-heavy ones. |
-| `-collect-interval` | `10s` default. `5s` on nodes you want to converge faster; `0` disables autonomous collection entirely (manual `POST /ingest` still works). |
+| `-collect-interval` | `10s` default. `5s` on nodes you want to converge faster; `0` disables autonomous collection entirely (manual `POST /ingest-sample` still works). |
 | `-proposer` | `true` default. Set `false` on CPU-constrained nodes — it keeps ring buffers per construct pair. |
 
 ### Port conflict warning

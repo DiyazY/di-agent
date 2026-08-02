@@ -397,39 +397,67 @@ func TestAddValidatedProposition_AppearsInPropositions(t *testing.T) {
 	t.Error("P-http proposition not found after POST /ontology/proposition")
 }
 
-func TestResetEdge_RestoresPriorAfterUpdates(t *testing.T) {
+// TestResetEdge_DiscardsEvidenceAndKeepsThePrior covers the operator action for a
+// relationship that learned from a period now known to be unrepresentative — a load
+// test, a broken collector. What goes is the evidence; the relationship is still
+// asserted to exist, and its prior is still the best available estimate.
+func TestResetEdge_DiscardsEvidenceAndKeepsThePrior(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
 
-	// Stream a few observations into PS→RC to move EMA off prior.
+	// Give one relation evidence of its own, directly, so the test is about reset
+	// rather than about whether pairs happened to form.
+	state := sm.State()
+	rels := state.Relationships(pairFrom(t), pairTo(t))
+	if len(rels) == 0 {
+		t.Fatalf("no relationship from %s to %s in the seeded model", pairFrom(t), pairTo(t))
+	}
 	for i := 0; i < 50; i++ {
-		if err := sm.Ingest("PS", "RC", 0.9, fmt.Sprintf("evt-%d", i)); err != nil {
+		if err := state.ObserveRelationship(rels[0].ID, 0.9, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
+	before, _ := state.Relationship(rels[0].ID)
+	if before.NObservations == 0 {
+		t.Fatal("setup: the relationship recorded no observations")
+	}
 
-	// Reset via HTTP.
-	resp := postJSON(t, base+"/agent/reset", ResetRequest{From: "PS", To: "RC"})
+	resp := postJSON(t, base+"/agent/reset",
+		ResetRequest{From: pairFrom(t), To: pairTo(t)})
 	if resp.StatusCode != 204 {
 		t.Fatalf("reset: %s", body(resp))
 	}
 	resp.Body.Close()
 
 	var edges []EdgeDTO
-	getJSON(t, base+"/edges?from=PS&to=RC", &edges)
+	getJSON(t, base+"/edges?from="+pairFrom(t)+"&to="+pairTo(t), &edges)
 	if len(edges) == 0 {
-		t.Fatal("no PS→RC edges returned after reset")
+		t.Fatalf("no %s→%s edges returned after reset", pairFrom(t), pairTo(t))
 	}
 	for _, e := range edges {
-		if e.EMAWeight != e.PriorWeight {
-			t.Errorf("edge %s: EMA=%.3f != prior=%.3f after reset", e.PropositionID, e.EMAWeight, e.PriorWeight)
-		}
 		if e.NObservations != 0 {
 			t.Errorf("edge %s: n_observations=%d after reset; want 0", e.PropositionID, e.NObservations)
 		}
 		if e.Confidence != 0.0 {
 			t.Errorf("edge %s: confidence=%.3f after reset; want 0.0", e.PropositionID, e.Confidence)
 		}
+		if e.PriorWeight != before.Prior {
+			t.Errorf("edge %s: prior %.3f after reset, want the untouched %.3f — a reset "+
+				"discards evidence, not the claim", e.PropositionID, e.PriorWeight, before.Prior)
+		}
+	}
+
+	// And the discard is on the record, because "no observations" and "observations
+	// thrown away by an operator" are different states of knowledge.
+	found := false
+	for _, e := range state.Journal().Events(0, 0) {
+		if e.Target == rels[0].ID && e.Detail["reset"] == true {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the journal holds no record of the reset, so a count of zero cannot be " +
+			"told apart from a relationship nothing ever observed")
 	}
 }
 
@@ -532,13 +560,16 @@ func TestStaticUI_RootServesIndex(t *testing.T) {
 
 // ── /ingest-sample (Bridge-routed telemetry) ──────────────────────────────────
 
-func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
-	// A cpu_utilization sample routes to RC via the Bridge, which fans out to
-	// every edge touching RC (P1: SC→RC, P2: RC→PS, P3: RC→PS, P8: MU→RC,
-	// P10: PS→RC, P14: RC→SC). After one POST, all of those edges must show
-	// n_observations >= 1 — we assert on the SC→RC pair for headline proof
-	// and then verify the RC-side fan-out via /edges.
-	base, _, cleanup := newTestAgent(t)
+// TestIngestSample_RecordsTheMetricAndItsConstruct pins what one sample does now.
+//
+// It used to assert that every edge touching the routed construct advanced by one
+// observation, because the Bridge fanned each sample out to all of them. That is
+// exactly the reading that was wrong: a single construct's magnitude is not an
+// observation of any relation's strength, so relations now wait for paired
+// observations of both endpoints. What one sample must do is update the metric's own
+// property and, through it, the construct that summarises the metric.
+func TestIngestSample_RecordsTheMetricAndItsConstruct(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
 
 	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
@@ -553,18 +584,38 @@ func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// At least one edge touching RC must register the observation. Edges
-	// before SC→RC (P1) are the most direct proof: a Bridge that ignored the
-	// sample would leave them at n=0.
-	var edges []EdgeDTO
-	getJSON(t, base+"/edges?from="+pairFrom(t)+"&to="+pairTo(t), &edges)
-	if len(edges) == 0 {
-		t.Fatalf("%s→%s returned no edges", pairFrom(t), pairTo(t))
+	metric, ok := sm.State().Property("cpu_utilization")
+	if !ok {
+		t.Fatal("no property for cpu_utilization after ingesting one")
 	}
-	for _, e := range edges {
-		if e.NObservations < 1 {
-			t.Errorf("edge %s (SC→RC) n_observations=%d after one sample; want >=1",
-				e.PropositionID, e.NObservations)
+	if metric.NObservations != 1 || metric.Value != 0.7 {
+		t.Errorf("cpu_utilization = %.4f from %d observations; want 0.7 from 1",
+			metric.Value, metric.NObservations)
+	}
+
+	construct, routed := sm.RoutedConstruct("cpu_utilization")
+	if !routed {
+		t.Skip("the loaded spec routes cpu_utilization nowhere")
+	}
+	c, ok := sm.State().Property(construct)
+	if !ok {
+		t.Fatalf("no property for the routed construct %s", construct)
+	}
+	if c.Value == 0 {
+		t.Errorf("construct %s stayed at zero after its member was observed; a cost "+
+			"answer reads the construct, so it would report an idle machine", construct)
+	}
+
+	// The relations are deliberately untouched: one endpoint observation is not
+	// evidence about an association.
+	for _, e := range func() []EdgeDTO {
+		var edges []EdgeDTO
+		getJSON(t, base+"/edges", &edges)
+		return edges
+	}() {
+		if e.NObservations != 0 {
+			t.Errorf("relation %s advanced to n=%d on a single endpoint observation; "+
+				"strengths must wait for pairs", e.PropositionID, e.NObservations)
 		}
 	}
 }
