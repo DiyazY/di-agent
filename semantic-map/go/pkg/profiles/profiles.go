@@ -293,7 +293,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		_, _ = peerRegistry.Add(url, "")
 	}
 
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, cfg.MinTrustScore, peerRegistry, peerClient)
+	reasoner := minimal.NewRuleEngineReasoner(cfg.DomainSpec, cfg.MinTrustScore, peerRegistry, peerClient)
 	var proposer contracts.ProposerContract
 	if cfg.UseProposer {
 		thresh := cfg.ProposerThreshold

@@ -297,7 +297,7 @@ func TestStateModelLearnsFromIngestedTelemetry(t *testing.T) {
 
 	sm := New(storage, ontology,
 		minimal.NewRelationalEMAUpdater(storage, 0.5, 10, 4, 30),
-		minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil),
+		minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil),
 		minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
 	sm.AttachState(state)
 

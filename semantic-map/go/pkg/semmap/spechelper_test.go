@@ -87,7 +87,7 @@ func buildMap(t *testing.T, relational bool) (*SemanticMap, *minimal.InMemorySto
 		updater = minimal.NewRelationalEMAUpdater(storage, 0.2, 500, 8, 60)
 	}
 	sm := New(storage, ontology, updater,
-		minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil),
+		minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil),
 		minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
 	return sm, storage
 }

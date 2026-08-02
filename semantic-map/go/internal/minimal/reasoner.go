@@ -31,8 +31,13 @@ import (
 // below the configured trust floor, and ranks the survivors by
 // trust-weighted savings (myEnergy − peerEnergy) × peer.Trust.
 type RuleEngineReasoner struct {
-	storage       contracts.StorageContract
-	ontology      contracts.OntologyContract
+	// spec names which construct plays which cost role. It is the reasoner's only
+	// static input: it used to reach the specification by type-asserting the ontology
+	// for a Spec() method, and to hold storage and ontology handles it stopped reading
+	// once cost moved to the state model. Both stayed live in the constructor
+	// signature, so every caller and every fixture still built a construct graph the
+	// reasoner never consulted — which reads as a dependency and is not one.
+	spec          *domain.Spec
 	minTrustScore float64
 
 	// state is the live state model, and cost is answered from it. Every estimate is
@@ -76,15 +81,13 @@ const peerCostQueryTimeout = 3 * time.Second
 // ErrInsufficientTrust ("no peers registered") with a clear rationale.
 // Compliance tests rely on this graceful-no-peers behavior.
 func NewRuleEngineReasoner(
-	storage contracts.StorageContract,
-	ontology contracts.OntologyContract,
+	spec *domain.Spec,
 	minTrustScore float64,
 	peerRegistry *peers.Registry,
 	peerClient *peers.Client,
 ) *RuleEngineReasoner {
 	return &RuleEngineReasoner{
-		storage:       storage,
-		ontology:      ontology,
+		spec:          spec,
 		minTrustScore: minTrustScore,
 		peers:         peerRegistry,
 		peerc:         peerClient,
@@ -101,12 +104,12 @@ func (r *RuleEngineReasoner) AttachState(s *statemap.Map) { r.state = s }
 // The estimate has two halves, and keeping them apart is the substance of the
 // design rather than presentation:
 //
-//	level        the confidence-blended OBSERVED value of the cost construct,
-//	             read from its node descriptor. On a node-local map that is this
+//	level        the OBSERVED value of the cost construct, read from the state
+//	             model's derived property for it. On a node-local map that is this
 //	             machine's current resource use and current experienced pressure.
-//	sensitivity  the weighted sum over the edges terminating at that construct,
-//	             each signed by its proposition's direction. How much the target
-//	             would move per unit change in a source construct.
+//	sensitivity  the sum of effective strengths over the relationships terminating
+//	             at that property, each signed by its declared direction. How much
+//	             the target would move per unit change in a source.
 //
 // An earlier version had no level at all: it summed edge weights and reported the
 // result as a latency. That quantity carried no observed magnitude, so it could not
@@ -123,10 +126,10 @@ func (r *RuleEngineReasoner) AttachState(s *statemap.Map) { r.state = s }
 // block. This function previously hardcoded the two IDs and was the last place in
 // the daemon that knew a construct by name.
 //
-// Deprecated propositions are filtered out via a one-time lookup against the
-// Ontology before edge iteration begins. The Ontology is the source of truth for
-// what is endorsed; Storage holds descriptors regardless so the audit trail is
-// preserved.
+// A withdrawn claim leaves the arithmetic because retiring it in the state model
+// removes the relationship from the traversal, not because a separate endorsement
+// list is consulted here. That is the difference between one model and two: there is
+// no second place where an edge can be live.
 func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.ActionCost, error) {
 	resourceID, pressureID, err := r.costConstructs()
 	if err != nil {
@@ -148,52 +151,18 @@ var ErrNoStateModel = errors.New(
 		"one cannot produce a traceable answer")
 
 // costConstructs resolves the cost roles from the loaded domain specification.
-// An ontology that carries no specification cannot name them, and guessing would
+// Without a specification the reasoner cannot name them, and guessing would
 // reintroduce exactly the hardcoding this removes.
 func (r *RuleEngineReasoner) costConstructs() (resource, pressure string, err error) {
-	carrier, ok := r.ontology.(interface{ Spec() *domain.Spec })
-	if !ok || carrier.Spec() == nil {
+	if r.spec == nil {
 		return "", "", fmt.Errorf("reasoner needs a domain specification to know which " +
 			"construct is the resource cost and which is the pressure penalty")
 	}
-	cm := carrier.Spec().CostModel
+	cm := r.spec.CostModel
 	if cm.ResourceConstruct == "" || cm.PressureConstruct == "" {
 		return "", "", fmt.Errorf("domain specification declares no cost_model roles")
 	}
 	return cm.ResourceConstruct, cm.PressureConstruct, nil
-}
-
-// constructLevel returns the confidence-blended observed value of one construct
-// and the confidence behind it. A construct absent from storage is reported as a
-// zero-confidence 0.5 — the neutral prior — rather than as an error, so a graph
-// seeded before a construct was added still answers.
-func (r *RuleEngineReasoner) constructLevel(constructID string) (level, confidence float64, err error) {
-	node, err := r.storage.GetNode(constructID)
-	if err != nil {
-		return 0, 0, err
-	}
-	if node == nil {
-		return 0.5, 0, nil
-	}
-	c := node.Confidence
-	return (1-c)*node.PriorValue + c*node.EMAValue, c, nil
-}
-
-// deprecatedPropositionSet returns the set of PropositionIDs that the
-// Ontology no longer endorses. Read once per CostOfAction call to keep the
-// hot loop simple.
-func (r *RuleEngineReasoner) deprecatedPropositionSet() (map[string]bool, error) {
-	props, err := r.ontology.Propositions()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]bool)
-	for _, p := range props {
-		if p.Deprecated {
-			out[p.PropositionID] = true
-		}
-	}
-	return out, nil
 }
 
 // RecommendPeer ranks every registered peer by trust-weighted savings and
@@ -349,17 +318,6 @@ func (r *RuleEngineReasoner) SimulateOutcome(octx *types.OffloadContext, targetN
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-func blend(e *types.EdgeDescriptor) float64 {
-	return (1-e.Confidence)*e.PriorWeight + e.Confidence*e.EMAWeight
-}
-
-func sign(d types.Direction) float64 {
-	if d == types.Positive {
-		return 1.0
-	}
-	return -1.0
-}
 
 // assumedDemand converts an offload request into a unit-less [0,1] increase in
 // resource demand, for the sensitivity term in SimulateOutcome.

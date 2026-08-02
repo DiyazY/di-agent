@@ -66,7 +66,7 @@ func newScenarioAgent(t *testing.T) *scenarioAgent {
 	// ONE state model for the facade and the reasoner. Two would let a facade-level
 	// retirement land in a model the reasoner never reads.
 	state := stateFor(t)
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
+	reasoner := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	reasoner.AttachState(state)
 	proposer := minimal.NewDisabledProposer()
 
@@ -868,7 +868,7 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 
 	u := minimal.NewEMAUpdater(s, 0.2, 500)
 	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
-	r := reasonerWithState(t, s, o)
+	r := reasonerWithState(t)
 
 	sm := semmap.New(s, o, u, r, proposer, minimal.NewDisabledTuner())
 	_ = sm // used indirectly; proposer is wired into sm but we call proposer directly
@@ -942,7 +942,7 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	seedReasonerState(t, s, o)
 
 	u := minimal.NewEMAUpdater(s, 0.2, 500)
-	r := reasonerWithState(t, s, o)
+	r := reasonerWithState(t)
 	proposer := minimal.NewDisabledProposer()
 	tuner := minimal.NewRuleBasedTunerFromSpec(mustSpec())
 

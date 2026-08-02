@@ -101,13 +101,20 @@ type Property struct {
 	// property, the aggregate of members for a derived one.
 	Value float64 `json:"value"`
 
-	// Confidence is how much of Value rests on observation rather than on its
-	// starting assumption, in [0,1]. A property with no observations reports 0 —
-	// which is the difference between "idle" and "not yet known".
+	// Confidence is how much observation stands behind Value, in [0,1]: the
+	// observation count against the convergence target. A property with no
+	// observations reports 0, which is the difference between "idle" and "not yet
+	// known", and a reader acting on a value has to be able to tell those apart.
+	//
+	// Note what it does NOT do, since the relationship field of the same name does
+	// exactly that: it gates no blend. A property's Value is a pure EMA of what was
+	// observed, so confidence describes the value without adjusting it. A
+	// relationship's Effective() really does blend prior and evidence by confidence,
+	// because a relationship has a prior worth blending and an unobserved property
+	// has no second number to fall back on.
 	Confidence float64 `json:"confidence"`
 
-	Prior         float64 `json:"prior"`
-	NObservations int     `json:"n_observations"`
+	NObservations int `json:"n_observations"`
 
 	// Source names where an observed property's data comes from — a metric type, a
 	// collector — so a reader can find out why a property exists.
@@ -342,9 +349,6 @@ func (m *Map) DeclareProperty(p Property) error {
 		np := p
 		if np.Status == "" {
 			np.Status = Active
-		}
-		if np.Value == 0 && np.Prior != 0 {
-			np.Value = np.Prior
 		}
 		np.FirstObserved = time.Time{}
 		np.LastObserved = time.Time{}

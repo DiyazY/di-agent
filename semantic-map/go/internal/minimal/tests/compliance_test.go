@@ -98,16 +98,11 @@ func TestSpecOntologyCompliance(t *testing.T) {
 
 func TestRuleEngineReasonerCompliance(t *testing.T) {
 	compliance.RunReasonerCompliance(t, func(t *testing.T) contracts.ReasonerContract {
-		// The reasoner reads from storage that the ontology has seeded. Build
-		// the same wiring the edge-minimal profile uses so the compliance suite
-		// exercises a realistic configuration.
-		s := minimal.NewInMemoryStorage()
-		o := minimal.NewOntologyFromSpec(mustSpec())
-		seedReasonerState(t, s, o)
-		r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
-		r.AttachState(stateFor(t))
-		r.AttachState(stateFor(t))
-		return r
+		// The reasoner needs the specification (for the cost roles) and a state model
+		// to answer from. It needs nothing else: this fixture used to build a storage
+		// graph and seed it, which passed and proved nothing, because no cost answer
+		// had read from there since the state model became the single source.
+		return reasonerWithState(t)
 	})
 }
 
@@ -146,11 +141,8 @@ func TestDisabledTunerCompliance(t *testing.T) {
 // alone changes what Propositions() reports and no decision, which is the failure
 // mode the facade exists to prevent.
 func TestReasonerSkipsRetiredRelationships(t *testing.T) {
-	s := minimal.NewInMemoryStorage()
-	o := minimal.NewOntologyFromSpec(mustSpec())
-	seedReasonerState(t, s, o)
 	state := stateFor(t)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	r.AttachState(state)
 
 	before, err := r.CostOfAction("pod-scheduling", "node_1")
@@ -217,8 +209,11 @@ func contains(haystack, needle string) bool {
 
 // seedReasonerState seeds storage with one node per construct and one edge per
 // proposition, mirroring what profiles.seedFromOntology does at daemon startup.
-// Without seeding, the reasoner has nothing to traverse and GraphPathUsed
-// would be empty.
+//
+// Despite the name it no longer has anything to do with the reasoner, which reads the
+// state model. It remains because the facade's graph surfaces — /graph, /edges,
+// /history and the updater — still read this storage, and a test exercising those needs
+// it populated.
 func seedReasonerState(t *testing.T, s *minimal.InMemoryStorage, o *minimal.SpecOntology) {
 	t.Helper()
 	cs, err := o.Constructs()
@@ -280,21 +275,19 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 }
 
-// stateFor builds a state model seeded from the spec, for fixtures that construct a
-// reasoner directly. Cost is answered from the map, so a reasoner without one is a
-// wiring error rather than a valid configuration — the same thing a real daemon
-// guarantees by always attaching one.
-// reasonerWithState builds a reasoner with the state model attached, which is what a
-// daemon always does: cost is answered from the map, so a reasoner without one cannot
-// answer at all.
-func reasonerWithState(t *testing.T, s *minimal.InMemoryStorage,
-	o *minimal.SpecOntology) *minimal.RuleEngineReasoner {
+// reasonerWithState builds a reasoner the way a daemon does: the specification, for
+// the cost roles, and a state model to answer from. Nothing else — cost is read from
+// the map, so a reasoner without one cannot answer at all, and there is no fixture for
+// that configuration.
+func reasonerWithState(t *testing.T) *minimal.RuleEngineReasoner {
 	t.Helper()
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	r.AttachState(stateFor(t))
 	return r
 }
 
+// stateFor builds a state model seeded from the spec, which is what the daemon attaches
+// at startup.
 func stateFor(t *testing.T) *statemap.Map {
 	t.Helper()
 	spec := mustSpec()

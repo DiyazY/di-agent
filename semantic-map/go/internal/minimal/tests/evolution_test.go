@@ -56,7 +56,7 @@ func newEvolutionAgentWithConvergence(t *testing.T, collector *scripted.Scripted
 	// bug this fixture had: cost is answered from the reasoner's map and mutated
 	// through the facade's.
 	state := stateFor(t)
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
+	reasoner := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	reasoner.AttachState(state)
 	if proposer == nil {
 		proposer = minimal.NewDisabledProposer()
@@ -586,7 +586,7 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	// through the same instance the proposer sees.
 	a.ontology = ontology
 	state := stateFor(t)
-	r := minimal.NewRuleEngineReasoner(a.storage, ontology, 0.5, nil, nil)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	r.AttachState(state)
 	a.sm = semmap.New(a.storage, ontology, a.updater, r, proposer, minimal.NewDisabledTuner())
 	a.sm.AttachState(state)
