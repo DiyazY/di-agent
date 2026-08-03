@@ -319,7 +319,7 @@ assertion rather than a measurement.
 
 ### Behavioral guarantees
 
-Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
+Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `go/compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
 
 Compliance suites exist for all five contracts (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
 
@@ -436,12 +436,33 @@ store behind the snapshot file.
 
 | Layer                                       | Language   | Why                                                                                                                           |
 | ------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Contract interfaces + compliance tests      | **Python** | Specification role — readable, fast to iterate, serves as the authoritative definition of correct behavior                    |
-| Prior initialization pipeline               | **Python** | One-time data wrangling from P1–P5; pandas/numpy/scipy ecosystem                                                              |
-| `cloud-full` profile service                | **Python** | scipy for Bayesian updater; correlation miner; SLM integration                                                                |
+| Contract interfaces + compliance suites     | **Go**     | The contract surface and the only definition of correctness. Co-located with the implementations they check                    |
+| Prior initialization pipeline               | **Python** | One-time data wrangling from P1–P5; scipy for the rank correlations. A build-time step — nothing here runs on a node          |
+| `cloud-full` profile service                | **Python** | scipy for a Bayesian estimator; correlation miner; SLM integration. Specified, not implemented (§3)                           |
 | `edge-minimal` and `edge-standard` daemons  | **Go**     | Single ARM binary, <10 MB footprint, no runtime to manage on edge nodes, goroutines for concurrent telemetry, predictable GC  |
 
-**The contract boundary enables this split.** The Python ABCs are the specification. The Go interfaces mirror them exactly. Both language implementations run against their respective compliance suites — passing both suites proves behavioral equivalence across languages.
+**This used to be a two-language contract boundary, and the claim it rested on was not
+true.** The contracts were mirrored as Python ABCs with their own compliance suites, and
+the stated argument was that the Python definitions were the specification, the Go
+interfaces mirrored them exactly, and passing both suites proved behavioural equivalence
+across languages. No Python implementation was ever built — `cloud-full`, the profile that
+would have needed one, is still unimplemented — so the Python suites had nothing to run
+against, which means the specification half of the argument was never checked by anything.
+Two definitions with one implementation is not a specification and an implementation; it is
+a definition and a copy, and the copy drifted: it still declared Storage and Updater after
+both were deleted from Go (§2), and its Ontology carried a proposition strength and an
+audit log the Go interface had stopped holding. A reader had no way to tell which was
+current.
+
+The mirror is deleted. The contract surface is `go/pkg/contracts`, the suites that check it
+are `go/compliance`, and they sit next to the implementations they check. When a second
+language implementation actually arrives, the interface it has to satisfy is the one with a
+passing suite behind it — which is the useful direction for the boundary to run.
+
+What remains of the Python layer is `prior_init/`: it reads the published constants from
+P1–P5 and emits `prior_weights.json`, which the daemon seeds relationship priors from. It
+was the part doing real work, and it is verifiable in the way the mirror was not — the
+committed artefact reproduces byte for byte from a fresh run (README §5).
 
 ---
 
@@ -894,8 +915,7 @@ case "my-profile":
     return sm, collector, nil
 ```
 
-4. Add the profile to `profiles.py` (Python registry) if a Python equivalent is needed.
-5. Update the profiles table in this file (§3) and the project structure in README.md.
+4. Update the profiles table in this file (§3) and the project structure in README.md.
 
 No other file needs to change.
 

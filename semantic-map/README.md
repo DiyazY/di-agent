@@ -85,29 +85,10 @@ semantic-map/
 │                               at startup (-domain) and refuses to run without it; no
 │                               construct or proposition identifier exists in any binary.
 │
-│  ── Python layer (specification + cloud-full) ──────────────────
+│  ── Python layer (the calibration pipeline — a build-time step) ──
 │
-├── types.py                    Shared data types (MetricSample, MetricType, EdgeDescriptor, …)
-├── map.py                      SemanticMap Python facade
-├── profiles.py                 Deployment profile registry + build_map() factory
 ├── prior_weights.json          Calibrated prior strengths output by the init pipeline
-├── requirements.txt            pytest only (no runtime deps for contracts)
-│
-├── contracts/                  Contract definitions (Python ABCs)
-│   ├── collector.py            CollectorContract
-│   ├── ontology.py             OntologyContract
-│   ├── reasoner.py             ReasonerContract + InsufficientTrustError
-│   ├── proposer.py             ProposerContract
-│   ├── storage.py              StorageContract   ⚠ no Go counterpart — see note below
-│   └── updater.py              UpdaterContract   ⚠ no Go counterpart — see note below
-│
-├── compliance/                 Shared compliance test suites (mix into pytest class)
-│   ├── collector.py            CollectorComplianceTests
-│   ├── ontology.py             OntologyComplianceTests
-│   ├── reasoner.py             ReasonerComplianceTests
-│   ├── proposer.py             ProposerComplianceTests
-│   ├── storage.py              ⚠ StorageComplianceTests — no Go counterpart
-│   └── updater.py              ⚠ UpdaterComplianceTests — no Go counterpart
+├── requirements.txt            scipy (spearmanr); the pipeline's only outside dependency
 │
 ├── prior_init/                 Prior initialization pipeline (Step 4)
 │   ├── pipeline.py             Entry point — reads P1–P5 constants, writes prior_weights.json
@@ -122,7 +103,7 @@ semantic-map/
     │
     ├── pkg/                    Public packages — importable by agent code
     │   ├── types/types.go      Go equivalents of all Python types
-    │   ├── contracts/          Go interfaces (mirrors of Python ABCs)
+    │   ├── contracts/          The contract surface — five interfaces
     │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
@@ -248,14 +229,15 @@ semantic-map/
 For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 
-> **The Python contract mirror is stale.** `storage.py` and `updater.py` have no Go
-> counterpart at all — they were a second model of the relations the state model holds,
-> learning from the same telemetry into a different structure — and `ontology.py` is
-> larger than the Go interface it mirrors, which no longer carries proposition strengths,
-> a deprecation flag or an audit log. The Python layer is a specification mirror with no
-> implementations behind it (`cloud-full` is unbuilt), so it was left in place rather than
-> half-ported. Read the Go tree above as the current design, and ARCHITECTURE.md §2 for
-> why each piece went.
+> **The Python contract mirror is gone.** `contracts/`, `compliance/`, `map.py`,
+> `profiles.py` and `types.py` mirrored the contract surface as ABCs, on the theory that
+> the Python definitions were the specification and Go implemented them. Nothing was ever
+> built behind the Python side — `cloud-full` does not exist — so the mirror was a second
+> definition with no implementation to keep it honest, and it drifted: it still declared
+> Storage and Updater after both were deleted from Go, and its Ontology carried a strength
+> and an audit log the Go interface had stopped holding. What remains of the Python layer
+> is `prior_init/`, which produces `prior_weights.json` and is the one part that was doing
+> real work. See ARCHITECTURE.md §4.
 
 ---
 
@@ -684,31 +666,11 @@ the shape of the real thing.
 
 Every contract has a compliance suite. A new implementation is valid if and only if it passes the suite for its contract.
 
-### Python
-
-Mix the compliance class into a pytest class and provide the named fixture:
-
-```python
-from semantic_map.compliance import OntologyComplianceTests, CollectorComplianceTests
-import pytest
-
-class TestMyOntology(OntologyComplianceTests):
-    @pytest.fixture
-    def ontology(self):
-        return MyOntology(spec)
-
-class TestMyCgroupCollector(CollectorComplianceTests):
-    @pytest.fixture
-    def collector(self):
-        return CgroupCollector(node_id="node_1", cgroup_root="/sys/fs/cgroup")
-```
-
-```bash
-pip install -r requirements.txt
-pytest compliance/
-```
-
-### Go
+The suites are Go, and they are the only definition of correctness there is. A parallel
+set of Python suites over ABC mirrors of the same interfaces used to sit beside them,
+described as the authoritative specification; since no Python implementation ever existed
+to run them against, what they specified was never checked, and they drifted out of step
+with the Go interfaces they mirrored (see §1).
 
 ```go
 func TestMyOntologyCompliance(t *testing.T) {
@@ -735,10 +697,20 @@ cd go && go test ./...
 Run once before deploying to a new cluster to replace bootstrap edge weights with values grounded in P1–P5 empirical data:
 
 ```bash
-python -m semantic_map.prior_init.pipeline \
-  --root ../ \
-  --out prior_weights.json
+# from semantic-map/
+python3 -m prior_init.pipeline --root ../../ --out prior_weights.json
 ```
+
+Both arguments matter and both were wrong in this file until now. The module path is
+`prior_init.pipeline` run from inside `semantic-map/`: the documented
+`semantic_map.prior_init.pipeline` cannot resolve, because the directory is
+`semantic-map` and a hyphen is not a valid Python module name. And `--root` points at the
+**mega-research** root rather than at the di-agent checkout, because the pipeline reads
+`energy-analysis/results/` and `overhead-decomposition/results/`, which are siblings of
+`di-agent/` rather than children of it. Run as written above, the pipeline reproduces the
+committed `prior_weights.json` byte for byte — propositions, per-KD edge weights,
+construct scores, scope and warnings all identical — which is what makes it a replication
+artefact rather than a checked-in number.
 
 The pipeline reads publication constants (J/pod, mJ/op, overhead fractions, throughput and latency) for the constructs a running cluster exhibits and writes:
 

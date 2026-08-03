@@ -49,7 +49,7 @@ If both commands succeed you have a working checkout. Nothing else on this list 
 
 | You want to… | Also install |
 | ------------ | ------------ |
-| Regenerate `prior_weights.json` from the P1–P5 constants | Python 3.9+ (`semantic-map/requirements.txt` is `pytest` only) |
+| Regenerate `prior_weights.json` from the P1–P5 constants | Python 3.9+ and scipy (`semantic-map/requirements.txt`). Run `python3 -m prior_init.pipeline --root ../../ --out prior_weights.json` from `semantic-map/` — the root is the mega-research checkout, since the pipeline reads the analysis results in its sibling directories |
 | Replay the dissertation's Netdata parquets | The parquet dataset — see [§3](#3-running-for-real). Not in this repo (it is ~GB of private experimental data). |
 | Use `POST /explain` | A local OpenAI-compatible LLM. [Ollama](https://ollama.com) is smallest: `brew install ollama && ollama pull qwen2.5:7b-instruct` |
 | Run the 3-VM PoC | [Multipass](https://multipass.run) |
@@ -126,7 +126,7 @@ The full flag table is in [README §3](semantic-map/README.md#3-running-the-edge
 
 ### Replaying recorded telemetry
 
-The `replay` binary feeds Netdata parquets through the real Bridge → Updater path, so a replayed run exercises exactly the production ingestion code. Idempotency is keyed on `(edge, event_id)`, which is what makes a replay a valid experiment rather than a simulation.
+The `replay` binary feeds Netdata parquets through the real ingestion path, so a replayed run exercises exactly the production code: each sample becomes an observation of a property, derived properties recompute, and the paired estimator folds it into the relationships incident to whatever moved. Idempotency is keyed on the event id — for the property's value and observation count as well as for the estimator's pairs — which is what makes a replay a valid experiment rather than a simulation.
 
 ```bash
 ./dev.sh replay list                                        # inventory
@@ -209,7 +209,9 @@ The catalogue is **compile-time closed on purpose**: `POST /ingest-sample` rejec
 
 ### 4.3 Swap a contract implementation
 
-Six contracts, all swappable: `Storage`, `Ontology`, `Updater`, `Reasoner`, `Proposer`, `Tuner` (plus `Collector`, above). Agent code never imports an implementation directly — it takes the interface.
+Five contracts, all swappable: `Collector` (above), `Ontology`, `Reasoner`, `Proposer`, `Tuner`. Agent code never imports an implementation directly — it takes the interface.
+
+`Storage` and `Updater` used to be here and were deleted rather than reimplemented: they held a second model of the relations the state model already holds, learning from the same telemetry into a different structure. The state model itself (`pkg/statemap`) is deliberately *not* a contract — one implementation, and it is the agent's single model, so an interface there would invite exactly the second implementation that removal eliminated. [ARCHITECTURE §2](semantic-map/ARCHITECTURE.md#2-contract-architecture) has the reasoning.
 
 ```
 1. Implement the interface in internal/<yourpkg>/
@@ -221,7 +223,9 @@ If an **ontology** method genuinely does not apply to your implementation — sa
 
 Note that this escape hatch is currently *ontology-only*: `ErrNotImplemented` is defined as "operation not implemented by this ontology profile", and only `compliance/ontology.go` checks for it. If you need the same partial-implementation semantics for another contract, generalise the sentinel and teach that contract's suite to skip — do not assume it already works.
 
-**Do not add a seventh contract without a second implementation that needs it.** `Bridge`, `pkg/peers`, and `pkg/explain` are deliberately concrete for exactly this reason: an interface derived from one example encodes that example's accidents. [ARCHITECTURE §2](semantic-map/ARCHITECTURE.md#2-contract-architecture) records the rule.
+**Do not add a sixth contract without a second implementation that needs it**, and the converse holds too: a contract whose subject has moved elsewhere gets removed rather than kept for symmetry. `pkg/statemap`, `pkg/peers` and `pkg/explain` are deliberately concrete, because an interface derived from one example encodes that example's accidents. [ARCHITECTURE §2](semantic-map/ARCHITECTURE.md#2-contract-architecture) records both directions of the rule.
+
+There is also no longer a Python mirror of these interfaces. One existed, described as the authoritative specification, with its own compliance suites; since no Python implementation was ever built, nothing ran those suites, and the mirror drifted out of step with the Go interfaces it claimed to specify. If you are looking for the definition of a contract, it is the Go interface and the suite in `go/compliance` that checks it.
 
 ### 4.4 Add a deployment profile
 
