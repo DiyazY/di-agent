@@ -83,6 +83,14 @@ func (m *SemanticMap) AcceptsForeignSamples() bool { return m.acceptForeign }
 var ErrForeignSample = errors.New(
 	"sample belongs to another machine: this map is node-local and models only its own")
 
+// ErrNotModelled is returned when an operator names a proposition the agent declares but
+// does not carry a relationship for. It is the caller naming something that does not
+// exist here, not a fault: seeding skips a proposition whose endpoints are not both
+// observable, so the claim is real and this agent simply has nothing to apply the action
+// to. Transports should render it as a client error — reporting success would tell an
+// operator their action took effect somewhere.
+var ErrNotModelled = errors.New("proposition is declared but not modelled on this agent")
+
 // New constructs a SemanticMap without peer coordination. The facade still
 // satisfies its peer-facing methods (Peers, PeerClient) by lazily allocating
 // an empty registry + default client on first access — preserving backward
@@ -231,34 +239,46 @@ func (m *SemanticMap) RoutedConstruct(metricType string) (string, bool) {
 // Resolving by label rather than by a constructed ID keeps the two naming schemes
 // independent: the state model is free to carry relationships the construct graph
 // does not.
-func (m *SemanticMap) assertStateStrength(propositionID string, strength float64, actor, reason string) {
+// It returns how many relationships it touched, so a caller can tell an assertion that
+// took effect from one that named a proposition this agent declares but does not model.
+func (m *SemanticMap) assertStateStrength(propositionID string, strength float64, actor, reason string) int {
 	if m.state == nil {
-		return
+		return 0
 	}
+	var n int
 	for _, r := range m.state.Relationships("", "") {
 		if r.Label != propositionID {
 			continue
 		}
 		if err := m.state.AssertRelationshipStrength(r.ID, strength, actor, reason); err != nil {
 			log.Printf("statemap: asserting %s: %v", r.ID, err)
+			continue
 		}
+		n++
 	}
+	return n
 }
 
 // retireStateRelationships retires every state-model relationship labelled with this
 // proposition, so a withdrawn claim leaves the reasoning path.
-func (m *SemanticMap) retireStateRelationships(propositionID, reason, actor string) {
+// It returns how many relationships it retired, for the reason assertStateStrength
+// gives.
+func (m *SemanticMap) retireStateRelationships(propositionID, reason, actor string) int {
 	if m.state == nil {
-		return
+		return 0
 	}
+	var n int
 	for _, r := range m.state.Relationships("", "") {
 		if r.Label != propositionID {
 			continue
 		}
 		if err := m.state.RetireRelationship(r.ID, reason, actor); err != nil {
 			log.Printf("statemap: retiring %s: %v", r.ID, err)
+			continue
 		}
+		n++
 	}
+	return n
 }
 
 // MetricRouter maps a metric type to the construct that summarises it.
@@ -293,7 +313,17 @@ func (m *SemanticMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 }
 
 func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
-	return m.proposer.Confirm(candidateID)
+	prop, err := m.proposer.Confirm(candidateID)
+	if err != nil {
+		return err
+	}
+	if prop == nil {
+		return nil // nothing to add: a disabled proposer, or already confirmed
+	}
+	// The facade applies it, because this is the only path that reaches both the
+	// declaration and the state model. A confirmed candidate that landed only in the
+	// declaration would appear in Propositions() and take part in no answer.
+	return m.AddValidatedProposition(prop)
 }
 
 func (m *SemanticMap) RejectCandidate(candidateID string) error {
@@ -315,10 +345,12 @@ func (m *SemanticMap) Constructs() ([]*types.Construct, error) {
 	return m.ontology.Constructs()
 }
 
-// Propositions returns every proposition (including deprecated ones, flagged
-// via Proposition.Deprecated).
+// Propositions returns every declared proposition, with the strength in force and the
+// retirement status overlaid from the state model. Deprecated ones are included, flagged
+// via Proposition.Deprecated; a proposition the agent declares but does not model
+// carries Instantiated false. See projectedPropositions for why the overlay exists.
 func (m *SemanticMap) Propositions() ([]*types.Proposition, error) {
-	return m.ontology.Propositions()
+	return m.projectedPropositions()
 }
 
 // AllEdges returns every relation the agent holds, rendered as edge descriptors.
@@ -367,65 +399,76 @@ func (m *SemanticMap) Neighbors(nodeID string) ([]string, error) {
 	return out, nil
 }
 
-// History returns ontology mutation events appended at or after `since`.
-// Pass the zero time.Time to retrieve the full audit log.
+// History returns mutation events recorded at or after `since`, from the state model's
+// journal — the one record there is. Pass the zero time.Time for everything held.
+//
+// The journal is bounded, so "everything held" is not "everything that happened";
+// GET /state/journal reports how many entries were dropped, and a caller that needs to
+// know whether the record is complete should read it there.
 func (m *SemanticMap) History(since time.Time) ([]*types.OntologyEvent, error) {
-	return m.ontology.GetHistory(since)
+	return m.projectedHistory(since)
 }
 
 // ── Write-side facade (ontology mutations) ────────────────────────────────────
 
-// SetPropositionStrength recalibrates the prior strength of an existing
-// proposition, appends an event to the audit log, and writes the new magnitude
-// through to every matching EdgeDescriptor in storage.
+// SetPropositionStrength recalibrates a proposition's strength: it asserts the value on
+// every relationship carrying that proposition as its label, and journals the assertion
+// with actor and reason.
 //
-// The storage write is the point of the operation, not bookkeeping. This is the
-// write path for "this edge's magnitude should change because better knowledge
-// arrived" — a fresh kube-bench scan revising an SC score, a new paper revising
-// a proposition, or an operator tune. The Reasoner computes cost from storage
-// edge weights, so an ontology-only write leaves the agent's decisions exactly
-// as they were and the recalibration is silently cosmetic.
+// This is the write path for "this claim's magnitude should change because better
+// knowledge arrived" — a fresh scan, a new paper, an operator tune. It writes one place,
+// because there is one place: the strength this changes is the strength every answer
+// reads, and /propositions reports it by overlay rather than by keeping a copy. The
+// arrangement it replaced wrote both a declaration and a model, and the period when only
+// the first write landed is documented in §7.3 of the P6 paper.
 //
-// The value is absolute: a new scan yields a new magnitude, not a delta. Callers
-// that think in deltas (see Tune) resolve the current value first and pass the
-// result. Writing here deliberately supersedes the per-distribution calibration
-// that prior_init seeded — an operator asserting a value for *this* deployment
-// outranks a cross-distribution estimate, and the audit log records that it
-// happened. Cold-start equivalence to Di-Select (paper §4.3) is a property of
-// the state at c = 0 before any operator action, not an invariant for all time.
+// The value is absolute: a new scan yields a new magnitude, not a delta. Callers that
+// think in deltas (see Tune) resolve the current value first and pass the result.
 //
-// EMAWeight is handled conditionally, and the condition matters. On an edge that
-// has accumulated observations it is evidence, and recalibrating a prior must not
-// rewrite observation history — so it is left untouched. On an edge with zero
-// observations it is not evidence at all, merely the seed value that
-// seedFromOntology set equal to the prior; leaving it behind would anchor the
-// first future observation's EMA to a magnitude the operator has already
-// superseded. That is not a corner case: the recalibration path exists primarily
-// for the six edges with no telemetry analog (paper §5.2), which carry zero
-// observations by definition.
+// What it writes is the PRIOR, and what was learned from this system is left untouched.
+// Those are separate fields precisely so that recalibrating an assumption cannot rewrite
+// observation history, and the effective strength blends the two by confidence — so on a
+// well-observed relationship an operator's number moves the answer very little. That is
+// the arithmetic behaving as designed rather than the write failing, and §7.3 measures
+// it. Asserting deliberately supersedes the per-cluster calibration that prior_init
+// seeded: an operator asserting a value for *this* deployment outranks a cross-cluster
+// estimate, the provenance field records that it is now an assertion, and cold-start
+// equivalence to Di-Select (paper §4.3) is a property of the state at c = 0 before any
+// operator action rather than an invariant for all time.
+//
+// Returns an error when no relationship carries the proposition — a declared claim the
+// agent does not model cannot be recalibrated, and reporting success would tell an
+// operator their action took effect somewhere.
 func (m *SemanticMap) SetPropositionStrength(id string, strength float64) error {
-	if err := m.ontology.SetPropositionStrength(id, strength); err != nil {
-		return err
+	if m.state == nil {
+		return ErrNoStateModel
 	}
-	// The assertion on the state model is the operative half: it is what every answer
-	// reads. The ontology write above keeps the declaration layer and its audit log in
-	// step, and records that the operator acted.
-	m.assertStateStrength(id, strength, "operator", "proposition strength set")
+	if n := m.assertStateStrength(id, strength, "operator", "proposition strength set"); n == 0 {
+		return fmt.Errorf("%w: no relationship carries %q, so there is no strength to set",
+			ErrNotModelled, id)
+	}
 	return nil
 }
 
-// Deprecate marks a proposition as no-longer-endorsed (soft delete).
-// Reasoners must skip deprecated propositions during cost computation.
-// The flag is synced to every matching EdgeDescriptor in storage so that
-// GET /graph reflects the deprecation without a proposition join.
+// Deprecate withdraws a proposition (soft delete): it retires every relationship
+// carrying that proposition as its label, which takes the claim out of the traversal so
+// no answer consults it, and leaves it retrievable with its evidence and a stated reason.
+//
+// Retirement in the state model is the whole operation. The declaration keeps reporting
+// the proposition — flagged deprecated by the overlay of projectedPropositions — because
+// history and replay need it to still be there, and because a decision taken before the
+// withdrawal must remain reconstructible.
+//
+// Returns an error when no relationship carries the proposition, for the reason
+// SetPropositionStrength gives.
 func (m *SemanticMap) Deprecate(id, reason string) error {
-	if err := m.ontology.Deprecate(id, reason); err != nil {
-		return err
+	if m.state == nil {
+		return ErrNoStateModel
 	}
-	// Retirement in the state model is what actually withdraws the claim: it leaves the
-	// traversal, so it stops contributing to every answer and shows as deprecated on
-	// the graph surfaces, which project the model.
-	m.retireStateRelationships(id, reason, "operator")
+	if n := m.retireStateRelationships(id, reason, "operator"); n == 0 {
+		return fmt.Errorf("%w: no relationship carries %q, so there is nothing to withdraw",
+			ErrNotModelled, id)
+	}
 	return nil
 }
 
@@ -636,9 +679,11 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		appliedIDs = append(appliedIDs, a.PropositionID)
 	}
 
-	// Best-effort audit record — don't fail tune on logging failure.
-	if err := m.ontology.RecordTune(text, operator, appliedIDs); err != nil {
-		log.Printf("SemanticMap.Tune: RecordTune failed: %v", err)
+	// The consolidated act, recorded alongside the individual assertions it produced.
+	// Reading those separately afterwards gives no way to tell one coordinated
+	// adjustment from several unrelated ones that landed together.
+	if m.state != nil {
+		m.state.RecordOperatorIntent(text, operator, appliedIDs)
 	}
 
 	return applied, nil

@@ -116,6 +116,14 @@ func TestGetEdges_FilterByFromTo_RC_PS_ReturnsBothP2AndP3(t *testing.T) {
 	}
 }
 
+// /history serves the state model's journal, which is the record of everything that
+// happened to the model — including the seeding it did to itself at startup. So these
+// tests assert that a mutation appears and that the since filter bounds the window; they
+// do not assert a count, because a count is the right assertion for a log of operator
+// actions only, and this is not that. The distinction is worth keeping in the test rather
+// than only in the comment: the previous version expected exactly one event, which was
+// true of the separate ontology log it read before and would silently start passing again
+// if the projection were narrowed back to mutations.
 func TestGetHistory_RespectsRFC3339Since(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
@@ -131,8 +139,8 @@ func TestGetHistory_RespectsRFC3339Since(t *testing.T) {
 		t.Fatal(err)
 	}
 	getJSON(t, base+"/history", &events)
-	if len(events) != 1 {
-		t.Errorf("after one mutation: got %d events, want 1", len(events))
+	if !hasEventKind(events, "proposition_strength_set", firstProp(t)) {
+		t.Errorf("no strength-set event for %s in %d journal entries", firstProp(t), len(events))
 	}
 }
 
@@ -144,9 +152,19 @@ func TestGetHistory_RespectsDurationSince(t *testing.T) {
 	}
 	var events []OntologyEventDTO
 	getJSON(t, base+"/history?since=1h", &events)
-	if len(events) != 1 {
-		t.Errorf("since=1h: got %d events, want 1", len(events))
+	if !hasEventKind(events, "proposition_strength_set", firstProp(t)) {
+		t.Errorf("no strength-set event for %s within the last hour", firstProp(t))
 	}
+}
+
+// hasEventKind reports whether the journal carries an event of this kind for this target.
+func hasEventKind(events []OntologyEventDTO, kind, target string) bool {
+	for _, e := range events {
+		if e.Kind == kind && (target == "" || strings.Contains(e.TargetID, target)) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHealthz_OK(t *testing.T) {
@@ -279,14 +297,17 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 
 	var events []OntologyEventDTO
 	getJSON(t, base+"/history", &events)
-	if len(events) != 1 {
-		t.Fatalf("history: got %d events, want 1", len(events))
+	// The target is the relationship's id, which carries the proposition as its label,
+	// so the assertion is containment rather than equality: the journal records the
+	// object that changed, and for a strength that object is the relationship.
+	if !hasEventKind(events, "proposition_strength_set", firstProp(t)) {
+		t.Errorf("no strength-set event for %s in %d journal entries", firstProp(t), len(events))
 	}
-	if events[0].Kind != "proposition_strength_set" {
-		t.Errorf("event kind: got %q, want proposition_strength_set", events[0].Kind)
-	}
-	if events[0].TargetID != firstProp(t) {
-		t.Errorf("event target: got %q, want P1", events[0].TargetID)
+	for _, e := range events {
+		if e.Kind == "proposition_strength_set" && e.Detail["reason"] == nil {
+			t.Errorf("strength-set event for %s carries no reason; an assertion without a "+
+				"stated basis cannot be audited", e.TargetID)
+		}
 	}
 }
 
@@ -673,7 +694,10 @@ func TestIngestSample_RequiresJSON(t *testing.T) {
 	}
 }
 
-func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
+// A proposition this agent cannot act on is a client error, not a fault. It used to
+// answer 500, which sent an operator looking for a bug in the daemon when the daemon had
+// correctly refused their request.
+func TestSetStrength_UnknownProposition_Returns404WithErrorJSON(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	resp := postJSON(t, base+"/ontology/strength", SetStrengthRequest{
@@ -681,8 +705,8 @@ func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
 		Strength:      0.5,
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != 500 {
-		t.Errorf("unknown prop: got %d, want 500", resp.StatusCode)
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown prop: got %d, want 404", resp.StatusCode)
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("error Content-Type: got %q, want application/json", ct)

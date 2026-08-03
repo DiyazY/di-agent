@@ -111,12 +111,19 @@ type ConstructDTO struct {
 }
 
 // PropositionDTO mirrors types.Proposition. Direction is rendered as "+"/"-".
+//
+// prior_strength is the value in force, overlaid from the state model's relationship for
+// this proposition. instantiated says whether such a relationship exists: false means the
+// claim is declared but not modelled here — seeding skips one whose endpoints are not
+// both observable — and prior_strength is then a placeholder rather than a calibrated
+// value. A client that reads the number without the flag can mistake one for the other.
 type PropositionDTO struct {
 	PropositionID    string   `json:"proposition_id"`
 	FromConstruct    string   `json:"from"`
 	ToConstruct      string   `json:"to"`
 	Direction        string   `json:"direction"`
 	PriorStrength    float64  `json:"prior_strength"`
+	Instantiated     bool     `json:"instantiated"`
 	Description      string   `json:"description,omitempty"`
 	EvidenceSources  []string `json:"evidence_sources,omitempty"`
 	Deprecated       bool     `json:"deprecated"`
@@ -250,6 +257,7 @@ func propositionToDTO(p *types.Proposition) PropositionDTO {
 		ToConstruct:      p.ToConstruct,
 		Direction:        directionToString(p.Direction),
 		PriorStrength:    p.PriorStrength,
+		Instantiated:     p.Instantiated,
 		Description:      p.Description,
 		EvidenceSources:  p.EvidenceSources,
 		Deprecated:       p.Deprecated,

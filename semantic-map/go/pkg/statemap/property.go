@@ -784,6 +784,25 @@ func (m *Map) AssertRelationshipStrength(id string, strength float64, actor, rea
 	return nil
 }
 
+// RecordOperatorIntent journals one operator action that spanned several
+// relationships, naming the intent, the actor, and what it touched.
+//
+// It records nothing about the map's contents — the assertions it produced did that
+// individually. What it adds is the act: which of them were one decision, whose, and
+// on what stated basis. Without it a coordinated adjustment is indistinguishable
+// afterwards from unrelated changes that happened to land together.
+func (m *Map) RecordOperatorIntent(intent, actor string, targets []string) {
+	if actor == "" {
+		actor = "operator"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bump(EventOperatorIntent, "", actor, map[string]any{
+		"intent":  intent,
+		"targets": append([]string(nil), targets...),
+	}, m.now())
+}
+
 // ResetRelationship discards what was learned about a relationship on this system,
 // returning it to its prior with no observations behind it.
 //

@@ -614,7 +614,11 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 		t.Errorf("graph path grew after a deprecation: before=%d after=%d",
 			len(before.GraphPathUsed), len(after.GraphPathUsed))
 	}
-	props, _ := a.ontology.Propositions()
+	// Read through the facade, not the declaration layer. The ontology holds no
+	// deprecation flag of its own — the flag on /propositions is overlaid from whether
+	// the relationship is retired — so reading it directly is how a caller would
+	// convince themselves nothing had happened.
+	props, _ := a.sm.Propositions()
 	foundDeprecated := false
 	for _, p := range props {
 		if p.PropositionID == target && p.Deprecated {
@@ -622,7 +626,7 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 		}
 	}
 	if !foundDeprecated {
-		t.Errorf("%s not flagged Deprecated in the declaration layer after Deprecate()", target)
+		t.Errorf("%s not reported deprecated after Deprecate()", target)
 	}
 	// The relationship must still be retrievable: a soft delete withdraws a claim from
 	// reasoning and keeps its record, so a decision taken before it stays reconstructible.

@@ -20,6 +20,16 @@ const (
 	EventRelationshipAsserted EventKind = "relationship.asserted"
 	EventRelationshipRetired  EventKind = "relationship.retired"
 
+	// EventOperatorIntent records one operator action that spanned several
+	// relationships, alongside the individual assertions it produced.
+	//
+	// It exists because the per-relationship records lose the thing an operator
+	// actually did. "prioritize performance" is one act with one reason; it lands as
+	// an assertion on each proposition the intent names, in opposite directions,
+	// and reading those separately afterwards gives no way to tell a coordinated
+	// adjustment from two unrelated ones that happened to be adjacent in the log.
+	EventOperatorIntent EventKind = "operator.intent"
+
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
 )

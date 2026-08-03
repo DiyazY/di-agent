@@ -4,8 +4,6 @@ package main
 //
 // Endpoint                          Method  Body / Path                    Status on success
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// /ingest                           POST    {from_id,to_id,observation,…}  204
-//                                                                          400 (unknown construct pair)
 // /cost                             GET     ?task=&node=                   200 ActionCost
 // /recommend                        POST    OffloadContext                 200 PeerRecommendation
 //                                                                          409 (no peer qualifies / none registered)
@@ -22,7 +20,9 @@ package main
 // /healthz                          GET     —                              200 HealthResponse
 // /version                          GET     —                              200 VersionResponse
 // /ontology/strength                POST    SetStrengthRequest             204
+//                                                                          404 (declared but not modelled)
 // /ontology/deprecate               POST    DeprecateRequest               204
+//                                                                          404 (declared but not modelled)
 // /ontology/construct               POST    AddConstructRequest            204
 // /ontology/proposition             POST    AddPropositionRequest          204
 // /agent/reset                      POST    ResetRequest                   204
@@ -68,9 +68,8 @@ import (
 // point for the daemon's URL surface; main only constructs the mux, the
 // SemanticMap, and the http.Server.
 //
-// Convention: the EXISTING endpoints (/ingest, /cost, /recommend, /simulate,
-// /candidates) keep their original http.Error plain-text error format to
-// minimize diff. Every NEW endpoint added in this expansion uses
+// Convention: the EXISTING endpoints (/cost, /recommend, /simulate, /candidates)
+// keep their original http.Error plain-text error format to minimize diff. Every NEW endpoint added in this expansion uses
 // writeError to emit a JSON {"error":"..."} body, and every new POST
 // handler calls requireJSON at the top as a lightweight CSRF mitigation.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
@@ -92,7 +91,7 @@ func registerStaticRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/", staticHandler())
 }
 
-// registerExistingRoutes preserves the original five endpoints unchanged.
+// registerExistingRoutes preserves the original endpoints unchanged.
 // They are kept in their own function so the diff against pre-expansion
 // behavior is obvious to reviewers.
 func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
@@ -398,7 +397,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.SetPropositionStrength(req.PropositionID, req.Strength); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, statusForOntologyError(err), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -415,7 +414,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.Deprecate(req.PropositionID, req.Reason); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, statusForOntologyError(err), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -541,7 +540,13 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.IngestSample(sample); err != nil {
-			writeError(w, statusForIngestError(err), err.Error())
+			// A foreign sample is the caller sending this agent another machine's
+			// telemetry, which is a configuration answer rather than a fault.
+			status := http.StatusInternalServerError
+			if errors.Is(err, semmap.ErrForeignSample) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
 			return
 		}
 		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed {
@@ -894,17 +899,23 @@ func serveExplainStream(
 	}
 }
 
-// statusForIngestError maps an Ingest failure to an HTTP status. A missing edge
-// means the caller named a construct pair the backbone does not carry, which is
-// a client error; anything else is treated as internal.
-func statusForIngestError(err error) int {
-	if err == nil {
+// statusForOntologyError maps an operator mutation failure to an HTTP status.
+//
+// Naming a proposition this agent declares but does not model is the caller naming
+// something that does not exist here — a 404, not a fault. Reporting 500 said the daemon
+// had broken when in fact it had correctly refused, which sends an operator looking for a
+// bug instead of at their request.
+func statusForOntologyError(err error) int {
+	switch {
+	case err == nil:
 		return http.StatusNoContent
+	case errors.Is(err, semmap.ErrNotModelled):
+		return http.StatusNotFound
+	case errors.Is(err, semmap.ErrNoStateModel):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
 	}
-	if strings.Contains(err.Error(), "not found in storage") {
-		return http.StatusBadRequest
-	}
-	return http.StatusInternalServerError
 }
 
 // knownPeers returns the registered peers, or nil when the registry is empty or

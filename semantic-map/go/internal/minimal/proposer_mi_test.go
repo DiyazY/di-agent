@@ -99,13 +99,27 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 	if len(cs) != 1 {
 		t.Fatalf("expected 1 candidate; got %d", len(cs))
 	}
-	if err := p.Confirm(cs[0].CandidateID); err != nil {
+	// Confirm returns the proposition rather than adding it: the caller applies it
+	// through the facade, which is the only path that reaches the state model too.
+	prop, err := p.Confirm(cs[0].CandidateID)
+	if err != nil {
 		t.Fatalf("Confirm error: %v", err)
+	}
+	if prop == nil {
+		t.Fatal("Confirm returned no proposition for a pending candidate")
+	}
+	if prop.FromConstruct != cs[0].FromID || prop.ToConstruct != cs[0].ToID {
+		t.Errorf("returned proposition %s→%s does not carry the candidate's endpoints %s→%s",
+			prop.FromConstruct, prop.ToConstruct, cs[0].FromID, cs[0].ToID)
+	}
+	if err := ontology.AddValidatedProposition(prop); err != nil {
+		t.Fatalf("applying the returned proposition: %v", err)
 	}
 
 	after, _ := ontology.Propositions()
 	if len(after) != beforeCount+1 {
-		t.Errorf("Confirm should add exactly 1 proposition; before=%d after=%d", beforeCount, len(after))
+		t.Errorf("applying the confirmation should add exactly 1 proposition; before=%d after=%d",
+			beforeCount, len(after))
 	}
 
 	// Confirmed candidate must no longer appear in pending.

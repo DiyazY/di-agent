@@ -130,7 +130,7 @@ semantic-map/
     │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
     │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
     │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
-    │   │   ├── tools.go        6 READ-ONLY tools over the facade + Dispatch()
+    │   │   ├── tools.go        8 READ-ONLY tools over the facade + Dispatch()
     │   │   ├── validator.go    Deterministic citation validator (Gate 1)
     │   │   ├── planner.go      Plan parse / structural validate / deterministic execute
     │   │   ├── critic.go       Critic verdict parse + prompt assembly (Gate 2)
@@ -139,8 +139,10 @@ semantic-map/
     │   │   └── openai.go       OpenAI-compatible client; planner→answer→critic loop
     │   ├── semmap/
     │   │   ├── map.go          SemanticMap Go facade (includes peer registry + client)
-    │   │   └── projection.go   Renders the state model's relationships as EdgeDescriptors
-    │   │                       for /graph, /edges, /neighbors, the viewer and mapctl
+    │   │   └── projection.go   Renders the state model onto the surfaces that predate it:
+    │   │                       relationships as EdgeDescriptors (/graph, /edges,
+    │   │                       /neighbors, viewer, mapctl), strengths and retirement
+    │   │                       onto /propositions, the journal onto /history
     │   ├── statemap/           The state model — what THIS system exhibits (concrete, NOT a contract)
     │   │   ├── property.go     Property + Relationship + Map: kinds, lifecycle, observe, retire
     │   │   ├── learn.go        Paired estimator — relationships learn their own strength
@@ -157,9 +159,11 @@ semantic-map/
     │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
     │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
-    │       ├── ontology.go     SpecOntology           (constructs + propositions from domain_spec.json;
-    │       │                                           live audit log)
-    │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips deprecated)
+    │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
+    │       │                                           propositions from domain_spec.json. No
+    │       │                                           strengths, no history — both live on the
+    │       │                                           state model)
+    │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
     │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
@@ -174,7 +178,7 @@ semantic-map/
     │
     ├── compliance/             Go compliance test suites — one per contract
     │   ├── collector.go        RunCollectorCompliance(t, factory)
-    │   ├── ontology.go         RunOntologyCompliance(t, factory)  — live mutations + audit
+    │   ├── ontology.go         RunOntologyCompliance(t, factory)  — vocabulary + validation
     │   ├── reasoner.go         RunReasonerCompliance(t, factory)
     │   ├── proposer.go         RunProposerCompliance(t, factory)
     │   └── tuner.go            RunTunerCompliance(t, factory)
@@ -244,12 +248,14 @@ semantic-map/
 For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 
-> **The Python `storage.py` / `updater.py` contracts are stale.** The Go side deleted
-> both, along with `InMemoryStorage` and the EMA updaters: they were a second model of
-> the relations the state model holds, learning from the same telemetry into a different
-> structure. The Python layer is a specification mirror with no implementations behind it
-> (`cloud-full` is unbuilt), so it was left in place rather than half-ported. Read the Go
-> tree above as the current design and ARCHITECTURE.md §2 for why the two contracts went.
+> **The Python contract mirror is stale.** `storage.py` and `updater.py` have no Go
+> counterpart at all — they were a second model of the relations the state model holds,
+> learning from the same telemetry into a different structure — and `ontology.py` is
+> larger than the Go interface it mirrors, which no longer carries proposition strengths,
+> a deprecation flag or an audit log. The Python layer is a specification mirror with no
+> implementations behind it (`cloud-full` is unbuilt), so it was left in place rather than
+> half-ported. Read the Go tree above as the current design, and ARCHITECTURE.md §2 for
+> why each piece went.
 
 ---
 
@@ -354,8 +360,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/neighbors`                        | `?node=`                                                 | Phase 1  |
 | GET  | `/healthz`                          | —                                                        | Phase 1  |
 | GET  | `/version`                          | —                                                        | Phase 1  |
-| POST | `/ontology/strength`                | `{proposition_id, strength}`                             | Phase 1  |
-| POST | `/ontology/deprecate`               | `{proposition_id, reason}`                               | Phase 1  |
+| POST | `/ontology/strength`                | `{proposition_id, strength}`                             | Phase 1  | `404` when the proposition is declared but not modelled here |
+| POST | `/ontology/deprecate`               | `{proposition_id, reason}`                               | Phase 1  | `404` likewise |
 | POST | `/ontology/construct`               | `{construct_id, name, description}`                      | Phase 1  |
 | POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-", prior_strength}` | Phase 1 |
 | POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |

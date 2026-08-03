@@ -57,17 +57,30 @@ type Proposition struct {
 	FromConstruct string
 	ToConstruct   string
 	Direction     Direction
+
+	// PriorStrength is the strength in force, overlaid from the state model's
+	// relationship for this proposition. The specification declares no strength, so
+	// what the declaration layer holds for this field is the policy floor as a
+	// placeholder — see Instantiated.
 	PriorStrength float64
+
+	// Instantiated reports whether the agent carries a relationship for this
+	// proposition. False means the claim is declared but not modelled — seeding skips
+	// a proposition whose endpoints are not both observable here — and PriorStrength
+	// is then the placeholder rather than a calibrated value. The flag exists so a
+	// caller can tell those two cases apart, which reading the number alone cannot.
+	Instantiated bool
 	// Description is a one-sentence English statement of the causal claim
 	// (e.g. "Lightweight distributions reduce pod-startup latency"). Empty
 	// for auto-proposed candidates until an operator fills it in via
 	// AddValidatedProposition. Populated for the Di-Select bootstrap P1–P15.
 	Description     string
 	EvidenceSources []string // e.g. ["P1", "P4"]
-	// Deprecated marks a proposition that the ontology no longer endorses but
-	// is preserved in-place (history/replay). Reasoners must skip deprecated
-	// propositions during cost computation. Deprecation is a soft-delete:
-	// existing propositions are never structurally removed.
+	// Deprecated marks a proposition the agent no longer endorses, overlaid from
+	// whether the state model's relationship for it is retired. It is preserved
+	// in-place for history and replay, and a retired relationship leaves the
+	// traversal, so no answer consults it. Deprecation is a soft-delete: propositions
+	// are never structurally removed.
 	Deprecated       bool
 	DeprecatedReason string
 }
@@ -266,6 +279,12 @@ const (
 	EventPropositionAdded       OntologyEventKind = "proposition_added"
 	EventPropositionStrengthSet OntologyEventKind = "proposition_strength_set"
 	EventPropositionDeprecated  OntologyEventKind = "proposition_deprecated"
+
+	// EventOperatorTune records one operator intent that spanned several
+	// propositions, alongside the individual strength events it produced. Reading
+	// those separately gives no way to tell a coordinated adjustment from unrelated
+	// ones that happened to land together.
+	EventOperatorTune OntologyEventKind = "operator-tune"
 )
 
 // OntologyEvent is one entry in the ontology audit log.

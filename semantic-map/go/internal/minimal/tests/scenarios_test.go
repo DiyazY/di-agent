@@ -333,7 +333,7 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	a := newScenarioAgent(t)
 
 	before, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
-	t.Log("Scenario: deprecate P1. Reasoner must skip it; storage must retain the EdgeDescriptor.")
+	t.Log("Scenario: deprecate P1. The reasoner must skip it; the model must retain it, marked.")
 	t.Log("")
 	t.Logf("  before deprecation  graph path length = %d", len(before.GraphPathUsed))
 	t.Logf("                       latency=%.3f  resource_cost=%.3f  confidence=%.3f",
@@ -373,8 +373,10 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 			"soft-delete, not removal")
 	}
 
-	// Ontology surface still includes the deprecated proposition (flagged).
-	props, _ := a.ontology.Propositions()
+	// The proposition surface still includes the withdrawn claim, flagged — the flag is
+	// overlaid from the relationship's retirement, so this reads through the facade. The
+	// declaration layer holds no flag of its own.
+	props, _ := a.sm.Propositions()
 	foundDeprecated := false
 	for _, p := range props {
 		if p.PropositionID == firstSpecProp() {
@@ -435,64 +437,74 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 
 // ── Scenario 6: Audit trail records every mutation ───────────────────────────
 
+// Every mutation goes through the FACADE, not the declaration layer. That is the
+// invariant the scenario is really about: the ontology answers for the vocabulary and
+// holds no strength, no deprecation flag and no log of its own, so an operator action
+// applied to it directly would change nothing and record nothing. Each call below has
+// two halves — a declaration where one is needed, and the state-model write that has
+// the effect — and the journal is where both are visible.
 func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 	a := newScenarioAgent(t)
 
-	t.Log("Scenario: trigger one of each ontology mutation. GetHistory must contain exactly four events.")
+	t.Log("Scenario: trigger one of each operator mutation through the facade.")
+	t.Log("History must record every one, against the single journal.")
 	t.Log("")
 
-	if err := a.ontology.SetPropositionStrength("P3", 0.77); err != nil {
+	if err := a.sm.SetPropositionStrength("P3", 0.77); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ontology.AddConstruct(&types.Construct{
+	if err := a.sm.AddConstruct(&types.Construct{
 		ConstructID: "PR",
 		Name:        "Privacy & Data Sovereignty",
 		Description: "Sample new construct added by scenario test",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Pick a fresh proposition pair that doesn't conflict with anything
-	// existing — PS↔SC is not in the Di-Select bootstrap propositions.
-	if err := a.ontology.AddValidatedProposition(&types.Proposition{
+	// A fresh pair that conflicts with nothing existing. PR is the construct just
+	// added, so this also covers the case where an endpoint has no routed metric: the
+	// facade declares the property alongside the relationship.
+	if err := a.sm.AddValidatedProposition(&types.Proposition{
 		PropositionID: "P-scenario",
 		FromConstruct: "PS",
-		ToConstruct:   "SC",
+		ToConstruct:   "PR",
 		Direction:     types.Positive,
 		PriorStrength: 0.42,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ontology.Deprecate(firstSpecProp(), "scenario test deprecation"); err != nil {
+	if err := a.sm.Deprecate(firstSpecProp(), "scenario test deprecation"); err != nil {
 		t.Fatal(err)
 	}
 
-	events, err := a.ontology.GetHistory(time.Time{})
+	events, err := a.sm.History(time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Logf("  recorded %d events in audit log:", len(events))
+	t.Logf("  recorded %d events in the journal:", len(events))
 	for i, e := range events {
 		t.Logf("    [%d] %s  kind=%s  target=%s  actor=%s",
 			i, e.Timestamp.Format(time.RFC3339Nano), e.Kind, e.TargetID, e.Actor)
 	}
 
-	if len(events) != 4 {
-		t.Errorf("expected exactly 4 events after 4 mutations; got %d", len(events))
-	}
-
-	want := []types.OntologyEventKind{
+	// The journal records seeding as well as operator action, so the assertion is that
+	// each mutation appears — not that the log holds exactly four entries. A count is
+	// the wrong assertion for a record that also holds what the agent did to itself.
+	for _, want := range []types.OntologyEventKind{
 		types.EventPropositionStrengthSet,
 		types.EventConstructAdded,
 		types.EventPropositionAdded,
 		types.EventPropositionDeprecated,
-	}
-	for i, w := range want {
-		if i >= len(events) {
-			break
+	} {
+		found := false
+		for _, e := range events {
+			if e.Kind == want {
+				found = true
+				break
+			}
 		}
-		if events[i].Kind != w {
-			t.Errorf("event[%d] kind=%s; expected %s", i, events[i].Kind, w)
+		if !found {
+			t.Errorf("no %s event in the journal after the corresponding mutation", want)
 		}
 	}
 
@@ -911,12 +923,15 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 		t.Errorf("expected significant p-value (< 0.05); got %.4f", cand.PValue)
 	}
 
-	// Confirm the candidate — backbone grows.
-	if err := proposer.Confirm(cand.CandidateID); err != nil {
+	// Confirm through the FACADE, which is what an operator's POST reaches. The proposer
+	// returns the proposition and the facade applies it to both the declaration and the
+	// state model; confirming against the proposer alone would leave the claim declared
+	// and unmodelled, taking part in no answer.
+	if err := sm.ConfirmCandidate(cand.CandidateID); err != nil {
 		t.Fatal(err)
 	}
 
-	props, err := o.Propositions()
+	props, err := sm.Propositions()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -935,6 +950,20 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	}
 	if !found {
 		t.Error("confirmed CE↔RC proposition not found in backbone")
+	}
+
+	// And it reached the model: a confirmed candidate must be traversable, not merely
+	// listed. This is the half the old path skipped.
+	var modelled bool
+	for _, p := range props {
+		if (p.FromConstruct == "CE" && p.ToConstruct == "RC") ||
+			(p.FromConstruct == "RC" && p.ToConstruct == "CE") {
+			modelled = p.Instantiated
+		}
+	}
+	if !modelled {
+		t.Error("the confirmed proposition is declared but not modelled, so it takes part " +
+			"in no answer — the failure propose-then-confirm exists to prevent")
 	}
 }
 
@@ -997,8 +1026,10 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 		}
 	}
 
-	// Audit trail: history must contain "operator-tune" event.
-	events, err := o.GetHistory(time.Time{})
+	// Audit trail: the journal must carry the consolidated operator intent alongside
+	// the individual assertions, or a coordinated adjustment is indistinguishable
+	// afterwards from unrelated ones that landed together.
+	events, err := sm.History(time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

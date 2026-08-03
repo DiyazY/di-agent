@@ -3,6 +3,7 @@ package semmap
 import (
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -61,6 +62,103 @@ func edgeFromRelationship(r statemap.Relationship) *types.EdgeDescriptor {
 		// is what Deprecated has always meant on this surface.
 		Deprecated:       r.Status == statemap.Retired,
 		DeprecatedReason: r.RetiredReason,
+	}
+}
+
+// projectedPropositions overlays the values in force onto the declared propositions.
+//
+// The declaration layer answers for the vocabulary — which propositions exist, between
+// which constructs, in which direction, with what description. It holds no strength,
+// because the specification declares none: what it reports for that field is the policy
+// floor as a placeholder. The number in force is the relationship's prior, and whether
+// the claim is withdrawn is whether the relationship is retired.
+//
+// A proposition with no relationship in the model is reported as declared, with its
+// placeholder strength and `Instantiated` false. That case is not a gap to hide: seeding
+// skips a proposition whose endpoints are not both observable (§3.1 of the P6 paper), so
+// the flag is how a caller tells a claim this agent carries from one it merely knows
+// about. Reporting the placeholder as though it were calibrated would be the error.
+func (m *SemanticMap) projectedPropositions() ([]*types.Proposition, error) {
+	declared, err := m.ontology.Propositions()
+	if err != nil {
+		return nil, err
+	}
+	if m.state == nil {
+		return declared, nil
+	}
+	byLabel := map[string]statemap.Relationship{}
+	for _, r := range m.state.Relationships("", "") {
+		if r.Label != "" {
+			byLabel[r.Label] = r
+		}
+	}
+	for _, p := range declared {
+		r, ok := byLabel[p.PropositionID]
+		if !ok {
+			continue
+		}
+		p.PriorStrength = r.Prior
+		p.Instantiated = true
+		if r.Status == statemap.Retired {
+			p.Deprecated = true
+			p.DeprecatedReason = r.RetiredReason
+		}
+	}
+	return declared, nil
+}
+
+// projectedHistory renders the state model's journal as ontology events.
+//
+// There is one journal. This projection exists so the surfaces that predate it —
+// `/history`, `mapctl history`, the viewer's audit panel, the explain layer's
+// get_history tool — keep working against the record that is actually authoritative.
+// The mapping is lossy in one direction only: the journal holds more kinds of event
+// than the ontology vocabulary can name (a property admitted, a property gone stale, a
+// decision taken), and those are surfaced as their own kinds rather than being dropped
+// or forced into a construct-shaped box.
+func (m *SemanticMap) projectedHistory(since time.Time) ([]*types.OntologyEvent, error) {
+	if m.state == nil {
+		return nil, ErrNoStateModel
+	}
+	events := m.state.Journal().Events(0, 0)
+	out := make([]*types.OntologyEvent, 0, len(events))
+	for _, e := range events {
+		if !since.IsZero() && e.At.Before(since) {
+			continue
+		}
+		detail := make(map[string]any, len(e.Detail)+1)
+		for k, v := range e.Detail {
+			detail[k] = v
+		}
+		detail["revision"] = e.Revision
+		out = append(out, &types.OntologyEvent{
+			Timestamp: e.At,
+			Actor:     e.Actor,
+			Kind:      ontologyEventKind(e.Kind),
+			TargetID:  e.Target,
+			Detail:    detail,
+		})
+	}
+	return out, nil
+}
+
+// ontologyEventKind maps a journal event onto the audit vocabulary the wire surfaces
+// already speak, keeping the names that had a meaning there and passing the rest
+// through unchanged rather than collapsing them into an "other" bucket.
+func ontologyEventKind(k statemap.EventKind) types.OntologyEventKind {
+	switch k {
+	case statemap.EventPropertyDeclared, statemap.EventPropertyAdmitted:
+		return types.EventConstructAdded
+	case statemap.EventRelationshipDeclared:
+		return types.EventPropositionAdded
+	case statemap.EventRelationshipAsserted:
+		return types.EventPropositionStrengthSet
+	case statemap.EventRelationshipRetired, statemap.EventPropertyRetired:
+		return types.EventPropositionDeprecated
+	case statemap.EventOperatorIntent:
+		return types.EventOperatorTune
+	default:
+		return types.OntologyEventKind(k)
 	}
 }
 

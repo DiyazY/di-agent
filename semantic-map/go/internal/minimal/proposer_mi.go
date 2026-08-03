@@ -216,28 +216,35 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 	return out, nil
 }
 
-// Confirm promotes a Pending candidate into the ontology backbone via
-// AddValidatedProposition. The synthesized PropositionID is
+// Confirm marks a Pending candidate accepted and returns the proposition it represents.
+// The synthesized PropositionID is
 //
 //	"P-" + hex(sha256(CandidateID))[:8]
 //
 // so the same candidate always lands the same proposition ID across replays.
-// On success the candidate's Status is flipped to Confirmed and a history
-// entry is appended.
-func (p *MICorrelationProposer) Confirm(candidateID string) error {
+//
+// It adds nothing itself. It used to call AddValidatedProposition on the ontology, which
+// meant a confirmed candidate reached the declaration layer and not the state model — so
+// it appeared in Propositions() and in no traversal, influencing no answer. That is the
+// exact failure propose-then-confirm exists to prevent, one layer over. The facade adds
+// the returned proposition through its own path, which declares both halves.
+//
+// The candidate is only marked Confirmed on the way out, so a caller that fails to apply
+// the proposition can retry: an unapplied confirmation must not leave the candidate in a
+// state where it can never be confirmed again.
+func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.candidates[candidateID]
 	if !ok {
-		return fmt.Errorf("candidate %q not found", candidateID)
+		return nil, fmt.Errorf("candidate %q not found", candidateID)
 	}
 	if c.Status != types.Pending {
-		return fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
+		return nil, fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
 	}
 
-	propID := "P-" + synthesizePropSuffix(candidateID)
 	prop := &types.Proposition{
-		PropositionID:   propID,
+		PropositionID:   "P-" + synthesizePropSuffix(candidateID),
 		FromConstruct:   c.FromID,
 		ToConstruct:     c.ToID,
 		Direction:       c.Direction,
@@ -245,11 +252,8 @@ func (p *MICorrelationProposer) Confirm(candidateID string) error {
 		Description:     fmt.Sprintf("Auto-proposed by MICorrelationProposer (|r|=%.3f, n=%d)", c.MIScore, c.NObservations),
 		EvidenceSources: []string{"proposer-mi"},
 	}
-	if err := p.ontology.AddValidatedProposition(prop); err != nil {
-		return err
-	}
 	c.Status = types.Confirmed
-	return nil
+	return prop, nil
 }
 
 // Reject marks a candidate as permanently suppressed for this session.

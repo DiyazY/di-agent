@@ -309,11 +309,6 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	// Calibrated proposition strengths reach the declaration layer so /propositions
 	// reports what this cluster was calibrated to. The operative copy is in the state
 	// model, seeded from the same file in seedStateMap.
-	if pw != nil {
-		applyPriorWeights(ontology, pw)
-		reconcilePropositionStrengths(ontology, pw, cfg.KD)
-	}
-
 	sm := semmap.NewWithPeers(ontology, reasoner, proposer, tuner, peerRegistry, peerClient)
 	sm.SetIdentity(cfg.NodeID, cfg.AcceptForeignSamples)
 	// Both halves need it: the facade feeds observations into the model, and the
@@ -344,40 +339,13 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	return sm, collector
 }
 
-// applyPriorWeights overwrites proposition PriorStrength values in the ontology
-// with those from prior_weights.json via the ontology's safe setter (locks
-// internally, does not mutate pointers returned by Propositions()). Unknown
-// proposition IDs are silently ignored so old files remain compatible with
-// new code.
-func applyPriorWeights(ontology *minimal.SpecOntology, pw *priorWeightsFile) {
-	for propID, entry := range pw.Propositions {
-		_ = ontology.SetPropositionStrength(propID, entry.PriorStrength)
-	}
-}
-
-// reconcilePropositionStrengths writes each proposition's per-cluster calibrated prior
-// back into the declaration layer, where a per-KD entry exists for it.
-//
-// Without this the two layers disagree for the whole cold-start period: the state model
-// holds the per-KD weight the agent reasons with, while GET /propositions reports the
-// global strength, and the first operator tune records a change from a number the agent
-// never used.
-//
-// It used to also populate a storage graph with a node per construct and an edge per
-// proposition — the seeding half of a second model. What remains is the reconciliation,
-// which is the part that was ever about agreement rather than duplication.
-func reconcilePropositionStrengths(ontology *minimal.SpecOntology, pw *priorWeightsFile, kd string) {
-	perKD := perKDEdgeWeights(pw, kd)
-	if len(perKD) == 0 {
-		return
-	}
-	propositions, _ := ontology.Propositions()
-	for _, p := range propositions {
-		if e, ok := perKD[edgeKey(p.FromConstruct, p.ToConstruct, p.PropositionID)]; ok {
-			_ = ontology.SetPropositionStrength(p.PropositionID, e.PriorWeight)
-		}
-	}
-}
+// The calibration is applied in one place — seedStateMap, which puts each per-cluster
+// prior on the relationship it belongs to. Two functions used to live here that also
+// wrote the strengths into the declaration layer, plus a reconciliation pass to stop the
+// two disagreeing. The declaration layer no longer holds a strength: GET /propositions
+// overlays the value in force from the model (see semmap.projectedPropositions), so there
+// is nothing left to reconcile and no window in which the exposed number and the used
+// number can differ.
 
 // perKDEdgeWeights returns the per-distribution edge map for kd, or nil if not
 // applicable. Callers must handle the nil case (fall back to global priors).

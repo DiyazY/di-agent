@@ -232,7 +232,7 @@ POST /ontology/deprecate {"proposition_id":"P7","reason":"..."}
         └─▶ append OntologyEvent {actor, kind, target, timestamp}
               └─▶ readable forever via GET /history
 ```
-*Only four mutations exist: `SetPropositionStrength`, `AddConstruct`, `AddValidatedProposition`, `Deprecate`. Every one is audited. Construct removal and direction reversal are impossible by design.*
+*Four operator mutations exist, all on the facade: `SetPropositionStrength`, `Deprecate`, `AddConstruct`, `AddValidatedProposition`. Each reaches the state model, which is what gives it an effect; each is journalled. The declaration layer itself carries only the last two, because only those change the vocabulary. Construct removal and direction reversal are impossible by design.*
 
 **④ A human asks a question** — the loop that makes the agent legible.
 
@@ -296,7 +296,7 @@ The rule we hold to: **no new contract without a second implementation that need
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | **Collector** | Read raw metrics from a source; emit normalized samples     | Pure read; deterministic `event_id`; `available_metrics()` is static; never raises on empty data         |
-| **Ontology**  | The declaration layer — constructs, propositions, validation, audit | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs are append-only; propositions are soft-deleted via `Deprecate` (never removed or direction-reversed); every mutation appends to an audit log readable via `GetHistory` |
+| **Ontology**  | The declaration layer — which constructs exist, which propositions relate them, whether a proposed one is valid | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs and propositions are append-only, never removed or direction-reversed. Holds **no** strength and **no** history: a proposition's magnitude is its relationship's prior and its withdrawal is that relationship's retirement, both in the state model, and the journal is the one audit record |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; `Reject` permanently suppresses within session          |
 | **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
@@ -334,7 +334,7 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 | `PerKDDecisionsDiffer`              | Two agents with same query but different `-kd`: cost outputs diverge — the per-KD priors steer        |
 | `DeprecationShrinksGraph`           | After `Deprecate("P1")`: graph path length drops by exactly 1; the model retains the retired relationship |
 | `IdempotentReplay`                  | 200 obs replayed with same eventIDs is a no-op; new eventIDs accumulate — idempotency is per-event    |
-| `AuditTrailRecordsEverything`       | Four ontology mutations → exactly four `OntologyEvent`s in chronological order via `GetHistory`        |
+| `AuditTrailRecordsEverything`       | Four operator mutations through the facade → each appears in the journal, in chronological order       |
 
 A separate numerical verification (`pkg/profiles/build_priors_test.go::TestBuildAppliesPerKDPriors`) confirms that for every KD in `prior_weights.json` and every proposition in the model, the seeded prior matches the file to 1e-6 precision. It runs through `Build` with the same Config literal the daemon constructs, which a library-level test of the seeder could not do — and that distinction caught a real failure once, when the convergence harness passed `-proposer false` and Go's flag package silently dropped every flag after it, including `-priors` and `-kd`.
 
@@ -370,9 +370,9 @@ The ontology is not a static reference. Empirical priors get recalibrated as new
 | New construct added               | `AddConstruct(c)`                            | Operator (new domain extension)         | declares an observed property at zero confidence — nothing routes to it, so a derived one would summarise nothing |
 | Existing claim retired (soft)     | `Deprecate(propID, reason)`                  | Operator (evidence-against accumulated) | retires the relationship: it leaves the traversal, keeps its record, and reads as deprecated on the graph surfaces |
 
-**Every ontology mutation must reach the state model.** This is an invariant, not an implementation detail, and it is the one most easily broken: every answer is computed from the model's relationships, never from the ontology's proposition list. A declaration-only mutation is therefore invisible to every decision the agent makes — it appears in `Propositions()`, it appears in `GetHistory()`, and it changes nothing. That failure mode is silent by construction, because the audit log records the operator's intent faithfully whether or not the model acted on it.
+**Every operator mutation must reach the state model.** This is an invariant, not an implementation detail, and it was the one most easily broken: every answer is computed from the model's relationships, never from a proposition list. A declaration-only mutation is invisible to every decision the agent makes — it appears in `Propositions()`, it appears in the audit trail, and it changes nothing. That failure mode is silent by construction, because a log records the operator's intent faithfully whether or not the model acted on it.
 
-The invariant survived the removal of the storage graph unchanged; only its object moved. `pkg/semmap/ontology_sync_test.go` and `strength_propagation_test.go` pin each mutation's effect on the model.
+**It is now structural rather than a rule to remember.** The declaration layer no longer *has* a strength to set or a flag to raise, so there is no longer a way to perform half of one of these mutations: `SetPropositionStrength` and `Deprecate` exist only on the facade, and each returns `ErrNotModelled` — rendered as 404 — when no relationship carries the named proposition, rather than reporting success for an action that landed nowhere. The invariant survived the removal of the storage graph unchanged, then stopped needing to be an invariant. `pkg/semmap/ontology_sync_test.go` and `strength_propagation_test.go` pin each mutation's effect on the model.
 
 The separation of `Prior` from `Strength` is what makes recalibration safe. An assertion moves the prior; what was learned from this system stays where it is, and the effective strength blends the two by confidence — so on a well-observed relationship an operator's number moves the answer very little, and the response says so rather than letting the operator assume otherwise.
 
@@ -382,7 +382,7 @@ What is stable, what is not:
 - **Proposition removal** is impossible. `Deprecate` is the only retirement path. Deprecated propositions remain in `Propositions()` so the audit trail / replay are intact, and the relationship stays in the model marked retired — soft-delete preserves both the structural and the evidence record, so a decision taken before the retirement remains reconstructible.
 - **Proposition direction reversal** is impossible. `ValidateProposition` rejects a new edge that contradicts an existing direction. The three Di-Select conflict pairs (P2/P3, P5/P6, P7/P9) are exempt because both halves are present from the bootstrap; the Proposer cannot introduce *new* conflict pairs without explicit operator action (a future extension).
 
-The audit log (`GetHistory(since)`) lets the agent answer "why is this edge weight what it is?" at any point in time. On the edge-minimal profile the log is in-memory and ephemeral across restarts. The `cloud-full` profile persists it.
+The audit trail (`GetHistory(since)` on the facade, `GET /history`) lets the agent answer "why is this strength what it is?" at any point in time. It is a projection of the state model's journal — there is one record, and it holds more than the ontology vocabulary can name, so a property admitted or a decision taken appears there too. It survives a restart when a state file is configured (§5, Persistence), and is bounded: `GET /state/journal` reports how many entries were dropped, which is what a caller needs before reading an absence as evidence.
 
 Implementations that intentionally do not support a mutation (e.g. a read-only ontology cache layered in front of the canonical store) return `contracts.ErrNotImplemented` rather than silently succeeding. The compliance suite tolerates this — every live-ontology subtest skips on `ErrNotImplemented`.
 
@@ -1144,10 +1144,10 @@ SemanticMap.Tune: resolve current magnitudes from the state model's relationship
           ↓
 TunerContract.Validate(adjustments) — hard bounds check
           ↓
-SemanticMap.SetPropositionStrength × N        ← facade, not the ontology method:
-                                                asserts on the model AND records it
-                                                in the declaration layer
-OntologyContract.RecordTune(text, operator)   ← single "operator-tune" event
+SemanticMap.SetPropositionStrength × N        ← asserts the prior on the model, with
+                                                actor and reason, per proposition
+statemap.RecordOperatorIntent(text, operator) ← one operator.intent event naming the
+                                                whole act and what it touched
           ↓
 Return []TuneAdjustment: PropositionID, OldStrength, NewStrength, Rationale
 ```
@@ -1156,7 +1156,7 @@ Two details in that flow are load-bearing and were both once wrong.
 
 **The delta anchors to the relationship's magnitude, not the proposition's strength.** Those differ by construction: the state model is seeded from `prior_weights.json`'s per-distribution `distribution_edge_weights` table while the ontology carries the global `propositions` table. On a k0s-seeded daemon P1's edge sits at 0.2138 against a proposition strength of 0.620. Anchoring a +0.12 nudge to the global figure would jump the edge from 0.2138 to 0.740, discarding per-distribution calibration in a single operator action. It also makes the SC-adjacent floor of 0.30 unreachable — anchored to per-KD magnitudes, P11 (0.0089 + 0.12 = 0.1289) clamps to it immediately.
 
-**Adjustments apply through `SemanticMap.SetPropositionStrength`, not `OntologyContract.SetPropositionStrength`.** Only the facade reaches the state model. Calling the contract method directly leaves the tune visible in `Propositions()` and in the audit log while changing no agent decision — see the write-through invariant in §2.
+**Adjustments apply through `SemanticMap.SetPropositionStrength`.** There is no longer an ontology method of that name to call by mistake — see §2 on why it was removed. The consolidated intent is journalled alongside the individual assertions, because reading those separately afterwards gives no way to tell one coordinated adjustment from several unrelated ones that landed together.
 
 The resulting effect is predictable in closed form, and the form is worth stating precisely because it bounds what operator tuning can do. A tune writes the prior; the Reasoner reads `effective = (1 − c)·prior + c·learned`. A prior change of δ therefore moves the sensitivity by `(1 − c)·δ` and moves the reported *levels* not at all, since those are the constructs' own observed values. At `c = 1` a tune is exactly inert — measured: on a k0s daemon after one idle run every edge reaches c = 1.000, and `prioritize performance` moves both sensitivities by 0.000000 while faithfully recording itself in the audit log.
 
