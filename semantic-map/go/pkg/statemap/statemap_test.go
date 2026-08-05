@@ -3,6 +3,7 @@ package statemap
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -792,5 +793,79 @@ func TestLoadRefusesAmbiguity(t *testing.T) {
 	}
 	if _, err := m2.Load(good); err == nil {
 		t.Error("loading into a populated map was accepted; the merge would be invisible")
+	}
+}
+
+// TestSaveIsAtomicUnderConcurrentWriters guards the shutdown case: the periodic save
+// loop and the synchronous shutdown save can both call Save on the same path at once
+// when the context is cancelled mid-tick. A shared temp path let them clobber each
+// other; a uniquely-named temp per save does not. The file must always be a complete,
+// loadable snapshot, and no temp litter may survive.
+func TestSaveIsAtomicUnderConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/state.json"
+
+	m, _ := newTestMap(t, Config{Owner: "node-x", ConvergenceObservations: 10, Alpha: 0.5})
+	if err := m.DeclareProperty(Property{ID: "cpu", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("cpu", 0.4, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 25; i++ {
+				if err := m.Save(path); err != nil {
+					t.Errorf("concurrent save: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// The destination is a complete snapshot, not a half-written one.
+	fresh, _ := newTestMap(t, Config{Owner: "node-x"})
+	loaded, err := fresh.Load(path)
+	if err != nil || !loaded {
+		t.Fatalf("after concurrent saves the snapshot did not load cleanly: loaded=%v err=%v", loaded, err)
+	}
+	if _, ok := fresh.Property("cpu"); !ok {
+		t.Error("restored map is missing a property that was present when saved")
+	}
+
+	// No temp files survive: a unique name per save is only safe if each one is also
+	// cleaned up, or the dir fills with orphaned .tmp-* beside the real snapshot.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("temp litter survived concurrent saves: %s", e.Name())
+		}
+	}
+}
+
+// TestSaveWritesPrivateFileMode pins the snapshot at 0o600: it holds this machine's
+// journal, decisions and telemetry-derived state, which is not world-readable material
+// on a shared host.
+func TestSaveWritesPrivateFileMode(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	m, _ := newTestMap(t, Config{Owner: "node-x"})
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("snapshot mode is %o, want 600 — a per-machine private snapshot should "+
+			"not be world-readable", perm)
 	}
 }

@@ -98,9 +98,29 @@ func (m *Map) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("encoding snapshot: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, blob, 0o644); err != nil {
+
+	// A uniquely-named temp file, not a fixed path+".tmp". Two saves can be in flight
+	// at once — the periodic save loop and the synchronous shutdown save race at
+	// SIGINT — and a shared temp path lets them clobber each other's bytes before
+	// either renames. os.CreateTemp also creates the file 0o600, which is the right
+	// mode for a per-machine private snapshot (journal, decisions, telemetry-derived
+	// values) rather than the world-readable 0o644 this used to write.
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating snapshot temp file: %w", err)
+	}
+	tmp := f.Name()
+	// Best-effort cleanup: a save that fails before the rename must not leave a
+	// litter of half-written temp files beside the real snapshot. Harmless after a
+	// successful rename, where tmp no longer exists.
+	defer func() { _ = os.Remove(tmp) }()
+
+	if _, err := f.Write(blob); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("writing snapshot: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing snapshot: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replacing snapshot: %w", err)
