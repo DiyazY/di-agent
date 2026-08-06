@@ -33,9 +33,10 @@ For design rationale, contract decisions, language strategy, and research connec
 Five commands to see the live ontology end-to-end. Requires Go 1.22+. See [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface) for the design.
 
 ```bash
-# 1. Start the daemon (edge-minimal profile, in-memory)
+# 1. Start the daemon (edge-minimal profile, in-memory).
+# -domain is required: the binary embeds no domain model.
 cd semantic-map/go
-go run ./cmd/agent -profile edge-minimal -addr :8080 &
+go run ./cmd/agent -profile edge-minimal -addr :8080 -domain ../domain_spec.json &
 ```
 
 ```bash
@@ -43,7 +44,7 @@ go run ./cmd/agent -profile edge-minimal -addr :8080 &
 curl -s localhost:8080/graph | jq '{constructs:(.constructs|length),
                                     propositions:(.propositions|length),
                                     edges:(.edges|length)}'
-# → {"constructs":7,"propositions":15,"edges":15}
+# → {"constructs":3,"propositions":4,"edges":4}   with the committed domain_spec.json
 
 curl -s 'localhost:8080/edges?from=RC&to=PS' | jq 'length'
 # → 2  (P2 and P3 — the multigraph conflict pair)
@@ -79,29 +80,15 @@ Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and head
 ```
 semantic-map/
 │
-│  ── Python layer (specification + cloud-full) ──────────────────
+├── domain_spec.json            THE DOMAIN MODEL — constructs, propositions, metric routing,
+│                               adjustment policy, tuner intent rules. The daemon loads this
+│                               at startup (-domain) and refuses to run without it; no
+│                               construct or proposition identifier exists in any binary.
 │
-├── types.py                    Shared data types (MetricSample, MetricType, EdgeDescriptor, …)
-├── map.py                      SemanticMap Python facade
-├── profiles.py                 Deployment profile registry + build_map() factory
+│  ── Python layer (the calibration pipeline — a build-time step) ──
+│
 ├── prior_weights.json          Calibrated prior strengths output by the init pipeline
-├── requirements.txt            pytest only (no runtime deps for contracts)
-│
-├── contracts/                  Contract definitions (Python ABCs)
-│   ├── collector.py            CollectorContract
-│   ├── storage.py              StorageContract
-│   ├── ontology.py             OntologyContract
-│   ├── updater.py              UpdaterContract
-│   ├── reasoner.py             ReasonerContract + InsufficientTrustError
-│   └── proposer.py             ProposerContract
-│
-├── compliance/                 Shared compliance test suites (mix into pytest class)
-│   ├── collector.py            CollectorComplianceTests
-│   ├── storage.py              StorageComplianceTests
-│   ├── ontology.py             OntologyComplianceTests
-│   ├── updater.py              UpdaterComplianceTests
-│   ├── reasoner.py             ReasonerComplianceTests
-│   └── proposer.py             ProposerComplianceTests
+├── requirements.txt            scipy (spearmanr); the pipeline's only outside dependency
 │
 ├── prior_init/                 Prior initialization pipeline (Step 4)
 │   ├── pipeline.py             Entry point — reads P1–P5 constants, writes prior_weights.json
@@ -116,15 +103,15 @@ semantic-map/
     │
     ├── pkg/                    Public packages — importable by agent code
     │   ├── types/types.go      Go equivalents of all Python types
-    │   ├── contracts/          Go interfaces (mirrors of Python ABCs)
-    │   │   └── contracts.go    All 6 interfaces + sentinel errors
+    │   ├── contracts/          The contract surface — five interfaces
+    │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
     │   ├── explain/            Natural-language operator surface (concrete, NOT a contract)
     │   │   ├── explainer.go    Explainer iface + Request/Response/Citation/Plan/Verdict/Usage
     │   │   ├── disabled.go     DisabledExplainer — the default; returns ErrNotEnabled
-    │   │   ├── tools.go        6 READ-ONLY tools over the facade + Dispatch()
+    │   │   ├── tools.go        8 READ-ONLY tools over the facade + Dispatch()
     │   │   ├── validator.go    Deterministic citation validator (Gate 1)
     │   │   ├── planner.go      Plan parse / structural validate / deterministic execute
     │   │   ├── critic.go       Critic verdict parse + prompt assembly (Gate 2)
@@ -133,22 +120,35 @@ semantic-map/
     │   │   └── openai.go       OpenAI-compatible client; planner→answer→critic loop
     │   ├── semmap/
     │   │   ├── map.go          SemanticMap Go facade (includes peer registry + client)
-    │   │   └── bridge.go       MetricType → construct routing (stateless, NOT a contract)
+    │   │   └── projection.go   Renders the state model onto the surfaces that predate it:
+    │   │                       relationships as EdgeDescriptors (/graph, /edges,
+    │   │                       /neighbors, viewer, mapctl), strengths and retirement
+    │   │                       onto /propositions, the journal onto /history
+    │   ├── statemap/           The state model — what THIS system exhibits (concrete, NOT a contract)
+    │   │   ├── property.go     Property + Relationship + Map: kinds, lifecycle, observe, retire
+    │   │   ├── learn.go        Paired estimator — relationships learn their own strength
+    │   │   ├── query.go        State(Query) + Explain(id) — census-carrying views
+    │   │   ├── journal.go      Bounded change log + DecisionBuilder (records inputs as read)
+    │   │   ├── persist.go      Versioned, owner-stamped snapshots (atomic write, refuses foreign)
+    │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
-    │       └── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
+    │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
+    │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties, calibrated priors
     │
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
     │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
     │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
-    │       ├── storage.go      InMemoryStorage        (multigraph, keyed by from→to:propID)
-    │       ├── ontology.go     StaticDiSelectOntology (7 constructs + P1–P15; live audit log)
-    │       ├── updater.go      EMAUpdater             (idempotency, reset; multigraph-aware)
-    │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips deprecated)
+    │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
+    │       │                                           propositions from domain_spec.json. No
+    │       │                                           strengths, no history — both live on the
+    │       │                                           state model)
+    │       ├── reasoner.go     RuleEngineReasoner     (deterministic, blended, skips retired)
     │       ├── proposer.go     DisabledProposer       (no-op)
     │       ├── proposer_mi.go  MICorrelationProposer  (Pearson r + Fisher z p-values; default via -proposer=true)
-    │       ├── tuner.go        RuleBasedTuner + DisabledTuner (7 intent patterns; default via -tuner=true)
+    │       ├── tuner.go        RuleBasedTuner + DisabledTuner (intent rules read from the spec;
+    │       │                                           default via -tuner=true)
     │       └── tests/
     │           ├── compliance_test.go   Runs all Go compliance suites
     │           └── scenarios_test.go    End-to-end narrated scenarios (ColdStart, Convergence,
@@ -159,18 +159,20 @@ semantic-map/
     │
     ├── compliance/             Go compliance test suites — one per contract
     │   ├── collector.go        RunCollectorCompliance(t, factory)
-    │   ├── storage.go          RunStorageCompliance(t, factory)   — multigraph guarantees
-    │   ├── updater.go          RunUpdaterCompliance(t, factory)   — per-edge idempotency
-    │   ├── ontology.go         RunOntologyCompliance(t, factory)  — live mutations + audit
+    │   ├── ontology.go         RunOntologyCompliance(t, factory)  — vocabulary + validation
     │   ├── reasoner.go         RunReasonerCompliance(t, factory)
-    │   └── proposer.go         RunProposerCompliance(t, factory)
+    │   ├── proposer.go         RunProposerCompliance(t, factory)
+    │   └── tuner.go            RunTunerCompliance(t, factory)
     │
     ├── pkg/profiles/
-    │   └── profiles_test.go    Numerical verification: per-KD prior seeding from prior_weights.json
+    │   ├── build_priors_test.go  Numerical verification: per-KD prior seeding, through Build
+    │   └── profiles_test.go      KD validation + prior_weights.json discovery
     │
     ├── cmd/agent/              Daemon binary
     │   ├── main.go             Flag parsing + profile build + ListenAndServe
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
+    │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
+    │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
     │   ├── dto.go              Named JSON DTOs (Direction serialized as "+"/"-")
     │   ├── static.go           //go:embed all:static + staticHandler()
     │   ├── routes_test.go      HTTP integration tests via httptest.NewServer
@@ -200,7 +202,7 @@ semantic-map/
     │
     └── cmd/replay/             Parquet replay binary — drives the 225 Netdata
         │                       parquets (P1–P5 dataset) into POST /ingest-sample
-        ├── main.go             run / all / probe / list / compare subcommands
+        ├── main.go             run / all / probe / list subcommands
         ├── parquet/            Streaming long-format reader over parquet-go v0.25.1
         │   ├── reader.go       Open + Next + Close; 4096-row batched buffer
         │   └── reader_test.go  Synthesized fixture parquets in t.TempDir()
@@ -211,7 +213,6 @@ semantic-map/
         │   ├── runner.go       Run(ctx, sender, cfg) + deterministic EventID()
         │   └── runner_test.go  httptest.Server-backed Sender; covers EventID
         │                       determinism across two replays (idempotency proof)
-        ├── compare/            In-process per-KD replay + divergence (meta-analysis)
         │   ├── runner.go       Build a SemanticMap per KD, stream parquet rows,
         │   │                   snapshot edges. Skips HTTP — driven on pkg/semmap
         │   │                   directly. See top-of-file comment for rationale.
@@ -226,6 +227,17 @@ semantic-map/
 ```
 
 For the architectural rationale behind the multigraph, live ontology, control surface, and per-layer language strategy, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+
+> **The Python contract mirror is gone.** `contracts/`, `compliance/`, `map.py`,
+> `profiles.py` and `types.py` mirrored the contract surface as ABCs, on the theory that
+> the Python definitions were the specification and Go implemented them. Nothing was ever
+> built behind the Python side — `cloud-full` does not exist — so the mirror was a second
+> definition with no implementation to keep it honest, and it drifted: it still declared
+> Storage and Updater after both were deleted from Go, and its Ontology carried a strength
+> and an audit log the Go interface had stopped holding. What remains of the Python layer
+> is `prior_init/`, which produces `prior_weights.json` and is the one part that was doing
+> real work. See ARCHITECTURE.md §4.
 
 ---
 
@@ -282,16 +294,6 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 `p95_*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward).
 
-### `POST /ingest`
-
-Feed a telemetry observation directly into the Updater.
-
-```json
-{"from_id":"SC","to_id":"RC","observation":0.71,"event_id":"cgroup-1703208286-001"}
-```
-
-`event_id` is required. The Updater is idempotent: replaying the same `event_id` is a no-op. The Collector produces these automatically; use this endpoint for manual injection or testing.
-
 ### `POST /ingest-sample`
 
 Feed one typed `MetricSample` through the Bridge. The daemon maps the
@@ -327,10 +329,9 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 
 | Verb | Path                                | Body / params                                            | Since    |
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |
-| POST | `/ingest`                           | `{from_id,to_id,observation,event_id}`                   | existing |
 | POST | `/ingest-sample`                    | `MetricSampleRequest`                                    | replay   |
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
-| POST | `/recommend`                        | `OffloadContext`                                         | existing |
+| POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered — an ordinary state, not a fault |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
 | GET  | `/candidates`                       | —                                                        | existing |
 | GET  | `/graph`                            | —                                                        | Phase 1  |
@@ -341,8 +342,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/neighbors`                        | `?node=`                                                 | Phase 1  |
 | GET  | `/healthz`                          | —                                                        | Phase 1  |
 | GET  | `/version`                          | —                                                        | Phase 1  |
-| POST | `/ontology/strength`                | `{proposition_id, strength}`                             | Phase 1  |
-| POST | `/ontology/deprecate`               | `{proposition_id, reason}`                               | Phase 1  |
+| POST | `/ontology/strength`                | `{proposition_id, strength}`                             | Phase 1  | `404` when the proposition is declared but not modelled here |
+| POST | `/ontology/deprecate`               | `{proposition_id, reason}`                               | Phase 1  | `404` likewise |
 | POST | `/ontology/construct`               | `{construct_id, name, description}`                      | Phase 1  |
 | POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-", prior_strength}` | Phase 1 |
 | POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |
@@ -357,6 +358,24 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/offload`                          | `OffloadHTTPRequest`                                     | Step 4.9 |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | —                                                        | Phase 2B |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=`         | State model |
+| GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
+| POST | `/state/properties`                 | `Property`                                               | State model |
+| DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
+| GET  | `/state/relationships`              | `?from=&to=`                                             | State model |
+| POST | `/state/relationships`              | `Relationship`                                           | State model |
+| DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
+| POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
+| GET  | `/state/estimate`                   | `?target=&id=` — answers from the map, returns a decision id | State model |
+| GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
+| GET  | `/state/decisions`                  | `?limit=`                                                | State model |
+| GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
+| POST | `/state/sweep`                      | —                                                        | State model |
+| GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
+| GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
+| GET  | `/state/peers/{id}`                 | path only                                                | Peer state |
+| POST | `/state/peers/refresh`              | — poll every peer now                                    | Peer state |
+| GET  | `/state/where`                      | `?property=` — per-node answers, deliberately not averaged | Peer state |
 
 `POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `-explain-provider=none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
 
@@ -384,11 +403,145 @@ scp agent-arm64 pi@192.168.1.x:/usr/local/bin/agent
 
 # Run on RPi4
 agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
+  -domain /etc/semantic-map/domain_spec.json \
   -priors /etc/semantic-map/prior_weights.json -kd k0s
 
 # Run locally (development)
-go run ./cmd/agent -profile edge-minimal
+go run ./cmd/agent -profile edge-minimal -domain ../domain_spec.json
 ```
+
+### The state model
+
+The map holds what the system exhibits and how those properties relate, updated by
+every sample, queryable and traceable.
+
+```bash
+# what is this system doing right now
+curl -s localhost:8080/state | jq '.counts'
+
+# one property, readable in a terminal
+curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
+
+# every cost answer is grounded in the map and carries its trace
+curl -s 'localhost:8080/cost?task=placement' | jq '.ResourceCost, .DecisionID, .Caveats'
+curl -s localhost:8080/state/decisions/$(curl -s 'localhost:8080/cost?task=placement' | jq -r .DecisionID) \
+  | jq '.revision, .properties_read, .relationships_read'
+
+# or ask about any property
+curl -s 'localhost:8080/state/estimate?target=PS&id=why-slow' | jq '.answer, .influences, .caveats'
+
+# lifecycle
+curl -s -X DELETE 'localhost:8080/state/properties/gpu_util?reason=device+removed&actor=me'
+curl -s -X POST localhost:8080/state/sweep | jq
+curl -s 'localhost:8080/state/journal?limit=10' | jq '.held, .dropped'
+```
+
+A metric the specification never declared still becomes a property: `/ingest-sample`
+answers 202 with `routed:false` rather than rejecting it, because a reading the system
+produced is not a typo to discard, and the journal records the admission. Silence
+marks a property stale (`-stale-after`) and optionally retires it (`-retire-after`);
+`-no-admit` closes the model for a deployment that wants that.
+
+### One agent per machine
+
+The map is node-local: each agent models the machine it runs on, and its graph holds
+that machine's evidence. `-node-id` is its identity (falling back to the hostname),
+and the default `-ingest-scope=self` rejects telemetry labelled with another
+machine's ID rather than folding it in. Every map is stamped with its owner, so a
+property is attributable once state crosses a node boundary, and a snapshot copied
+from another host is refused instead of adopted as local history.
+
+```bash
+# A deployment: one agent per node, modelling that node
+agent -profile edge-minimal -domain ../domain_spec.json -node-id node_1
+
+# Replaying a whole testbed into one daemon — an aggregate, not a deployment
+agent -profile edge-minimal -domain ../domain_spec.json -ingest-scope=any
+```
+
+`-ingest-scope=any` exists for exactly that replay case and logs a startup warning:
+the resulting edge weights are means over machines that may be different physical
+systems. `GET /cost?node=X` returns 409 when X is not this agent, pointing at that
+machine's own endpoint when it is a known peer.
+
+### Asking other nodes
+
+A node-local map means any question wider than one machine is a question for other
+agents. Each agent fetches its peers' maps (`-peer-state-poll`, default 30s) and holds
+them under the owner each peer reported.
+
+```bash
+agent -domain ../domain_spec.json -node-id node_1 -peers http://node_2:8080
+
+# this node and every peer, side by side
+curl -s localhost:8080/state/cluster | jq '.cluster.self_id, .cluster.peers | keys, .stale_peers'
+
+# who has this property, and what do they say it is
+curl -s 'localhost:8080/state/where?property=cpu_utilization' | jq '.holders'
+# → [{"node":"node_1","local":true,"value":0.15,…},
+#    {"node":"node_2","local":false,"value":0.88,"age_seconds":1.8,…}]
+
+curl -s localhost:8080/state/peers | jq            # who, when, how much, last error
+curl -s -X POST localhost:8080/state/peers/refresh # poll now instead of waiting
+```
+
+Peer state is never merged into the local map. A property with the same ID on two
+nodes describes two systems, and folding them together would make every "this system"
+answer a claim about some union of machines. So answers stay per node and are not
+averaged — the reason to ask several nodes is to be able to pick one.
+
+Three failure modes are reported rather than smoothed over. A peer that answered
+before and cannot be reached now keeps its last snapshot and is listed under
+`unreachable`, because during a partition that snapshot is all this agent has. An
+address that never identified itself appears under `silent` and does not become a node,
+since inventing one from a URL would put a machine that may not exist into the cluster
+view. And a snapshot older than `-peer-state-stale` (default 90s) is labelled history
+rather than withheld.
+
+### How relationships learn
+
+A relationship advances on a *pair*: both endpoints observed within
+`-pair-window-seconds` (default 15s). What it learns is `|r|`, the correlation
+magnitude over the last `-pair-history` pairs, which is the same quantity the priors
+were calibrated as — so prior and evidence are on one scale and the confidence blend
+interpolates between comparable numbers.
+
+```bash
+agent -profile edge-minimal -domain ../domain_spec.json \
+  -priors ../prior_weights.json -kd k0s \
+  -pair-window-seconds 15 -pair-support 8 -pair-history 60
+```
+
+Two consequences worth knowing before reading a number off `/edges`:
+
+- **One endpoint moving proves nothing.** A stream that drives `cpu_utilization` and
+  nothing else leaves every relationship at its prior with confidence 0, however long
+  it runs. That is the honest report: the magnitude of a construct is not a measurement
+  of how strongly it influences another.
+- **Conflict pairs separate.** Two claims over the same pair with opposite signs are
+  two relationships, and evidence matching one sibling's declared direction drives the
+  other to zero. Live, 20 correlated pairs leave the positive sibling at 0.995 and the
+  negative one at 0.000.
+
+`-pair-window-seconds` is a tolerance, not smoothing: collectors sample on independent
+grids (`system.*` on 0, 5, 10 …, PSI on 2, 6, 12 …), so without it no pair ever forms.
+`-pair-support` is how many pairs a relationship needs before its strength moves at all
+— below that, `n_observations` stays at zero, because confidence has to keep reporting
+that nothing has been learned. There was a `-relational` flag here selecting between
+this estimator and one that moved an edge on any single sample; only this reading was
+defensible, so the choice went. See ARCHITECTURE.md §5 for what it does and does not
+claim.
+
+`-domain` is mandatory. The daemon carries no constructs, propositions, metric
+routes, adjustment bounds or tuner keywords of its own, so without a
+specification there is no graph to serve and it exits with
+`no domain spec: pass -domain <path> to load one` rather than starting on a
+built-in default. Deploy the specification alongside the binary and treat it as
+part of the release: two daemons on the same binary and different specifications
+are different agents. The daemon also rejects positional arguments, because Go's
+`flag` package stops parsing at the first one — `-proposer false` (a space
+instead of `=`) silently discarded every flag after it and cost this project a
+full round of invalid measurements.
 
 ### Replay (Netdata parquet datasets)
 
@@ -424,58 +577,35 @@ single-row normalizer per triple):
 | --- | --- | --- | --- |
 | `system.cpu` | `idle` | `cpu_utilization` | `1.0 - value/100.0`, clipped to `[0,1]` |
 | `system.ram` | `used` | `memory_utilization` | `value / hostRAM`, host total from testbed (master=64 GiB, RPi4=8 GiB) |
-| `system.net` | `InOctets` | `network_rx_bps` | `value * 125` (kilobits/s → bytes/s) |
-| `system.net` | `OutOctets` | `network_tx_bps` | `|value| * 125` (Netdata reports outbound as signed-negative) |
+| `system.net` | `InOctets` | `network_rx_bps` | `value * 125 / 125e6` — kilobits/s → bytes/s → fraction of a 1 Gbps link |
+| `system.net` | `OutOctets` | `network_tx_bps` | `|value| * 125 / 125e6` (Netdata reports outbound as signed-negative) |
+
+Every normalizer lands on `[0,1]`, which is required rather than tidy: the
+divergence measure is defined on that interval and an out-of-range value clips,
+freezing the affected edge while aggregates keep looking healthy. The reference
+capacity (1 Gbps) is a property of the testbed, so a deployment on a different
+link must change it or its network-derived weights will not be comparable.
 
 Rows outside the table (Netdata's own `netdata.workers.*` self-monitoring,
 disk/inode contexts, per-core `cpu.cpu` channels, …) are silently dropped
 by the playback layer. Extending the table later is a contained change in
 `cmd/replay/mapping/mapping.go`; the runner and CLI need no edits.
 
-#### Replay compare — debug/inspection side-tool
+#### Cross-KD compare — removed
 
-> **Not a production-decision artifact.** `replay compare` is a debugging
-> and inspection tool. It exists so you can spot mapping bugs, sanity-check
-> that the same Bridge produces a consistent shape of evidence across
-> different real-shaped inputs, and see at a glance which edges respond to
-> which recorded telemetry. **It is not a comparison of Kubernetes
-> distributions for production decisions.** The parquets it consumes are
-> synthetic benchmark loads from the P1/P2 study — controlled exercise
-> runs, not natural deployment behavior — so any "divergence" the table
-> highlights reflects *the test harness inputs*, not anything publishable
-> about which KD is "better."
+`replay compare` built one SemanticMap per distribution in a single process, fed each
+its own parquets, and printed a per-edge × per-KD divergence table. It is gone.
 
-Mechanically, the subcommand builds **N independent SemanticMaps in one
-process** — one per KD, each seeded with its calibrated priors from
-`prior_weights.json` — feeds each only its own KD's parquet rows, snapshots
-every map's final edge state, and prints a per-edge × per-KD table.
+The reason is scope rather than mechanics. Cross-distribution comparison is not a goal
+of this work — the Semantic Map is about giving one agent a defensible model of one
+system — and the tool's own documentation had to open by warning that its table was not
+a comparison of Kubernetes distributions, because the parquets are controlled benchmark
+runs rather than deployment behaviour. A measurement instrument whose output has to be
+labelled "do not read this as what it looks like" is better removed than maintained.
 
-```bash
-./dev.sh replay compare --test idle --run 1                       # 5-KD inspection table
-./dev.sh replay compare --test idle --runs-all --json             # 5-run average, JSON
-./dev.sh replay compare --test cp_heavy_12client --csv > c.csv    # long-format CSV
-```
-
-```text
-=== compare: test=idle, run=1, 5 KDs ===
-
-  PropID      Edge  Prior      k0s      k3s      k8s  kubeEdge  openYurt    Range
-      P1  SC→RC(+)  0.214    0.045    0.032    0.046    0.068    0.067    0.036
-      P2  RC→PS(-)  0.319    0.047    0.049    0.045    0.050    0.058    0.013
-      ...
-```
-
-`Effective` per KD = `(1 − confidence) · prior + confidence · ema`. `Range
-= max − min` highlights inputs that the Bridge propagated differently per
-KD. The bottom matter prints convergence counts, top-3 most divergent
-rows, and a bridge-boundary check. JSON output is deterministic across
-re-runs (`diff /tmp/c1.json /tmp/c2.json` is empty) — that's the only
-reproducibility contract.
-
-Compare is the deliberate exception to "cmd/replay only speaks HTTP" — it
-imports `pkg/profiles` and `pkg/semmap` directly because per-KD inspection
-cannot share a daemon without cross-contamination. The rationale is
-documented at the top of `cmd/replay/compare/runner.go`.
+`replay run`, `replay all` and `replay probe` remain: they stream a real dataset into a
+running daemon over HTTP, which is how the map gets exercised with telemetry that has
+the shape of the real thing.
 
 ---
 
@@ -488,7 +618,7 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-min-trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
 | `-priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline            |
 | `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). When set together with `-priors`, the per-KD edge weights in the file seed the graph instead of the global Di-Select strengths. |
-| `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest` will update edges). |
+| `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
@@ -496,6 +626,25 @@ documented at the top of `cmd/replay/compare/runner.go`.
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
+
+**State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
+
+| Flag                     | Default | Meaning                                                                            |
+| ------------------------ | ------- | ---------------------------------------------------------------------------------- |
+| `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
+| `-retire-after`          | `0`     | Silence after which a property is retired automatically. `0` leaves retirement to an operator. Retirement is soft and cascades to relationships that reference the property. |
+| `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
+| `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
+| `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at its seeded prior with confidence 0 — an honest report that nothing has been learned, and a map that never improves on what it was told. |
+| `-pair-window-seconds`   | `15`    | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
+| `-pair-support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
+| `-pair-history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
+| `-state-file`            | `""`    | Path to persist the map and its journal. Empty keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
+| `-save-interval`         | `1m`    | Snapshot cadence when `-state-file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses. |
+| `-journal-size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
+| `-ingest-scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
+| `-peer-state-poll`       | `30s`   | How often to fetch each peer's map. `0` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
+| `-peer-state-stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `-explain-provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
@@ -517,36 +666,16 @@ documented at the top of `cmd/replay/compare/runner.go`.
 
 Every contract has a compliance suite. A new implementation is valid if and only if it passes the suite for its contract.
 
-### Python
-
-Mix the compliance class into a pytest class and provide the named fixture:
-
-```python
-from semantic_map.compliance import StorageComplianceTests, CollectorComplianceTests
-import pytest
-
-class TestMyStorage(StorageComplianceTests):
-    @pytest.fixture
-    def storage(self):
-        return MyStorage(":memory:")
-
-class TestMyCgroupCollector(CollectorComplianceTests):
-    @pytest.fixture
-    def collector(self):
-        return CgroupCollector(node_id="node_1", cgroup_root="/sys/fs/cgroup")
-```
-
-```bash
-pip install -r requirements.txt
-pytest compliance/
-```
-
-### Go
+The suites are Go, and they are the only definition of correctness there is. A parallel
+set of Python suites over ABC mirrors of the same interfaces used to sit beside them,
+described as the authoritative specification; since no Python implementation ever existed
+to run them against, what they specified was never checked, and they drifted out of step
+with the Go interfaces they mirrored (see §1).
 
 ```go
-func TestStorageCompliance(t *testing.T) {
-    compliance.RunStorageCompliance(t, func(t *testing.T) contracts.StorageContract {
-        return NewMyStorage()
+func TestMyOntologyCompliance(t *testing.T) {
+    compliance.RunOntologyCompliance(t, func(t *testing.T) contracts.OntologyContract {
+        return NewMyOntology(spec)
     })
 }
 
@@ -568,16 +697,44 @@ cd go && go test ./...
 Run once before deploying to a new cluster to replace bootstrap edge weights with values grounded in P1–P5 empirical data:
 
 ```bash
-python -m semantic_map.prior_init.pipeline \
-  --root ../ \
-  --out prior_weights.json
+# from semantic-map/
+python3 -m prior_init.pipeline --root ../../ --out prior_weights.json
 ```
 
-The pipeline reads publication constants (J/pod, mJ/op, CIS scores, overhead fractions) and writes:
+Both arguments matter and both were wrong in this file until now. The module path is
+`prior_init.pipeline` run from inside `semantic-map/`: the documented
+`semantic_map.prior_init.pipeline` cannot resolve, because the directory is
+`semantic-map` and a hyphen is not a valid Python module name. And `--root` points at the
+**mega-research** root rather than at the di-agent checkout, because the pipeline reads
+`energy-analysis/results/` and `overhead-decomposition/results/`, which are siblings of
+`di-agent/` rather than children of it. Run as written above, the pipeline reproduces the
+committed `prior_weights.json` byte for byte — propositions, per-KD edge weights,
+construct scores, scope and warnings all identical — which is what makes it a replication
+artefact rather than a checked-in number.
+
+The pipeline reads publication constants (J/pod, mJ/op, overhead fractions, throughput and latency) for the constructs a running cluster exhibits and writes:
 
 - `propositions[P*].prior_strength` — one calibrated λ per proposition (global)
-- `distribution_edge_weights[kd][edge_key].prior_weight` — per-KD edge weights (5 KDs × 15 edges)
+- `distribution_edge_weights[kd][edge_key].prior_weight` — per-KD edge weights, one per proposition in scope
 - `distribution_construct_scores[kd][construct]` — per-KD construct scores (informational)
+- `constructs` and `scope` — which constructs the calibration covers and why, so a
+  reader can tell the artefact's scope from the artefact
+
+Every emitted prior is clamped to the specification's `[global_floor,
+global_ceiling]` — the same bounds the operator tuner enforces, so the pipeline
+cannot emit a value an operator would be forbidden to set. The floor also keeps
+the divergence measure meaningful: Bernoulli KL grows without bound as the prior
+approaches zero, so a zero-valued prior would report the degeneracy of the prior
+rather than the informativeness of the evidence.
+
+Propositions are included only when *both* endpoints are constructs the pipeline
+can calibrate from telemetry, which is the same rule the daemon's specification
+applies (ARCHITECTURE.md §2). An earlier version calibrated all seven Di-Select
+constructs, including from a third-party CIS scanner, a GitHub star count, and
+setup time in human hours; min-max normalisation over five distributions put the
+worst performer on each dimension at exactly zero, so those magnitudes encoded a
+rank within the sample rather than a measurement, and adding a sixth distribution
+would have rescaled every prior.
 
 ### Loading priors at startup
 
@@ -593,7 +750,15 @@ agent -priors /etc/semantic-map/prior_weights.json -kd k0s
 
 If the supplied `-kd` is not in the file's `distributions` list, the daemon refuses to start.
 
-The current `prior_weights.json` was generated on 2026-05-12. Re-run if new empirical papers are incorporated or the KD set changes.
+The calibrated weight is written into both layers — the storage edge the Reasoner
+reads and the ontology's proposition strength `GET /propositions` reports. They
+must agree: when they did not, the exposed prior was one the agent never used and
+the first operator tune recorded its transition from that unused number.
+`TestBuildKeepsOntologyAndStorageInAgreement` pins this for all five KDs.
+
+Re-run the pipeline if new empirical papers are incorporated, if the KD set
+changes, or if `domain_spec.json` changes which propositions are in scope — the
+file's `scope` block records what the current artefact covers.
 
 ---
 
@@ -624,6 +789,8 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 | `POST` | `/offload` | `{task_type,source_node_id,data_size_bytes,latency_budget_ms,energy_budget_joules?}` | `200 {accepted,reason,expected_latency,expected_energy}` |
 
 `/offload` is the peer side of the protocol: it runs `CostOfAction` on the local graph and accepts when the result fits the requested budgets. It does not actually schedule any work — that is a P7 (execution) concern. The expected latency/energy in the response let the source agent record an outcome and adjust trust.
+
+These three endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
 
 ### `mapctl peers`
 
@@ -756,15 +923,15 @@ Any backend that speaks the OpenAI `/v1/chat/completions` surface works — `lla
 
 ```json
 {
-  "answer": "P10 (PS→RC, direction −) dominates with effective 0.62 vs prior 0.645, followed by P8 (MU→RC, direction −) at effective 0.30. Both have 15 observations at confidence 0.60.",
+  "answer": "P10 (PS→RC, direction −) dominates with effective 0.62 vs prior 0.645, followed by P3 (RC→PS, direction +) at effective 0.30. Both have 15 observations at confidence 0.03.",
   "citations": [
-    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.60, "n_observations": 15},
-    {"kind": "edge", "id": "P8",  "ema_weight": 0.30, "prior_weight": 0.316, "confidence": 0.60, "n_observations": 15}
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.03, "n_observations": 15},
+    {"kind": "edge", "id": "P3",  "ema_weight": 0.30, "prior_weight": 0.406, "confidence": 0.03, "n_observations": 15}
   ],
   "confidence": "high",
   "proposal": null,
   "tool_trace": [
-    {"name": "get_cost",  "arguments": {"node_id":"master","task_type":"pod-scheduling"}, "result_digest": "cost node=master task=pod-scheduling rc=0.6912 conf=0.600"},
+    {"name": "get_cost",  "arguments": {"node_id":"master","task_type":"pod-scheduling"}, "result_digest": "cost node=master task=pod-scheduling rc=0.6912 conf=0.030"},
     {"name": "get_edges", "arguments": {"to":"RC"}, "result_digest": "edges from= to=RC count=5"}
   ],
   "model_name": "qwen2.5:7b-instruct",

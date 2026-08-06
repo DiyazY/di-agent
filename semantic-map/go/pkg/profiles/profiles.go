@@ -10,9 +10,10 @@ import (
 
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
-	"github.com/DiyazY/di-agent/pkg/types"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 // defaultPeerTimeout caps a single peer HTTP call in v1. LAN-local peers
@@ -91,11 +92,51 @@ type Config struct {
 	// ProposerBufSize is the ring buffer capacity per construct pair. Defaults to 120.
 	ProposerBufSize int
 
+	// DomainSpec is the loaded domain model: constructs, metric routing,
+	// propositions, adjustment policy and operator vocabulary. Required — a
+	// profile without one has no graph to reason over. See pkg/domain.
+	DomainSpec *domain.Spec
+
 	// UseRuleBasedTuner enables the RuleBasedTuner instead of the DisabledTuner.
 	// When true (default for edge-minimal), natural-language operator intent can be
 	// mapped to proposition strength adjustments via SemanticMap.Tune / POST /agent/tune.
 	// Set false to disable operator tuning entirely.
 	UseRuleBasedTuner bool
+
+	// PairWindowSeconds, PairMinSupport and PairWindow tune the state model's paired
+	// estimator: how far apart two observations may be and still count as
+	// simultaneous, how many pairs a relationship needs before its strength moves,
+	// and how many recent pairs the estimate is computed over. Zero means the
+	// estimator's own defaults (15s, 8, 60).
+	//
+	// There used to be a Relational flag beside these, selecting between two
+	// estimators — one that moved an edge on any single endpoint observation, and one
+	// that waited for both. Only the paired reading was defensible (a single
+	// construct's magnitude is not an observation of an association's strength), and
+	// it is what the state model does; the choice went with the second model.
+	PairWindowSeconds int
+	PairMinSupport    int
+	PairWindow        int
+
+	// StateMap is the live state model this agent reasons from: every answer is read
+	// from it and recorded in its journal, so each one carries a DecisionID that
+	// reproduces its inputs.
+	//
+	// Nil is allowed and means "build one with the defaults" rather than "run without
+	// one". There is nothing left for an agent without a state model to do — cost,
+	// estimates, explanations and the graph surfaces are all read from it — so a
+	// half-wired agent is a wiring mistake that used to surface much later as an empty
+	// answer. A caller that wants control over the lifecycle (persistence, sweeps,
+	// injected clock) passes its own, which is what the daemon does.
+	StateMap *statemap.Map
+
+	// AcceptForeignSamples lets this agent ingest telemetry labelled with other
+	// machines' IDs into its own graph. The map is node-local by design (one agent
+	// per machine, its graph holding that machine's evidence), so the default is
+	// off: an aggregate over machines that are different physical systems produces
+	// edge weights that are means over incomparable mechanisms. A whole-testbed
+	// replay is the legitimate exception and sets this explicitly.
+	AcceptForeignSamples bool
 }
 
 func DefaultConfig() Config {
@@ -114,11 +155,11 @@ func DefaultConfig() Config {
 // priorWeightsFile mirrors the top-level structure of prior_weights.json
 // produced by semantic_map.prior_init.pipeline.
 type priorWeightsFile struct {
-	Version                  string                                `json:"version"`
-	GeneratedAt              string                                `json:"generated_at"`
-	Distributions            []string                              `json:"distributions"`
-	Propositions             map[string]propositionPrior           `json:"propositions"`
-	DistributionEdgeWeights  map[string]map[string]edgePrior       `json:"distribution_edge_weights"`
+	Version                 string                          `json:"version"`
+	GeneratedAt             string                          `json:"generated_at"`
+	Distributions           []string                        `json:"distributions"`
+	Propositions            map[string]propositionPrior     `json:"propositions"`
+	DistributionEdgeWeights map[string]map[string]edgePrior `json:"distribution_edge_weights"`
 }
 
 type propositionPrior struct {
@@ -170,8 +211,30 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 	if err := validateKD(pw, cfg.KD); err != nil {
 		return nil, nil, err
 	}
+	// A profile without a domain model has no graph to reason over. Fail here
+	// rather than constructing an agent whose /graph is empty, which would look
+	// identical to an agent whose telemetry has not arrived yet.
+	if cfg.DomainSpec == nil {
+		return nil, nil, fmt.Errorf("no domain spec: pass -domain <path> to load one")
+	}
 	switch profileName {
 	case "edge-minimal":
+		// A caller that did not supply a state model gets one. Everything this profile
+		// answers is read from it, so building the agent without one produces something
+		// that looks assembled and cannot answer.
+		if cfg.StateMap == nil {
+			cfg.StateMap = statemap.New(statemap.Config{
+				ConvergenceObservations: int(cfg.ConvergenceThreshold),
+				Alpha:                   cfg.EMAAlpha,
+				AdmitUnknown:            true,
+				Learn:                   true,
+			}, statemap.NewJournal(0))
+		}
+		// Seed the state model here, where both the specification and the calibration are
+		// in hand: relationships get this cluster's priors instead of a placeholder.
+		if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
+			return nil, nil, err
+		}
 		sm, coll := buildEdgeMinimal(cfg, pw)
 		return sm, coll, nil
 	default:
@@ -195,9 +258,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 }
 
 func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
-	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
-	updater := minimal.NewEMAUpdater(storage, cfg.EMAAlpha, cfg.ConvergenceThreshold)
+	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
 	// network I/O) so the reasoner has a place to look up peers even when
@@ -218,7 +279,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		_, _ = peerRegistry.Add(url, "")
 	}
 
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, cfg.MinTrustScore, peerRegistry, peerClient)
+	reasoner := minimal.NewRuleEngineReasoner(cfg.DomainSpec, cfg.MinTrustScore, peerRegistry, peerClient)
 	var proposer contracts.ProposerContract
 	if cfg.UseProposer {
 		thresh := cfg.ProposerThreshold
@@ -240,20 +301,21 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 
 	var tuner contracts.TunerContract
 	if cfg.UseRuleBasedTuner {
-		tuner = minimal.NewRuleBasedTuner()
+		tuner = minimal.NewRuleBasedTunerFromSpec(cfg.DomainSpec)
 	} else {
 		tuner = minimal.NewDisabledTuner()
 	}
 
-	// Apply calibrated proposition strengths from the pipeline before seeding
-	// storage. Per-KD edge weights (if any) are applied during seeding.
-	if pw != nil {
-		applyPriorWeights(ontology, pw)
-	}
-
-	seedFromOntology(storage, ontology, pw, cfg.KD)
-
-	sm := semmap.NewWithPeers(storage, ontology, updater, reasoner, proposer, tuner, peerRegistry, peerClient)
+	// Calibrated proposition strengths reach the declaration layer so /propositions
+	// reports what this cluster was calibrated to. The operative copy is in the state
+	// model, seeded from the same file in seedStateMap.
+	sm := semmap.NewWithPeers(ontology, reasoner, proposer, tuner, peerRegistry, peerClient)
+	sm.SetIdentity(cfg.NodeID, cfg.AcceptForeignSamples)
+	// Both halves need it: the facade feeds observations into the model, and the
+	// reasoner answers from it. Attaching only one would give a model that fills up
+	// and never gets read, or a reasoner reading a model nothing updates.
+	sm.AttachState(cfg.StateMap)
+	reasoner.AttachState(cfg.StateMap)
 
 	// Build collector(s): Netdata, Cgroup, or both via MultiCollector.
 	// Empty CgroupRoot/NodeID or empty NetdataURL disables the respective
@@ -271,71 +333,23 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
 	case hasCgroup:
 		collector = minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
-	// else: collector stays nil — collection loop disabled
+		// else: collector stays nil — collection loop disabled
 	}
 
 	return sm, collector
 }
 
-// applyPriorWeights overwrites proposition PriorStrength values in the ontology
-// with those from prior_weights.json via the ontology's safe setter (locks
-// internally, does not mutate pointers returned by Propositions()). Unknown
-// proposition IDs are silently ignored so old files remain compatible with
-// new code.
-func applyPriorWeights(ontology *minimal.StaticDiSelectOntology, pw *priorWeightsFile) {
-	for propID, entry := range pw.Propositions {
-		_ = ontology.SetPropositionStrength(propID, entry.PriorStrength)
-	}
-}
-
-// seedFromOntology pre-populates storage with one node per construct and one
-// edge per proposition. Edge prior_weight selection precedence:
-//
-//  1. pw.DistributionEdgeWeights[cfg.KD][edgeKey] (per-KD calibrated, if both KD
-//     and the file are provided);
-//  2. proposition PriorStrength from the ontology (which may have been
-//     overwritten by applyPriorWeights from the global pw.Propositions table).
-func seedFromOntology(
-	storage *minimal.InMemoryStorage,
-	ontology *minimal.StaticDiSelectOntology,
-	pw *priorWeightsFile,
-	kd string,
-) {
-	constructs, _ := ontology.Constructs()
-	for _, c := range constructs {
-		_ = storage.PutNode(&types.NodeDescriptor{
-			NodeID:        c.ConstructID,
-			ConstructType: c.Name,
-			PriorValue:    0.5, // neutral prior; per-distribution values seeded by Netdata adapter
-			EMAValue:      0.5,
-			Confidence:    0.0,
-			NObservations: 0,
-		})
-	}
-
-	perKD := perKDEdgeWeights(pw, kd)
-
-	propositions, _ := ontology.Propositions()
-	for _, p := range propositions {
-		prior := p.PriorStrength
-		if e, ok := perKD[edgeKey(p.FromConstruct, p.ToConstruct, p.PropositionID)]; ok {
-			prior = e.PriorWeight
-		}
-		_ = storage.PutEdge(&types.EdgeDescriptor{
-			FromID:        p.FromConstruct,
-			ToID:          p.ToConstruct,
-			PropositionID: p.PropositionID,
-			Direction:     p.Direction,
-			PriorWeight:   prior,
-			EMAWeight:     prior, // starts equal to prior
-			Confidence:    0.0,
-			NObservations: 0,
-		})
-	}
-}
+// The calibration is applied in one place — seedStateMap, which puts each per-cluster
+// prior on the relationship it belongs to. Two functions used to live here that also
+// wrote the strengths into the declaration layer, plus a reconciliation pass to stop the
+// two disagreeing. The declaration layer no longer holds a strength: GET /propositions
+// overlays the value in force from the model (see semmap.projectedPropositions), so there
+// is nothing left to reconcile and no window in which the exposed number and the used
+// number can differ.
 
 // perKDEdgeWeights returns the per-distribution edge map for kd, or nil if not
 // applicable. Callers must handle the nil case (fall back to global priors).
+// perKDEdgeWeights returns the calibrated edge priors for one cluster, or nil.
 func perKDEdgeWeights(pw *priorWeightsFile, kd string) map[string]edgePrior {
 	if pw == nil || kd == "" {
 		return nil

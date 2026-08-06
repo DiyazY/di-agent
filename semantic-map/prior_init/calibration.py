@@ -21,7 +21,8 @@ PS  – Performance & Scalability:  inverted pod-startup latency + throughput
 SC  – Security & Compliance:       CIS security score
 RR  – Reliability & Resilience:    inverted recovery time + offline preservation
 MU  – Maintainability & Usability: inverted setup time
-RC  – Resource Constraints & Cost: inverted energy_per_pod_j + inverted cp_overhead_w
+RC  – Resource Constraints & Cost: inverted cp_overhead_w (energy_per_pod_j dropped —
+                                   see build_construct_scores)
 CO  – Connectivity & Offline:      offline_preservation + inverted cp_amplification
 CE  – Community & Ecosystem:       normalised GitHub stars
 """
@@ -44,7 +45,34 @@ from .loaders import load_energy_efficiency, load_interrupt_amplification
 KDS = ["k3s", "k0s", "k8s", "kubeEdge", "openYurt"]
 
 # Propositions: (id, from, to, direction)
-PROPOSITIONS = [
+# Constructs the agent can observe at runtime. A construct that cannot change
+# while a cluster runs is not state, and an edge with no observable endpoint is
+# provably inert in the Reasoner: cost accumulates (effective - prior), and an
+# unobserved edge has effective == prior by definition, so it contributes exactly
+# zero regardless of its prior or of any operator action on it.
+#
+# Membership is a data decision, not a code one. Routing a new MetricType to a
+# construct (see the Bridge's routing table) is what makes it admissible here;
+# adding it to this set and regenerating is the whole change.
+TELEMETRY_CONSTRUCTS = ["RC", "CO", "PS"]
+
+CONSTRUCT_META = {
+    "RC": ("Resource Constraints & Cost",
+           "CPU, memory and energy cost of running the workload"),
+    "CO": ("Connectivity & Offline Resilience",
+           "network throughput, loss and latency to peers"),
+    "PS": ("Performance & Scalability",
+           "scheduling and startup latency; resource pressure experienced"),
+    "SC": ("Security & Compliance", "hardening posture; not runtime state"),
+    "RR": ("Reliability & Resilience", "recovery behaviour; runtime but unrouted"),
+    "MU": ("Maintainability & Usability", "operational effort; not runtime state"),
+    "CE": ("Community & Ecosystem", "vendor backing; not runtime state"),
+}
+
+# The full Di-Select backbone, retained as the source from which the agent's
+# graph is derived. Di-Select remains the origin of the causal claims; the agent
+# instantiates the subset it can actually observe.
+DISELECT_PROPOSITIONS = [
     ("P1",  "SC", "RC", "positive"),
     ("P2",  "RC", "PS", "negative"),
     ("P3",  "RC", "PS", "positive"),
@@ -61,6 +89,13 @@ PROPOSITIONS = [
     ("P14", "RC", "SC", "negative"),
     ("P15", "MU", "RR", "positive"),
 ]
+
+# The agent's graph: propositions whose BOTH endpoints are observable. An edge
+# with one observable endpoint still receives observations through it, but its
+# far construct is a constant, so the edge cannot express a relation — see
+# research-docs/relational-edge-learning.md.
+PROPOSITIONS = [p for p in DISELECT_PROPOSITIONS
+                if p[1] in TELEMETRY_CONSTRUCTS and p[2] in TELEMETRY_CONSTRUCTS]
 
 
 def _norm_inv(vals: dict[str, float]) -> dict[str, float]:
@@ -112,13 +147,12 @@ def compute_construct_scores(root_dir: str | None = None) -> dict[str, dict[str,
     mu = _norm_inv(SETUP_TIME_HOURS)
 
     # ── RC: Resource Constraints & Cost ───────────────────────────────────
-    # energy_per_pod_j: lower = better resource efficiency
-    epod = {kd: energy[kd]["energy_per_pod_j"] or 15.0 for kd in KDS}
-    epod_inv = _norm_inv(epod)
-    # cp_overhead_w: lower = better
+    # Control-plane power overhead only. The energy-per-pod figure was dropped: it
+    # comes from a DVFS model of one hardware class, and applying it to a system
+    # whose energy was never measured produces a number with no referent. What is
+    # left is an overhead measurement, which is what the constructs's name claims.
     overhead = {kd: energy[kd]["cp_overhead_w"] or 0.35 for kd in KDS}
-    overhead_inv = _norm_inv(overhead)
-    rc = _blend(epod_inv, overhead_inv, w_a=0.6)
+    rc = _norm_inv(overhead)
 
     # ── CO: Connectivity & Offline Resilience ─────────────────────────────
     # offline preservation + inverted interrupt amplification (lower amp = less overhead)

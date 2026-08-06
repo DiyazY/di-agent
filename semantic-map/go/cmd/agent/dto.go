@@ -111,12 +111,19 @@ type ConstructDTO struct {
 }
 
 // PropositionDTO mirrors types.Proposition. Direction is rendered as "+"/"-".
+//
+// prior_strength is the value in force, overlaid from the state model's relationship for
+// this proposition. instantiated says whether such a relationship exists: false means the
+// claim is declared but not modelled here — seeding skips one whose endpoints are not
+// both observable — and prior_strength is then a placeholder rather than a calibrated
+// value. A client that reads the number without the flag can mistake one for the other.
 type PropositionDTO struct {
 	PropositionID    string   `json:"proposition_id"`
 	FromConstruct    string   `json:"from"`
 	ToConstruct      string   `json:"to"`
 	Direction        string   `json:"direction"`
 	PriorStrength    float64  `json:"prior_strength"`
+	Instantiated     bool     `json:"instantiated"`
 	Description      string   `json:"description,omitempty"`
 	EvidenceSources  []string `json:"evidence_sources,omitempty"`
 	Deprecated       bool     `json:"deprecated"`
@@ -156,11 +163,11 @@ type HealthResponse struct {
 
 // VersionResponse is the body of GET /version.
 type VersionResponse struct {
-	AgentVersion        string `json:"agent_version"`
-	GoVersion           string `json:"go_version"`
-	BuildCommit         string `json:"build_commit"`
-	SemmapConstructs    int    `json:"semmap_constructs"`
-	SemmapPropositions  int    `json:"semmap_propositions"`
+	AgentVersion       string `json:"agent_version"`
+	GoVersion          string `json:"go_version"`
+	BuildCommit        string `json:"build_commit"`
+	SemmapConstructs   int    `json:"semmap_constructs"`
+	SemmapPropositions int    `json:"semmap_propositions"`
 }
 
 // ErrorResponse is the body of any 4xx/5xx returned by a NEW endpoint.
@@ -250,6 +257,7 @@ func propositionToDTO(p *types.Proposition) PropositionDTO {
 		ToConstruct:      p.ToConstruct,
 		Direction:        directionToString(p.Direction),
 		PriorStrength:    p.PriorStrength,
+		Instantiated:     p.Instantiated,
 		Description:      p.Description,
 		EvidenceSources:  p.EvidenceSources,
 		Deprecated:       p.Deprecated,
@@ -284,23 +292,18 @@ func eventToDTO(e *types.OntologyEvent) OntologyEventDTO {
 	}
 }
 
-// knownMetricTypes is the closed enumeration of accepted metric types on the
-// /ingest-sample boundary. The Bridge silently ignores types not in
-// metricTypeToConstruct, but the HTTP layer rejects unknown values up front
-// so that operators (and the replay tool) get a clear 400 instead of a
-// silent no-op.
-var knownMetricTypes = map[types.MetricType]struct{}{
-	types.CPUUtilization:      {},
-	types.MemoryUtilization:   {},
-	types.CPUThrottleRatio:    {},
-	types.BlockIOUtil:         {},
-	types.EnergyJoules:        {},
-	types.PodStartupMs:        {},
-	types.SchedulingLatencyMs: {},
-	types.NetworkRxBps:        {},
-	types.NetworkTxBps:        {},
-	types.NetworkLossRatio:    {},
-	types.NetworkLatencyMs:    {},
+// metricTypeValidator answers whether the loaded domain specification routes a
+// metric type. The /ingest-sample boundary rejects unrouted types with 400 so
+// operators and the replay tool get a clear error instead of a silent no-op —
+// ingestion itself ignores them for forward compatibility, which is the right
+// behaviour inside the pipeline but the wrong behaviour at an API boundary a
+// human is typing against.
+//
+// This asks the specification rather than carrying a list. A hardcoded copy here
+// was a third place routing knowledge lived, and it silently rejected the two PSI
+// types the specification routes to PS.
+type metricTypeValidator interface {
+	RoutedConstruct(metricType string) (string, bool)
 }
 
 func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
@@ -316,11 +319,17 @@ func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
 // validating the metric_type string against the closed catalogue declared in
 // pkg/types. Returns an error suitable for writeError(400, ...) when the
 // metric type is unknown.
-func sampleRequestToTypes(req *MetricSampleRequest) (*types.MetricSample, error) {
+func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*types.MetricSample, error) {
 	mt := types.MetricType(req.MetricType)
-	if _, ok := knownMetricTypes[mt]; !ok {
-		return nil, fmt.Errorf("unknown metric_type %q; must be one of the types in pkg/types.MetricType", req.MetricType)
+	if req.MetricType == "" {
+		return nil, fmt.Errorf("metric_type is required")
 	}
+	// An unrouted metric type is NOT rejected. It is something the system reported,
+	// and the state model records it as a property — a model that can only represent
+	// what someone declared in advance is a model of the system as it was when they
+	// wrote it down. The handler answers 202 rather than 204 so the caller still
+	// learns that nothing summarises it, which is the part a typo needs to surface.
+	_ = v
 	return &types.MetricSample{
 		NodeID:        req.NodeID,
 		MetricType:    mt,

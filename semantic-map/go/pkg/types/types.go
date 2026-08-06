@@ -24,14 +24,10 @@ const (
 
 // ── Graph primitives ──────────────────────────────────────────────────────────
 
-type NodeDescriptor struct {
-	NodeID        string
-	ConstructType string
-	PriorValue    float64
-	EMAValue      float64
-	Confidence    float64 // 0.0 = prior-dominated, 1.0 = evidence-dominated
-	NObservations int
-}
+// NodeDescriptor is gone with the storage graph it belonged to: a construct's current
+// value and the confidence behind it live on the state model's property for that
+// construct, where they are recomputed from the metrics routed to it rather than stored
+// as a second copy.
 
 type EdgeDescriptor struct {
 	FromID           string
@@ -42,8 +38,8 @@ type EdgeDescriptor struct {
 	EMAWeight        float64
 	Confidence       float64
 	NObservations    int
-	Deprecated       bool   // mirrors Proposition.Deprecated; set by SemanticMap.Deprecate
-	DeprecatedReason string // mirrors Proposition.DeprecatedReason
+	Deprecated       bool     // mirrors Proposition.Deprecated; set by SemanticMap.Deprecate
+	DeprecatedReason string   // mirrors Proposition.DeprecatedReason
 	Mu               *float64 // Gaussian mean  (edge-standard profile+); nil if unavailable
 	Sigma            *float64 // Gaussian std   (edge-standard profile+); nil if unavailable
 }
@@ -57,21 +53,34 @@ type Construct struct {
 }
 
 type Proposition struct {
-	PropositionID   string
-	FromConstruct   string
-	ToConstruct     string
-	Direction       Direction
-	PriorStrength   float64
+	PropositionID string
+	FromConstruct string
+	ToConstruct   string
+	Direction     Direction
+
+	// PriorStrength is the strength in force, overlaid from the state model's
+	// relationship for this proposition. The specification declares no strength, so
+	// what the declaration layer holds for this field is the policy floor as a
+	// placeholder — see Instantiated.
+	PriorStrength float64
+
+	// Instantiated reports whether the agent carries a relationship for this
+	// proposition. False means the claim is declared but not modelled — seeding skips
+	// a proposition whose endpoints are not both observable here — and PriorStrength
+	// is then the placeholder rather than a calibrated value. The flag exists so a
+	// caller can tell those two cases apart, which reading the number alone cannot.
+	Instantiated bool
 	// Description is a one-sentence English statement of the causal claim
 	// (e.g. "Lightweight distributions reduce pod-startup latency"). Empty
 	// for auto-proposed candidates until an operator fills it in via
 	// AddValidatedProposition. Populated for the Di-Select bootstrap P1–P15.
 	Description     string
 	EvidenceSources []string // e.g. ["P1", "P4"]
-	// Deprecated marks a proposition that the ontology no longer endorses but
-	// is preserved in-place (history/replay). Reasoners must skip deprecated
-	// propositions during cost computation. Deprecation is a soft-delete:
-	// existing propositions are never structurally removed.
+	// Deprecated marks a proposition the agent no longer endorses, overlaid from
+	// whether the state model's relationship for it is retired. It is preserved
+	// in-place for history and replay, and a retired relationship leaves the
+	// traversal, so no answer consults it. Deprecation is a soft-delete: propositions
+	// are never structurally removed.
 	Deprecated       bool
 	DeprecatedReason string
 }
@@ -85,21 +94,53 @@ type ValidationResult struct {
 // ── Agent query types ─────────────────────────────────────────────────────────
 
 type OffloadContext struct {
-	TaskType            string
-	SourceNodeID        string
-	DataSizeBytes       int64
-	LatencyBudgetMs     float64
-	EnergyBudgetJoules  *float64 // nil = unconstrained
+	TaskType           string
+	SourceNodeID       string
+	DataSizeBytes      int64
+	LatencyBudgetMs    float64
+	EnergyBudgetJoules *float64 // nil = unconstrained
 }
 
 type ActionCost struct {
 	CPUCost         float64
-	ResourceCost    float64 // resource overhead derived from CPU/memory observations
+	ResourceCost    float64 // observed level of the resource construct, confidence-blended
 	EnergyCost      float64 // placeholder: zero until EnergyJoules observations are available
-	LatencyEstimate float64
+	LatencyEstimate float64 // observed level of the pressure construct, confidence-blended
 	Confidence      float64
-	Rationale       string   // must reference specific node/edge IDs
+	Rationale       string // must reference specific node/edge IDs
 	GraphPathUsed   []string
+
+	// ResourceSensitivity and PressureSensitivity are the weighted sums over the
+	// edges terminating at each cost construct: how much the target would move per
+	// unit change in a source construct, signed by each proposition's direction.
+	//
+	// They are reported beside the levels rather than folded into them. A level
+	// answers "what is it now", which the observed construct value answers best; a
+	// sensitivity answers "what would it become if load changed", which only the
+	// relations can answer and which the level cannot contain. Adding the two was
+	// measured and made next-interval predictions monotonically worse, so the
+	// separation is empirical.
+	//
+	// Sensitivities are fully informed at cold start, since they come from the
+	// calibrated priors; levels are uninformed at cold start and accumulate. The
+	// two halves of the map are therefore useful at opposite ends of a deployment.
+	ResourceSensitivity float64
+	PressureSensitivity float64
+
+	// DecisionID identifies this answer in the state map's journal. Fetching it
+	// returns the properties and relationships the answer was computed from, at the
+	// values they held — so "why did the agent say that" is answerable after the
+	// system has moved on, rather than only from a rationale string that cannot be
+	// checked against anything.
+	//
+	// Empty when the reasoner has no state map attached, which is the signal that
+	// this answer is not traceable rather than that nothing happened.
+	DecisionID string
+
+	// Caveats name the reasons this answer may be weak: inputs that are stale, that
+	// have never been observed, or that are missing. An agent that reports these is
+	// reviewable; one that reports only its conclusion is not.
+	Caveats []string
 }
 
 type PeerRecommendation struct {
@@ -111,8 +152,8 @@ type PeerRecommendation struct {
 
 type OutcomeSimulation struct {
 	ExpectedLatency      float64
-	ExpectedResourceCost float64  // resource overhead derived from CPU/memory observations
-	ExpectedEnergy       float64  // placeholder: zero until EnergyJoules observations are available
+	ExpectedResourceCost float64 // resource overhead derived from CPU/memory observations
+	ExpectedEnergy       float64 // placeholder: zero until EnergyJoules observations are available
 	Confidence           float64
 	GraphPathUsed        []string
 	P95Latency           *float64 // nil if Gaussian descriptors unavailable
@@ -123,19 +164,32 @@ type OutcomeSimulation struct {
 // ── Collector types ───────────────────────────────────────────────────────────
 
 // MetricType is the semantic kind of an observation emitted by a collector.
-// Values are fixed — collectors must normalize raw source data to these units:
 //
-//	CPUUtilization       fraction [0,1]  CPU quota consumed
-//	MemoryUtilization    fraction [0,1]  memory limit consumed
-//	CPUThrottleRatio     fraction [0,1]  scheduling periods throttled
-//	BlockIOUtil          fraction [0,1]  block I/O bandwidth consumed
-//	PodStartupMs         milliseconds    pod creation → running
-//	SchedulingLatencyMs  milliseconds    pod pending → scheduled
-//	NetworkRxBps         bytes/sec       receive throughput
-//	NetworkTxBps         bytes/sec       transmit throughput
-//	NetworkLossRatio     fraction [0,1]  packet loss
-//	NetworkLatencyMs     milliseconds    RTT to a peer node
-//	EnergyJoules         joules          energy in the sample interval
+// Collectors must normalize every value to a fraction on [0,1] before emitting,
+// against whatever reference the deployment considers saturation — link capacity
+// for throughput, a latency budget for durations, an energy budget for joules.
+// This is a correctness requirement, not a convention: edge weights are Bernoulli
+// parameters, so an out-of-range value is clipped and the affected edge stops
+// responding to evidence while the aggregates keep looking healthy.
+//
+//	CPUUtilization       CPU quota consumed
+//	MemoryUtilization    memory limit consumed
+//	CPUThrottleRatio     scheduling periods throttled
+//	BlockIOUtil          block I/O bandwidth consumed
+//	CPUPressureRatio     PSI cpu.some stall fraction
+//	IOPressureRatio      PSI io.some stall fraction
+//	PodStartupMs         pod creation → running, against a budget
+//	SchedulingLatencyMs  pod pending → scheduled, against a budget
+//	NetworkRxBps         receive throughput, against link capacity
+//	NetworkTxBps         transmit throughput, against link capacity
+//	NetworkLossRatio     packet loss
+//	NetworkLatencyMs     RTT to a peer node, against a budget
+//	EnergyJoules         energy in the sample interval, against a budget
+//
+// Which construct each type routes to is declared in domain_spec.json, not here:
+// these constants exist so collectors and tests can name a type without a string
+// literal. A type the loaded specification does not route is ignored rather than
+// rejected, so a collector upgraded ahead of the specification still ingests.
 type MetricType string
 
 const (
@@ -143,6 +197,8 @@ const (
 	MemoryUtilization   MetricType = "memory_utilization"
 	CPUThrottleRatio    MetricType = "cpu_throttle_ratio"
 	BlockIOUtil         MetricType = "block_io_util"
+	CPUPressureRatio    MetricType = "cpu_pressure_ratio"
+	IOPressureRatio     MetricType = "io_pressure_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
@@ -223,6 +279,12 @@ const (
 	EventPropositionAdded       OntologyEventKind = "proposition_added"
 	EventPropositionStrengthSet OntologyEventKind = "proposition_strength_set"
 	EventPropositionDeprecated  OntologyEventKind = "proposition_deprecated"
+
+	// EventOperatorTune records one operator intent that spanned several
+	// propositions, alongside the individual strength events it produced. Reading
+	// those separately gives no way to tell a coordinated adjustment from unrelated
+	// ones that happened to land together.
+	EventOperatorTune OntologyEventKind = "operator-tune"
 )
 
 // OntologyEvent is one entry in the ontology audit log.
@@ -236,7 +298,7 @@ const (
 //	EventPropositionDeprecated  -> {"reason": ...}
 type OntologyEvent struct {
 	Timestamp time.Time
-	Actor     string         // "system", "operator:alice", "proposer", "prior_init_pipeline", …
+	Actor     string // "system", "operator:alice", "proposer", "prior_init_pipeline", …
 	Kind      OntologyEventKind
 	TargetID  string
 	Detail    map[string]any

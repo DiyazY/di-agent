@@ -2,6 +2,7 @@ package minimal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -28,9 +31,24 @@ import (
 // below the configured trust floor, and ranks the survivors by
 // trust-weighted savings (myEnergy − peerEnergy) × peer.Trust.
 type RuleEngineReasoner struct {
-	storage       contracts.StorageContract
-	ontology      contracts.OntologyContract
+	// spec names which construct plays which cost role. It is the reasoner's only
+	// static input: it used to reach the specification by type-asserting the ontology
+	// for a Spec() method, and to hold storage and ontology handles it stopped reading
+	// once cost moved to the state model. Both stayed live in the constructor
+	// signature, so every caller and every fixture still built a construct graph the
+	// reasoner never consulted — which reads as a dependency and is not one.
+	spec          *domain.Spec
 	minTrustScore float64
+
+	// state is the live state model, and cost is answered from it. Every estimate is
+	// recorded in its journal so the answer can be re-derived afterwards from the
+	// properties and relationships it actually read.
+	//
+	// Required: a reasoner without one returns ErrNoStateModel rather than falling
+	// back to the construct graph. The fallback existed while the two coexisted, and
+	// it meant an untraceable answer could be produced by forgetting one wiring call —
+	// silently, since an empty DecisionID is easy to overlook.
+	state *statemap.Map
 
 	// peers is the live registry of remote agents this reasoner can offload
 	// to. nil is permitted (and equivalent to an empty registry): RecommendPeer
@@ -63,104 +81,88 @@ const peerCostQueryTimeout = 3 * time.Second
 // ErrInsufficientTrust ("no peers registered") with a clear rationale.
 // Compliance tests rely on this graceful-no-peers behavior.
 func NewRuleEngineReasoner(
-	storage contracts.StorageContract,
-	ontology contracts.OntologyContract,
+	spec *domain.Spec,
 	minTrustScore float64,
 	peerRegistry *peers.Registry,
 	peerClient *peers.Client,
 ) *RuleEngineReasoner {
 	return &RuleEngineReasoner{
-		storage:       storage,
-		ontology:      ontology,
+		spec:          spec,
 		minTrustScore: minTrustScore,
 		peers:         peerRegistry,
 		peerc:         peerClient,
 	}
 }
 
-// CostOfAction walks every non-deprecated edge in storage and accumulates the
-// contribution of each to the agent's cost estimate. Iterating edges (not
-// propositions) is the multigraph-correct read path: conflict pairs (e.g. P2
-// negative and P3 positive on RC→PS) contribute independently with their own
-// EMA-tracked magnitudes and proposition-fixed signs.
+// AttachState gives this reasoner the live state model to answer from. Answers
+// produced afterwards carry a DecisionID that reproduces their inputs.
+func (r *RuleEngineReasoner) AttachState(s *statemap.Map) { r.state = s }
+
+// CostOfAction estimates what work costs on THIS machine, and how sensitive that
+// cost is to a change in load.
 //
-// Deprecated propositions are filtered out via a one-time lookup against the
-// Ontology before edge iteration begins. The Ontology is the source of truth
-// for what is endorsed; Storage holds descriptors regardless of endorsement
-// status so the audit trail is preserved.
+// The estimate has two halves, and keeping them apart is the substance of the
+// design rather than presentation:
+//
+//	level        the OBSERVED value of the cost construct, read from the state
+//	             model's derived property for it. On a node-local map that is this
+//	             machine's current resource use and current experienced pressure.
+//	sensitivity  the sum of effective strengths over the relationships terminating
+//	             at that property, each signed by its declared direction. How much
+//	             the target would move per unit change in a source.
+//
+// An earlier version had no level at all: it summed edge weights and reported the
+// result as a latency. That quantity carried no observed magnitude, so it could not
+// distinguish a busy machine from an idle one, and a measurement over 182 replayed
+// runs found it no better than the static priors at predicting which node was about
+// to be pressured — while the observed level alone was the best predictor available.
+// The same measurement swept the coefficient on the relation term and found that
+// adding it to the level degraded the prediction monotonically. Hence: levels lead,
+// sensitivities are reported alongside, and SimulateOutcome is where a sensitivity
+// is actually applied, because a counterfactual is the question a level cannot
+// answer.
+//
+// Which construct plays which role comes from the domain specification's cost_model
+// block. This function previously hardcoded the two IDs and was the last place in
+// the daemon that knew a construct by name.
+//
+// A withdrawn claim leaves the arithmetic because retiring it in the state model
+// removes the relationship from the traversal, not because a separate endorsement
+// list is consulted here. That is the difference between one model and two: there is
+// no second place where an edge can be live.
 func (r *RuleEngineReasoner) CostOfAction(taskType, nodeID string) (*types.ActionCost, error) {
-	deprecated, err := r.deprecatedPropositionSet()
+	resourceID, pressureID, err := r.costConstructs()
 	if err != nil {
 		return nil, err
 	}
-
-	edges, err := r.storage.AllEdges()
-	if err != nil {
-		return nil, err
+	if r.state == nil {
+		return nil, ErrNoStateModel
 	}
-
-	var cpuCost, resourceCost, latency float64
-	var confidenceSum float64
-	var counted int
-	var path []string
-
-	for _, e := range edges {
-		if deprecated[e.PropositionID] {
-			continue
-		}
-		effective := blend(e)
-		path = append(path, fmt.Sprintf("%s→%s[%s](%.2f)",
-			e.FromID, e.ToID, e.PropositionID, effective))
-		confidenceSum += e.Confidence
-		counted++
-
-		switch e.ToID {
-		case "RC":
-			// Prior-relative cost: deviation from Di-Select prior, scaled by
-			// direction. Positive edge drifting above prior = more overhead than
-			// expected. Negative edge drifting below prior = less efficiency than
-			// expected. Both inflate cost; matching-prior observations contribute 0.
-			// Raw effective * sign cancels when all RC-adjacent edges converge to
-			// the same observation (they receive the same metric via the Bridge),
-			// so deviation is the only stable discriminator between agents.
-			resourceCost += (effective - e.PriorWeight) * sign(e.Direction)
-		case "PS":
-			latency += effective * sign(e.Direction)
-		}
-	}
-
-	var confidence float64
-	if counted > 0 {
-		confidence = confidenceSum / float64(counted)
-	}
-	cpuCost = latency * 0.1 // lightweight proxy; replaced by P4 prior initialization
-
-	return &types.ActionCost{
-		CPUCost:         math.Max(0, cpuCost),
-		ResourceCost:    math.Max(0, resourceCost),
-		EnergyCost:      0,
-		LatencyEstimate: math.Max(0, latency),
-		Confidence:      confidence,
-		Rationale:       fmt.Sprintf("task=%s node=%s path=[%s]", taskType, nodeID, strings.Join(path, ", ")),
-		GraphPathUsed:   path,
-	}, nil
+	return r.costFromState(taskType, nodeID, resourceID, pressureID)
 }
 
-// deprecatedPropositionSet returns the set of PropositionIDs that the
-// Ontology no longer endorses. Read once per CostOfAction call to keep the
-// hot loop simple.
-func (r *RuleEngineReasoner) deprecatedPropositionSet() (map[string]bool, error) {
-	props, err := r.ontology.Propositions()
-	if err != nil {
-		return nil, err
+// ErrNoStateModel is returned when a reasoner is asked for a cost without a state
+// model to answer from. It is a wiring error rather than a runtime condition: the
+// construct-graph cost path was removed once the state model became the single
+// source, and falling back to it meant an untraceable answer could be produced by
+// forgetting one wiring call — silently, since an empty DecisionID is easy to miss.
+var ErrNoStateModel = errors.New(
+	"reasoner has no state model: cost is answered from the map, so an agent without " +
+		"one cannot produce a traceable answer")
+
+// costConstructs resolves the cost roles from the loaded domain specification.
+// Without a specification the reasoner cannot name them, and guessing would
+// reintroduce exactly the hardcoding this removes.
+func (r *RuleEngineReasoner) costConstructs() (resource, pressure string, err error) {
+	if r.spec == nil {
+		return "", "", fmt.Errorf("reasoner needs a domain specification to know which " +
+			"construct is the resource cost and which is the pressure penalty")
 	}
-	out := make(map[string]bool)
-	for _, p := range props {
-		if p.Deprecated {
-			out[p.PropositionID] = true
-		}
+	cm := r.spec.CostModel
+	if cm.ResourceConstruct == "" || cm.PressureConstruct == "" {
+		return "", "", fmt.Errorf("domain specification declares no cost_model roles")
 	}
-	return out, nil
+	return cm.ResourceConstruct, cm.PressureConstruct, nil
 }
 
 // RecommendPeer ranks every registered peer by trust-weighted savings and
@@ -171,11 +173,11 @@ func (r *RuleEngineReasoner) deprecatedPropositionSet() (map[string]bool, error)
 //  2. Compute the local CostOfAction once.
 //  3. For each peer with Trust ≥ minTrustScore, GET /cost on the peer URL.
 //     a. Success → MarkSeen on the registry; compute savings as
-//        (myEnergy − peerEnergy); compute trust-weighted savings as
-//        savings × peer.Trust.
+//     (myEnergy − peerEnergy); compute trust-weighted savings as
+//     savings × peer.Trust.
 //     b. Failure → log via log.Printf and apply peerPenalty to the peer's
-//        trust score. Skip this peer; do not abort the run. The reasoner
-//        must remain useful when one peer is down.
+//     trust score. Skip this peer; do not abort the run. The reasoner
+//     must remain useful when one peer is down.
 //  4. Pick the peer with the highest trust-weighted savings. If no peer
 //     beats local cost (savings ≤ 0 everywhere) → ErrInsufficientTrust.
 //  5. Build a PeerRecommendation citing the peer ID, the trust score we
@@ -281,17 +283,33 @@ func (r *RuleEngineReasoner) SimulateOutcome(octx *types.OffloadContext, targetN
 		return nil, err
 	}
 
+	// A simulation is a counterfactual: the machine is not running this task yet,
+	// so its observed levels do not include the task's load. This is where the
+	// sensitivities earn their place — they convert an assumed increase in resource
+	// demand into an expected movement of each cost construct. The level answers
+	// "what is it now" and cannot answer this; the relations can, and are fully
+	// informed from the calibrated priors even at cold start.
+	//
+	// The assumed demand is deliberately crude: data size against a reference,
+	// clamped to [0,1], because the OffloadContext carries no better description of
+	// what the task will do. A collector that reported per-task demand would replace
+	// this without touching the structure — the term is `sensitivity x demand`
+	// either way.
+	demand := assumedDemand(octx)
+	expectedResource := cost.ResourceCost + cost.ResourceSensitivity*demand
+	expectedLatency := cost.LatencyEstimate + cost.PressureSensitivity*demand
+
 	var riskFlags []string
-	if octx.LatencyBudgetMs > 0 && cost.LatencyEstimate > octx.LatencyBudgetMs {
-		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", cost.LatencyEstimate, octx.LatencyBudgetMs))
+	if octx.LatencyBudgetMs > 0 && expectedLatency > octx.LatencyBudgetMs {
+		riskFlags = append(riskFlags, fmt.Sprintf("latency %.1fms exceeds budget %.1fms", expectedLatency, octx.LatencyBudgetMs))
 	}
-	if octx.EnergyBudgetJoules != nil && cost.ResourceCost > *octx.EnergyBudgetJoules {
-		riskFlags = append(riskFlags, fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", cost.ResourceCost, *octx.EnergyBudgetJoules))
+	if octx.EnergyBudgetJoules != nil && expectedResource > *octx.EnergyBudgetJoules {
+		riskFlags = append(riskFlags, fmt.Sprintf("resource cost %.3f exceeds energy budget %.3fJ", expectedResource, *octx.EnergyBudgetJoules))
 	}
 
 	return &types.OutcomeSimulation{
-		ExpectedLatency:      cost.LatencyEstimate,
-		ExpectedResourceCost: cost.ResourceCost,
+		ExpectedLatency:      math.Max(0, expectedLatency),
+		ExpectedResourceCost: math.Max(0, expectedResource),
 		Confidence:           cost.Confidence,
 		GraphPathUsed:        cost.GraphPathUsed,
 		RiskFlags:            riskFlags,
@@ -301,13 +319,115 @@ func (r *RuleEngineReasoner) SimulateOutcome(octx *types.OffloadContext, targetN
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func blend(e *types.EdgeDescriptor) float64 {
-	return (1-e.Confidence)*e.PriorWeight + e.Confidence*e.EMAWeight
+// assumedDemand converts an offload request into a unit-less [0,1] increase in
+// resource demand, for the sensitivity term in SimulateOutcome.
+//
+// referenceBytes is the payload at which a task is treated as saturating the
+// machine. It is a placeholder for a real demand estimate, and it is stated as a
+// constant here rather than buried in an expression so that its arbitrariness is
+// visible: nothing in the dataset calibrates it.
+func assumedDemand(octx *types.OffloadContext) float64 {
+	const referenceBytes = 64 * 1024 * 1024
+	if octx == nil || octx.DataSizeBytes <= 0 {
+		return 0
+	}
+	d := float64(octx.DataSizeBytes) / referenceBytes
+	if d > 1 {
+		return 1
+	}
+	return d
 }
 
-func sign(d types.Direction) float64 {
-	if d == types.Positive {
-		return 1.0
+// costFromState answers a cost query from the state model and records the answer
+// with the state that produced it.
+//
+// Reading through the DecisionBuilder is what makes the record trustworthy: the
+// properties and relationships that reach the arithmetic are exactly the ones the
+// journal ends up holding, because the reading produces the record. A separate
+// "log what we used" pass would be free to disagree with what was actually used, and
+// that disagreement is invisible in exactly the cases where it matters.
+func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressureID string) (*types.ActionCost, error) {
+	who := nodeID
+	if who == "" {
+		who = "self"
 	}
-	return -1.0
+	// The decision id has to be unique per answer and derivable by the caller, so a
+	// client can fetch the trace without the daemon inventing an opaque handle.
+	id := fmt.Sprintf("cost-%d-%s-%s", r.state.Revision(), taskType, who)
+	b := r.state.Decide(id, fmt.Sprintf("cost of %s on %s", taskType, who))
+
+	level := func(propertyID string) (float64, float64) {
+		p, ok := b.Property(propertyID)
+		if !ok {
+			// Absent rather than unobserved: the caveat the builder already recorded
+			// says so, and a neutral level keeps the answer computable.
+			return 0.5, 0
+		}
+		return p.Value, p.Confidence
+	}
+
+	// A sensitivity is a per-unit quantity: how much the target moves for a unit
+	// change in a source construct, summed over the incoming relationships and signed
+	// by each one's direction. It deliberately does NOT multiply by the source's
+	// current value — that would make it a contribution to the current level, which
+	// the level already reports, and it would collapse the whole term to zero before
+	// any telemetry has arrived. Keeping it per-unit is what makes the calibrated
+	// priors informative at cold start, which is the one moment they are all the agent
+	// has.
+	//
+	// The source properties are still read, because the decision record should show
+	// which properties the sensitivity was assembled from even when their values do
+	// not enter the arithmetic.
+	sensitivity := func(targetID string) float64 {
+		var sum float64
+		for _, rel := range b.RelationshipsInto(targetID) {
+			if _, ok := b.Property(rel.From); !ok {
+				continue
+			}
+			sum += rel.Effective() * float64(rel.Sign)
+		}
+		return sum
+	}
+
+	resourceLevel, resourceConf := level(resourceID)
+	pressureLevel, pressureConf := level(pressureID)
+	resourceSens := sensitivity(resourceID)
+	pressureSens := sensitivity(pressureID)
+
+	// Deprecated propositions are excluded by construction here: the builder reads
+	// the state model's relationships, and retirement removes them from that view.
+	// The storage path needs an explicit filter for the same effect.
+	b.Note("%s level %.4f (c=%.2f), sensitivity %+.4f", resourceID, resourceLevel, resourceConf, resourceSens)
+	b.Note("%s level %.4f (c=%.2f), sensitivity %+.4f", pressureID, pressureLevel, pressureConf, pressureSens)
+
+	confidence := (resourceConf + pressureConf) / 2
+
+	d := b.Commit(map[string]any{
+		"task_type":            taskType,
+		"node":                 who,
+		"resource_cost":        math.Max(0, resourceLevel),
+		"latency_estimate":     math.Max(0, pressureLevel),
+		"resource_sensitivity": resourceSens,
+		"pressure_sensitivity": pressureSens,
+		"confidence":           confidence,
+	})
+
+	path := make([]string, 0, len(d.RelationshipsRead))
+	for i := range d.RelationshipsRead {
+		path = append(path, d.RelationshipsRead[i].String())
+	}
+
+	return &types.ActionCost{
+		CPUCost:             math.Max(0, resourceLevel*0.1),
+		ResourceCost:        math.Max(0, resourceLevel),
+		EnergyCost:          0,
+		LatencyEstimate:     math.Max(0, pressureLevel),
+		Confidence:          confidence,
+		ResourceSensitivity: resourceSens,
+		PressureSensitivity: pressureSens,
+		DecisionID:          d.ID,
+		Caveats:             d.Caveats,
+		Rationale:           d.Rationale,
+		GraphPathUsed:       path,
+	}, nil
 }

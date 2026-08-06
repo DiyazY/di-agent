@@ -1,1 +1,10 @@
-pytest>=8.0
+# Dependencies of the prior initialization pipeline (prior_init/), which is the
+# whole of the Python layer. It is a build-time step: it reads the published P1–P5
+# constants and emits prior_weights.json.
+#
+# scipy is a real runtime dependency — calibration.py computes Spearman
+# correlations with scipy.stats.spearmanr. It went undeclared while this file
+# listed pytest instead, which was the dependency of the contract compliance
+# mirror that no longer exists, so the one package the pipeline cannot run
+# without was the one not named here.
+scipy>=1.11

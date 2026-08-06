@@ -15,12 +15,12 @@ import (
 // as a small key/value table.
 func newRecommendCmd(deps *Deps) *cobra.Command {
 	var (
-		task       string
-		source     string
-		size       int64
-		latencyMs  float64
-		energyJ    float64
-		energySet  bool
+		task      string
+		source    string
+		size      int64
+		latencyMs float64
+		energyJ   float64
+		energySet bool
 	)
 	cmd := &cobra.Command{
 		Use:   "recommend",

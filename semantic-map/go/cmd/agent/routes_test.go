@@ -14,6 +14,8 @@ import (
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // newTestAgent wires a SemanticMap via the edge-minimal profile and returns
@@ -22,6 +24,8 @@ import (
 func newTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		StateMap:             newTestState(t),
+		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.2,
 		ConvergenceThreshold: 500,
 		MinTrustScore:        0.5,
@@ -57,14 +61,14 @@ func TestGetGraph_ReturnsSevenConstructsAndFifteenPropositions(t *testing.T) {
 	defer cleanup()
 	var snap GraphSnapshot
 	getJSON(t, base+"/graph", &snap)
-	if len(snap.Constructs) != 7 {
-		t.Errorf("constructs: got %d, want 7", len(snap.Constructs))
+	if want := len(mustSpec(t).Constructs); len(snap.Constructs) != want {
+		t.Errorf("constructs: got %d, want %d", len(snap.Constructs), want)
 	}
-	if len(snap.Propositions) != 15 {
-		t.Errorf("propositions: got %d, want 15", len(snap.Propositions))
+	if want := len(mustSpec(t).Propositions); len(snap.Propositions) != want {
+		t.Errorf("propositions: got %d, want %d", len(snap.Propositions), want)
 	}
-	if len(snap.Edges) != 15 {
-		t.Errorf("edges: got %d, want 15", len(snap.Edges))
+	if want := len(mustSpec(t).Propositions); len(snap.Edges) != want {
+		t.Errorf("edges: got %d, want %d", len(snap.Edges), want)
 	}
 }
 
@@ -90,8 +94,8 @@ func TestGetEdges_NoFilterReturnsFifteen(t *testing.T) {
 	defer cleanup()
 	var edges []EdgeDTO
 	getJSON(t, base+"/edges", &edges)
-	if len(edges) != 15 {
-		t.Errorf("/edges: got %d, want 15", len(edges))
+	if want := len(mustSpec(t).Propositions); len(edges) != want {
+		t.Errorf("/edges: got %d, want %d", len(edges), want)
 	}
 }
 
@@ -112,6 +116,14 @@ func TestGetEdges_FilterByFromTo_RC_PS_ReturnsBothP2AndP3(t *testing.T) {
 	}
 }
 
+// /history serves the state model's journal, which is the record of everything that
+// happened to the model — including the seeding it did to itself at startup. So these
+// tests assert that a mutation appears and that the since filter bounds the window; they
+// do not assert a count, because a count is the right assertion for a log of operator
+// actions only, and this is not that. The distinction is worth keeping in the test rather
+// than only in the comment: the previous version expected exactly one event, which was
+// true of the separate ontology log it read before and would silently start passing again
+// if the projection were narrowed back to mutations.
 func TestGetHistory_RespectsRFC3339Since(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
@@ -123,26 +135,36 @@ func TestGetHistory_RespectsRFC3339Since(t *testing.T) {
 		t.Errorf("future since: got %d events, want 0", len(events))
 	}
 	// Trigger a mutation, then query with zero time — must include it.
-	if err := sm.SetPropositionStrength("P1", 0.77); err != nil {
+	if err := sm.SetPropositionStrength(firstProp(t), 0.77); err != nil {
 		t.Fatal(err)
 	}
 	getJSON(t, base+"/history", &events)
-	if len(events) != 1 {
-		t.Errorf("after one mutation: got %d events, want 1", len(events))
+	if !hasEventKind(events, "proposition_strength_set", firstProp(t)) {
+		t.Errorf("no strength-set event for %s in %d journal entries", firstProp(t), len(events))
 	}
 }
 
 func TestGetHistory_RespectsDurationSince(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
-	if err := sm.SetPropositionStrength("P1", 0.5); err != nil {
+	if err := sm.SetPropositionStrength(firstProp(t), 0.5); err != nil {
 		t.Fatal(err)
 	}
 	var events []OntologyEventDTO
 	getJSON(t, base+"/history?since=1h", &events)
-	if len(events) != 1 {
-		t.Errorf("since=1h: got %d events, want 1", len(events))
+	if !hasEventKind(events, "proposition_strength_set", firstProp(t)) {
+		t.Errorf("no strength-set event for %s within the last hour", firstProp(t))
 	}
+}
+
+// hasEventKind reports whether the journal carries an event of this kind for this target.
+func hasEventKind(events []OntologyEventDTO, kind, target string) bool {
+	for _, e := range events {
+		if e.Kind == kind && (target == "" || strings.Contains(e.TargetID, target)) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHealthz_OK(t *testing.T) {
@@ -166,27 +188,44 @@ func TestVersion_ReturnsStructWithCounts(t *testing.T) {
 	if v.GoVersion == "" {
 		t.Error("go_version empty")
 	}
-	if v.SemmapConstructs != 7 {
-		t.Errorf("semmap_constructs: got %d, want 7", v.SemmapConstructs)
+	// Counts come from the loaded domain spec rather than from literals, so a
+	// change to the graph's scope surfaces as a spec change rather than as a
+	// test failure that has to be hand-reconciled.
+	spec := mustSpec(t)
+	if v.SemmapConstructs != len(spec.Constructs) {
+		t.Errorf("semmap_constructs: got %d, want %d", v.SemmapConstructs, len(spec.Constructs))
 	}
-	if v.SemmapPropositions != 15 {
-		t.Errorf("semmap_propositions: got %d, want 15", v.SemmapPropositions)
+	if v.SemmapPropositions != len(spec.Propositions) {
+		t.Errorf("semmap_propositions: got %d, want %d", v.SemmapPropositions, len(spec.Propositions))
 	}
 }
 
 func TestGetNeighbors_ReturnsTargetConstructs(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	// SC has propositions P1 (→RC), P4 (→RR), P12 (→MU).
+	// Derive the expectation from the spec: a construct's neighbours are the
+	// targets of every proposition it sources.
+	spec := mustSpec(t)
+	source := spec.Constructs[0].ConstructID
+	want := map[string]bool{}
+	for _, p := range spec.Propositions {
+		if p.FromConstruct == source {
+			want[p.ToConstruct] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Skipf("construct %s sources no propositions in the spec", source)
+	}
+
 	var neighbors []string
-	getJSON(t, base+"/neighbors?node=SC", &neighbors)
+	getJSON(t, base+"/neighbors?node="+source, &neighbors)
 	got := map[string]bool{}
 	for _, n := range neighbors {
 		got[n] = true
 	}
-	for _, want := range []string{"RC", "RR", "MU"} {
-		if !got[want] {
-			t.Errorf("SC neighbors missing %s; got %v", want, neighbors)
+	for w := range want {
+		if !got[w] {
+			t.Errorf("%s neighbors missing %s; got %v", source, w, neighbors)
 		}
 	}
 }
@@ -238,7 +277,7 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	resp := postJSON(t, base+"/ontology/strength", SetStrengthRequest{
-		PropositionID: "P1",
+		PropositionID: firstProp(t),
 		Strength:      0.95,
 	})
 	if resp.StatusCode != 204 {
@@ -249,7 +288,7 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 	var props []PropositionDTO
 	getJSON(t, base+"/propositions", &props)
 	for _, p := range props {
-		if p.PropositionID == "P1" {
+		if p.PropositionID == firstProp(t) {
 			if p.PriorStrength != 0.95 {
 				t.Errorf("P1 strength after set: got %.3f, want 0.95", p.PriorStrength)
 			}
@@ -258,14 +297,17 @@ func TestSetStrength_UpdatesAndAppearsInHistory(t *testing.T) {
 
 	var events []OntologyEventDTO
 	getJSON(t, base+"/history", &events)
-	if len(events) != 1 {
-		t.Fatalf("history: got %d events, want 1", len(events))
+	// The target is the relationship's id, which carries the proposition as its label,
+	// so the assertion is containment rather than equality: the journal records the
+	// object that changed, and for a strength that object is the relationship.
+	if !hasEventKind(events, "proposition_strength_set", firstProp(t)) {
+		t.Errorf("no strength-set event for %s in %d journal entries", firstProp(t), len(events))
 	}
-	if events[0].Kind != "proposition_strength_set" {
-		t.Errorf("event kind: got %q, want proposition_strength_set", events[0].Kind)
-	}
-	if events[0].TargetID != "P1" {
-		t.Errorf("event target: got %q, want P1", events[0].TargetID)
+	for _, e := range events {
+		if e.Kind == "proposition_strength_set" && e.Detail["reason"] == nil {
+			t.Errorf("strength-set event for %s carries no reason; an assertion without a "+
+				"stated basis cannot be audited", e.TargetID)
+		}
 	}
 }
 
@@ -279,7 +321,7 @@ func TestDeprecate_FlagsPropositionAndReasonerSkipsIt(t *testing.T) {
 	}
 
 	resp := postJSON(t, base+"/ontology/deprecate", DeprecateRequest{
-		PropositionID: "P1",
+		PropositionID: firstProp(t),
 		Reason:        "http test",
 	})
 	if resp.StatusCode != 204 {
@@ -291,7 +333,7 @@ func TestDeprecate_FlagsPropositionAndReasonerSkipsIt(t *testing.T) {
 	getJSON(t, base+"/propositions", &props)
 	var p1 *PropositionDTO
 	for i := range props {
-		if props[i].PropositionID == "P1" {
+		if props[i].PropositionID == firstProp(t) {
 			p1 = &props[i]
 		}
 	}
@@ -376,46 +418,74 @@ func TestAddValidatedProposition_AppearsInPropositions(t *testing.T) {
 	t.Error("P-http proposition not found after POST /ontology/proposition")
 }
 
-func TestResetEdge_RestoresPriorAfterUpdates(t *testing.T) {
+// TestResetEdge_DiscardsEvidenceAndKeepsThePrior covers the operator action for a
+// relationship that learned from a period now known to be unrepresentative — a load
+// test, a broken collector. What goes is the evidence; the relationship is still
+// asserted to exist, and its prior is still the best available estimate.
+func TestResetEdge_DiscardsEvidenceAndKeepsThePrior(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
 
-	// Stream a few observations into PS→RC to move EMA off prior.
+	// Give one relation evidence of its own, directly, so the test is about reset
+	// rather than about whether pairs happened to form.
+	state := sm.State()
+	rels := state.Relationships(pairFrom(t), pairTo(t))
+	if len(rels) == 0 {
+		t.Fatalf("no relationship from %s to %s in the seeded model", pairFrom(t), pairTo(t))
+	}
 	for i := 0; i < 50; i++ {
-		if err := sm.Ingest("PS", "RC", 0.9, fmt.Sprintf("evt-%d", i)); err != nil {
+		if err := state.ObserveRelationship(rels[0].ID, 0.9, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
+	before, _ := state.Relationship(rels[0].ID)
+	if before.NObservations == 0 {
+		t.Fatal("setup: the relationship recorded no observations")
+	}
 
-	// Reset via HTTP.
-	resp := postJSON(t, base+"/agent/reset", ResetRequest{From: "PS", To: "RC"})
+	resp := postJSON(t, base+"/agent/reset",
+		ResetRequest{From: pairFrom(t), To: pairTo(t)})
 	if resp.StatusCode != 204 {
 		t.Fatalf("reset: %s", body(resp))
 	}
 	resp.Body.Close()
 
 	var edges []EdgeDTO
-	getJSON(t, base+"/edges?from=PS&to=RC", &edges)
+	getJSON(t, base+"/edges?from="+pairFrom(t)+"&to="+pairTo(t), &edges)
 	if len(edges) == 0 {
-		t.Fatal("no PS→RC edges returned after reset")
+		t.Fatalf("no %s→%s edges returned after reset", pairFrom(t), pairTo(t))
 	}
 	for _, e := range edges {
-		if e.EMAWeight != e.PriorWeight {
-			t.Errorf("edge %s: EMA=%.3f != prior=%.3f after reset", e.PropositionID, e.EMAWeight, e.PriorWeight)
-		}
 		if e.NObservations != 0 {
 			t.Errorf("edge %s: n_observations=%d after reset; want 0", e.PropositionID, e.NObservations)
 		}
 		if e.Confidence != 0.0 {
 			t.Errorf("edge %s: confidence=%.3f after reset; want 0.0", e.PropositionID, e.Confidence)
 		}
+		if e.PriorWeight != before.Prior {
+			t.Errorf("edge %s: prior %.3f after reset, want the untouched %.3f — a reset "+
+				"discards evidence, not the claim", e.PropositionID, e.PriorWeight, before.Prior)
+		}
+	}
+
+	// And the discard is on the record, because "no observations" and "observations
+	// thrown away by an operator" are different states of knowledge.
+	found := false
+	for _, e := range state.Journal().Events(0, 0) {
+		if e.Target == rels[0].ID && e.Detail["reset"] == true {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the journal holds no record of the reset, so a count of zero cannot be " +
+			"told apart from a relationship nothing ever observed")
 	}
 }
 
 func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
-	resp := postRaw(t, base+"/ontology/strength", `{"proposition_id":"P1","strength":0.5}`)
+	resp := postRaw(t, base+"/ontology/strength", `{"proposition_id":firstProp(t),"strength":0.5}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
@@ -511,13 +581,16 @@ func TestStaticUI_RootServesIndex(t *testing.T) {
 
 // ── /ingest-sample (Bridge-routed telemetry) ──────────────────────────────────
 
-func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
-	// A cpu_utilization sample routes to RC via the Bridge, which fans out to
-	// every edge touching RC (P1: SC→RC, P2: RC→PS, P3: RC→PS, P8: MU→RC,
-	// P10: PS→RC, P14: RC→SC). After one POST, all of those edges must show
-	// n_observations >= 1 — we assert on the SC→RC pair for headline proof
-	// and then verify the RC-side fan-out via /edges.
-	base, _, cleanup := newTestAgent(t)
+// TestIngestSample_RecordsTheMetricAndItsConstruct pins what one sample does now.
+//
+// It used to assert that every edge touching the routed construct advanced by one
+// observation, because the Bridge fanned each sample out to all of them. That is
+// exactly the reading that was wrong: a single construct's magnitude is not an
+// observation of any relation's strength, so relations now wait for paired
+// observations of both endpoints. What one sample must do is update the metric's own
+// property and, through it, the construct that summarises the metric.
+func TestIngestSample_RecordsTheMetricAndItsConstruct(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
 
 	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
@@ -532,23 +605,49 @@ func TestIngestSample_AppliesBridgeRouting(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// At least one edge touching RC must register the observation. Edges
-	// before SC→RC (P1) are the most direct proof: a Bridge that ignored the
-	// sample would leave them at n=0.
-	var edges []EdgeDTO
-	getJSON(t, base+"/edges?from=SC&to=RC", &edges)
-	if len(edges) == 0 {
-		t.Fatal("SC→RC returned no edges; ontology missing P1?")
+	metric, ok := sm.State().Property("cpu_utilization")
+	if !ok {
+		t.Fatal("no property for cpu_utilization after ingesting one")
 	}
-	for _, e := range edges {
-		if e.NObservations < 1 {
-			t.Errorf("edge %s (SC→RC) n_observations=%d after one sample; want >=1",
-				e.PropositionID, e.NObservations)
+	if metric.NObservations != 1 || metric.Value != 0.7 {
+		t.Errorf("cpu_utilization = %.4f from %d observations; want 0.7 from 1",
+			metric.Value, metric.NObservations)
+	}
+
+	construct, routed := sm.RoutedConstruct("cpu_utilization")
+	if !routed {
+		t.Skip("the loaded spec routes cpu_utilization nowhere")
+	}
+	c, ok := sm.State().Property(construct)
+	if !ok {
+		t.Fatalf("no property for the routed construct %s", construct)
+	}
+	if c.Value == 0 {
+		t.Errorf("construct %s stayed at zero after its member was observed; a cost "+
+			"answer reads the construct, so it would report an idle machine", construct)
+	}
+
+	// The relations are deliberately untouched: one endpoint observation is not
+	// evidence about an association.
+	for _, e := range func() []EdgeDTO {
+		var edges []EdgeDTO
+		getJSON(t, base+"/edges", &edges)
+		return edges
+	}() {
+		if e.NObservations != 0 {
+			t.Errorf("relation %s advanced to n=%d on a single endpoint observation; "+
+				"strengths must wait for pairs", e.PropositionID, e.NObservations)
 		}
 	}
 }
 
-func TestIngestSample_UnknownMetricTypeReturns400(t *testing.T) {
+// TestIngestSample_UnroutedMetricIsRecordedNotRejected pins the contract that
+// replaced a 400. An unrouted metric type is something the system reported: the
+// state model records it as a property, because a map that can only represent what
+// someone declared in advance describes the system as it was when they wrote it
+// down. The response is 202 rather than 204 so a typo is still visible — the caller
+// learns the reading was kept but nothing summarises it.
+func TestIngestSample_UnroutedMetricIsRecordedNotRejected(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
@@ -559,18 +658,21 @@ func TestIngestSample_UnknownMetricTypeReturns400(t *testing.T) {
 		EventID:       "ingest-sample-unknown",
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Errorf("unknown metric_type: got %d, want 400 (%s)", resp.StatusCode, body(resp))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("unrouted metric_type: got %d, want 202 (%s)", resp.StatusCode, body(resp))
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("error Content-Type: got %q, want application/json", ct)
+		t.Errorf("Content-Type: got %q, want application/json", ct)
 	}
-	var er ErrorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
-		t.Fatalf("decode error body: %v", err)
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
 	}
-	if !strings.Contains(er.Error, "bogus_metric") {
-		t.Errorf("error %q should mention the bad metric_type", er.Error)
+	if got["routed"] != false {
+		t.Errorf("body should report routed=false, got %v", got["routed"])
+	}
+	if got["metric_type"] != "bogus_metric" {
+		t.Errorf("body should name the metric type, got %v", got["metric_type"])
 	}
 }
 
@@ -592,7 +694,10 @@ func TestIngestSample_RequiresJSON(t *testing.T) {
 	}
 }
 
-func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
+// A proposition this agent cannot act on is a client error, not a fault. It used to
+// answer 500, which sent an operator looking for a bug in the daemon when the daemon had
+// correctly refused their request.
+func TestSetStrength_UnknownProposition_Returns404WithErrorJSON(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	resp := postJSON(t, base+"/ontology/strength", SetStrengthRequest{
@@ -600,8 +705,8 @@ func TestSetStrength_UnknownProposition_Returns500WithErrorJSON(t *testing.T) {
 		Strength:      0.5,
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != 500 {
-		t.Errorf("unknown prop: got %d, want 500", resp.StatusCode)
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown prop: got %d, want 404", resp.StatusCode)
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("error Content-Type: got %q, want application/json", ct)
@@ -788,33 +893,44 @@ func TestOffload_AcceptWithinBudget(t *testing.T) {
 // usable values within ~200 ticks.
 func drivePositiveCost(t *testing.T, sm *semmap.SemanticMap) {
 	t.Helper()
-	const N = 200
-	for i := 0; i < N; i++ {
-		// RC inputs: drive the one positive (P1: SC→RC) high, the two
-		// negatives (P8: MU→RC, P10: PS→RC) low.
-		if err := sm.Ingest("SC", "RC", 0.95, fmt.Sprintf("bias-sc-rc-%d", i)); err != nil {
-			t.Fatal(err)
+	// Cost is the observed level of the cost constructs, read from the state model, so
+	// making it positive means giving those constructs telemetry. The previous version
+	// drove edge observations, which moved the construct graph and — once cost came
+	// from the state model — stopped affecting the answer at all.
+	spec := mustSpec(t)
+	targets := map[string]bool{
+		spec.CostModel.ResourceConstruct: true,
+		spec.CostModel.PressureConstruct: true,
+	}
+	var metrics []string
+	for _, r := range spec.MetricRouting {
+		if targets[r.ConstructID] {
+			metrics = append(metrics, r.MetricType)
 		}
-		if err := sm.Ingest("MU", "RC", 0.05, fmt.Sprintf("bias-mu-rc-%d", i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("PS", "RC", 0.05, fmt.Sprintf("bias-ps-rc-%d", i)); err != nil {
-			t.Fatal(err)
-		}
-		// PS inputs: CO→PS (P13, negative) at -1.0 → contribution = +1.0.
-		// RC→PS conflict pair cancels at any observed value.
-		if err := sm.Ingest("CO", "PS", -1.0, fmt.Sprintf("bias-co-ps-%d", i)); err != nil {
-			t.Fatal(err)
+	}
+	if len(metrics) == 0 {
+		t.Fatal("no metric routes to either cost construct")
+	}
+	for i := 0; i < 200; i++ {
+		for _, m := range metrics {
+			if err := sm.IngestSample(&types.MetricSample{
+				NodeID:        "node_self",
+				MetricType:    types.MetricType(m),
+				Value:         0.8,
+				TimestampUnix: int64(1700000000 + i),
+				EventID:       fmt.Sprintf("bias-%s-%d", m, i),
+			}); err != nil {
+				t.Fatalf("ingesting %s: %v", m, err)
+			}
 		}
 	}
 }
 
-// newOffloadTestAgent returns a test agent tuned for the /offload reject
-// tests: alpha=0.5 and convergence=100 so 200 biasing ticks push EMAs close
-// to their targets and confidence saturates well above 0.5.
 func newOffloadTestAgent(t *testing.T) (baseURL string, sm *semmap.SemanticMap, cleanup func()) {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		StateMap:             newTestState(t),
+		DomainSpec:           mustSpec(t),
 		EMAAlpha:             0.5,
 		ConvergenceThreshold: 100,
 		MinTrustScore:        0.5,
@@ -908,4 +1024,17 @@ func TestOffload_RequiresJSON(t *testing.T) {
 	if resp.StatusCode != 400 {
 		t.Errorf("missing Content-Type: got %d, want 400", resp.StatusCode)
 	}
+}
+
+// newTestState gives a fixture the state model a real daemon always attaches: cost is
+// answered from the map, so an agent built without one cannot answer at all.
+func newTestState(t *testing.T) *statemap.Map {
+	t.Helper()
+	// Mirrors the daemon's defaults: admission on, so a metric nobody declared still
+	// becomes a property, and a low convergence count so a fixture reaches useful
+	// confidence without thousands of samples.
+	return statemap.New(statemap.Config{
+		ConvergenceObservations: 100,
+		AdmitUnknown:            true,
+	}, statemap.NewJournal(0))
 }

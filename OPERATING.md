@@ -12,13 +12,13 @@ If you are changing code, read [`DEVELOPING.md`](DEVELOPING.md) instead. If you 
 
 | Assumption | Consequence for you |
 | ---------- | ------------------- |
-| **No authentication on any endpoint.** No TLS, no bearer tokens, no middleware. | Anyone who can reach the port can read the graph *and mutate it* — deprecate propositions, reset edges, retune weights. Treat the listen address as fully trusted. |
-| **All state is in memory.** `InMemoryStorage`; nothing is written to disk. | A restart discards every learned EMA weight, confidence score, and audit-log entry. The agent returns to cold-start priors. |
+| **No authentication on any endpoint.** No TLS, no bearer tokens, no middleware. | Anyone who can reach the port can read the **whole model** — `GET /state` returns every property, relationship, decision and journal entry, not only the graph — *and mutate it*: deprecate propositions, reset edges, retune weights. Agents fetch each other's `/state` the same way, so a reachable agent also discloses to any host that can pose as a peer. Treat the listen address as fully trusted. |
+| **State is in memory unless `-state-file` is set.** | Without it, a restart discards every learned strength, confidence and journal entry, and the agent returns to cold-start priors. With it, the map and its journal are snapshotted periodically and on shutdown, and a snapshot naming a different owner is refused. |
 | **`-addr :8080` binds every interface.** | On a multi-homed host this is reachable from anywhere routable. Bind explicitly. |
 
 None of these are oversights — they are recorded scope decisions ([ARCHITECTURE §10](semantic-map/ARCHITECTURE.md#10-coordination)) for a lab-network deployment, with production hardening deferred to P7. But they mean the deployment rule is simple:
 
-> **Run it on an isolated or trusted network segment, bound to a private interface, and expect to lose learned state on restart.**
+> **Run it on an isolated or trusted network segment, bound to a private interface. Set `-state-file` if a restart must keep its learned state; without it, a restart returns to cold-start priors.**
 
 If you need it on a shared network, put it behind something that terminates TLS and authenticates — a reverse proxy with client certs, or a WireGuard/Tailscale interface. Do not expose port 8080 to anything you do not control.
 
@@ -127,7 +127,7 @@ Everything is command-line flags — there is no config file. The full table is 
 | Flag | Guidance |
 | ---- | -------- |
 | `-regime` | `stable` / `default` / `bursty` / `volatile`. Sets `-alpha` and `-convergence` to a bundle calibrated against the k0s workload matrix. **Prefer this over tuning the two numbers by hand.** Use `stable` for steady IoT nodes, `bursty` for control-plane-heavy ones. |
-| `-collect-interval` | `10s` default. `5s` on nodes you want to converge faster; `0` disables autonomous collection entirely (manual `POST /ingest` still works). |
+| `-collect-interval` | `10s` default. `5s` on nodes you want to converge faster; `0` disables autonomous collection entirely (manual `POST /ingest-sample` still works). |
 | `-proposer` | `true` default. Set `false` on CPU-constrained nodes — it keeps ring buffers per construct pair. |
 
 ### Port conflict warning
@@ -210,9 +210,9 @@ sudo systemctl status di-agent
 journalctl -u di-agent -f
 ```
 
-The hardening directives above are additions to the PoC unit, not copied from it — the agent genuinely needs no filesystem writes, no privileges, and no address families beyond IP, so lock all of that down. `MemoryMax=128M` is roughly 8× the measured working set, which leaves headroom while still killing a runaway.
+The hardening directives above are additions to the PoC unit, not copied from it — as written (no `-state-file`) the agent needs no filesystem writes, no privileges, and no address families beyond IP, so lock all of that down. **If you enable persistence**, add the state file's directory to `ReadWritePaths=`: `ProtectSystem=strict` makes the whole tree read-only, and both the periodic write and its temp file need that directory writable, so a hardened unit otherwise fails to persist silently while everything else looks healthy. `MemoryMax=128M` is roughly 8× the measured working set, which leaves headroom while still killing a runaway.
 
-**`Restart=always` is doing more than it looks like.** Because state is in memory, a restart is not free — it is a full reset to cold-start priors. Automatic restart keeps the agent *available*, but every restart discards learned evidence. If you see frequent restarts in `journalctl`, treat that as a data-loss event, not just a blip.
+**`Restart=always` interacts with persistence — know which mode you are in.** With `-state-file`, a restart restores the map and journal from the last snapshot (written periodically and on clean shutdown), so `Restart=always` keeps the agent both available and warm; only what changed since the last periodic write is lost, and only on an unclean kill. Without a state file, every restart is a full reset to cold-start priors — automatic restart keeps the agent available but discards all learned evidence, and frequent restarts in `journalctl` are a data-loss event, not a blip.
 
 ---
 

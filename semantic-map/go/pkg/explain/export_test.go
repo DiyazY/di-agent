@@ -20,7 +20,7 @@ func (r plannerTestReader) Peers() *peers.Registry { return r.SemanticMap.Peers(
 
 func newPlannerTestReader(t *testing.T) SemanticMapReader {
 	t.Helper()
-	sm, _, err := profiles.Build("edge-minimal", profiles.Config{})
+	sm, _, err := profiles.Build("edge-minimal", profiles.Config{DomainSpec: mustSpec(t)})
 	if err != nil {
 		t.Fatalf("profiles.Build: %v", err)
 	}

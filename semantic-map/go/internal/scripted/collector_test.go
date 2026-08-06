@@ -117,10 +117,10 @@ func TestSineWavePattern_Sample(t *testing.T) {
 		Mid: 0.5, Amp: 0.3, PeriodTicks: 20,
 		StartTick: 0, EndTick: -1,
 	}
-	v0, _ := p.Sample(0)         // sin(0) = 0
-	vQuarter, _ := p.Sample(5)   // sin(π/2) = 1
-	vHalf, _ := p.Sample(10)     // sin(π) = 0
-	vThree, _ := p.Sample(15)    // sin(3π/2) = -1
+	v0, _ := p.Sample(0)       // sin(0) = 0
+	vQuarter, _ := p.Sample(5) // sin(π/2) = 1
+	vHalf, _ := p.Sample(10)   // sin(π) = 0
+	vThree, _ := p.Sample(15)  // sin(3π/2) = -1
 	if math.Abs(v0-0.5) > 1e-9 {
 		t.Errorf("sine at phase 0 should equal Mid (0.5); got %v", v0)
 	}

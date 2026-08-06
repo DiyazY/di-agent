@@ -12,22 +12,9 @@ import (
 	"github.com/DiyazY/di-agent/compliance"
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
-	"github.com/DiyazY/di-agent/pkg/types"
+	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
-
-func TestInMemoryStorageCompliance(t *testing.T) {
-	compliance.RunStorageCompliance(t, func(t *testing.T) contracts.StorageContract {
-		return minimal.NewInMemoryStorage()
-	})
-}
-
-func TestEMAUpdaterCompliance(t *testing.T) {
-	compliance.RunUpdaterCompliance(t, func(t *testing.T) (contracts.UpdaterContract, contracts.StorageContract) {
-		s := minimal.NewInMemoryStorage()
-		u := minimal.NewEMAUpdater(s, 0.2, 500)
-		return u, s
-	})
-}
 
 func TestCgroupCollectorCompliance(t *testing.T) {
 	compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
@@ -72,21 +59,19 @@ func netdataFakeHandler(t *testing.T) http.Handler {
 	return mux
 }
 
-func TestStaticDiSelectOntologyCompliance(t *testing.T) {
+func TestSpecOntologyCompliance(t *testing.T) {
 	compliance.RunOntologyCompliance(t, func(t *testing.T) contracts.OntologyContract {
-		return minimal.NewStaticDiSelectOntology()
+		return minimal.NewOntologyFromSpec(mustSpec())
 	})
 }
 
 func TestRuleEngineReasonerCompliance(t *testing.T) {
 	compliance.RunReasonerCompliance(t, func(t *testing.T) contracts.ReasonerContract {
-		// The reasoner reads from storage that the ontology has seeded. Build
-		// the same wiring the edge-minimal profile uses so the compliance suite
-		// exercises a realistic configuration.
-		s := minimal.NewInMemoryStorage()
-		o := minimal.NewStaticDiSelectOntology()
-		seedReasonerState(t, s, o)
-		return minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+		// The reasoner needs the specification (for the cost roles) and a state model
+		// to answer from. It needs nothing else: this fixture used to build a storage
+		// graph and seed it, which passed and proved nothing, because no cost answer
+		// had read from there since the state model became the single source.
+		return reasonerWithState(t)
 	})
 }
 
@@ -98,14 +83,14 @@ func TestDisabledProposerCompliance(t *testing.T) {
 
 func TestMICorrelationProposerCompliance(t *testing.T) {
 	compliance.RunProposerCompliance(t, func(t *testing.T) contracts.ProposerContract {
-		o := minimal.NewStaticDiSelectOntology()
+		o := minimal.NewOntologyFromSpec(mustSpec())
 		return minimal.NewMICorrelationProposer(o, 0.8, 10, 50)
 	})
 }
 
 func TestRuleBasedTunerCompliance(t *testing.T) {
 	compliance.RunTunerCompliance(t, func(t *testing.T) contracts.TunerContract {
-		return minimal.NewRuleBasedTuner()
+		return minimal.NewRuleBasedTunerFromSpec(mustSpec())
 	})
 }
 
@@ -115,16 +100,19 @@ func TestDisabledTunerCompliance(t *testing.T) {
 	})
 }
 
-// TestReasonerSkipsDeprecatedPropositions verifies the live-ontology
-// behavior end-to-end: when the Ontology deprecates a proposition, the
-// Reasoner must exclude its edge from cost computation. The graph path
-// length drops by one, and the underlying edge stays in storage (preserved
-// for audit / replay).
-func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
-	s := minimal.NewInMemoryStorage()
-	o := minimal.NewStaticDiSelectOntology()
-	seedReasonerState(t, s, o)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+// TestReasonerSkipsRetiredRelationships verifies that retirement removes a claim
+// from reasoning: the reasoner reads relationships from the state model, so a
+// retired one leaves the traversal path and stops contributing to any answer.
+//
+// The retirement is applied to the state model rather than to the ontology, because
+// the state model is what the reasoner reads. Going through the facade
+// (SemanticMap.Deprecate) does both; a caller reaching past it into the ontology
+// alone changes what Propositions() reports and no decision, which is the failure
+// mode the facade exists to prevent.
+func TestReasonerSkipsRetiredRelationships(t *testing.T) {
+	state := stateFor(t)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	r.AttachState(state)
 
 	before, err := r.CostOfAction("pod-scheduling", "node_1")
 	if err != nil {
@@ -134,9 +122,19 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 		t.Fatal("expected non-empty graph path before deprecation")
 	}
 
-	// Deprecate one proposition (P1: SC→RC positive — the first one in
-	// diSelectPropositions order).
-	if err := o.Deprecate("P1", "spurious in this deployment"); err != nil {
+	// Retire one relationship the cost path reads.
+	var retired string
+	for _, rel := range state.Relationships("", "") {
+		if rel.To == mustSpec().CostModel.ResourceConstruct ||
+			rel.To == mustSpec().CostModel.PressureConstruct {
+			retired = rel.ID
+			break
+		}
+	}
+	if retired == "" {
+		t.Skip("no relationship terminates at a cost construct in this spec")
+	}
+	if err := state.RetireRelationship(retired, "spurious in this deployment", "operator:test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,26 +143,23 @@ func TestReasonerSkipsDeprecatedPropositions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(after.GraphPathUsed) != len(before.GraphPathUsed)-1 {
-		t.Errorf("graph path should shrink by 1 after deprecation; got %d → %d",
+		t.Errorf("graph path should shrink by 1 after retirement; got %d → %d",
 			len(before.GraphPathUsed), len(after.GraphPathUsed))
 	}
 	for _, entry := range after.GraphPathUsed {
-		if contains(entry, "[P1]") {
-			t.Errorf("deprecated proposition P1 still appears in graph path: %q", entry)
+		if contains(entry, retired) {
+			t.Errorf("retired relationship %s still appears in the graph path: %q", retired, entry)
 		}
 	}
 
-	// The edge must still be in storage — soft-delete, not removal.
-	edges, _ := s.AllEdges()
-	stillPresent := false
-	for _, e := range edges {
-		if e.PropositionID == "P1" {
-			stillPresent = true
-			break
-		}
+	// Retirement is soft: the relationship stays retrievable so a decision taken
+	// before it remains reconstructible.
+	rel, ok := state.Relationship(retired)
+	if !ok {
+		t.Fatalf("retired relationship %s is gone from the map; soft deletion must keep it", retired)
 	}
-	if !stillPresent {
-		t.Error("deprecated proposition's edge was removed from storage — soft-delete must preserve it")
+	if rel.RetiredReason == "" {
+		t.Error("retired relationship carries no reason")
 	}
 }
 
@@ -179,44 +174,6 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
-}
-
-// seedReasonerState seeds storage with one node per construct and one edge per
-// proposition, mirroring what profiles.seedFromOntology does at daemon startup.
-// Without seeding, the reasoner has nothing to traverse and GraphPathUsed
-// would be empty.
-func seedReasonerState(t *testing.T, s *minimal.InMemoryStorage, o *minimal.StaticDiSelectOntology) {
-	t.Helper()
-	cs, err := o.Constructs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range cs {
-		if err := s.PutNode(&types.NodeDescriptor{
-			NodeID:        c.ConstructID,
-			ConstructType: c.Name,
-			PriorValue:    0.5,
-			EMAValue:      0.5,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ps, err := o.Propositions()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range ps {
-		if err := s.PutEdge(&types.EdgeDescriptor{
-			FromID:        p.FromConstruct,
-			ToID:          p.ToConstruct,
-			PropositionID: p.PropositionID,
-			Direction:     p.Direction,
-			PriorWeight:   p.PriorStrength,
-			EMAWeight:     p.PriorStrength,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 // newFakeCgroupRoot creates a temp directory with valid cgroups v2 files
@@ -234,7 +191,7 @@ func newFakeCgroupRoot(t *testing.T) string {
 			"throttled_usec 25000\n",
 	)
 	mustWrite(t, filepath.Join(root, "memory.current"), "2147483648\n") // 2 GB
-	mustWrite(t, filepath.Join(root, "memory.max"), "8589934592\n")      // 8 GB
+	mustWrite(t, filepath.Join(root, "memory.max"), "8589934592\n")     // 8 GB
 
 	return root
 }
@@ -244,4 +201,40 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("mustWrite %s: %v", path, err)
 	}
+}
+
+// reasonerWithState builds a reasoner the way a daemon does: the specification, for
+// the cost roles, and a state model to answer from. Nothing else — cost is read from
+// the map, so a reasoner without one cannot answer at all, and there is no fixture for
+// that configuration.
+func reasonerWithState(t *testing.T) *minimal.RuleEngineReasoner {
+	t.Helper()
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	r.AttachState(stateFor(t))
+	return r
+}
+
+// stateFor builds a state model seeded from the spec, which is what the daemon attaches
+// at startup.
+func stateFor(t *testing.T) *statemap.Map {
+	t.Helper()
+	return stateForConvergence(t, 500)
+}
+
+// stateForConvergence is the same with a chosen convergence target, so a scenario can
+// let confidence saturate inside a short observation window.
+func stateForConvergence(t *testing.T, convergence float64) *statemap.Map {
+	t.Helper()
+	sm := statemap.New(statemap.Config{
+		Owner:                   "scenario-node",
+		ConvergenceObservations: int(convergence),
+		Alpha:                   0.2,
+		AdmitUnknown:            true,
+		Learn:                   true,
+		LearnConfig:             statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 4, Window: 60},
+	}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(sm, mustSpec(), "", ""); err != nil {
+		t.Fatalf("seeding the state model: %v", err)
+	}
+	return sm
 }

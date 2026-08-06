@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -36,162 +37,117 @@ func (t *DisabledTuner) Validate(adjustments []*types.TuneAdjustment) error {
 // modulate a fixed delta (defaultDelta = 0.12) applied to the matching
 // proposition set.
 //
-// Hard bounds are enforced by Validate:
-//   - Global ceiling: 0.95 (no proposition can be maximized)
-//   - Global floor: 0.10 (no proposition can be zeroed)
-//   - SC-related propositions (P1, P4, P11, P14): floor = 0.30
+// The vocabulary and the bounds both come from the domain specification, not from
+// this file. An intent names propositions, so a hardcoded rule table would break
+// the moment the graph's scope changed — which is exactly what happened when the
+// scope narrowed to observable constructs and four of seven intents were left
+// pointing at propositions that no longer existed. Bounds live there too, so a
+// proposition added at runtime can be given a floor without a rebuild.
 //
-// This is a deterministic v1 implementation. The same TunerContract interface
-// is used by the cloud-full profile with an SLM back-end.
-type RuleBasedTuner struct{}
-
-func NewRuleBasedTuner() *RuleBasedTuner { return &RuleBasedTuner{} }
-
-const defaultDelta = 0.12
-
-type intentRule struct {
-	keywords   []string         // any of these triggers the rule (case-insensitive)
-	propDeltas map[string]float64 // propID → delta when direction=positive
-	// When direction is negative, all deltas are negated before applying.
+// This is a deterministic implementation. The same TunerContract interface admits
+// a language-model back-end.
+type RuleBasedTuner struct {
+	spec *domain.Spec
 }
 
-var intentRules = []intentRule{
-	{
-		keywords: []string{"security", "secure", "compliance", "hardening", "cis"},
-		propDeltas: map[string]float64{
-			"P1":  +defaultDelta, // SC→RC+: security increases resource use
-			"P11": +defaultDelta, // CE→SC+: community helps security patching
-		},
-	},
-	{
-		keywords: []string{"performance", "throughput", "latency", "fast", "speed"},
-		propDeltas: map[string]float64{
-			"P3": +defaultDelta, // RC→PS+: lightweight → better performance
-			"P2": -0.10,         // RC→PS-: suppress overhead (conflict pair)
-		},
-	},
-	{
-		keywords: []string{"energy", "power", "efficient", "battery", "watt"},
-		propDeltas: map[string]float64{
-			"P10": +defaultDelta, // PS→RC-: better efficiency → lower cost
-			"P8":  +0.08,         // MU→RC-: simpler ops → lower cost
-		},
-	},
-	{
-		keywords: []string{"reliability", "resilience", "ha", "availability", "recovery", "fault"},
-		propDeltas: map[string]float64{
-			"P5":  +defaultDelta, // CO→RR+: offline autonomy helps reliability
-			"P15": +defaultDelta, // MU→RR+: automation shortens recovery
-		},
-	},
-	{
-		keywords: []string{"maintainability", "maintenance", "simple", "admin", "operations", "setup"},
-		propDeltas: map[string]float64{
-			"P7": +defaultDelta, // CE→MU+: rich ecosystem lowers effort
-			"P8": +0.10,         // MU→RC-: simplicity reduces cost
-		},
-	},
-	{
-		keywords: []string{"connectivity", "offline", "disconnected"},
-		propDeltas: map[string]float64{
-			"P5":  +defaultDelta, // CO→RR+: offline autonomy
-			"P13": +0.08,         // CO→PS-: acknowledge the sync overhead
-		},
-	},
-	{
-		keywords: []string{"community", "ecosystem", "vendor"},
-		propDeltas: map[string]float64{
-			"P7":  +defaultDelta, // CE→MU+: ecosystem helps maintainability
-			"P11": +0.08,         // CE→SC+: community helps security
-		},
-	},
+// NewRuleBasedTunerFromSpec builds a tuner over the specification's vocabulary.
+func NewRuleBasedTunerFromSpec(spec *domain.Spec) *RuleBasedTuner {
+	return &RuleBasedTuner{spec: spec}
 }
 
-// Direction detection words.
+// Direction detection words. These are vocabulary about the *operator's phrasing*
+// rather than about the domain — they do not name constructs or propositions — so
+// they stay in code while the intent rules live in the specification.
 var decreaseWords = []string{"deprioritize", "reduce", "decrease", "lower", "less", "minimize", "avoid"}
 var increaseWords = []string{"prioritize", "increase", "focus", "more", "higher", "emphasize", "maximize", "prefer"}
 
-func (t *RuleBasedTuner) ParseIntent(text string) ([]*types.TuneIntent, error) {
-	lower := strings.ToLower(text)
+// isNegativeDirection reports whether the operator asked to reduce rather than
+// raise. Explicit increase words win a tie so "prefer less overhead" reads as an
+// increase in the efficiency claim rather than a decrease.
+func isNegativeDirection(lower string) bool {
+	neg := matchesAnyKeyword(lower, decreaseWords)
+	pos := matchesAnyKeyword(lower, increaseWords)
+	return neg && !pos
+}
 
-	// Detect direction: negative if any decrease word found; positive if increase
-	// word found or no direction word at all (default to positive).
-	direction := 1.0
-	for _, w := range decreaseWords {
-		if strings.Contains(lower, w) {
-			direction = -1.0
-			break
-		}
+func (t *RuleBasedTuner) ParseIntent(text string) ([]*types.TuneIntent, error) {
+	if t.spec == nil {
+		return nil, fmt.Errorf("tuner: no domain spec loaded")
+	}
+	lower := strings.ToLower(text)
+	sign := 1.0
+	if isNegativeDirection(lower) {
+		sign = -1.0
 	}
 
-	// Accumulate deltas per propID — if two rules target the same propID,
-	// take the larger absolute value (last-writer-wins if equal).
-	deltas := make(map[string]float64)
-	rationales := make(map[string]string)
-
-	for _, rule := range intentRules {
-		matched := ""
-		for _, kw := range rule.keywords {
-			if strings.Contains(lower, kw) {
-				matched = kw
-				break
-			}
-		}
-		if matched == "" {
+	// Accumulate across every matching intent so "faster and more efficient"
+	// applies both. A proposition named by two intents takes the larger
+	// magnitude rather than the sum, so overlapping vocabulary cannot compound
+	// into an adjustment neither intent asked for.
+	byProp := map[string]float64{}
+	matched := map[string]string{}
+	for _, rule := range t.spec.IntentRules {
+		if !matchesAnyKeyword(lower, rule.Keywords) {
 			continue
 		}
-		for propID, baseDelta := range rule.propDeltas {
-			d := baseDelta * direction
-			if existing, ok := deltas[propID]; !ok || math.Abs(d) > math.Abs(existing) {
-				deltas[propID] = d
-				rationales[propID] = fmt.Sprintf("intent:%s (keyword: %s, direction: %+.0f)", text, matched, direction)
+		for pid, delta := range rule.Deltas {
+			d := delta * sign
+			if prev, ok := byProp[pid]; !ok || math.Abs(d) > math.Abs(prev) {
+				byProp[pid] = d
+				matched[pid] = rule.Intent
 			}
 		}
 	}
-
-	if len(deltas) == 0 {
+	if len(byProp) == 0 {
 		return nil, nil
 	}
 
-	out := make([]*types.TuneIntent, 0, len(deltas))
-	for propID, delta := range deltas {
-		out = append(out, &types.TuneIntent{
-			PropositionID: propID,
-			Delta:         delta,
-			Rationale:     rationales[propID],
+	pids := make([]string, 0, len(byProp))
+	for pid := range byProp {
+		pids = append(pids, pid)
+	}
+	sort.Strings(pids)
+
+	intents := make([]*types.TuneIntent, 0, len(pids))
+	for _, pid := range pids {
+		intents = append(intents, &types.TuneIntent{
+			PropositionID: pid,
+			Delta:         byProp[pid],
+			Rationale: fmt.Sprintf("intent:%s (matched: %s, direction: %+d)",
+				text, matched[pid], int(sign)),
 		})
 	}
-	// Stable order: sort by PropositionID so output is deterministic.
-	sort.Slice(out, func(i, j int) bool { return out[i].PropositionID < out[j].PropositionID })
-	return out, nil
+	return intents, nil
 }
 
-// propositionFloor returns the minimum allowed strength for a proposition.
-// SC-related propositions have a higher floor (security must stay meaningful).
-func propositionFloor(propID string) float64 {
-	switch propID {
-	case "P1", "P4", "P11", "P14":
-		return 0.30
-	default:
-		return 0.10
+// matchesAnyKeyword reports whether any keyword appears in the lowered text.
+func matchesAnyKeyword(lower string, keywords []string) bool {
+	for _, k := range keywords {
+		if strings.Contains(lower, strings.ToLower(k)) {
+			return true
+		}
 	}
+	return false
 }
-
-const strengthCeil = 0.95
 
 func (t *RuleBasedTuner) Validate(adjustments []*types.TuneAdjustment) error {
+	if t.spec == nil {
+		return fmt.Errorf("tuner: no domain spec loaded")
+	}
 	var errs []string
 	for _, a := range adjustments {
-		floor := propositionFloor(a.PropositionID)
+		floor := t.spec.FloorFor(a.PropositionID)
 		if a.NewStrength < floor {
-			errs = append(errs, fmt.Sprintf("%s: %.3f below floor %.3f", a.PropositionID, a.NewStrength, floor))
+			errs = append(errs, fmt.Sprintf("%s: %.3f below floor %.3f",
+				a.PropositionID, a.NewStrength, floor))
 		}
-		if a.NewStrength > strengthCeil {
-			errs = append(errs, fmt.Sprintf("%s: %.3f above ceiling %.3f", a.PropositionID, a.NewStrength, strengthCeil))
+		if a.NewStrength > t.spec.Policy.GlobalCeiling {
+			errs = append(errs, fmt.Sprintf("%s: %.3f above ceiling %.3f",
+				a.PropositionID, a.NewStrength, t.spec.Policy.GlobalCeiling))
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("tune validation failed: %s", strings.Join(errs, "; "))
+		return fmt.Errorf("tuner validation: %s", strings.Join(errs, "; "))
 	}
 	return nil
 }
