@@ -48,7 +48,7 @@ func NewNetdataCollector(nodeID, baseURL string, httpClient *http.Client) *Netda
 	}
 }
 
-func (n *NetdataCollector) SourceID() string                    { return n.sid }
+func (n *NetdataCollector) SourceID() string                     { return n.sid }
 func (n *NetdataCollector) AvailableMetrics() []types.MetricType { return netdataAvailMetrics }
 
 // Collect polls all configured Netdata charts and returns normalized samples.

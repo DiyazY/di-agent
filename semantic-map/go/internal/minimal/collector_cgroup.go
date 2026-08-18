@@ -64,7 +64,7 @@ func NewCgroupCollector(nodeID, cgroupRoot string) *CgroupCollector {
 	}
 }
 
-func (c *CgroupCollector) SourceID() string                   { return c.sid }
+func (c *CgroupCollector) SourceID() string                     { return c.sid }
 func (c *CgroupCollector) AvailableMetrics() []types.MetricType { return cgroupAvailMetrics }
 
 // Collect reads one batch of normalized metric samples from cgroups v2.

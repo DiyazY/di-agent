@@ -11,7 +11,7 @@ Design rationale and decision record. Update this file when a contract, profile,
   - [Component reference](#component-reference)
   - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
-  - [The six contracts](#the-six-contracts)
+  - [The five contracts](#the-five-contracts)
   - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
@@ -20,7 +20,8 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [5. Telemetry Pipeline](#5-telemetry-pipeline)
   - [CollectorContract](#collectorcontract)
   - [MetricType catalogue](#metrictype-catalogue)
-  - [The Bridge](#the-bridge)
+  - [How a relationship's strength is learned](#how-a-relationships-strength-is-learned)
+  - [The graph surfaces are a projection](#the-graph-surfaces-are-a-projection)
   - [Planned collector implementations](#planned-collector-implementations)
 - [6. Automatic Graph Extension](#6-automatic-graph-extension)
 - [7. Adding a New Profile](#7-adding-a-new-profile)
@@ -45,7 +46,7 @@ The Semantic Map has two layers that are always present simultaneously:
 │  "In THIS cluster, under THESE workloads, here is reality"     │
 ├────────────────────────────────────────────────────────────────┤
 │  Layer 1 — Backbone (stable prior)                             │
-│  7 Di-Select constructs + 15 causal propositions (P1–P15)      │
+│  Constructs + causal propositions, declared in domain_spec.json │
 │  "What matters and how things relate"                          │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -60,12 +61,69 @@ At `confidence = 0.0` the agent uses the literature. At `confidence = 1.0` it us
 
 **What is stable and what is not:**
 
-| Element                               | Stable?                                        |
-| ------------------------------------- | ---------------------------------------------- |
-| Graph topology — the 7 constructs     | Yes — domain-invariant                         |
-| Proposition directions (P1–P15)       | Yes — causal directions do not change          |
-| Proposition magnitudes (edge weights) | No — learned from evidence                     |
-| New edges (P16+)                      | Possible — discovered by the Proposer contract |
+| Element                               | Stable?                                                          |
+| ------------------------------------- | ---------------------------------------------------------------- |
+| The domain model as a whole           | Declared in data — `domain_spec.json`, loaded at startup         |
+| Proposition directions                | Yes — a direction never reverses once declared                   |
+| Proposition magnitudes (edge weights) | No — learned from evidence                                       |
+| New constructs and propositions       | Possible — added by the Proposer contract or `AddConstruct`      |
+
+**The domain model is data, not code.** The binary contains no construct or
+proposition identifier. `domain_spec.json` declares the constructs, the
+propositions over them with their directions, the metric-to-construct routing,
+the adjustment floor and ceiling, and the tuner's intent vocabulary; the daemon
+loads it via `-domain` and refuses to start without one. Two consequences: the
+graph a given deployment ran can be reconstructed from an artefact rather than
+from a binary, and a property that appears while the cluster is running is
+admitted by adding a construct and a route rather than by rebuilding. The
+compliance suites assert against whatever specification is loaded — non-emptiness
+and referential integrity of every proposition's endpoints — not against a fixed
+count.
+
+**Whose state is this?** One agent per machine, and its map holds that machine's
+state. That is why nothing in the model has a machine dimension and none is needed:
+the map *is* one machine's state, and it says whose in its owner. The backbone stays
+construct-level because the causal claims do not differ by host — one shape, one
+model per agent. What a peer knows travels as a labelled snapshot and is never merged
+in (§5, Peer state).
+
+Cluster-level questions are answered by asking peers (§6), not by one agent
+accumulating everyone's telemetry. The alternative — every agent modelling the whole
+cluster — requires telemetry fan-out and, worse, averages relations across machines
+that may be different physical systems: an x86 control-plane host and a Cortex-A72
+worker do not share a resource-to-pressure relation, so one edge spanning both is a
+mean over incomparable mechanisms. The effect is measurable rather than theoretical.
+When the pair tracker briefly keyed on construct alone and mixed nodes, the conflict
+pair on RC→PS separated the opposite way under load; per-node pairing reversed the
+conclusion.
+
+Two mechanisms enforce this. `-node-id` is the agent's identity, not merely the label
+it stamps on its own samples, and `-ingest-scope=self` (the default) rejects samples
+belonging to another machine with a distinguishable error. `GET /cost?node=X` answers
+409 when X is not this agent, naming that machine's own URL if it is a known peer,
+because returning local numbers under a peer's name is a fabrication — and ignoring
+the parameter, which is what the route did before, was exactly that. Replaying a
+whole testbed into one daemon is legitimate and available via `-ingest-scope=any`,
+which logs at startup that the resulting graph is an aggregate and not a deployment
+topology.
+
+**Which constructs belong here.** A quantity that cannot change while the cluster
+runs is not state; it is a property of the platform, fixed when the platform was
+chosen. The committed specification therefore declares the three constructs a
+running cluster exhibits — RC (resource cost), CO (connectivity), PS
+(performance) — and the four Di-Select propositions whose *both* endpoints are
+among them: P2 and P3 on RC→PS, P10 on PS→RC, P13 on CO→PS. Security posture,
+maintainability and ecosystem maturity are selection-time knowledge and stay with
+Di-Select. Reliability is genuine runtime state but no MetricType routes to it
+yet.
+
+The reason to exclude rather than seed-and-freeze is mechanical. An edge with no
+observations has `effective ≡ prior`, so it contributes a constant to the
+sensitivity sum and nothing at all to a comparison between machines, at every
+sample count and after any operator adjustment. Frozen edges change no decision;
+what they do change is `mean_confidence`, which divides by the number of edges
+present. Carrying them makes the agent's self-report worse without making its
+decisions better.
 
 ### The agent at a glance
 
@@ -96,7 +154,7 @@ One daemon, four concentric layers. Everything outside the core is optional; the
                             ║                                                   ║
                             ║   Storage (multigraph, keyed by from,to,propID)   ║
                             ║   ┌─────────────────────────────────────────────┐ ║
-                            ║   │ Backbone: 7 constructs, 15 propositions     │ ║
+                            ║   │ Backbone: constructs + propositions (spec)  │ ║
                             ║   │ Evidence: per-edge EMA + confidence + n_obs │ ║
                             ║   │ Audit:    append-only OntologyEvent log     │ ║
                             ║   └─────────────────────────────────────────────┘ ║
@@ -105,7 +163,7 @@ One daemon, four concentric layers. Everything outside the core is optional; the
                             ╔════════════════════════╧══════════════════════════╗
    /sys/fs/cgroup ─────────▶║  LAYER 1 · INGESTION                              ║
    Netdata :19999           ║                                                   ║
-   parquet replay           ║   Collector ──samples──▶ Bridge ──▶ Updater (EMA) ║
+   parquet replay           ║   Collector ──samples──▶ state model (properties) ║
                             ║   (typed MetricSample)   (routes    (idempotent   ║
                             ║                           to        per event_id) ║
                             ║                           construct)              ║
@@ -122,9 +180,9 @@ What each piece is for, when it runs, and whether it is required.
 
 | Component | Package | Purpose | Runs when | Required? |
 |---|---|---|---|---|
-| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest` works without one |
-| **Bridge** | `pkg/semmap` | Route one `MetricSample` to its construct, then to every edge touching it | Every sample | Yes (stateless, not a contract) |
-| **Updater** | `internal/minimal` | Fold the observation into each edge's EMA; bump confidence | Every routed sample | Yes |
+| **Collector** | `internal/minimal` | Read raw metrics from cgroup / Netdata / parquet; emit typed `MetricSample`s | Collection loop tick (`-collect-interval`) | Optional — `POST /ingest-sample` works without one |
+| **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Yes (a table in the spec) |
+| **State model** | `pkg/statemap` | Hold the properties the system exhibits and the relationships between them; recompute what derives; fold paired observations into learned strengths; journal every change and decision | Every sample, and every answer | Not a contract — one implementation, and the agent's single model |
 | **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
 | **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
@@ -143,9 +201,9 @@ Four distinct things can happen to this daemon. Each takes a different path.
 ```
 Collector.Collect()
   └─▶ []*MetricSample {NodeID, MetricType, Value, EventID}
-        └─▶ Bridge: MetricType → construct (e.g. cpu_utilization → RC)
+        └─▶ routing: MetricType → construct (e.g. cpu_utilization → RC)
               └─▶ Ontology.Relationships(RC) → every proposition touching RC
-                    └─▶ Updater.UpdateEdge(from, to, value, eventID)  × each pair
+                    └─▶ statemap.ObserveEvent(property, value, at, eventID)
                           └─▶ Storage: ema += α(value − ema); n_obs++; confidence = n_obs/N
 ```
 *Idempotent per `(edge, event_id)` — replaying the same sample changes nothing.*
@@ -174,7 +232,7 @@ POST /ontology/deprecate {"proposition_id":"P7","reason":"..."}
         └─▶ append OntologyEvent {actor, kind, target, timestamp}
               └─▶ readable forever via GET /history
 ```
-*Only four mutations exist: `SetPropositionStrength`, `AddConstruct`, `AddValidatedProposition`, `Deprecate`. Every one is audited. Construct removal and direction reversal are impossible by design.*
+*Four operator mutations exist, all on the facade: `SetPropositionStrength`, `Deprecate`, `AddConstruct`, `AddValidatedProposition`. Each reaches the state model, which is what gives it an effect; each is journalled. The declaration layer itself carries only the last two, because only those change the vocabulary. Construct removal and direction reversal are impossible by design.*
 
 **④ A human asks a question** — the loop that makes the agent legible.
 
@@ -199,7 +257,7 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
   Metric source          Semantic Map
   (cgroup / Netdata)
         │
-   [Collector] ──samples──▶ [Bridge] ──update_edge()──▶ [Updater]
+   [Collector] ──samples──▶ [state model: properties, relationships]
                                                               │
                     ┌─────────────────────────────────────────┘
                     ▼
@@ -207,9 +265,9 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
         │              SemanticMap facade            │
         │  cost_of_action()  recommend_peer()        │
         │  simulate_outcome()  tune()                │
-        └───┬───────┬──────────┬────────┬───────┬───┘
-            │       │          │        │       │
-        Storage  Ontology  Reasoner  Proposer  Tuner
+        └───┬──────────┬──────────┬────────┬───────┘
+            │          │          │        │
+      state model  Ontology  Reasoner  Proposer/Tuner
             ▲                                        
             │ read-only                              
    ┌────────┴──────────┬──────────────────┐          
@@ -219,7 +277,7 @@ The Semantic Map is not a monolith. It is a **set of responsibilities, each behi
    (§10)          (§13–14)
 ```
 
-The Collector and Bridge live outside the SemanticMap facade — they feed it. The Bridge is not a contract; it is a thin, stateless mapper (see §5). The three components below the facade are *consumers*: they read graph state and expose it, but only the facade's own mutation methods can change it.
+The Collector lives outside the SemanticMap facade — it feeds it. The three components below the facade are *consumers*: they read model state and expose it, but only the facade's own mutation methods can change it.
 
 ### What is deliberately not a contract
 
@@ -227,28 +285,43 @@ The contract set has stayed at six since the first release. Three substantial co
 
 | Component | Why it is concrete, not a contract |
 |---|---|
-| **Bridge** (`pkg/semmap`) | Stateless pure function of `(MetricType, Ontology)`. There is nothing to swap — a second implementation would be the same code with a different routing table, and the routing table is already data. |
+| **State model** (`pkg/statemap`) | One implementation, and it is the agent's model rather than a pluggable store. A contract here would invite a second implementation, which is the arrangement §2 just finished removing. |
 | **Peers** (`pkg/peers`) | One implementation exists. Promoting it to a contract before a second one (SQLite-backed registry, gossip discovery) would be designing an interface against a sample size of one. |
 | **Explain** (`pkg/explain`) | Same reasoning, plus: it is an operator convenience, not part of the agent's decision path. A contract would imply the daemon depends on it. It does not — the default is `-explain-provider=none`. |
 
 The rule we hold to: **no new contract without a second implementation that needs it.** Interfaces derived from one example encode that example's accidents. Each of these three gets promoted the day a real second implementation arrives, and not before.
 
-### The six contracts
+### The five contracts
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | **Collector** | Read raw metrics from a source; emit normalized samples     | Pure read; deterministic `event_id`; `available_metrics()` is static; never raises on empty data         |
-| **Storage**   | Read/write node and edge descriptors                        | Atomic writes; `nil` on miss, never raises. **Multigraph:** edges keyed by `(from, to, proposition_id)` — `GetEdgesByPair` returns all edges between two constructs; `GetEdge` returns one deterministic pick |
-| **Ontology**  | Live structural knowledge — constructs, propositions, validation, audit | Always returns ≥7 constructs + P1–P15; constructs are append-only; propositions are soft-deleted via `Deprecate` (never removed or direction-reversed); every mutation appends to an audit log readable via `GetHistory` |
-| **Updater**   | Incorporate telemetry into edge/node descriptors            | Idempotent per `(edge, event_id)` — one observation updates every edge in a `(from, to)` pair, each tracking its own EMA. `Reset` restores prior without deleting |
-| **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing graph path; `SimulateOutcome` is pure (read-only) |
-| **Proposer**  | Detect statistical patterns suggesting new backbone edges   | Never modifies Storage or Ontology directly; `Reject` permanently suppresses within session               |
+| **Ontology**  | The declaration layer — which constructs exist, which propositions relate them, whether a proposed one is valid | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs and propositions are append-only, never removed or direction-reversed. Holds **no** strength and **no** history: a proposition's magnitude is its relationship's prior and its withdrawal is that relationship's retirement, both in the state model, and the journal is the one audit record |
+| **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
+| **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; `Reject` permanently suppresses within session          |
+| **Tuner**     | Map natural-language operator intent to proposition strength adjustments | Parses intent; resolves current magnitudes; clamps to `[floor, 0.95]` with a raised floor on SC-adjacent propositions; emits one `operator-tune` audit event per invocation. See §11 |
+
+**Storage and Updater used to be here**, and their removal is the largest structural change
+the design has been through. Storage held a graph of construct edges; Updater incorporated
+telemetry into them, with `RelationalUpdaterContract` as an alternative estimator. Together
+they were a second model of the same relations the state model holds — learning from the
+same samples into a different structure, kept in step by a propagation call.
+
+Once cost, estimates, explanations and the graph surfaces were all read from the state
+model, that second copy had exactly one remaining role: being displayed. An operator
+opening the viewer read weights and confidences that entered no decision, on a page that
+looked exactly like the one that used to. So the contracts went, their implementations
+(`InMemoryStorage`, `EMAUpdater`, `RelationalEMAUpdater`) went, their compliance suites went,
+and the graph surfaces now project the state model — see §5, "The graph surfaces are a
+projection". `POST /ingest`, which named a construct pair and a magnitude directly, went
+with them: an observation is of a property, and a single number about a pair is an
+assertion rather than a measurement.
 
 ### Behavioral guarantees
 
-Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
+Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `go/compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
 
-Compliance suites exist for all six contracts (`compliance/{collector,storage,updater,ontology,reasoner,proposer}.go`). Each runs against a factory the implementation supplies, so a new storage or ontology can be validated with a single test file wired to the suite.
+Compliance suites exist for all five contracts (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
 
 ### End-to-end validation: integration scenarios
 
@@ -256,14 +329,22 @@ Compliance proves each part works in isolation. **Scenarios prove the parts comp
 
 | Scenario                            | Demonstrates                                                                                          |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `ColdStart`                         | 15 edges seeded, confidence=0, effective value == prior — agent defers entirely to literature         |
-| `ConvergenceOnOneEdge`              | 500 obs at fixed value: EMA drifts prior → observed, confidence climbs 0→1, effective crosses over    |
+| `ColdStart`                         | every declared relationship seeded, confidence=0, effective value == prior — agent defers entirely to the calibration |
+| `ConvergenceOnOneEdge`              | 500 obs at fixed value: the learned strength drifts prior → observed, confidence climbs 0→1, effective crosses over |
 | `PerKDDecisionsDiffer`              | Two agents with same query but different `-kd`: cost outputs diverge — the per-KD priors steer        |
-| `DeprecationShrinksGraph`           | After `Deprecate("P1")`: graph path length drops by exactly 1; storage retains the EdgeDescriptor      |
+| `DeprecationShrinksGraph`           | After `Deprecate("P1")`: graph path length drops by exactly 1; the model retains the retired relationship |
 | `IdempotentReplay`                  | 200 obs replayed with same eventIDs is a no-op; new eventIDs accumulate — idempotency is per-event    |
-| `AuditTrailRecordsEverything`       | Four ontology mutations → exactly four `OntologyEvent`s in chronological order via `GetHistory`        |
+| `AuditTrailRecordsEverything`       | Four operator mutations through the facade → each appears in the journal, in chronological order       |
 
-A separate numerical verification (`pkg/profiles/profiles_test.go::TestPerKDSeedingMatchesPriorWeights`) confirms that for every KD in `prior_weights.json` and every one of the 15 propositions, the seeded `EdgeDescriptor.PriorWeight` matches the file to 1e-6 precision. This is the production reason to trust the `-kd` flag.
+A separate numerical verification (`pkg/profiles/build_priors_test.go::TestBuildAppliesPerKDPriors`) confirms that for every KD in `prior_weights.json` and every proposition in the model, the seeded prior matches the file to 1e-6 precision. It runs through `Build` with the same Config literal the daemon constructs, which a library-level test of the seeder could not do — and that distinction caught a real failure once, when the convergence harness passed `-proposer false` and Go's flag package silently dropped every flag after it, including `-priors` and `-kd`.
+
+`TestBuildKeepsOntologyAndStorageInAgreement` pins a second invariant: the prior a
+caller reads from `GET /propositions` is the one every answer is computed from. Per-KD
+seeding writes the calibrated weight into the state model *and* back into the
+ontology's proposition strength. Before that write-back existed the two layers
+disagreed for the whole cold-start period — k0s P2 was exposed as the global 0.55
+while the operative value was the calibrated 0.319 — and the first operator tune
+recorded its transition from a number the agent had never used.
 
 #### Evolution scenarios
 
@@ -282,26 +363,32 @@ A separate numerical verification (`pkg/profiles/profiles_test.go::TestPerKDSeed
 
 The ontology is not a static reference. Empirical priors get recalibrated as new papers land, operators deprecate claims that the deployment's evidence contradicts, and new domains may introduce new constructs. The contract therefore admits four kinds of mutation, each emitting one `OntologyEvent` to an append-only audit log:
 
-| Mutation                          | Method                                       | Typical caller                          |
-| --------------------------------- | -------------------------------------------- | --------------------------------------- |
-| Edge magnitude recalibrated       | `SetPropositionStrength(propID, strength)`   | `prior_init` pipeline; operator tuning  |
-| New edge added (validated)        | `AddValidatedProposition(p)`                 | `Proposer.Confirm` (post-review)        |
-| New construct added               | `AddConstruct(c)`                            | Operator (new domain extension)         |
-| Existing edge retired (soft)      | `Deprecate(propID, reason)`                  | Operator (evidence-against accumulated) |
+| Mutation                          | Method                                       | Typical caller                          | Write to the state model |
+| --------------------------------- | -------------------------------------------- | --------------------------------------- | ------------------------ |
+| Claim magnitude recalibrated      | `SetPropositionStrength(propID, strength)`   | `prior_init` pipeline; operator tuning  | asserts the `Prior` on every relationship carrying that label, with actor and reason |
+| New claim added (validated)       | `AddValidatedProposition(p)`                 | `Proposer.Confirm` (post-review)        | declares the relationship at its prior with zero confidence; declares an endpoint property first if nothing routes to that construct |
+| New construct added               | `AddConstruct(c)`                            | Operator (new domain extension)         | declares an observed property at zero confidence — nothing routes to it, so a derived one would summarise nothing |
+| Existing claim retired (soft)     | `Deprecate(propID, reason)`                  | Operator (evidence-against accumulated) | retires the relationship: it leaves the traversal, keeps its record, and reads as deprecated on the graph surfaces |
+
+**Every operator mutation must reach the state model.** This is an invariant, not an implementation detail, and it was the one most easily broken: every answer is computed from the model's relationships, never from a proposition list. A declaration-only mutation is invisible to every decision the agent makes — it appears in `Propositions()`, it appears in the audit trail, and it changes nothing. That failure mode is silent by construction, because a log records the operator's intent faithfully whether or not the model acted on it.
+
+**It is now structural rather than a rule to remember.** The declaration layer no longer *has* a strength to set or a flag to raise, so there is no longer a way to perform half of one of these mutations: `SetPropositionStrength` and `Deprecate` exist only on the facade, and each returns `ErrNotModelled` — rendered as 404 — when no relationship carries the named proposition, rather than reporting success for an action that landed nowhere. The invariant survived the removal of the storage graph unchanged, then stopped needing to be an invariant. `pkg/semmap/ontology_sync_test.go` and `strength_propagation_test.go` pin each mutation's effect on the model.
+
+The separation of `Prior` from `Strength` is what makes recalibration safe. An assertion moves the prior; what was learned from this system stays where it is, and the effective strength blends the two by confidence — so on a well-observed relationship an operator's number moves the answer very little, and the response says so rather than letting the operator assume otherwise.
 
 What is stable, what is not:
 
 - **Construct removal** is impossible. Constructs are domain-stable per the architecture; once added they stay forever.
-- **Proposition removal** is impossible. `Deprecate` is the only retirement path. Deprecated propositions remain in `Propositions()` so the audit trail / replay are intact, but the Reasoner skips them during cost computation. The `EdgeDescriptor` in storage stays in place too — soft-delete preserves both the structural and the evidence record.
+- **Proposition removal** is impossible. `Deprecate` is the only retirement path. Deprecated propositions remain in `Propositions()` so the audit trail / replay are intact, and the relationship stays in the model marked retired — soft-delete preserves both the structural and the evidence record, so a decision taken before the retirement remains reconstructible.
 - **Proposition direction reversal** is impossible. `ValidateProposition` rejects a new edge that contradicts an existing direction. The three Di-Select conflict pairs (P2/P3, P5/P6, P7/P9) are exempt because both halves are present from the bootstrap; the Proposer cannot introduce *new* conflict pairs without explicit operator action (a future extension).
 
-The audit log (`GetHistory(since)`) lets the agent answer "why is this edge weight what it is?" at any point in time. On the edge-minimal profile the log is in-memory and ephemeral across restarts. The `cloud-full` profile persists it.
+The audit trail (`GetHistory(since)` on the facade, `GET /history`) lets the agent answer "why is this strength what it is?" at any point in time. It is a projection of the state model's journal — there is one record, and it holds more than the ontology vocabulary can name, so a property admitted or a decision taken appears there too. It survives a restart when a state file is configured (§5, Persistence), and is bounded: `GET /state/journal` reports how many entries were dropped, which is what a caller needs before reading an absence as evidence.
 
 Implementations that intentionally do not support a mutation (e.g. a read-only ontology cache layered in front of the canonical store) return `contracts.ErrNotImplemented` rather than silently succeeding. The compliance suite tolerates this — every live-ontology subtest skips on `ErrNotImplemented`.
 
 ### Why the backbone is a multigraph
 
-Di-Select's 15 propositions span only 12 distinct construct pairs because three are **conflict pairs** — two propositions on the same `(from, to)` capturing distinct mechanisms with opposite directions:
+A construct pair may host more than one proposition. Such **conflict pairs** carry distinct mechanisms with opposite directions on the same `(from, to)`, which is why the edge key is the full triple:
 
 | Pair        | Mechanism captured by each proposition                                                       |
 | ----------- | -------------------------------------------------------------------------------------------- |
@@ -313,8 +400,8 @@ These are not contradictions — they are **co-existing, evidence-distinguishabl
 
 Implications for the contracts:
 
-- **Storage** keys edges by the full triple `(from, to, proposition_id)`. `GetEdgesByPair(from, to)` returns every edge — critical for the Updater. `GetEdge(from, to)` returns a deterministic pick (lex-smallest `proposition_id`) so single-edge callers keep working.
-- **Updater** applies one observation to every edge between `(from, to)`. Idempotency is keyed on `(from, to, proposition_id, event_id)` so a replay is a no-op per-edge, not just per-pair.
+- **The state model** keys relationships by `(from, to, label)`, where the label is the proposition ID. Two claims over the same pair with opposite signs are therefore two relationships, and evidence for one is evidence against the other. `Relationships(from, to)` returns every relationship between two properties.
+- **Retirement cascades.** Retiring a property retires the relationships that reference it, because an edge to something absent cannot be evaluated. Both are soft, so an earlier decision stays reconstructible.
 - **Reasoner** iterates `AllEdges()` directly and uses each edge's own `Direction`. There is no proposition-to-edge join, and so no risk of conflating P2 with P3.
 - **Ontology** `ValidateProposition` rejects a new proposition that contradicts an existing one. The three bootstrap conflict pairs are exempt because both are present from the start with domain validation. New auto-proposed conflicts from the Proposer go through the normal rejection path — backbone extension does not introduce conflict pairs without explicit operator action.
 
@@ -324,17 +411,22 @@ Implications for the contracts:
 
 A profile is a named configuration that wires specific implementations to each contract. The agent binary is identical across profiles — only the profile name changes at startup.
 
-| Profile         | Collector                   | Storage   | Ontology                 | Updater        | Reasoner         | Proposer          | Target                |
-| --------------- | --------------------------- | --------- | ------------------------ | -------------- | ---------------- | ----------------- | --------------------- |
-| `edge-minimal`  | cgroup (direct `/sys/fs`)   | In-memory | Static Di-Select         | EMA            | Rule engine      | Disabled          | RPi4, IoT nodes       |
-| `edge-standard` | cgroup + kubelet `/metrics` | SQLite    | Static + extension table | EMA + Gaussian | Rule engine      | Threshold-based   | Standard edge servers |
-| `cloud-full`    | Netdata HTTP API            | Neo4j     | RDF/OWL + SPARQL         | Bayesian       | SLM (Phi-3 Mini) | Correlation miner | Cloud VMs             |
+| Profile         | Collector                   | State model            | Ontology                 | Reasoner         | Proposer          | Target                |
+| --------------- | --------------------------- | ---------------------- | ------------------------ | ---------------- | ----------------- | --------------------- |
+| `edge-minimal`  | cgroup (direct `/sys/fs`)   | in-memory + snapshots  | Static Di-Select         | Rule engine      | MI correlation    | RPi4, IoT nodes       |
+| `edge-standard` | cgroup + kubelet `/metrics` | + variance per property | Static + extension table | Rule engine      | Threshold-based   | Standard edge servers |
+| `cloud-full`    | Netdata HTTP API            | + durable store         | RDF/OWL + SPARQL         | SLM (Phi-3 Mini) | Correlation miner | Cloud VMs             |
 
-**EMA** — Exponential Moving Average: `new = α × observation + (1-α) × old`. Controls how fast the agent adapts. `α = 0.2` is the default.
+**EMA** — Exponential Moving Average: `new = α × observation + (1-α) × old`. Controls how fast a property's value follows what it observes. `α = 0.2` is the default.
 
-**Gaussian (μ, σ)** — adds variance tracking alongside the mean. Required for `simulate_outcome()` to return P95 risk estimates. Available from `edge-standard` upward.
+**Variance (μ, σ)** — tracking a property's spread alongside its mean, which is what
+`simulate_outcome()` needs to return P95 risk estimates rather than a point estimate.
+Planned from `edge-standard` upward; the model records neither today, and the field is
+`nil` rather than a fabricated number.
 
-**Bayesian updater** — full posterior distribution update. Richer uncertainty quantification but heavier. Cloud-only.
+The state model is the same code in every profile — one implementation, deliberately (§2).
+What differs upward is what it can afford to keep: variance per property, and a durable
+store behind the snapshot file.
 
 **Why not Python on the edge?** Baseline interpreter footprint (~50–80 MB), unpredictable GC pauses under latency budgets, and the operational cost of managing a Python runtime on every constrained node.
 
@@ -344,12 +436,33 @@ A profile is a named configuration that wires specific implementations to each c
 
 | Layer                                       | Language   | Why                                                                                                                           |
 | ------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Contract interfaces + compliance tests      | **Python** | Specification role — readable, fast to iterate, serves as the authoritative definition of correct behavior                    |
-| Prior initialization pipeline               | **Python** | One-time data wrangling from P1–P5; pandas/numpy/scipy ecosystem                                                              |
-| `cloud-full` profile service                | **Python** | scipy for Bayesian updater; correlation miner; SLM integration                                                                |
+| Contract interfaces + compliance suites     | **Go**     | The contract surface and the only definition of correctness. Co-located with the implementations they check                    |
+| Prior initialization pipeline               | **Python** | One-time data wrangling from P1–P5; scipy for the rank correlations. A build-time step — nothing here runs on a node          |
+| `cloud-full` profile service                | **Python** | scipy for a Bayesian estimator; correlation miner; SLM integration. Specified, not implemented (§3)                           |
 | `edge-minimal` and `edge-standard` daemons  | **Go**     | Single ARM binary, <10 MB footprint, no runtime to manage on edge nodes, goroutines for concurrent telemetry, predictable GC  |
 
-**The contract boundary enables this split.** The Python ABCs are the specification. The Go interfaces mirror them exactly. Both language implementations run against their respective compliance suites — passing both suites proves behavioral equivalence across languages.
+**This used to be a two-language contract boundary, and the claim it rested on was not
+true.** The contracts were mirrored as Python ABCs with their own compliance suites, and
+the stated argument was that the Python definitions were the specification, the Go
+interfaces mirrored them exactly, and passing both suites proved behavioural equivalence
+across languages. No Python implementation was ever built — `cloud-full`, the profile that
+would have needed one, is still unimplemented — so the Python suites had nothing to run
+against, which means the specification half of the argument was never checked by anything.
+Two definitions with one implementation is not a specification and an implementation; it is
+a definition and a copy, and the copy drifted: it still declared Storage and Updater after
+both were deleted from Go (§2), and its Ontology carried a proposition strength and an
+audit log the Go interface had stopped holding. A reader had no way to tell which was
+current.
+
+The mirror is deleted. The contract surface is `go/pkg/contracts`, the suites that check it
+are `go/compliance`, and they sit next to the implementations they check. When a second
+language implementation actually arrives, the interface it has to satisfy is the one with a
+passing suite behind it — which is the useful direction for the boundary to run.
+
+What remains of the Python layer is `prior_init/`: it reads the published constants from
+P1–P5 and emits `prior_weights.json`, which the daemon seeds relationship priors from. It
+was the part doing real work, and it is verifiable in the way the mirror was not — the
+committed artefact reproduces byte for byte from a fresh run (README §5).
 
 ---
 
@@ -359,7 +472,7 @@ Live observations flow into the Semantic Map through a three-stage pipeline:
 
 ```
 ┌──────────────┐   MetricSample[]   ┌────────┐  update_edge()  ┌─────────┐
-│  Collector   │ ─────────────────▶ │ Bridge │ ──────────────▶ │ Updater │
+│  Collector   │ ─────────────────▶ │ state model: property, then what derives │
 │  (contract)  │                    │ (thin) │                  │(contract│
 └──────────────┘                    └────────┘                  └─────────┘
   cgroup plugin                     maps metric type      EMA / Gaussian /
@@ -387,39 +500,297 @@ Each `MetricSample` carries:
 | `container_id`   | `str`        | Empty for node-level aggregates; set for per-container   |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
-**`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + container_id + metric_type + str(timestamp_unix))[:16]`. This carries the Updater's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the graph.
+**`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + container_id + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
 
-**`available_metrics()` is static** — declared once at construction, never changes within a deployment session. The Bridge uses this to know which graph edges can be updated without calling `collect()` first.
+**`available_metrics()` is static** — declared once at construction, never changes within a deployment session. It says what this collector can report without calling `collect()` first.
 
 ### MetricType catalogue
 
-Units are fixed per type. Collectors must normalize raw source values to these units before emitting.
+Routing is declared in `domain_spec.json`, not in code, and every route fixes its
+unit as a fraction on [0,1]. Collectors must normalize before emitting: edge
+weights are Bernoulli parameters and the divergence measure is defined on that
+interval, so an out-of-range observation is clipped and the affected edge stops
+responding to evidence while aggregates keep tracing a smooth curve. A replay
+harness that passed network throughput in raw bytes per second produced exactly
+that failure, silently.
 
-| `MetricType`            | Unit           | Maps to construct(s)            | Note                          |
-| ----------------------- | -------------- | ------------------------------- | ----------------------------- |
-| `cpu_utilization`       | fraction [0,1] | RC                              |                               |
-| `memory_utilization`    | fraction [0,1] | RC                              |                               |
-| `cpu_throttle_ratio`    | fraction [0,1] | RC → PS edge (P2 proxy)         | cgroup `cpu.stat` throttled_periods / total_periods |
-| `block_io_util`         | fraction [0,1] | RC                              |                               |
-| `pod_startup_ms`        | milliseconds   | PS                              | creation timestamp → Running  |
-| `scheduling_latency_ms` | milliseconds   | PS                              | Pending → Scheduled           |
-| `network_rx_bps`        | bytes/sec      | CO                              |                               |
-| `network_tx_bps`        | bytes/sec      | CO                              |                               |
-| `network_loss_ratio`    | fraction [0,1] | CO → PS edge (P13 proxy)        |                               |
-| `network_latency_ms`    | milliseconds   | CO, PS                          | RTT to a peer node            |
-| `energy_joules`         | joules         | RC (energy cost per interval)   | from RAPL or P4 model         |
+| `MetricType`            | Construct | Note                                                       |
+| ----------------------- | --------- | ---------------------------------------------------------- |
+| `cpu_utilization`       | RC        |                                                            |
+| `memory_utilization`    | RC        |                                                            |
+| `cpu_throttle_ratio`    | RC        | cgroup `cpu.stat` throttled_periods / total_periods        |
+| `block_io_util`         | RC        | block device utilization                                   |
+| `energy_joules`         | RC        | from RAPL or the P4 energy model, normalized to a budget    |
+| `network_rx_bps`        | CO        | fraction of link capacity                                  |
+| `network_tx_bps`        | CO        | fraction of link capacity                                  |
+| `network_loss_ratio`    | CO        |                                                            |
+| `network_latency_ms`    | CO        | RTT to a peer, normalized against a budget                 |
+| `pod_startup_ms`        | PS        | creation timestamp → Running, normalized against a budget  |
+| `scheduling_latency_ms` | PS        | Pending → Scheduled, likewise                              |
+| `cpu_pressure_ratio`    | PS        | PSI `cpu.some` stall fraction                              |
+| `io_pressure_ratio`     | PS        | PSI `io.some` stall fraction                               |
 
-**Constructs with no runtime telemetry** (SC, MU, CE, RR) are updated exclusively from the prior. This is intentional — those constructs reflect structural properties of the distribution (security posture, setup complexity, community health) that do not change during a running deployment. Their priors are set by the initialization pipeline.
+An unrouted `MetricType` is ignored rather than rejected: forward compatibility is
+deliberate, so a collector upgraded ahead of the specification does not break
+ingestion. Adding a construct and routing metrics to it is a specification change;
+see §2 on why constructs that cannot change while the cluster runs are not routed
+at all.
 
-### The Bridge
+**How many observations a relationship gets.** A relationship advances on a *pair*, so
+its `n_obs` counts the times both its endpoints were observed close enough together —
+not the sample count, and not the count reaching either endpoint alone. A stream that
+drives one endpoint and not the other produces a relationship that never advances,
+which is the honest report rather than a defect. `N_converge` should therefore be set
+against expected *paired* coverage, which is bounded by the slower of the two
+collectors.
 
-The bridge is a stateless function wired inside the agent. It is not a contract because its logic is fully determined by the Ontology — there is nothing to swap. For each `MetricSample` it:
+### The state model: properties, relationships, trace
 
-1. Looks up which proposition edges involve the metric's target construct via `OntologyContract.Relationships(construct_id)`
-2. Calls `UpdaterContract.update_edge(from_id, to_id, sample.value, sample.event_id)` for each edge
-3. Calls `UpdaterContract.update_node(construct_id, sample.value, sample.event_id)` for the node descriptor
+`pkg/statemap` is the map as a model of the system rather than of a framework. It
+exists because an agent that decides anything about its own system needs a model that
+is current, answerable and attributable, and none of those follow from a schema fixed
+at build time.
 
-Because `event_id` flows unchanged from Collector → Bridge → Updater, idempotency is end-to-end.
+**Vertices are properties.** An OBSERVED property is fed by telemetry and holds what
+the system is doing. A DERIVED property aggregates members and is recomputed rather
+than stored, so a summary can never disagree with what it summarises. A framework's
+evaluation constructs live here as derived properties over the metrics that evidence
+them, which keeps prior knowledge without the graph being about the framework.
+
+**Edges are relationships**, each carrying its provenance: `seeded` from prior
+knowledge, `learned` from observing this system, `asserted` by an operator. An agent
+that cannot say why it believes an edge cannot be audited, so provenance is data.
+
+**Lifecycle is the substance.** An observation of an unknown property admits it and
+journals the admission, so the map follows a system that changes rather than a schema
+someone wrote down. Silence marks a property stale and can retire it, because a model
+that keeps reporting a departed metric's last value asserts what it cannot support.
+Retiring a property cascades to the relationships referencing it, since an edge to
+something absent cannot be evaluated. Retirement is soft: an earlier decision has to
+stay reconstructible.
+
+The ordering in `IngestSample` matters: the state model records a sample BEFORE the
+routing table is consulted. The table says what the agent knows how to summarise, not
+what the system is allowed to exhibit.
+
+**Queryable.** `State(Query)` answers "what is this system doing" with no arguments
+and narrows by kind, status, confidence or one-hop neighbourhood. A view never
+contains a dangling edge, and every response carries a census of the whole map so a
+filtered view cannot be mistaken for the whole. `Explain(id)` renders one property's
+neighbourhood as text, because the first question after a surprising decision is
+"what did it think was going on" and that should not require a client.
+
+**Traceable.** Every mutation advances a revision. A `DecisionBuilder` records the
+state a decision reads *as it reads it*, so the record cannot drift from the reading,
+and inputs are copied so a decision cannot silently become a description of a later
+system. Caveats name stale inputs, unobserved values and absent properties. The
+journal is bounded and reports what it dropped, so an absence is never mistaken for
+evidence that nothing happened, and a decision evicted by that bound answers 410
+rather than 404.
+
+**The Reasoner answers from it, and only from it.** A reasoner without a state model
+returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
+as a fallback, because a fallback meant an untraceable answer could be produced by
+forgetting one wiring call, silently, since an empty `DecisionID` is easy to miss.
+
+**The operator surface reaches it too.** `Tune` and `SetPropositionStrength` assert the
+strength on the state model's matching relationships, recording actor and reason;
+`Deprecate` retires them so a withdrawn claim leaves the traversal path. An operator
+action that stopped at the construct graph would change what `Propositions()` reports
+and no decision — which is what it did until this was wired.
+
+**Level and sensitivity are different quantities.** A level is the observed value of a
+cost construct. A sensitivity is per unit change in a source construct — the signed sum
+of effective strengths, NOT multiplied by the source's current value. Multiplying would
+duplicate what the level already reports and would collapse the term to zero before any
+telemetry arrived, which is precisely when the calibrated priors are all the agent has.
+`/state/estimate` reports both, and calls the value-weighted one a contribution.
+
+**Details.** `CostOfAction` reads the cost constructs' levels and
+their incoming relationships through a DecisionBuilder, so the properties that reach
+the arithmetic are exactly the ones the journal holds — a separate "log what we used"
+pass would be free to disagree with what was used, and that disagreement is invisible
+in precisely the cases where it matters. Every cost answer therefore carries a
+`DecisionID` and its caveats, and `GET /state/decisions/{id}` reproduces the inputs
+afterwards. A reasoner constructed without a state model has no cost path at all and
+returns `ErrNoStateModel`, so an untraceable answer is not a thing the agent can
+produce.
+
+`GET /state/estimate?target=` does the same for any property, not only the cost
+constructs.
+
+**The map survives the process.** `-state-file` persists properties, relationships and
+the journal; the write is to a temporary file and renamed, because a half-written
+snapshot read back on the next start would look like knowledge. Two things follow from
+persisting at all. A restarted agent is not back at cold start on a system it has
+already watched for a week, and "why did you do that yesterday" stays answerable —
+without this the audit trail is an artefact of one process lifetime rather than of the
+agent. The shutdown save is synchronous in `main` rather than in the save goroutine:
+cancelling the context and returning let the process exit mid-write, so a clean restart
+silently dropped everything since the last periodic save.
+
+What is deliberately not persisted: the estimator's pair windows. Restoring them would
+restore a claim of simultaneity between observations taken before a restart and after
+it, across a gap of unknown length. The learned strengths and their confidences survive,
+so the estimator resumes from what it concluded rather than from what it was mid-way
+through concluding. The snapshot carries a format version and an owner, and a mismatch
+in either is refused rather than guessed at — a version 1 file half-loads under version
+2's field names, and a snapshot copied from another host would install that machine's
+observations as this one's history at full confidence.
+
+### Peer state: knowledge crossing a node boundary
+
+A node-local map means every question wider than one machine is a question for another
+agent. Until `pkg/statemap.PeerStore` and `peers.Client.State`, the only things that
+crossed a node boundary were a cost number, a health probe and an offload request: an
+agent could not ask a peer what properties it has, which of them have gone quiet, or
+what it believes about a relation. "Cluster-level questions go to peers" meant "ask a
+peer for one number".
+
+Each agent now fetches its peers' maps on a timer and holds them under the owner each
+peer *reported* — not the URL it was reached at, so a peer reachable at two addresses is
+one peer and a proxy in front of several is not mistaken for one. `GET /state/cluster`
+returns this node's state and every peer's, side by side; `GET /state/where?property=`
+answers "who has this, and what do they say it is".
+
+**Nothing is merged, and that is the whole design.** A `PeerStore` is a separate type
+from `Map` precisely so a question about "this system" cannot be answered with a peer's
+property by accident. Merging would produce a map whose properties belong to no definite
+system, and confidence — the claim that a value rests on observation — would stop having
+a subject. For the same reason `/state/where` returns per-node answers and does not
+average them: a mean across machines describes none of them, and the reason to ask
+several nodes is to be able to pick one.
+
+Three refusals and three distinctions hold the boundary. State naming no owner is
+refused at the client, because unattributed properties are the one kind that could
+quietly be read as this machine's. State claiming *this* agent's identity is refused at
+the store, since a proxy loop would otherwise make one machine appear twice in every
+cluster view. A peer that answered before and cannot be reached now keeps its last
+snapshot and is listed as unreachable — during a partition that snapshot is all this
+agent has. An address that has never identified itself is reported as silent and does
+not become a node, because inventing one from a URL would put a machine that may not
+exist into the cluster view. And a snapshot older than `-peer-state-stale` is labelled
+history rather than withheld, so the caller decides whether to act on it.
+
+### How a relationship's strength is learned
+
+A relationship asserts that one property influences another with some strength. What a
+telemetry sample says about that strength has one defensible reading, and the map used to
+implement two.
+
+**What it does.** A relationship advances only when both endpoints have been observed
+within the pairing window (default 15 s). The strength learned is `|r|`, the magnitude of
+the Pearson correlation over a sliding window of pairs — the same quantity the priors were
+calibrated as, since `prior_weights.json` records `spearman_rho` per proposition — so prior
+and evidence sit on one scale and the confidence blend interpolates between comparable
+numbers.
+
+Two properties follow:
+
+- **Conflict pairs separate.** P2 and P3 share `RC→PS` with opposite directions. Evidence
+  whose sign matches one sibling's declared direction drives the other toward zero. A live
+  20-pair stream of correlated `cpu_utilization` and `pod_startup_ms` leaves the positive
+  sibling at 0.995 and the negative one at 0.000.
+- **The learned sign can contradict the backbone.** A proposition asserts a direction;
+  when the system shows the opposite sign, that is evidence against *that* proposition
+  rather than evidence of a weaker relation.
+
+**What it replaced.** The other reading was endpoint EMA: every sample updated every edge
+incident to its construct, and the edge's weight tracked that construct's magnitude. It was
+cheap and every sample carried information, so confidence grew with the raw sample rate —
+but the quantity was a proxy. The utilization of RC is not a measurement of how strongly RC
+influences PS, and under that reading a conflict pair received the identical observation and
+moved identically, so the "evidence-distinguishable mechanisms" claim of §2 was not testable
+at all. It also meant a strength could reach full confidence on a signal that never varied.
+Keeping both estimators meant keeping two models; the endpoint reading is the one that went.
+
+**Where pairing happens.** Inside the state model, which is the only place that has the
+latest value per property. Two details are load-bearing. Collectors sample on independent
+grids — in the dissertation testbed `system.*` lands on 0, 5, 10 … and PSI on 2, 6, 12 …, so
+the two never share a timestamp — hence a tolerance window rather than an exact match. And
+because the map is node-local, every pair comes from one machine by construction; the
+earlier arrangement had to key its pair tracker on node as well as construct, because one
+graph ingested a whole cluster and would otherwise pair the master's CPU reading with a
+worker's pressure reading.
+
+**Idempotency.** An observation carries an event identity, and the map recognises one it
+has already applied: a replayed archive or a retried post is a no-op rather than a second
+vote. This holds for properties as well as relationships — the count behind a value is a
+claim about how much observation stands behind it, and double-counting inflates confidence
+the map has not earned. Recognition is bounded (the most recent few thousand events), so it
+covers retries and batch replays rather than all history.
+
+**What it does not claim.** Correlation is not causation. A relationship's existence and
+direction come from the grounded-theory backbone; what is learned is the magnitude of the
+association this system exhibits and whether the declared sign is the sign it shows. `|r|`
+carries no significance test, matching how the priors were calibrated (`p = 0.188` on the
+RC→PS pair), so a weak relation estimated over a short window can still produce a sizeable
+magnitude.
+
+### The graph surfaces are a projection
+
+`/graph`, `/edges`, `/neighbors`, the web viewer and `mapctl edges` render the state
+model's relationships as `EdgeDescriptor`s. The wire shape is unchanged from when they read
+a storage graph, deliberately — the clients kept working — but the numbers are now the ones
+that decide things.
+
+The mapping: endpoints from the relationship's endpoints, `proposition_id` from its label,
+direction from its sign, `prior_weight` from its prior, `ema_weight` from its learned
+strength, `confidence` from how much of that rests on paired observation here, `deprecated`
+from retirement. A relationship between metric-level properties appears too; the store only
+ever held construct-level edges, and hiding the extras would make the surface a filtered
+view that claims to be whole.
+
+### What a cost estimate is
+
+`CostOfAction` reports two quantities per cost construct, and keeping them apart is
+the substance of the design rather than presentation:
+
+| | source | informed at cold start | moved by |
+| --- | --- | --- | --- |
+| **level** | the construct's own descriptor, confidence-blended | no — blends to a neutral prior | telemetry only |
+| **sensitivity** | weighted sum over the edges terminating at it, signed by direction | yes — from the calibrated priors | telemetry, operator tuning, deprecation |
+
+A level answers *what is it now*; a sensitivity answers *what would it become if load
+changed*. The two halves are useful at opposite ends of a deployment: the priors
+carry the sensitivities and are fully informed on day one, while the levels
+accumulate and are worthless until they do.
+
+They are reported side by side and never summed. That is an empirical constraint,
+not a preference: over 182 replayed runs the observed level was the best available
+predictor of the next interval's ranking, adding the relation term degraded it
+monotonically, and sweeping the mixing coefficient found no interior maximum. So
+`CostOfAction` reports the level and `SimulateOutcome` — a counterfactual, which a
+level cannot answer — is where a sensitivity is multiplied by an assumed demand.
+
+An earlier version had no level at all. It summed edge weights and called the result
+a latency, which carried no observed magnitude and so could not distinguish a busy
+machine from an idle one; `/cost` returned the same numbers whatever machine it was
+asked about. The estimate is now a physical statement: on the k0s idle testbed it
+reports `RC_level = 0.0775` at c = 0.98, i.e. this machine is about 8% utilized and
+the agent has seen enough to say so.
+
+Which construct plays which role comes from `domain_spec.json`'s `cost_model` block.
+The cost function was the last place in the daemon that knew a construct by name.
+
+### What ingestion does
+
+`IngestSample` records the sample against the metric's own property, and everything else
+follows from the model: derived properties recompute from their members, and the estimator
+folds the observation into the relationships incident to whatever moved. The routed
+construct is passed to the Proposer, which needs construct-level values to look for
+relations the backbone does not declare.
+
+The order matters and is the substantive part: the state model records the observation
+**before** the routing table is consulted. The routing table says what this agent knows how
+to summarise; it does not say what the system is allowed to exhibit. A metric nobody has
+mapped is still something the system is doing, so it becomes a property — journalled as an
+admission — where the construct path would have dropped it.
+
+There used to be a Bridge here: a stateless function that fanned each sample out to every
+construct edge touching it, calling `UpdateEdge` on each. It is gone with the storage graph
+and for the reason given above — a single construct's magnitude is not an observation of any
+association's strength.
 
 ### Planned collector implementations
 
@@ -431,7 +802,7 @@ Because `event_id` flows unchanged from Collector → Bridge → Updater, idempo
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
 | `NetdataCollector`  | Netdata HTTP streaming API       | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go` | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps |
 
-Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The Bridge processes all their outputs — idempotency ensures overlapping `event_id`s from the same physical observation are harmless.
+Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The map ingests all their outputs — event identities make overlapping reports of the same physical observation harmless.
 
 #### Externally-driven path: parquet replay
 
@@ -439,16 +810,15 @@ Multiple collectors can run concurrently in the same agent (e.g., `edge-standard
 client, not a `CollectorContract` implementation living inside the daemon.
 The split is deliberate — the replay tool reproduces the dissertation's
 P1–P5 dataset (225 Netdata parquets) from outside the daemon by POSTing
-`MetricSample`s to `/ingest-sample`. That endpoint runs the Bridge
-server-side, so externally-driven samples take the same code path as
-in-process collectors. Two benefits fall out:
+`MetricSample`s to `/ingest-sample`, so externally-driven samples take
+the same code path as in-process collectors. Two benefits fall out:
 
 - Anyone with a Go toolchain and the dataset can reproduce the convergence
   story without linking against internal packages — `cmd/replay/` imports
   only `pkg/types` (via duplicated wire DTOs in `cmd/replay/client/`).
 - The replay tool's `EventID` derivation (`sha256("replay:" + parquet +
   ":" + hostname + ":" + chart_context + ":" + metric_id + ":" +
-  relative_time)[:16]`) carries the Updater's idempotency guarantee
+  relative_time)[:16]`) carries the map's idempotency guarantee
   end-to-end: re-replaying the same parquet cannot inflate
   `n_observations`. The acceptance proof is the
   `n_observations`-before/after/after-again triple in the README.
@@ -460,7 +830,7 @@ with no impact on the daemon or its profiles.
 #### `replay compare` — debug/inspection side-tool (`cmd/replay/compare/`)
 
 **Auxiliary, not a research artifact.** `replay compare` is for spotting
-mapping bugs, sanity-checking that the Bridge produces a consistent shape
+mapping bugs, sanity-checking that routing produces a consistent shape
 of evidence across different real-shaped recorded inputs, and inspecting
 which edges respond to which telemetry — not for drawing production
 conclusions about "which KD is better." The parquets it consumes are
@@ -473,7 +843,7 @@ each seeded with that KD's calibrated priors from `prior_weights.json` —
 feeds each only its own KD's parquet rows, snapshots every map's final
 edge set, and emits a per-edge × per-KD inspection table (plus JSON/CSV
 for downstream tooling). `Effective = (1−c)·prior + c·ema` is what the
-Reasoner would consume; `Range = max − min` flags inputs that the Bridge
+Reasoner would consume; `Range = max − min` flags inputs that ingestion
 propagated differently per KD.
 
 Compare deliberately **breaks the cmd/replay HTTP rule** and imports
@@ -491,13 +861,13 @@ dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 
-The Bridge ships as a stateless function in `go/pkg/semmap/bridge.go::Bridge`, exposed on the facade as `SemanticMap.IngestSample`. The autonomous scheduler that ticks the configured collector and feeds each sample through the Bridge lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or the Bridge.
+Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and passes the routed construct to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
 
 ---
 
 ## 6. Automatic Graph Extension
 
-The Proposer contract supports discovering relationships beyond P1–P15. The flow is **propose-then-confirm** — patterns are detected automatically, but a human confirms before the backbone is modified.
+The Proposer contract supports discovering relationships the loaded specification does not declare. The flow is **propose-then-confirm** — patterns are detected automatically, but a human confirms before the backbone is modified.
 
 ```
 Telemetry accumulates in the evidence layer
@@ -522,25 +892,30 @@ The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default
 
 ## 7. Adding a New Profile
 
-1. Create `go/internal/<profile-name>/` and implement all six contracts, or reuse existing implementations.
+1. Create `go/internal/<profile-name>/` and implement all five contracts, or reuse existing implementations.
 2. Every implementation must pass its contract's compliance suite before being wired into a profile.
 3. Add a case to `go/pkg/profiles/profiles.go`:
 
 ```go
 case "my-profile":
     collector := myprofile.NewMyCollector(...)
-    storage   := myprofile.NewMyStorage(...)
-    ontology  := minimal.NewStaticDiSelectOntology() // reuse if sufficient
-    updater   := myprofile.NewMyUpdater(storage, ...)
-    reasoner  := myprofile.NewMyReasoner(storage, ontology, ...)
+    ontology  := minimal.NewOntologyFromSpec(spec) // reuse if sufficient
+    reasoner  := myprofile.NewMyReasoner(spec, ...)
     proposer  := myprofile.NewMyProposer(...)
     tuner     := myprofile.NewMyTuner(...)      // or minimal.NewDisabledTuner() to opt out
-    seedFromOntology(storage, ontology)
-    return semmap.New(storage, ontology, updater, reasoner, proposer, tuner), collector, nil
+    // The state model is the agent's one model, and Build always has one: a caller
+    // that passes none gets it built with the defaults, because an agent without a
+    // state model can answer nothing. Seeding must run before the map is handed out
+    // — it is what declares a property per routed metric and per construct, and a
+    // relationship per proposition, with this cluster's calibrated priors.
+    seedStateMap(cfg.StateMap, spec, pw, cfg.KD)
+    sm := semmap.New(ontology, reasoner, proposer, tuner)
+    sm.AttachState(cfg.StateMap)
+    reasoner.AttachState(cfg.StateMap)
+    return sm, collector, nil
 ```
 
-4. Add the profile to `profiles.py` (Python registry) if a Python equivalent is needed.
-5. Update the profiles table in this file (§3) and the project structure in README.md.
+4. Update the profiles table in this file (§3) and the project structure in README.md.
 
 No other file needs to change.
 
@@ -552,7 +927,7 @@ No other file needs to change.
 | ------------------------------------------- | ----------------------------------------------------------------------------- |
 | P1 (Performance & Resource Efficiency)      | Initial priors: pod-startup latency, throughput constants per KD              |
 | P2 (Security, Resilience & Maintainability) | Initial priors: security compliance scores, recovery time constants           |
-| P3 (Di-Select Framework)                    | Backbone topology: 7 constructs, 15 propositions, prior directions            |
+| P3 (Di-Select Framework)                    | The causal claims the specification declares: construct pairs, directions, priors |
 | P4 (Energy Analysis / DVFS)                 | Initial priors: J/pod, mJ/op, interrupt amplification ratios per KD           |
 | P5 (Overhead Decomposition)                 | Initial priors: per-component CPU overhead (kube-apiserver = 66.7% idle)      |
 | **P6 (this work)**                          | The Semantic Map itself — schema, prior initialization, convergence study     |
@@ -571,7 +946,7 @@ Both authors identify a further requirement — *anchors* — without which "eve
 | Anchor (Ng)          | Semantic Map implementation                                                                                             |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Real-world outcomes  | Netdata telemetry — only `MetricSample` observations update the EMA; no model-estimated evidence                        |
-| Frozen rules         | Di-Select's 15 propositions as an append-only backbone (constructs never removed; direction reversal disallowed)        |
+| Frozen rules         | The declared propositions as an append-only backbone (constructs never removed; direction reversal disallowed)          |
 | Human judgment       | Operator tune, candidate confirm/reject, deprecate — every mutation stamped in the `OntologyEvent` audit log            |
 
 This design also satisfies Ng's reliable-agentic-system invariant — *every important output can be traced to a task, a plan, an artifact, a source, an evaluator decision, and a bounded execution record* — as an architectural property: `CostRequest`, `GraphPathUsed`, `ActionCost`, `EventID` provenance, `Rationale`, and `n_observations` correspond one-to-one to the six required trace elements. The distinction from most LLM-agent frameworks in this space is that the backbone is not an ad-hoc ontology invented by prompting an LLM: it is Di-Select's grounded-theory result [P3]. Any downstream LLM consumer of this graph sits on the *operator-facing surface* — the reasoning and ingestion paths remain deterministic Go code, and reproducibility of P6 results does not depend on any LLM's behaviour.
@@ -604,7 +979,7 @@ Every layer talks to the layer above only via HTTP — the CLI does not import `
 
 ### HTTP API
 
-Two endpoint families coexist on the same mux. The five pre-existing endpoints (`/ingest`, `/cost`, `/recommend`, `/simulate`, `/candidates`) keep their original `http.Error` plain-text error format to minimize diff against the v0 daemon. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
+Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 endpoints (`/cost`, `/recommend`, `/simulate`, `/candidates`) keep their original `http.Error` plain-text error format to minimize diff against the v0 daemon. The fifth, `/ingest`, is gone: it named a construct pair and a magnitude directly, which is an assertion about a relation rather than an observation of one. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
 
 | Verb | Path                              | Request body / params                                                  | Response (2xx)                | Semantics                                                                                              |
 | ---- | --------------------------------- | ---------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -617,7 +992,7 @@ Two endpoint families coexist on the same mux. The five pre-existing endpoints (
 | GET  | `/history`                        | `?since=` (RFC3339 timestamp or Go duration like `1h`; omitted → zero) | `[]OntologyEventDTO`          | Append-only audit log of mutations                                                                     |
 | GET  | `/neighbors`                      | `?node=ID` (required)                                                  | `[]string`                    | IDs of constructs reachable in one hop                                                                 |
 | POST | `/ontology/strength`              | `SetStrengthRequest`                                                   | `204 No Content`              | Recalibrate `prior_strength` for one proposition; audit-logged                                          |
-| POST | `/ontology/deprecate`             | `DeprecateRequest`                                                     | `204 No Content`              | Soft-delete a proposition (Reasoner skips deprecated edges; descriptor stays in storage for audit)     |
+| POST | `/ontology/deprecate`             | `DeprecateRequest`                                                     | `204 No Content`              | Soft-delete a proposition (the relationship is retired: out of the traversal, kept for audit)          |
 | POST | `/ontology/construct`             | `AddConstructRequest`                                                  | `204 No Content`              | Append a new construct (append-only; constructs are domain-stable)                                     |
 | POST | `/ontology/proposition`           | `AddPropositionRequest` (`direction` is `"+"` or `"-"`)                | `204 No Content`              | Add a validated proposition; `ValidateProposition` rejects direction contradictions                    |
 | POST | `/agent/reset`                    | `ResetRequest`                                                         | `204 No Content`              | Reset the EMA for a `(from, to)` pair back to its prior — does not delete the edge                     |
@@ -632,7 +1007,7 @@ Errors on the new endpoints follow a single shape:
 {"error": "Content-Type must be application/json"}
 ```
 
-`writeError` (in `cmd/agent/routes.go`) is the only path to a non-2xx response. The five pre-existing endpoints retain `http.Error`'s plain-text body for backward compatibility.
+`writeError` (in `cmd/agent/routes.go`) is the only path to a non-2xx response. The four surviving pre-Phase-1 endpoints retain `http.Error`'s plain-text body for backward compatibility.
 
 ### CSRF mitigation: `requireJSON`
 
@@ -714,9 +1089,11 @@ Collapsing them — e.g. embedding HTML rendering inside Go handlers, or buildin
 
 The dissertation calls this work a *Context-Aware Agentic Framework for **Decentralized** Edge Computing*. Single-agent EMA convergence is the mechanism; multi-agent coordination is the spine. Without it, `RecommendPeer` is dead code, "decentralized" is aspirational, and P7 has nothing to build on.
 
+This section covers the registry and the trust mechanics that decide *where work goes*. What peers know about their own systems — and why it is held apart from local state rather than merged into it — is [§5, Peer state](#peer-state-knowledge-crossing-a-node-boundary).
+
 ### The peer registry — concrete, not a contract
 
-In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a seventh contract. The contract surface stays at six (Storage, Ontology, Updater, Reasoner, Proposer, Collector) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
+In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
 - SQLite-backed registry for the edge-standard / cloud-full profile so trust history survives restarts;
 - gossip-based discovery (mDNS / dat-style) so peers find each other without a static `--peers` flag.
@@ -781,15 +1158,29 @@ POST /agent/tune {"intent": "prioritize security", "operator": "alice"}
           ↓
 TunerContract.ParseIntent(text) → []TuneIntent{PropositionID, Delta}
           ↓
-SemanticMap.Tune: resolve current strengths → compute newStrength = clamp(old+delta, floor, ceil)
+SemanticMap.Tune: resolve current magnitudes from the state model's relationship
+                  priors (NOT from ontology.Propositions())
+                  → newStrength = clamp(old+delta, floor, ceil)
           ↓
 TunerContract.Validate(adjustments) — hard bounds check
           ↓
-OntologyContract.SetPropositionStrength × N   ← each emits "set-strength" event
-OntologyContract.RecordTune(text, operator)   ← single "operator-tune" event
+SemanticMap.SetPropositionStrength × N        ← asserts the prior on the model, with
+                                                actor and reason, per proposition
+statemap.RecordOperatorIntent(text, operator) ← one operator.intent event naming the
+                                                whole act and what it touched
           ↓
 Return []TuneAdjustment: PropositionID, OldStrength, NewStrength, Rationale
 ```
+
+Two details in that flow are load-bearing and were both once wrong.
+
+**The delta anchors to the relationship's magnitude, not the proposition's strength.** Those differ by construction: the state model is seeded from `prior_weights.json`'s per-distribution `distribution_edge_weights` table while the ontology carries the global `propositions` table. On a k0s-seeded daemon P1's edge sits at 0.2138 against a proposition strength of 0.620. Anchoring a +0.12 nudge to the global figure would jump the edge from 0.2138 to 0.740, discarding per-distribution calibration in a single operator action. It also makes the SC-adjacent floor of 0.30 unreachable — anchored to per-KD magnitudes, P11 (0.0089 + 0.12 = 0.1289) clamps to it immediately.
+
+**Adjustments apply through `SemanticMap.SetPropositionStrength`.** There is no longer an ontology method of that name to call by mistake — see §2 on why it was removed. The consolidated intent is journalled alongside the individual assertions, because reading those separately afterwards gives no way to tell one coordinated adjustment from several unrelated ones that landed together.
+
+The resulting effect is predictable in closed form, and the form is worth stating precisely because it bounds what operator tuning can do. A tune writes the prior; the Reasoner reads `effective = (1 − c)·prior + c·learned`. A prior change of δ therefore moves the sensitivity by `(1 − c)·δ` and moves the reported *levels* not at all, since those are the constructs' own observed values. At `c = 1` a tune is exactly inert — measured: on a k0s daemon after one idle run every edge reaches c = 1.000, and `prioritize performance` moves both sensitivities by 0.000000 while faithfully recording itself in the audit log.
+
+That is the intended arithmetic rather than a defect, but it is a real limitation of tuning priors as an operator instrument: the better the agent knows its machine, the less an assertion about the prior can change. Deprecation is not attenuated the same way — it removes an edge from the sensitivity sum outright, and selectively: retiring the sole edge terminating at the resource construct took `ResourceSensitivity` from −0.0576 to exactly 0 while leaving the pressure term untouched. An operator wanting to influence a converged agent has the structural path, not the magnitude path.
 
 ### Hard bounds
 
@@ -984,9 +1375,9 @@ The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prom
 
 ```json
 {
-  "answer": "The dominant edge is P10 (PS→RC, prior 0.645, effective 0.62 at confidence 0.60).",
+  "answer": "The dominant edge is P10 (PS→RC, prior 0.645, effective 0.62 at confidence 0.03).",
   "citations": [
-    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.60, "n_observations": 15}
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.03, "n_observations": 15}
   ],
   "confidence": "high",
   "proposal": null,
@@ -1101,7 +1492,7 @@ Two things live in a session:
 1. **Prior turns**, replayed into the answering agent's context so an operator can ask *"what about diag-2?"* without restating the question.
 2. **A tool-result cache**, keyed by `(tool_name, canonical(args))`. Flushed wholesale when the ontology history watermark advances — any mutation (tune, deprecate, strength set, construct or proposition added) invalidates it.
 
-Whole-cache invalidation rather than per-key is deliberate: the graph is 7 nodes and 15 edges. Reasoning about which cached results a given mutation could have affected costs more, in code and in bug surface, than just refetching.
+Whole-cache invalidation rather than per-key is deliberate: the graph is single-digit in both nodes and edges. Reasoning about which cached results a given mutation could have affected costs more, in code and in bug surface, than just refetching.
 
 Three properties of the transcript are load-bearing:
 
@@ -1180,7 +1571,7 @@ Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `cr
 
 ### What v2 does not change
 
-- **The reasoner, updater, Bridge, and prior-init pipeline remain pure deterministic Go.** No LLM touches the ingestion or reasoning path.
+- **The reasoner, the state model, and the prior-init pipeline remain pure deterministic Go.** No LLM touches the ingestion or reasoning path.
 - **The tool registry is still read-only.** Planner, answering agent, and critic all get the same six read tools. None can mutate.
 - **`-explain-provider=none` remains the default.** All P6 results in `research-docs/` are produced with the Explain layer off.
 

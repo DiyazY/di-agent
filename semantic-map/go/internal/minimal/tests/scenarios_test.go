@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -45,41 +47,35 @@ func newJSONEncoder(w io.Writer) *json.Encoder     { return json.NewEncoder(w) }
 
 type scenarioAgent struct {
 	sm       *semmap.SemanticMap
-	storage  *minimal.InMemoryStorage
-	ontology *minimal.StaticDiSelectOntology
-	updater  *minimal.EMAUpdater
+	state    *statemap.Map
+	ontology *minimal.SpecOntology
 }
 
-// newScenarioAgent wires the same edge-minimal stack a production daemon
-// would (InMemoryStorage + StaticDiSelectOntology + EMAUpdater +
-// RuleEngineReasoner + DisabledProposer) and seeds storage from the
-// ontology's default Di-Select bootstrap. It returns the SemanticMap plus
-// raw handles so scenarios can call ontology mutations and inspect storage
-// state directly — operations the facade intentionally hides from agent code.
+// newScenarioAgent wires the same edge-minimal stack a production daemon would — a
+// state model seeded from the specification, the ontology as the declaration layer, a
+// reasoner that reads the model, and a disabled proposer. It returns the SemanticMap
+// plus the model and the ontology so scenarios can drive mutations and inspect state
+// directly, which the facade intentionally hides from agent code.
 func newScenarioAgent(t *testing.T) *scenarioAgent {
 	t.Helper()
-	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
-	updater := minimal.NewEMAUpdater(storage, 0.2, 500)
-	reasoner := minimal.NewRuleEngineReasoner(storage, ontology, 0.5, nil, nil)
-	proposer := minimal.NewDisabledProposer()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
+	// ONE state model for the facade and the reasoner. Two would let a facade-level
+	// retirement land in a model the reasoner never reads.
+	state := stateFor(t)
+	reasoner := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	reasoner.AttachState(state)
 
-	seedReasonerState(t, storage, ontology)
-
-	return &scenarioAgent{
-		sm:       semmap.New(storage, ontology, updater, reasoner, proposer, minimal.NewDisabledTuner()),
-		storage:  storage,
-		ontology: ontology,
-		updater:  updater,
-	}
+	sm := semmap.New(ontology, reasoner, minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	return &scenarioAgent{sm: sm, state: state, ontology: ontology}
 }
 
 // edgeSnapshot is a frozen view of one edge's state at a moment in time.
 // Used to print "T=N: edge X is here" narrative rows.
 type edgeSnapshot struct {
-	FromID, ToID, PropID                                   string
+	FromID, ToID, PropID                          string
 	PriorWeight, EMAWeight, Effective, Confidence float64
-	NObservations                                  int
+	NObservations                                 int
 }
 
 func (s edgeSnapshot) String() string {
@@ -87,24 +83,24 @@ func (s edgeSnapshot) String() string {
 		s.FromID, s.ToID, s.PropID, s.PriorWeight, s.EMAWeight, s.Confidence, s.Effective, s.NObservations)
 }
 
-func snapEdgeByPropID(t *testing.T, s *minimal.InMemoryStorage, propID string) edgeSnapshot {
+func snapEdgeByPropID(t *testing.T, state *statemap.Map, propID string) edgeSnapshot {
 	t.Helper()
-	edges, _ := s.AllEdges()
-	for _, e := range edges {
-		if e.PropositionID == propID {
-			return edgeSnapshot{
-				FromID:        e.FromID,
-				ToID:          e.ToID,
-				PropID:        e.PropositionID,
-				PriorWeight:   e.PriorWeight,
-				EMAWeight:     e.EMAWeight,
-				Effective:     (1-e.Confidence)*e.PriorWeight + e.Confidence*e.EMAWeight,
-				Confidence:    e.Confidence,
-				NObservations: e.NObservations,
-			}
+	for _, r := range state.Relationships("", "") {
+		if r.Label != propID {
+			continue
+		}
+		return edgeSnapshot{
+			FromID:        r.From,
+			ToID:          r.To,
+			PropID:        r.Label,
+			PriorWeight:   r.Prior,
+			EMAWeight:     r.Strength,
+			Effective:     r.Effective(),
+			Confidence:    r.Confidence,
+			NObservations: r.NObservations,
 		}
 	}
-	t.Fatalf("propID %q not in storage", propID)
+	t.Fatalf("no relationship carries proposition %q", propID)
 	return edgeSnapshot{}
 }
 
@@ -116,25 +112,29 @@ func TestScenario_ColdStart(t *testing.T) {
 	t.Log("Scenario: cold start — ontology bootstrapped, no observations yet.")
 	t.Log("Expected: confidence=0 on every edge, effective value equals the prior, EMA equals the prior.")
 
-	edges, err := a.storage.AllEdges()
-	if err != nil {
-		t.Fatal(err)
+	// Every relationship the specification declares between observable constructs. A
+	// proposition naming a construct nothing routes to is deliberately absent: seeding
+	// does not invent a property to hang it on, so the count is bounded by the spec
+	// rather than equal to it.
+	rels := a.state.Relationships("", "")
+	if len(rels) == 0 {
+		t.Fatal("no relationships after seeding")
 	}
-	if len(edges) != 15 {
-		t.Fatalf("expected 15 seeded edges (P1–P15); got %d", len(edges))
+	if want := len(mustSpec().Propositions); len(rels) > want {
+		t.Fatalf("seeded %d relationships from %d propositions", len(rels), want)
 	}
 
-	sort.Slice(edges, func(i, j int) bool { return edges[i].PropositionID < edges[j].PropositionID })
-	for _, e := range edges {
-		if e.Confidence != 0.0 {
-			t.Errorf("edge %s starts with confidence=%.3f; expected 0.0", e.PropositionID, e.Confidence)
+	sort.Slice(rels, func(i, j int) bool { return rels[i].ID < rels[j].ID })
+	for _, r := range rels {
+		if r.Confidence != 0.0 {
+			t.Errorf("%s starts with confidence=%.3f; expected 0.0", r.ID, r.Confidence)
 		}
-		if e.EMAWeight != e.PriorWeight {
-			t.Errorf("edge %s EMA=%.3f != prior=%.3f at cold start",
-				e.PropositionID, e.EMAWeight, e.PriorWeight)
+		if r.Effective() != r.Prior {
+			t.Errorf("%s effective=%.3f != prior=%.3f at cold start — with no evidence the "+
+				"prior IS the estimate", r.ID, r.Effective(), r.Prior)
 		}
-		if e.NObservations != 0 {
-			t.Errorf("edge %s NObservations=%d at cold start; expected 0", e.PropositionID, e.NObservations)
+		if r.NObservations != 0 {
+			t.Errorf("%s has %d observations at cold start; expected 0", r.ID, r.NObservations)
 		}
 	}
 
@@ -146,7 +146,7 @@ func TestScenario_ColdStart(t *testing.T) {
 		t.Errorf("aggregate confidence at cold start = %.3f; expected 0.0", cost.Confidence)
 	}
 	t.Logf("T=0 (cold start)")
-	t.Logf("  edges seeded: %d", len(edges))
+	t.Logf("  relationships seeded: %d", len(rels))
 	t.Logf("  aggregate confidence: %.3f", cost.Confidence)
 	t.Logf("  decision latency estimate: %.3f  resource cost: %.3f", cost.LatencyEstimate, cost.ResourceCost)
 	t.Logf("  graph path length: %d (all edges contribute via priors)", len(cost.GraphPathUsed))
@@ -169,21 +169,21 @@ func TestScenario_ConvergenceOnOneEdge(t *testing.T) {
 
 	for i := 0; i < totalObs; i++ {
 		if cpIdx < len(checkpoints) && i == checkpoints[cpIdx] {
-			snap := snapEdgeByPropID(t, a.storage, target)
+			snap := snapEdgeByPropID(t, a.state, target)
 			t.Logf("  T=%-4d  %s", i, snap)
 			cpIdx++
 		}
 		// Find an edge with target propID to discover its (from, to).
 		if i == 0 {
-			snap := snapEdgeByPropID(t, a.storage, target)
+			snap := snapEdgeByPropID(t, a.state, target)
 			a.streamObservation(t, snap.FromID, snap.ToID, observed, i)
 			continue
 		}
-		snap := snapEdgeByPropID(t, a.storage, target)
+		snap := snapEdgeByPropID(t, a.state, target)
 		a.streamObservation(t, snap.FromID, snap.ToID, observed, i)
 	}
 
-	final := snapEdgeByPropID(t, a.storage, target)
+	final := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  T=%-4d  %s", totalObs, final)
 
 	// Invariants.
@@ -199,12 +199,27 @@ func TestScenario_ConvergenceOnOneEdge(t *testing.T) {
 	}
 }
 
-// streamObservation is a tiny convenience for the per-iteration ingest with a
-// deterministic eventID. Errors fail the test fast.
+// streamObservation records one observation OF a relationship's strength, which is what
+// the removed POST /ingest did: it named a pair and a magnitude directly.
+//
+// The daemon no longer exposes that. Telemetry now observes properties, and strengths
+// are estimated from paired observations of both endpoints — a single number about a
+// pair is an assertion, not a measurement, and the only caller that had one was a test.
+// The scenarios below still want to drive a relationship's evidence in isolation, so they
+// reach the model directly rather than through a wire endpoint that would invite the same
+// confusion again.
 func (a *scenarioAgent) streamObservation(t *testing.T, fromID, toID string, value float64, i int) {
 	t.Helper()
-	if err := a.sm.Ingest(fromID, toID, value, fmt.Sprintf("evt-%s→%s-%d", fromID, toID, i)); err != nil {
-		t.Fatalf("ingest failed at i=%d: %v", i, err)
+	rels := a.state.Relationships(fromID, toID)
+	if len(rels) == 0 {
+		t.Fatalf("no relationship from %s to %s", fromID, toID)
+	}
+	at := time.Unix(1700000000+int64(i), 0)
+	for _, r := range rels {
+		event := fmt.Sprintf("evt-%s→%s-%d", fromID, toID, i)
+		if err := a.state.ObserveRelationshipEvent(r.ID, value, at, event); err != nil {
+			t.Fatalf("observing %s at i=%d: %v", r.ID, i, err)
+		}
 	}
 }
 
@@ -214,14 +229,18 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	pwPath := findPriorWeightsFileForScenarios(t)
 
 	smK3s, _, err := profiles.Build("edge-minimal", profiles.Config{
-		EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
+		DomainSpec: mustSpec(),
+		StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
+		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k3s",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	smK0s, _, err := profiles.Build("edge-minimal", profiles.Config{
-		EMAAlpha: 0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
+		DomainSpec: mustSpec(),
+		StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
+		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
 		PriorWeightsPath: pwPath, KD: "k0s",
 	})
 	if err != nil {
@@ -231,15 +250,80 @@ func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
 	costK3s, _ := smK3s.CostOfAction("pod-scheduling", "node_1")
 	costK0s, _ := smK0s.CostOfAction("pod-scheduling", "node_1")
 
-	t.Log("Scenario: two agents, same query, different -kd. Decisions should diverge because the per-KD")
-	t.Log("priors land different initial weights on each edge.")
+	t.Log("Scenario: two agents, same query, different -kd. Per-cluster calibration lives on the")
+	t.Log("edges, so at cold start it shows up in the SENSITIVITIES, not in the levels: neither")
+	t.Log("agent has observed anything yet, and an honest level says so.")
 	t.Log("")
-	t.Logf("  k3s  →  latency=%.3f  resource_cost=%.3f  confidence=%.3f", costK3s.LatencyEstimate, costK3s.ResourceCost, costK3s.Confidence)
-	t.Logf("  k0s  →  latency=%.3f  resource_cost=%.3f  confidence=%.3f", costK0s.LatencyEstimate, costK0s.ResourceCost, costK0s.Confidence)
+	t.Logf("  k3s  →  level(resource)=%.3f level(pressure)=%.3f  dR=%+.4f dP=%+.4f  conf=%.3f",
+		costK3s.ResourceCost, costK3s.LatencyEstimate,
+		costK3s.ResourceSensitivity, costK3s.PressureSensitivity, costK3s.Confidence)
+	t.Logf("  k0s  →  level(resource)=%.3f level(pressure)=%.3f  dR=%+.4f dP=%+.4f  conf=%.3f",
+		costK0s.ResourceCost, costK0s.LatencyEstimate,
+		costK0s.ResourceSensitivity, costK0s.PressureSensitivity, costK0s.Confidence)
+	t.Log("")
 
-	if costK3s.LatencyEstimate == costK0s.LatencyEstimate &&
-		costK3s.ResourceCost == costK0s.ResourceCost {
-		t.Errorf("k3s and k0s agents produced identical cost estimates — per-KD seeding is not steering behavior")
+	if costK3s.ResourceSensitivity == costK0s.ResourceSensitivity &&
+		costK3s.PressureSensitivity == costK0s.PressureSensitivity {
+		t.Errorf("k3s and k0s agents produced identical sensitivities — per-KD seeding is not "+
+			"steering behaviour (dR %.6f vs %.6f, dP %.6f vs %.6f)",
+			costK3s.ResourceSensitivity, costK0s.ResourceSensitivity,
+			costK3s.PressureSensitivity, costK0s.PressureSensitivity)
+	}
+
+	// The levels must agree, and that is the point rather than a shortcoming: two
+	// agents that have observed nothing know nothing about their machines' state,
+	// whatever their calibration says about how the constructs relate.
+	if costK3s.ResourceCost != costK0s.ResourceCost {
+		t.Errorf("cold-start levels differ (%.6f vs %.6f); with no observations on either "+
+			"machine the observed level cannot be cluster-specific",
+			costK3s.ResourceCost, costK0s.ResourceCost)
+	}
+	if costK3s.Confidence != 0 || costK0s.Confidence != 0 {
+		t.Errorf("cold-start confidence should be zero; got %.4f and %.4f",
+			costK3s.Confidence, costK0s.Confidence)
+	}
+
+	// A simulation applies the sensitivity to an assumed demand. It needs a non-zero
+	// level to act on: with every property unobserved the projection is negative for
+	// both agents and clamps to zero, so the difference in calibration is real but
+	// invisible in the reported cost. Feeding each agent a little telemetry first is
+	// what a simulation on a running system would have.
+	for _, pair := range []struct {
+		sm *semmap.SemanticMap
+		id string
+	}{{smK3s, "k3s"}, {smK0s, "k0s"}} {
+		for i := 0; i < 20; i++ {
+			for _, m := range costMetrics(t) {
+				if err := pair.sm.IngestSample(&types.MetricSample{
+					NodeID: "node_1", MetricType: types.MetricType(m), Value: 0.6,
+					TimestampUnix: int64(1700000000 + i), EventID: pair.id + m + itoaScenario(i),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+
+	size := int64(16 * 1024 * 1024)
+	simK3s, err := smK3s.SimulateOutcome(&types.OffloadContext{
+		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	simK0s, err := smK0s.SimulateOutcome(&types.OffloadContext{
+		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("  simulated with a %d MiB task:", size/(1024*1024))
+	t.Logf("    k3s  →  expected_latency=%.4f expected_resource=%.4f",
+		simK3s.ExpectedLatency, simK3s.ExpectedResourceCost)
+	t.Logf("    k0s  →  expected_latency=%.4f expected_resource=%.4f",
+		simK0s.ExpectedLatency, simK0s.ExpectedResourceCost)
+	if simK3s.ExpectedLatency == simK0s.ExpectedLatency &&
+		simK3s.ExpectedResourceCost == simK0s.ExpectedResourceCost {
+		t.Error("per-cluster calibration did not reach the simulated outcome: with levels " +
+			"observed and sensitivities differing, the projection should differ too")
 	}
 }
 
@@ -249,13 +333,16 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	a := newScenarioAgent(t)
 
 	before, _ := a.sm.CostOfAction("pod-scheduling", "node_1")
-	t.Log("Scenario: deprecate P1. Reasoner must skip it; storage must retain the EdgeDescriptor.")
+	t.Log("Scenario: deprecate P1. The reasoner must skip it; the model must retain it, marked.")
 	t.Log("")
 	t.Logf("  before deprecation  graph path length = %d", len(before.GraphPathUsed))
 	t.Logf("                       latency=%.3f  resource_cost=%.3f  confidence=%.3f",
 		before.LatencyEstimate, before.ResourceCost, before.Confidence)
 
-	if err := a.ontology.Deprecate("P1", "scenario test"); err != nil {
+	// Through the facade: it retires the relationship in the state model as well, which
+	// is what the reasoner reads. Reaching into the ontology alone changes what
+	// Propositions() reports and no decision.
+	if err := a.sm.Deprecate(firstSpecProp(), "scenario test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,24 +356,30 @@ func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 			len(before.GraphPathUsed), len(after.GraphPathUsed))
 	}
 
-	// Storage must still hold the deprecated edge — soft delete only.
-	all, _ := a.storage.AllEdges()
+	// The model must still hold the withdrawn claim, marked — soft delete only, so a
+	// decision taken before the retirement stays reconstructible.
 	stillPresent := false
-	for _, e := range all {
-		if e.PropositionID == "P1" {
+	for _, r := range a.state.Relationships("", "") {
+		if r.Label == firstSpecProp() {
 			stillPresent = true
+			if r.Status != statemap.Retired {
+				t.Errorf("%s is still %s after Deprecate()", r.Label, r.Status)
+			}
 			break
 		}
 	}
 	if !stillPresent {
-		t.Error("deprecated edge P1 disappeared from storage — Deprecate must be soft-delete, not removal")
+		t.Error("the deprecated relationship disappeared from the model — Deprecate must be " +
+			"soft-delete, not removal")
 	}
 
-	// Ontology surface still includes the deprecated proposition (flagged).
-	props, _ := a.ontology.Propositions()
+	// The proposition surface still includes the withdrawn claim, flagged — the flag is
+	// overlaid from the relationship's retirement, so this reads through the facade. The
+	// declaration layer holds no flag of its own.
+	props, _ := a.sm.Propositions()
 	foundDeprecated := false
 	for _, p := range props {
-		if p.PropositionID == "P1" {
+		if p.PropositionID == firstSpecProp() {
 			if !p.Deprecated {
 				t.Error("P1 not flagged Deprecated in ontology after Deprecate()")
 			}
@@ -308,20 +401,20 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 	t.Log("")
 
 	const target = "P10" // PS→RC
-	startSnap := snapEdgeByPropID(t, a.storage, target)
+	startSnap := snapEdgeByPropID(t, a.state, target)
 
 	// First pass.
 	for i := 0; i < 200; i++ {
 		a.streamObservation(t, startSnap.FromID, startSnap.ToID, 0.7, i)
 	}
-	afterFirst := snapEdgeByPropID(t, a.storage, target)
+	afterFirst := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  after first pass (200 obs):   %s", afterFirst)
 
 	// Replay — same eventIDs.
 	for i := 0; i < 200; i++ {
 		a.streamObservation(t, startSnap.FromID, startSnap.ToID, 0.7, i)
 	}
-	afterReplay := snapEdgeByPropID(t, a.storage, target)
+	afterReplay := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  after replay (same evtIDs):   %s", afterReplay)
 
 	if afterReplay.NObservations != afterFirst.NObservations ||
@@ -334,7 +427,7 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 	for i := 1000; i < 1200; i++ {
 		a.streamObservation(t, startSnap.FromID, startSnap.ToID, 0.7, i)
 	}
-	afterNew := snapEdgeByPropID(t, a.storage, target)
+	afterNew := snapEdgeByPropID(t, a.state, target)
 	t.Logf("  after 200 new evtIDs:         %s", afterNew)
 
 	if afterNew.NObservations == afterFirst.NObservations {
@@ -344,64 +437,74 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 
 // ── Scenario 6: Audit trail records every mutation ───────────────────────────
 
+// Every mutation goes through the FACADE, not the declaration layer. That is the
+// invariant the scenario is really about: the ontology answers for the vocabulary and
+// holds no strength, no deprecation flag and no log of its own, so an operator action
+// applied to it directly would change nothing and record nothing. Each call below has
+// two halves — a declaration where one is needed, and the state-model write that has
+// the effect — and the journal is where both are visible.
 func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 	a := newScenarioAgent(t)
 
-	t.Log("Scenario: trigger one of each ontology mutation. GetHistory must contain exactly four events.")
+	t.Log("Scenario: trigger one of each operator mutation through the facade.")
+	t.Log("History must record every one, against the single journal.")
 	t.Log("")
 
-	if err := a.ontology.SetPropositionStrength("P3", 0.77); err != nil {
+	if err := a.sm.SetPropositionStrength("P3", 0.77); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ontology.AddConstruct(&types.Construct{
+	if err := a.sm.AddConstruct(&types.Construct{
 		ConstructID: "PR",
 		Name:        "Privacy & Data Sovereignty",
 		Description: "Sample new construct added by scenario test",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Pick a fresh proposition pair that doesn't conflict with anything
-	// existing — PS↔SC is not in the Di-Select bootstrap propositions.
-	if err := a.ontology.AddValidatedProposition(&types.Proposition{
+	// A fresh pair that conflicts with nothing existing. PR is the construct just
+	// added, so this also covers the case where an endpoint has no routed metric: the
+	// facade declares the property alongside the relationship.
+	if err := a.sm.AddValidatedProposition(&types.Proposition{
 		PropositionID: "P-scenario",
 		FromConstruct: "PS",
-		ToConstruct:   "SC",
+		ToConstruct:   "PR",
 		Direction:     types.Positive,
 		PriorStrength: 0.42,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ontology.Deprecate("P15", "scenario test deprecation"); err != nil {
+	if err := a.sm.Deprecate(firstSpecProp(), "scenario test deprecation"); err != nil {
 		t.Fatal(err)
 	}
 
-	events, err := a.ontology.GetHistory(time.Time{})
+	events, err := a.sm.History(time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Logf("  recorded %d events in audit log:", len(events))
+	t.Logf("  recorded %d events in the journal:", len(events))
 	for i, e := range events {
 		t.Logf("    [%d] %s  kind=%s  target=%s  actor=%s",
 			i, e.Timestamp.Format(time.RFC3339Nano), e.Kind, e.TargetID, e.Actor)
 	}
 
-	if len(events) != 4 {
-		t.Errorf("expected exactly 4 events after 4 mutations; got %d", len(events))
-	}
-
-	want := []types.OntologyEventKind{
+	// The journal records seeding as well as operator action, so the assertion is that
+	// each mutation appears — not that the log holds exactly four entries. A count is
+	// the wrong assertion for a record that also holds what the agent did to itself.
+	for _, want := range []types.OntologyEventKind{
 		types.EventPropositionStrengthSet,
 		types.EventConstructAdded,
 		types.EventPropositionAdded,
 		types.EventPropositionDeprecated,
-	}
-	for i, w := range want {
-		if i >= len(events) {
-			break
+	} {
+		found := false
+		for _, e := range events {
+			if e.Kind == want {
+				found = true
+				break
+			}
 		}
-		if events[i].Kind != w {
-			t.Errorf("event[%d] kind=%s; expected %s", i, events[i].Kind, w)
+		if !found {
+			t.Errorf("no %s event in the journal after the corresponding mutation", want)
 		}
 	}
 
@@ -448,6 +551,8 @@ type coordinationAgent struct {
 func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordinationAgent {
 	t.Helper()
 	sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+		DomainSpec:           mustSpec(),
+		StateMap:             statemap.New(statemap.Config{ConvergenceObservations: 100}, statemap.NewJournal(0)),
 		EMAAlpha:             0.5,
 		ConvergenceThreshold: 100,
 		MinTrustScore:        0.5,
@@ -513,39 +618,57 @@ func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	})
 }
 
-// biasEnergyTo drives the agent's CostOfAction ResourceCost toward a chosen
-// level by ingesting the same constant on each of the three edges that feed
-// into RC (the reasoner's resource-cost aggregator). Drives the EMA close enough to
-// the target that conf×ema dominates the (1-conf)×prior term — 200 ticks at
-// alpha=0.5 / convergence=100 saturates confidence at 1.0.
+// biasEnergyTo drives an agent's reported resource cost by feeding it telemetry,
+// which is the only thing that moves a cost level now.
 //
-//   target ≈ +0.85 → high-cost agent (the one that wants to offload)
-//   target ≈ +0.10 → low-cost agent  (the attractive offload destination)
-//   target ≈ +0.50 → medium-cost agent
+// The cost estimate reports the confidence-blended OBSERVED value of the resource
+// construct, so making one agent look busier than another means giving it busier
+// telemetry — not adjusting its edges. An earlier version of this helper pushed edge
+// weights around, which stopped differentiating the agents the moment levels came
+// from construct descriptors, and rightly so: an edge weight says how constructs
+// relate, not how loaded a machine is.
 //
-// The shape is: P1 SC→RC (+, prior 0.6) contribution = +obs.
-//
-//	P8  MU→RC (−, prior 0.5) contribution = −obs.
-//	P10 PS→RC (−, prior 0.5) contribution = −obs.
-//	Net energy ≈ +obs_sc − obs_mu − obs_ps.
-//
-// To hit +0.85 we set sc=0.95, mu=0.05, ps=0.05 → 0.85.
-// To hit +0.10 we set sc=0.20, mu=0.05, ps=0.05 → 0.10.
-// To hit +0.50 we set sc=0.60, mu=0.05, ps=0.05 → 0.50.
-func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, scObs, mu, ps float64) {
+// `load` is the utilization to report, on the [0,1] scale every routed metric uses.
+func biasEnergyTo(t *testing.T, sm *semmap.SemanticMap, label string, load float64) {
 	t.Helper()
-	const ticks = 200
+
+	spec := mustSpec()
+	// Any metric routed to the resource construct will do; take the first the
+	// specification declares so the helper follows the model rather than naming a
+	// metric type.
+	var metric string
+	for _, r := range spec.MetricRouting {
+		if r.ConstructID == spec.CostModel.ResourceConstruct {
+			metric = r.MetricType
+			break
+		}
+	}
+	if metric == "" {
+		t.Fatalf("no metric routes to the resource construct %q", spec.CostModel.ResourceConstruct)
+	}
+
+	const ticks = 300 // enough for the state model's confidence to be meaningful
 	for i := 0; i < ticks; i++ {
-		if err := sm.Ingest("SC", "RC", scObs, fmt.Sprintf("%s-sc-%d", label, i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("MU", "RC", mu, fmt.Sprintf("%s-mu-%d", label, i)); err != nil {
-			t.Fatal(err)
-		}
-		if err := sm.Ingest("PS", "RC", ps, fmt.Sprintf("%s-ps-%d", label, i)); err != nil {
+		if err := sm.IngestSample(&types.MetricSample{
+			NodeID:        label,
+			MetricType:    types.MetricType(metric),
+			Value:         clamp01(load),
+			TimestampUnix: int64(1700000000 + i),
+			EventID:       fmt.Sprintf("%s-%s-%d", label, metric, i),
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
+
+func clamp01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 // decodeJSON / writeJSONBody are tiny helpers so registerScenarioHTTP does not
@@ -597,9 +720,9 @@ func TestScenario_CoordinationOffload(t *testing.T) {
 
 	// ── Bias each agent so CostOfAction returns a distinguishable energy cost ──
 
-	biasEnergyTo(t, a.sm, "A", 0.20, 0.05, 0.05) // → ≈ 0.10 (low)
-	biasEnergyTo(t, b.sm, "B", 0.95, 0.05, 0.05) // → ≈ 0.85 (high)
-	biasEnergyTo(t, c.sm, "C", 0.60, 0.05, 0.05) // → ≈ 0.50 (medium)
+	biasEnergyTo(t, a.sm, "A", 0.05) // nearly idle — the attractive destination
+	biasEnergyTo(t, b.sm, "B", 0.90) // heavily loaded — wants to shed work
+	biasEnergyTo(t, c.sm, "C", 0.45) // in between
 
 	// ── Pre-flight: print each agent's self-cost ────────────────────────────────
 
@@ -762,16 +885,15 @@ func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descript
 //  4. Operator Confirms the candidate → backbone grows to 16 propositions.
 //  5. Verified: a new non-deprecated proposition covering CE↔RC exists.
 func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
-	s := minimal.NewInMemoryStorage()
-	o := minimal.NewStaticDiSelectOntology()
-	seedReasonerState(t, s, o)
-
-	u := minimal.NewEMAUpdater(s, 0.2, 500)
+	o := minimal.NewOntologyFromSpec(mustSpec())
 	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
+	state := stateFor(t)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	r.AttachState(state)
 
-	sm := semmap.New(s, o, u, r, proposer, minimal.NewDisabledTuner())
-	_ = sm // used indirectly; proposer is wired into sm but we call proposer directly
+	sm := semmap.New(o, r, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	_ = sm // wired for realism; this scenario drives the proposer directly
 
 	// Ingest 60 samples driving CE↔RC correlation:
 	// CE (community ecosystem) and RC (resource constraints) are not linked
@@ -801,17 +923,20 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 		t.Errorf("expected significant p-value (< 0.05); got %.4f", cand.PValue)
 	}
 
-	// Confirm the candidate — backbone grows.
-	if err := proposer.Confirm(cand.CandidateID); err != nil {
+	// Confirm through the FACADE, which is what an operator's POST reaches. The proposer
+	// returns the proposition and the facade applies it to both the declaration and the
+	// state model; confirming against the proposer alone would leave the claim declared
+	// and unmodelled, taking part in no answer.
+	if err := sm.ConfirmCandidate(cand.CandidateID); err != nil {
 		t.Fatal(err)
 	}
 
-	props, err := o.Propositions()
+	props, err := sm.Propositions()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(props) != 16 {
-		t.Errorf("expected 16 propositions after confirm; got %d", len(props))
+	if want := len(mustSpec().Propositions) + 1; len(props) != want {
+		t.Errorf("expected %d propositions after confirm; got %d", want, len(props))
 	}
 
 	// Verified: a new proposition covering CE↔RC exists and is not deprecated.
@@ -826,57 +951,85 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	if !found {
 		t.Error("confirmed CE↔RC proposition not found in backbone")
 	}
+
+	// And it reached the model: a confirmed candidate must be traversable, not merely
+	// listed. This is the half the old path skipped.
+	var modelled bool
+	for _, p := range props {
+		if (p.FromConstruct == "CE" && p.ToConstruct == "RC") ||
+			(p.FromConstruct == "RC" && p.ToConstruct == "CE") {
+			modelled = p.Instantiated
+		}
+	}
+	if !modelled {
+		t.Error("the confirmed proposition is declared but not modelled, so it takes part " +
+			"in no answer — the failure propose-then-confirm exists to prevent")
+	}
 }
 
 // ── Scenario 9: Operator Tune and Audit Trail ─────────────────────────────────
 //
 // Verifies the full operator-tuning pipeline:
 //  1. Build an SM with the RuleBasedTuner.
-//  2. Tune "prioritize security" — expect P1 and/or P11 to increase.
+//  2. Tune on the spec's first intent rule — expect every proposition that rule
+//     names to move in the direction the rule's delta declares.
 //  3. Verify the history contains an "operator-tune" event with the intent text.
 //  4. Verify that CostOfAction after tuning is traversable without error.
 func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
-	s := minimal.NewInMemoryStorage()
-	o := minimal.NewStaticDiSelectOntology()
-	seedReasonerState(t, s, o)
+	o := minimal.NewOntologyFromSpec(mustSpec())
+	state := stateFor(t)
+	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
+	r.AttachState(state)
+	tuner := minimal.NewRuleBasedTunerFromSpec(mustSpec())
 
-	u := minimal.NewEMAUpdater(s, 0.2, 500)
-	r := minimal.NewRuleEngineReasoner(s, o, 0.5, nil, nil)
-	proposer := minimal.NewDisabledProposer()
-	tuner := minimal.NewRuleBasedTuner()
-
-	sm := semmap.New(s, o, u, r, proposer, tuner)
+	sm := semmap.New(o, r, minimal.NewDisabledProposer(), tuner)
+	sm.AttachState(state)
 
 	costBefore, err := r.CostOfAction("pod-scheduling", "node_1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	applied, err := sm.Tune("prioritize security", "test-operator")
+	applied, err := sm.Tune("prioritize "+firstSpecKeyword(), "test-operator")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(applied) == 0 {
-		t.Fatal("expected at least one adjustment for 'prioritize security'")
+		t.Fatal("expected at least one adjustment for the spec's first intent")
 	}
 
-	// P1 or P11 must be in the applied list and must have increased.
-	found := false
+	// Every proposition the rule names must move in the direction its delta
+	// declares — unless the floor or ceiling already pinned it there, in which
+	// case standing still is the correct outcome.
+	rule := mustSpec().IntentRules[0]
+	seen := map[string]bool{}
 	for _, a := range applied {
-		if a.PropositionID == "P1" || a.PropositionID == "P11" {
-			found = true
-			if a.NewStrength <= a.OldStrength {
-				t.Errorf("%s: expected strength to increase; got %.3f → %.3f",
-					a.PropositionID, a.OldStrength, a.NewStrength)
-			}
+		delta, named := rule.Deltas[a.PropositionID]
+		if !named {
+			t.Errorf("%s adjusted but intent %q does not name it", a.PropositionID, rule.Intent)
+			continue
+		}
+		seen[a.PropositionID] = true
+		moved := a.NewStrength - a.OldStrength
+		switch {
+		case delta > 0 && moved < 0:
+			t.Errorf("%s: intent raises it by %.2f but strength fell %.3f → %.3f",
+				a.PropositionID, delta, a.OldStrength, a.NewStrength)
+		case delta < 0 && moved > 0:
+			t.Errorf("%s: intent lowers it by %.2f but strength rose %.3f → %.3f",
+				a.PropositionID, delta, a.OldStrength, a.NewStrength)
 		}
 	}
-	if !found {
-		t.Error("expected P1 or P11 in applied adjustments for 'prioritize security'")
+	for propID := range rule.Deltas {
+		if !seen[propID] {
+			t.Errorf("intent %q names %s but no adjustment was applied to it", rule.Intent, propID)
+		}
 	}
 
-	// Audit trail: history must contain "operator-tune" event.
-	events, err := o.GetHistory(time.Time{})
+	// Audit trail: the journal must carry the consolidated operator intent alongside
+	// the individual assertions, or a coordinated adjustment is indistinguishable
+	// afterwards from unrelated ones that landed together.
+	events, err := sm.History(time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +1043,7 @@ func TestEvolution_OperatorTuneAndAuditTrail(t *testing.T) {
 	if tuneEvent == nil {
 		t.Fatal("expected 'operator-tune' event in history")
 	}
-	if tuneEvent.Detail["intent"] != "prioritize security" {
+	if tuneEvent.Detail["intent"] != "prioritize "+firstSpecKeyword() {
 		t.Errorf("operator-tune event has wrong intent: %v", tuneEvent.Detail["intent"])
 	}
 	if tuneEvent.Actor != "test-operator" {
@@ -930,3 +1083,23 @@ func findPriorWeightsFileForScenarios(t *testing.T) string {
 	t.Skip("prior_weights.json not found — per-KD scenario skipped")
 	return ""
 }
+
+// costMetrics returns the metrics routed to either cost construct, so a scenario can
+// give an agent levels to reason about without naming a metric type.
+func costMetrics(t *testing.T) []string {
+	t.Helper()
+	spec := mustSpec()
+	want := map[string]bool{
+		spec.CostModel.ResourceConstruct: true,
+		spec.CostModel.PressureConstruct: true,
+	}
+	var out []string
+	for _, r := range spec.MetricRouting {
+		if want[r.ConstructID] {
+			out = append(out, r.MetricType)
+		}
+	}
+	return out
+}
+
+func itoaScenario(i int) string { return strconv.Itoa(i) }

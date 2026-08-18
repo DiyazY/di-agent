@@ -43,7 +43,7 @@ func NewMultiCollector(collectors ...contracts.CollectorContract) *MultiCollecto
 	}
 }
 
-func (m *MultiCollector) SourceID() string                    { return m.sid }
+func (m *MultiCollector) SourceID() string                     { return m.sid }
 func (m *MultiCollector) AvailableMetrics() []types.MetricType { return m.avail }
 
 // Collect calls every member collector in order and merges results.

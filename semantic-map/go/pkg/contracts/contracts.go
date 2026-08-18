@@ -1,70 +1,60 @@
-// Package contracts defines the six interface contracts of the Semantic Map.
+// Package contracts defines the interface contracts of the Semantic Map:
+// Collector, Ontology, Reasoner, Proposer and Tuner.
 //
 // Behavioral guarantees are documented on each interface. All implementations
 // must satisfy these guarantees and pass the shared compliance suite in
 // github.com/DiyazY/di-agent/compliance.
+//
+// Storage and Updater used to be here as well, and they described the second model:
+// a graph of construct edges with its own estimator, kept beside the state model and
+// learning the same relations from the same telemetry. The state model in
+// pkg/statemap holds the properties, the relationships and the estimator, so the two
+// contracts had no subject left — a StorageContract implementation would be a place
+// to put numbers nothing reads.
 package contracts
 
 import (
-	"time"
-
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// ── Storage ───────────────────────────────────────────────────────────────────
-
-// StorageContract persists node and edge descriptors.
-//
-// The edge graph is a multigraph: two propositions may share the same
-// (fromID, toID) endpoints with opposite directions (e.g. Di-Select's P2/P3
-// both span RC→PS). Storage must therefore key edges by the full triple
-// (fromID, toID, propositionID), not by endpoints alone.
-//
-// Guarantees:
-//   - Atomicity: Put operations either fully succeed or leave prior state intact.
-//   - Nil safety: Get operations return (nil, nil) for unknown IDs; they never
-//     return a non-nil error for a simple miss.
-//   - Empty-safe: Neighbors, AllEdges, and GetEdgesByPair return empty slices,
-//     never nil.
-//   - Multigraph: GetEdgesByPair returns every edge between (fromID, toID).
-//     GetEdge returns one — the entry with the lexicographically smallest
-//     PropositionID — for backward-compatible simple-graph access.
-type StorageContract interface {
-	GetNode(nodeID string) (*types.NodeDescriptor, error)
-	PutNode(d *types.NodeDescriptor) error
-	GetEdge(fromID, toID string) (*types.EdgeDescriptor, error)
-	GetEdgesByPair(fromID, toID string) ([]*types.EdgeDescriptor, error)
-	PutEdge(d *types.EdgeDescriptor) error
-	Neighbors(nodeID string) ([]string, error)
-	AllEdges() ([]*types.EdgeDescriptor, error)
-}
-
 // ── Ontology ──────────────────────────────────────────────────────────────────
 
-// OntologyContract answers structural questions about constructs and
-// propositions and supports the live-ontology lifecycle: priors get
-// recalibrated, the Proposer discovers new propositions, operators deprecate
-// stale ones, and new domains may add constructs.
+// OntologyContract is the declaration layer: which constructs exist, which
+// propositions relate them, and whether a proposed new one is structurally valid.
+//
+// It holds no magnitudes and no history, and that boundary is the whole point of the
+// interface. A proposition's strength lives on the state model's relationship for it,
+// where it is blended with what this system has shown and read by every answer; a
+// second copy here would be a number the agent does not use, kept in step by hand.
+// The same applies to history: the state model's journal records every mutation with
+// actor and reason, and a second log would be another record to reconcile. Both used
+// to be here, and §7.3 of the P6 paper documents the defect from the period when the
+// strength this layer exposed was not the strength in force.
+//
+// What it does own is the vocabulary. The specification declares no prior strengths at
+// all, so there is nothing numeric for this layer to be authoritative about — the
+// declared set, the causal directions, and the validation rules are what it answers
+// for, and those are exactly what a caller needs before it can name anything.
 //
 // Guarantees:
-//   - Bootstrap minimum: Constructs() returns ≥7 (Di-Select baseline) and
-//     Propositions() returns ≥15 (P1–P15), regardless of runtime extensions.
-//   - Soft-delete only: existing propositions are never structurally removed
-//     and their Direction never reverses. Deprecate marks a proposition as
-//     no-longer-endorsed but keeps it in Propositions() for history/replay.
-//     Reasoners must skip deprecated propositions during cost computation.
-//   - Append-only constructs: AddConstruct is supported but constructs are
-//     never removed (they are domain-stable per the architecture).
-//   - Pure query: ValidateProposition, Constructs, Propositions,
-//     Relationships, GetHistory never modify state.
-//   - Audit log: every mutation (SetPropositionStrength,
-//     AddValidatedProposition, AddConstruct, Deprecate) appends one
-//     OntologyEvent that GetHistory exposes in chronological insertion order.
-//     RecordTune emits an "operator-tune" audit event consolidating a
-//     batch of operator-driven strength adjustments.
-//   - Implementations that intentionally do not support a mutation (e.g. a
-//     truly static cloud-cache implementation) return ErrNotImplemented
-//     from that method rather than silently succeeding.
+//   - Non-empty: Constructs() and Propositions() are both non-empty, with every
+//     proposition endpoint a declared construct. The counts follow the loaded
+//     domain specification; the contract fixes no particular scope.
+//   - No removal, no reversal: a proposition is never structurally removed and its
+//     Direction never reverses. Withdrawal is retirement in the state model, which
+//     is what takes a claim out of reasoning; Propositions() keeps reporting it so
+//     history and replay stay intact.
+//   - Append-only constructs: AddConstruct is supported but constructs are never
+//     removed (they are domain-stable per the architecture).
+//   - Pure query: ValidateProposition, Constructs, Propositions and Relationships
+//     never modify state.
+//   - Additions are declarations, not decisions: AddConstruct and
+//     AddValidatedProposition extend the vocabulary. On their own they change no
+//     answer — the facade declares the matching property or relationship in the
+//     state model in the same call, and that is the half that has an effect.
+//   - Implementations that intentionally do not support an addition (a static
+//     read-only profile, say) return ErrNotImplemented rather than silently
+//     succeeding.
 type OntologyContract interface {
 	// Read surface.
 	Constructs() ([]*types.Construct, error)
@@ -72,43 +62,15 @@ type OntologyContract interface {
 	Relationships(constructID string) ([]*types.Proposition, error)
 	ValidateProposition(fromID, toID string, dir types.Direction) (*types.ValidationResult, error)
 
-	// Write surface — the "live" mutations. Each emits one OntologyEvent.
+	// Vocabulary extension. Each is paired by the facade with a declaration in the
+	// state model; neither has an effect on any answer by itself.
 	AddValidatedProposition(p *types.Proposition) error
-	SetPropositionStrength(propositionID string, strength float64) error
 	AddConstruct(c *types.Construct) error
-	Deprecate(propositionID, reason string) error
-
-	// Audit. Returns events appended at or after `since`; pass zero time to
-	// retrieve the full history. Order is chronological by insertion.
-	GetHistory(since time.Time) ([]*types.OntologyEvent, error)
-
-	// RecordTune appends a consolidated "operator-tune" event to the audit log
-	// without modifying any proposition strength. It records the operator's
-	// intent string alongside the proposition IDs that were adjusted in the
-	// same batch. Implementations that cannot record return nil (best-effort;
-	// never blocks Tune).
-	RecordTune(text, operator string, appliedIDs []string) error
 }
 
 // ErrNotImplemented is returned by an OntologyContract implementation that
 // intentionally does not support a particular mutation in its profile.
 var ErrNotImplemented = contractError("operation not implemented by this ontology profile")
-
-// ── Updater ───────────────────────────────────────────────────────────────────
-
-// UpdaterContract incorporates telemetry into edge and node descriptors.
-//
-// Guarantees:
-//   - Idempotency: calling UpdateEdge or UpdateNode twice with the same eventID
-//     leaves stored state identical to what it was after the first call.
-//   - No-panic on valid input: out-of-range observations are clipped silently.
-//   - Reset semantics: Reset restores EMAWeight = PriorWeight, NObservations = 0,
-//     Confidence = 0.0 without deleting the edge.
-type UpdaterContract interface {
-	UpdateEdge(fromID, toID string, observation float64, eventID string) (*types.EdgeDescriptor, error)
-	UpdateNode(nodeID string, observation float64, eventID string) (*types.NodeDescriptor, error)
-	Reset(fromID, toID string) error
-}
 
 // ── Reasoner ──────────────────────────────────────────────────────────────────
 
@@ -129,7 +91,7 @@ type ReasonerContract interface {
 
 // Sentinel errors returned by ReasonerContract implementations.
 var (
-	ErrNoRationale      = contractError("reasoner must provide a non-empty rationale")
+	ErrNoRationale       = contractError("reasoner must provide a non-empty rationale")
 	ErrInsufficientTrust = contractError("no peer meets the minimum trust threshold")
 )
 
@@ -157,7 +119,19 @@ type ProposerContract interface {
 	// so callers (Bridge, IngestSample) need not know which pairs to supply.
 	ObserveConstruct(constructID string, value float64) error
 	GetCandidates() ([]*types.CandidateEdge, error)
-	Confirm(candidateID string) error
+	// Confirm marks a candidate accepted and returns the proposition it represents.
+	//
+	// It does not add that proposition anywhere: the caller does, through the facade,
+	// which is the only path that reaches both the declaration and the state model.
+	// This shape is what makes the "never modifies the backbone directly" guarantee
+	// above true rather than aspirational — an implementation that wrote the
+	// declaration itself would produce a confirmed candidate that appears in
+	// Propositions() and in no traversal, which is the failure the propose-then-confirm
+	// protocol exists to prevent.
+	//
+	// Returns (nil, nil) when the implementation has nothing to add — a disabled
+	// proposer, or a candidate already confirmed.
+	Confirm(candidateID string) (*types.Proposition, error)
 	Reject(candidateID string) error
 	Defer(candidateID string) error
 	GetHistory() ([]*types.CandidateEdge, error)

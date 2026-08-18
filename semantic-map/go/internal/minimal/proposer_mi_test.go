@@ -20,7 +20,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 		// PS→RC observations; P10 (PS→RC −) is in the bootstrap, but the
 		// suite's data has positive correlation, so the proposer emits a
 		// positive PS→RC candidate (conflict-pair sibling — multigraph-legal).
-		ontology := minimal.NewStaticDiSelectOntology()
+		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		return minimal.NewMICorrelationProposer(ontology, 0.8, 30, 100)
 	})
 }
@@ -28,7 +28,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 // ── Strongly correlated input → emits a candidate ─────────────────────────────
 
 func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	// Use a free pair (MU↛PS), threshold 0.8, minPairs 30, bufSize 200.
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
@@ -62,7 +62,7 @@ func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
 // ── Uncorrelated input → no candidate ─────────────────────────────────────────
 
 func TestMICorrelationProposer_UncorrelatedQuiet(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 	rng := rand.New(rand.NewSource(7))
 
@@ -83,7 +83,7 @@ func TestMICorrelationProposer_UncorrelatedQuiet(t *testing.T) {
 // ── Confirm: candidate becomes a real proposition ────────────────────────────
 
 func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	for i := 0; i < 60; i++ {
@@ -99,13 +99,27 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 	if len(cs) != 1 {
 		t.Fatalf("expected 1 candidate; got %d", len(cs))
 	}
-	if err := p.Confirm(cs[0].CandidateID); err != nil {
+	// Confirm returns the proposition rather than adding it: the caller applies it
+	// through the facade, which is the only path that reaches the state model too.
+	prop, err := p.Confirm(cs[0].CandidateID)
+	if err != nil {
 		t.Fatalf("Confirm error: %v", err)
+	}
+	if prop == nil {
+		t.Fatal("Confirm returned no proposition for a pending candidate")
+	}
+	if prop.FromConstruct != cs[0].FromID || prop.ToConstruct != cs[0].ToID {
+		t.Errorf("returned proposition %s→%s does not carry the candidate's endpoints %s→%s",
+			prop.FromConstruct, prop.ToConstruct, cs[0].FromID, cs[0].ToID)
+	}
+	if err := ontology.AddValidatedProposition(prop); err != nil {
+		t.Fatalf("applying the returned proposition: %v", err)
 	}
 
 	after, _ := ontology.Propositions()
 	if len(after) != beforeCount+1 {
-		t.Errorf("Confirm should add exactly 1 proposition; before=%d after=%d", beforeCount, len(after))
+		t.Errorf("applying the confirmation should add exactly 1 proposition; before=%d after=%d",
+			beforeCount, len(after))
 	}
 
 	// Confirmed candidate must no longer appear in pending.
@@ -140,7 +154,7 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 // ── Reject suppresses future re-emission ──────────────────────────────────────
 
 func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	feed := func() {
@@ -174,7 +188,7 @@ func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
 // ── Re-emission idempotency: many Observes → one CandidateID ──────────────────
 
 func TestMICorrelationProposer_NoDuplicateCandidate(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 
 	for i := 0; i < 500; i++ {
@@ -200,36 +214,41 @@ func TestMICorrelationProposer_NoDuplicateCandidate(t *testing.T) {
 // ── Coverage check: existing same-direction proposition blocks emission ───────
 
 func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
-	// P1 is SC→RC positive in the bootstrap. Same-direction proposals on the
-	// same pair must be blocked; opposite-direction (conflict-pair sibling)
-	// proposals are permitted (multigraph behavior).
+	// The spec's first proposition already occupies its (from, to) pair in one
+	// direction. Same-direction proposals on that pair must be blocked;
+	// opposite-direction (conflict-pair sibling) proposals are permitted
+	// (multigraph behavior).
+	from, to, sign := specPair()
+	if from == "" {
+		t.Skip("spec covers every pair in both directions; no free direction to test")
+	}
 	{
-		ontology := minimal.NewStaticDiSelectOntology()
+		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
-			y := 0.95 * x // strong positive
-			_ = p.Observe("SC", "RC", x, y)
+			y := sameDirectionSeries(sign, x)
+			_ = p.Observe(from, to, x, y)
 		}
 		cs, _ := p.GetCandidates()
 		if len(cs) != 0 {
-			t.Errorf("expected no candidate (SC→RC + already in P1); got %d", len(cs))
+			t.Errorf("expected no candidate (pair already in the backbone); got %d", len(cs))
 		}
 	}
 	{
-		ontology := minimal.NewStaticDiSelectOntology()
+		ontology := minimal.NewOntologyFromSpec(mustSpec())
 		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
-			y := 1.0 - 0.95*x // strong negative
-			_ = p.Observe("SC", "RC", x, y)
+			y := sameDirectionSeries(flipDir(sign), x)
+			_ = p.Observe(from, to, x, y)
 		}
 		cs, _ := p.GetCandidates()
 		if len(cs) != 1 {
-			t.Fatalf("expected 1 candidate for SC→RC negative (free direction); got %d", len(cs))
+			t.Fatalf("expected 1 candidate on the free direction of %s→%s; got %d", from, to, len(cs))
 		}
-		if cs[0].Direction != types.Negative {
-			t.Errorf("expected Negative direction; got %v", cs[0].Direction)
+		if wantDir := oppositeOf(sign); cs[0].Direction != wantDir {
+			t.Errorf("expected %v direction; got %v", wantDir, cs[0].Direction)
 		}
 	}
 }
@@ -237,7 +256,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 // ── Pearson sanity ────────────────────────────────────────────────────────────
 
 func TestMICorrelationProposer_PerfectCorrelation(t *testing.T) {
-	ontology := minimal.NewStaticDiSelectOntology()
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	p := minimal.NewMICorrelationProposer(ontology, 0.5, 10, 50)
 	// y = x exactly → r should be ≈ 1.0.
 	for i := 0; i < 20; i++ {

@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 // Descriptor captures one peer's identity, address, and current trust state.
@@ -73,9 +75,9 @@ func (d *Descriptor) clone() *Descriptor {
 // URL — calling Add twice with the same URL returns the existing descriptor
 // without disturbing its trust history.
 type Registry struct {
-	mu          sync.RWMutex
-	byID        map[string]*Descriptor
-	urlToID     map[string]string
+	mu      sync.RWMutex
+	byID    map[string]*Descriptor
+	urlToID map[string]string
 }
 
 // NewRegistry returns an empty in-memory peer registry.
@@ -292,6 +294,51 @@ func (c *Client) Cost(ctx context.Context, peerURL, taskType, sourceNodeID strin
 		return nil, fmt.Errorf("peers.Client.Cost: decode: %w", err)
 	}
 	return &out, nil
+}
+
+// State fetches the peer's semantic map — what properties it exhibits, how they
+// relate, and how much of that rests on observation.
+//
+// This is what makes "cluster-level questions go to peers" mean more than asking for
+// one number. Before this, an agent could ask a peer what an action would cost and
+// nothing else: not which properties the peer has, not which of them have gone quiet,
+// not what it believes about a relation. Those are the questions a node needs answered
+// to reason about anything beyond itself.
+//
+// The returned snapshot is stamped with the fetch time and the peer's own identity, and
+// it is the caller's job to keep it apart from local state. The wire type is
+// statemap.PeerState rather than a local copy of it, because duplicating the property
+// and relationship structs here would give the two ends of the exchange separate
+// definitions of the same thing — the shape they agree on is the whole point.
+func (c *Client) State(ctx context.Context, peerURL string) (*statemap.PeerState, error) {
+	u := strings.TrimRight(peerURL, "/") + "/state"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("peers.Client.State: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("peers.Client.State: transport: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("peers.Client.State: peer %s returned %d: %s",
+			peerURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var view statemap.StateView
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		return nil, fmt.Errorf("peers.Client.State: decode: %w", err)
+	}
+	if view.Owner == "" {
+		// Refused here rather than stored and puzzled over later: unattributed state is
+		// the one kind that could quietly be read as someone else's.
+		return nil, fmt.Errorf("peers.Client.State: peer %s returned state naming no owner: "+
+			"that agent is running without a node identity, so its properties cannot be "+
+			"attributed to a system", peerURL)
+	}
+	st := statemap.PeerStateFrom(peerURL, view, time.Now())
+	return &st, nil
 }
 
 // Health probes the peer's /healthz endpoint. Returns true only on 2xx —

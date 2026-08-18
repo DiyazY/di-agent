@@ -6,107 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/DiyazY/di-agent/internal/minimal"
 )
 
-// TestPerKDSeedingMatchesPriorWeights is the numerical verification that
-// `-kd <name>` applies the per-distribution edge weights from
-// prior_weights.json. For each (proposition, KD) pair in the file, the seeded
-// EdgeDescriptor.PriorWeight must equal
-// distribution_edge_weights[kd][edge_key].prior_weight.
-//
-// The storage backbone is a multigraph: Di-Select has three "conflict-pair"
-// propositions (P2/P3 on RC→PS, P5/P6 on CO→RR, P7/P9 on CE→MU) sharing
-// endpoints but with distinct PropositionIDs and opposite directions. Storage
-// must hold all 15 propositions as independent EdgeDescriptors.
-func TestPerKDSeedingMatchesPriorWeights(t *testing.T) {
-	pwPath := findPriorWeightsFile(t)
-
-	// Parse the file directly to get expected values.
-	raw, err := os.ReadFile(pwPath)
-	if err != nil {
-		t.Fatalf("read prior_weights.json: %v", err)
-	}
-	var expected priorWeightsFile
-	if err := json.Unmarshal(raw, &expected); err != nil {
-		t.Fatalf("parse prior_weights.json: %v", err)
-	}
-	if len(expected.Distributions) == 0 {
-		t.Fatal("prior_weights.json has no distributions")
-	}
-
-	for _, kd := range expected.Distributions {
-		kd := kd
-		t.Run(kd, func(t *testing.T) {
-			storage := minimal.NewInMemoryStorage()
-			ontology := minimal.NewStaticDiSelectOntology()
-			applyPriorWeights(ontology, &expected)
-			seedFromOntology(storage, ontology, &expected, kd)
-
-			perKD := expected.DistributionEdgeWeights[kd]
-			if len(perKD) == 0 {
-				t.Fatalf("no edge weights for KD=%q in file", kd)
-			}
-
-			edges, err := storage.AllEdges()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(edges) == 0 {
-				t.Fatal("storage has no edges after seeding")
-			}
-
-			matched := 0
-			for _, e := range edges {
-				key := edgeKey(e.FromID, e.ToID, e.PropositionID)
-				want, ok := perKD[key]
-				if !ok {
-					t.Errorf("seeded edge %q has no entry in prior_weights for KD=%q", key, kd)
-					continue
-				}
-				if !almostEqual(e.PriorWeight, want.PriorWeight, 1e-6) {
-					t.Errorf("edge %q PriorWeight: got %.6f, want %.6f", key, e.PriorWeight, want.PriorWeight)
-				}
-				if !almostEqual(e.EMAWeight, want.PriorWeight, 1e-6) {
-					t.Errorf("edge %q EMAWeight: got %.6f, want %.6f (should start equal to prior)",
-						key, e.EMAWeight, want.PriorWeight)
-				}
-				matched++
-			}
-			// All 15 Di-Select propositions (P1–P15) must be present after
-			// seeding — the multigraph storage holds one descriptor per
-			// proposition, including the three conflict pairs.
-			if matched < 15 {
-				t.Errorf("expected ≥15 matched edges (P1–P15) after multigraph seeding; got %d", matched)
-			}
-		})
-	}
-}
-
-// TestGlobalSeedingWhenKDIsEmpty verifies that when KD is unset, edges are
-// seeded from the global proposition strengths in prior_weights.json (NOT
-// the per-KD weights).
-func TestGlobalSeedingWhenKDIsEmpty(t *testing.T) {
-	pwPath := findPriorWeightsFile(t)
-	raw, _ := os.ReadFile(pwPath)
-	var pw priorWeightsFile
-	_ = json.Unmarshal(raw, &pw)
-
-	storage := minimal.NewInMemoryStorage()
-	ontology := minimal.NewStaticDiSelectOntology()
-	applyPriorWeights(ontology, &pw)
-	seedFromOntology(storage, ontology, &pw, "") // no KD
-
-	edges, _ := storage.AllEdges()
-	for _, e := range edges {
-		want := pw.Propositions[e.PropositionID].PriorStrength
-		if !almostEqual(e.PriorWeight, want, 1e-6) {
-			t.Errorf("edge %s→%s (prop %s): PriorWeight=%.6f; expected global %.6f",
-				e.FromID, e.ToID, e.PropositionID, e.PriorWeight, want)
-		}
-	}
-}
+// The two seeding tests that used to open this file inspected a storage graph that no
+// longer exists: they called applyPriorWeights and seedFromOntology directly and
+// checked the EdgeDescriptors that came out. Per-KD and global prior seeding are now
+// verified where they matter, through Build and against the state model the agent
+// reasons from — see TestBuildAppliesPerKDPriors and TestBuildWithoutKDUsesGlobalPriors
+// in build_priors_test.go. Re-adding a direct seeder test would check the seeder
+// against itself.
 
 // TestValidateKD checks that unknown distribution names are rejected.
 func TestValidateKD(t *testing.T) {

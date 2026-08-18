@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/peers"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -103,6 +104,38 @@ func Validate(reader SemanticMapReader, resp *ExplainResponse) ValidationResult 
 		case "construct":
 			if _, ok := constructIDs[c.ID]; !ok {
 				issues = append(issues, prefix+": no construct with this ID exists")
+			}
+
+		case "property":
+			// A property citation is checked against the state model — the model the
+			// agent reasons from. This is what makes the surface's claim hold: an answer
+			// about what the system is doing is verified against the same values a
+			// decision would have used, not against a backbone no decision reads.
+			sm := reader.State()
+			if sm == nil {
+				issues = append(issues, prefix+
+					": cites a property but this agent has no state model to check it against")
+				break
+			}
+			p, ok := sm.Property(c.ID)
+			if !ok {
+				issues = append(issues, prefix+": no property with this ID is in the map")
+				break
+			}
+			// Zero means "not cited": a citation that omits a value is making no
+			// numeric claim, and inventing one to check would reject honest answers.
+			if c.Value != 0 && !floatMatch(c.Value, p.Value) {
+				issues = append(issues, fmt.Sprintf("%s: cited value %.4f but the map holds %.4f",
+					prefix, c.Value, p.Value))
+			}
+			if c.Confidence != 0 && !floatMatch(c.Confidence, p.Confidence) {
+				issues = append(issues, fmt.Sprintf("%s: cited confidence %.4f but the map holds %.4f",
+					prefix, c.Confidence, p.Confidence))
+			}
+			if p.Status == statemap.Retired {
+				issues = append(issues, prefix+
+					": cites a retired property as current state; retired properties may be "+
+					"referenced as history, not as what the system is doing now")
 			}
 
 		case "event":

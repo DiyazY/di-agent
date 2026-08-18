@@ -71,8 +71,8 @@ type Config struct {
 // ProgressEvent is emitted once per replayed tick (relative_time). It is
 // the unit the CLI prints as a one-line "T=N → M samples sent" status.
 type ProgressEvent struct {
-	Tick        int64
-	SamplesSent int
+	Tick           int64
+	SamplesSent    int
 	SamplesSkipped int
 }
 

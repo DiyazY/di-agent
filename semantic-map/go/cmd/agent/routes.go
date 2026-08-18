@@ -4,9 +4,9 @@ package main
 //
 // Endpoint                          Method  Body / Path                    Status on success
 // ─────────────────────────────────────────────────────────────────────────────────────────
-// /ingest                           POST    {from_id,to_id,observation,…}  204
 // /cost                             GET     ?task=&node=                   200 ActionCost
 // /recommend                        POST    OffloadContext                 200 PeerRecommendation
+//                                                                          409 (no peer qualifies / none registered)
 // /simulate                         POST    {context,target_node_id}       200 OutcomeSimulation
 // /candidates                       GET     —                              200 []CandidateEdge
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -20,7 +20,9 @@ package main
 // /healthz                          GET     —                              200 HealthResponse
 // /version                          GET     —                              200 VersionResponse
 // /ontology/strength                POST    SetStrengthRequest             204
+//                                                                          404 (declared but not modelled)
 // /ontology/deprecate               POST    DeprecateRequest               204
+//                                                                          404 (declared but not modelled)
 // /ontology/construct               POST    AddConstructRequest            204
 // /ontology/proposition             POST    AddPropositionRequest          204
 // /agent/reset                      POST    ResetRequest                   204
@@ -55,6 +57,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/semmap"
@@ -65,9 +68,8 @@ import (
 // point for the daemon's URL surface; main only constructs the mux, the
 // SemanticMap, and the http.Server.
 //
-// Convention: the EXISTING endpoints (/ingest, /cost, /recommend, /simulate,
-// /candidates) keep their original http.Error plain-text error format to
-// minimize diff. Every NEW endpoint added in this expansion uses
+// Convention: the EXISTING endpoints (/cost, /recommend, /simulate, /candidates)
+// keep their original http.Error plain-text error format to minimize diff. Every NEW endpoint added in this expansion uses
 // writeError to emit a JSON {"error":"..."} body, and every new POST
 // handler calls requireJSON at the top as a lightweight CSRF mitigation.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
@@ -89,33 +91,44 @@ func registerStaticRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /ui/", staticHandler())
 }
 
-// registerExistingRoutes preserves the original five endpoints unchanged.
+// registerExistingRoutes preserves the original endpoints unchanged.
 // They are kept in their own function so the diff against pre-expansion
 // behavior is obvious to reviewers.
 func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
-	// POST /ingest  {"from_id":"SC","to_id":"RC","observation":0.7,"event_id":"evt-1"}
-	mux.HandleFunc("POST /ingest", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			FromID      string  `json:"from_id"`
-			ToID        string  `json:"to_id"`
-			Observation float64 `json:"observation"`
-			EventID     string  `json:"event_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := sm.Ingest(req.FromID, req.ToID, req.Observation, req.EventID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-
 	// GET /cost?task=pod-scheduling&node=node_1
+	//
+	// `node` names the machine the question is about, and this agent can only
+	// answer for itself: the map is node-local, so its graph holds this machine's
+	// evidence and nothing else. Asking about another machine is answered with 409
+	// and that machine's own URL when it is a known peer, because returning local
+	// numbers under a peer's name would be a fabrication — and the previous
+	// behaviour, ignoring the parameter and computing locally regardless, was
+	// exactly that.
+	//
+	// `node_id` is accepted as an alias: callers and demo scripts used both
+	// spellings, and the unrecognised one silently became the empty string.
 	mux.HandleFunc("GET /cost", func(w http.ResponseWriter, r *http.Request) {
 		task := r.URL.Query().Get("task")
+		if task == "" {
+			task = r.URL.Query().Get("task_type")
+		}
 		node := r.URL.Query().Get("node")
+		if node == "" {
+			node = r.URL.Query().Get("node_id")
+		}
+		if self := sm.SelfID(); node != "" && self != "" && node != self &&
+			!sm.AcceptsForeignSamples() {
+			msg := fmt.Sprintf("this agent models %q and cannot answer for %q; ask that "+
+				"machine's own agent", self, node)
+			for _, p := range knownPeers(sm) {
+				if p.ID == node || strings.Contains(p.URL, node) {
+					msg += fmt.Sprintf(" at %s/cost", p.URL)
+					break
+				}
+			}
+			writeError(w, http.StatusConflict, msg)
+			return
+		}
 		result, err := sm.CostOfAction(task, node)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -133,7 +146,16 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		}
 		result, err := sm.RecommendPeer(&ctx)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			// ErrInsufficientTrust covers "no peer registry", "no peers
+			// registered" and "no peer qualifies" — all ordinary states of a
+			// single-node or freshly-started deployment, not server faults.
+			// 409 says the request was well-formed but current state cannot
+			// satisfy it, which is what an operator needs to distinguish.
+			if errors.Is(err, contracts.ErrInsufficientTrust) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, result)
@@ -375,7 +397,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.SetPropositionStrength(req.PropositionID, req.Strength); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, statusForOntologyError(err), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -392,7 +414,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		if err := sm.Deprecate(req.PropositionID, req.Reason); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, statusForOntologyError(err), err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -512,13 +534,35 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		sample, err := sampleRequestToTypes(&req)
+		sample, err := sampleRequestToTypes(&req, sm)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := sm.IngestSample(sample); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			// A foreign sample is the caller sending this agent another machine's
+			// telemetry, which is a configuration answer rather than a fault.
+			status := http.StatusInternalServerError
+			if errors.Is(err, semmap.ErrForeignSample) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed {
+			// Recorded as a property of the system, but no construct summarises it.
+			// Saying so keeps a typo visible without discarding a reading the system
+			// actually produced — a model that can only hold what someone declared in
+			// advance is a model of the system as it was when they wrote it down.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"recorded":    true,
+				"routed":      false,
+				"metric_type": string(sample.MetricType),
+				"note": "not in the domain specification's routing table: recorded as a " +
+					"property, not summarised by any construct",
+			})
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -853,4 +897,34 @@ func serveExplainStream(
 	if _, err := streamer.ExplainStream(r.Context(), req, emit); err != nil {
 		log.Printf("explain: stream ended with error: %v", err)
 	}
+}
+
+// statusForOntologyError maps an operator mutation failure to an HTTP status.
+//
+// Naming a proposition this agent declares but does not model is the caller naming
+// something that does not exist here — a 404, not a fault. Reporting 500 said the daemon
+// had broken when in fact it had correctly refused, which sends an operator looking for a
+// bug instead of at their request.
+func statusForOntologyError(err error) int {
+	switch {
+	case err == nil:
+		return http.StatusNoContent
+	case errors.Is(err, semmap.ErrNotModelled):
+		return http.StatusNotFound
+	case errors.Is(err, semmap.ErrNoStateModel):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// knownPeers returns the registered peers, or nil when the registry is empty or
+// unavailable. Used only to enrich an error message, so a failure to read it is
+// not worth propagating.
+func knownPeers(sm *semmap.SemanticMap) []*peers.Descriptor {
+	list, err := sm.Peers().List()
+	if err != nil {
+		return nil
+	}
+	return list
 }
