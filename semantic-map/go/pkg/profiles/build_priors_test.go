@@ -1,13 +1,15 @@
 package profiles
 
 import (
+	"bytes"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
-// TestBuildAppliesPerKDPriors exercises the path the daemon actually uses —
+// TestBuildSeedsStructureAndNoMagnitude exercises the path the daemon actually uses —
 // Build() with the same Config literal cmd/agent/main.go constructs — rather
 // than calling applyPriorWeights and seedFromOntology directly the way
 // TestPerKDSeedingMatchesPriorWeights does.
@@ -19,7 +21,14 @@ import (
 // started normally on hardcoded ontology defaults. A library-level test could
 // not catch that; this test pins the Build-with-full-Config contract, and
 // TestRejectsPositionalArgs in cmd/agent covers the CLI side.
-func TestBuildAppliesPerKDPriors(t *testing.T) {
+//
+// What it pins has since inverted. Build used to seed each relationship's strength
+// from prior_weights.json, and this test checked the number arrived. Strengths are
+// now learned only: a calibration file supplies no magnitude, and a freshly built
+// agent must report that it does not yet know what any relationship is worth. The
+// failure this guards against is therefore the opposite one — a number appearing
+// where nothing has been measured.
+func TestBuildSeedsStructureAndNoMagnitude(t *testing.T) {
 	pwPath := findPriorWeightsFile(t)
 
 	pw, err := loadPriorWeights(pwPath)
@@ -56,72 +65,82 @@ func TestBuildAppliesPerKDPriors(t *testing.T) {
 				t.Fatal("no edges after Build")
 			}
 
-			perKD := pw.DistributionEdgeWeights[kd]
-			if len(perKD) == 0 {
-				t.Fatalf("no per-KD edge weights for %q", kd)
+			// The artefact must still parse and must still describe the same structure
+			// the map ended up with — otherwise this test would keep passing against a
+			// file that had quietly stopped saying anything.
+			if len(pw.AgentEdges) == 0 {
+				t.Fatalf("artefact declares no agent_edges; nothing pins the structure "+
+					"the map was seeded from (kd=%q)", kd)
+			}
+			declared := map[string]agentEdge{}
+			for _, ae := range pw.AgentEdges {
+				declared[ae.PropositionID] = ae
+			}
+			// And it must carry no magnitude to seed from. This is the assertion that
+			// would have caught the artefact keeping a prior_weight table long after
+			// the daemon stopped reading it.
+			raw, err := os.ReadFile(pwPath)
+			if err != nil {
+				t.Fatalf("re-reading the artefact: %v", err)
+			}
+			for _, banned := range []string{"prior_strength", "prior_weight", "ema_weight"} {
+				if bytes.Contains(raw, []byte(banned)) {
+					t.Errorf("artefact still emits %q: a magnitude nothing reads is worse "+
+						"than an absent one, because nothing about it looks wrong", banned)
+				}
 			}
 
 			checked := 0
 			for _, e := range edges {
-				key := edgeKey(e.FromID, e.ToID, e.PropositionID)
-				want, ok := perKD[key]
-				if !ok {
-					t.Errorf("edge key %q absent from prior_weights.json", key)
-					continue
+				// Structure arrives: the edge exists, between the declared endpoints,
+				// in the declared direction.
+				if e.FromID == "" || e.ToID == "" || e.PropositionID == "" {
+					t.Errorf("edge %+v is missing structure", e)
 				}
-				if diff := e.PriorWeight - want.PriorWeight; diff > 1e-6 || diff < -1e-6 {
-					t.Errorf("%s: Build seeded PriorWeight=%.6f, want %.6f",
-						e.PropositionID, e.PriorWeight, want.PriorWeight)
+				// Magnitude does not.
+				if e.Established != nil {
+					t.Errorf("%s: Build produced an established strength %.6f; the "+
+						"long-run layer is accumulated from this machine's own pairs and "+
+						"nothing may seed it", e.PropositionID, *e.Established)
 				}
-				// EMA starts equal to the prior, so a mis-seeded prior would
-				// also corrupt the cold-start effective weight.
-				if diff := e.EMAWeight - want.PriorWeight; diff > 1e-6 || diff < -1e-6 {
-					t.Errorf("%s: Build seeded EMAWeight=%.6f, want %.6f (cold start)",
-						e.PropositionID, e.EMAWeight, want.PriorWeight)
+				if e.Assertion != nil {
+					t.Errorf("%s: Build produced an assertion %.6f; only an operator "+
+						"sets one", e.PropositionID, *e.Assertion)
+				}
+				if e.Effective != nil {
+					t.Errorf("%s: Build produced an effective strength %.6f before any "+
+						"observation; a cold-start agent must report that it does not "+
+						"know yet", e.PropositionID, *e.Effective)
+				}
+				if e.Basis != "unknown" {
+					t.Errorf("%s: basis %q at cold start, want unknown",
+						e.PropositionID, e.Basis)
+				}
+				if e.NObservations != 0 || e.Confidence != 0 {
+					t.Errorf("%s: cold start reports n=%d confidence=%.4f",
+						e.PropositionID, e.NObservations, e.Confidence)
+				}
+				// Structure in the map matches structure in the artefact.
+				if ae, ok := declared[e.PropositionID]; ok {
+					if ae.FromID != e.FromID || ae.ToID != e.ToID {
+						t.Errorf("%s: map has %s→%s, artefact declares %s→%s",
+							e.PropositionID, e.FromID, e.ToID, ae.FromID, ae.ToID)
+					}
 				}
 				checked++
 			}
-			if want := len(pw.Propositions); checked != want {
-				t.Errorf("checked %d edges, want %d", checked, want)
+			if checked == 0 {
+				t.Error("no edges reached the state model")
 			}
 		})
 	}
 }
 
-// TestBuildWithoutKDUsesGlobalPriors guards the fallback: with -priors but no
-// -kd, edges take the global calibrated proposition strengths, not the
-// ontology's hardcoded defaults.
-func TestBuildWithoutKDUsesGlobalPriors(t *testing.T) {
-	pwPath := findPriorWeightsFile(t)
-	pw, err := loadPriorWeights(pwPath)
-	if err != nil {
-		t.Fatalf("loadPriorWeights: %v", err)
-	}
-
-	cfg := DefaultConfig()
-	cfg.DomainSpec = mustSpec()
-	cfg.PriorWeightsPath = pwPath
-	cfg.KD = ""
-
-	sm, _, err := Build("edge-minimal", cfg)
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	edges, err := sm.AllEdges()
-	if err != nil {
-		t.Fatalf("AllEdges: %v", err)
-	}
-	for _, e := range edges {
-		want, ok := pw.Propositions[e.PropositionID]
-		if !ok {
-			continue
-		}
-		if diff := e.PriorWeight - want.PriorStrength; diff > 1e-6 || diff < -1e-6 {
-			t.Errorf("%s: PriorWeight=%.6f, want global %.6f",
-				e.PropositionID, e.PriorWeight, want.PriorStrength)
-		}
-	}
-}
+// The global-prior fallback test that stood here is gone with the thing it tested.
+// Seeding resolved a magnitude per relationship — per-cluster calibration, else the
+// global proposition strength, else a neutral 0.5 — and this test pinned the middle
+// rung. There is no chain now: a declaration carries no magnitude at all, which
+// TestBuildSeedsStructureAndNoMagnitude asserts directly.
 
 // TestBuildKeepsOntologyAndStorageInAgreement pins the invariant that the prior
 // a caller reads from GET /propositions is the one the Reasoner traverses. Per-KD
@@ -165,9 +184,17 @@ func TestBuildKeepsOntologyAndStorageInAgreement(t *testing.T) {
 					t.Errorf("edge %s has no matching proposition", e.PropositionID)
 					continue
 				}
-				if diff := got - e.PriorWeight; diff > 1e-9 || diff < -1e-9 {
-					t.Errorf("%s: proposition strength %.6f, edge PriorWeight %.6f",
-						e.PropositionID, got, e.PriorWeight)
+				// The two surfaces must report the same number, whatever it is. At cold
+				// start that number is nothing on both sides: the edge has no effective
+				// strength and the declaration layer reports 0 for it.
+				var want float64
+				if e.Effective != nil {
+					want = *e.Effective
+				}
+				if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+					t.Errorf("%s: proposition reports %.6f, edge effective %.6f — a "+
+						"caller reading GET /propositions must see what the Reasoner "+
+						"traverses", e.PropositionID, got, want)
 				}
 			}
 		})
