@@ -45,19 +45,79 @@ The Semantic Map has two layers that are always present simultaneously:
 │  Statistical descriptors updated by live telemetry             │
 │  "In THIS cluster, under THESE workloads, here is reality"     │
 ├────────────────────────────────────────────────────────────────┤
-│  Layer 1 — Backbone (stable prior)                             │
+│  Layer 1 — Backbone (structure only, no magnitudes)            │
 │  Constructs + causal propositions, declared in domain_spec.json │
 │  "What matters and how things relate"                          │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**The cold-start arc:** on day one the agent relies entirely on Di-Select priors. As deployment telemetry flows in, each edge's EMA drifts toward observed reality. A `confidence` score on every edge tracks the transition:
+**The cold-start arc:** on day one the agent has no magnitudes at all, and says so. A
+relationship's strength is learned from the machine, on two timescales, with an
+operator able to override either:
 
 ```
-effective_value = (1 - confidence) × prior  +  confidence × ema
+effective = assertion    if an operator set one          — takes effect in full
+          | established  else, once pairs have accumulated — the machine's baseline
+          | recent       else, once anything has folded    — the last few pairs
+          | unknown      otherwise
 ```
 
-At `confidence = 0.0` the agent uses the literature. At `confidence = 1.0` it uses its own deployment history. The transition is smooth and automatic.
+`Basis()` names which of the four answered, and the fourth is the one that matters:
+"I have not measured this yet" is representable, so no caller is handed a figure as
+though it had been measured.
+
+**Why two learned layers.** Both smooth the same input — |r| over a trailing window of
+pairs — at different time constants. `recent` (α = 0.20, memory ≈ 5 pairs) answers what
+is happening now. `established` (α_slow = 0.001, memory ≈ 2.3 workload regimes) answers
+what is normal for this machine. Their *difference* answers how unusual the present is,
+which is the quantity an agent actually wants and the honest replacement for measuring
+divergence from a calibration — that only ever described the calibration.
+
+The separation is real on replayed telemetry. One agent, three regimes in sequence:
+
+| after | recent | established | basis |
+| ----- | ------ | ----------- | ----- |
+| *(cold start)* | — | — | `unknown` |
+| `dp_redis_density` (528 pairs) | 0.887 | 0.442 | `established` |
+| `cp_heavy_12client` (729) | 0.555 | 0.527 | `established` |
+| `idle` (911) | 0.007 | 0.558 | `established` |
+
+The last row is the point. An idle stretch drives the recent estimate to 0.007, because
+an idle machine exhibits no association between resource and pressure. A single-layer
+agent would take that as having *learned* that resource does not affect pressure. The
+established layer holds 0.558 — what this machine does when it is doing anything — and
+the gap is the signal that the present is atypical.
+
+**α_slow sits on a measured trade-off, and is not a derived optimum.** The criterion is
+the one the layer's purpose dictates: a baseline must distinguish machines without
+depending on the order the machine happened to be exercised in. An offline fit over 231
+traces reported an interior maximum in that ratio; sweeping the constant against the
+daemon itself, over 135 accumulated streams, showed the maximum to be an artefact of the
+offline streams being ~6× shorter than a deployment's. At deployment scale the ratio
+rises monotonically toward slower constants and peaks where the memory exceeds the whole
+history — the degenerate case, where the estimate is a running mean and order-invariant
+by definition.
+
+What the sweep establishes is the trade-off: order-invariance improves 16-fold from
+α = 0.20 to 0.0001 while the baseline's span over a stream falls from 0.539 to 0.099, so
+the slow end buys stability by ceasing to move. 0.001 keeps ten times the recent layer's
+order-invariance and about a third of its responsiveness. Pinning one value needs a
+stated requirement about how fast a baseline should follow a persistent change, which is
+a modelling decision rather than a measurement. See `convergence/derive_alpha_slow.py`
+(offline) and `convergence/sweep_alpha_slow.sh` (daemon-fidelity).
+
+**The estimate is bias-corrected**, dividing by 1 − (1−α)^n, and that is substance
+rather than polish. Measuring the uncorrected form is what showed why: across five
+replays of one workload on one machine its end value varied by σ ≈ 0.32 against 0.025
+for the fast layer, because with ~89 pairs per run and a memory of 1000 it never left
+its transient. A layer whose value depends mostly on its own initialisation is not a
+baseline.
+
+**Establishing takes longer than one run** — ~1000 pairs, about two workloads or half an
+hour at 1 Hz. So the established layer only means anything because the map persists
+across restarts (§ Persistence): an agent that has watched a machine for a week returns
+with a baseline, and that is what makes the persistence guarantee load-bearing rather
+than a convenience.
 
 **What is stable and what is not:**
 
@@ -109,21 +169,46 @@ topology.
 
 **Which constructs belong here.** A quantity that cannot change while the cluster
 runs is not state; it is a property of the platform, fixed when the platform was
-chosen. The committed specification therefore declares the three constructs a
-running cluster exhibits — RC (resource cost), CO (connectivity), PS
-(performance) — and the four Di-Select propositions whose *both* endpoints are
-among them: P2 and P3 on RC→PS, P10 on PS→RC, P13 on CO→PS. Security posture,
-maintainability and ecosystem maturity are selection-time knowledge and stay with
-Di-Select. Reliability is genuine runtime state but no MetricType routes to it
-yet.
+chosen. The committed specification therefore declares the two constructs this deployment
+both exhibits *and* measures — RC (resource cost) and PS (performance) — and the two
+Di-Select propositions over them whose declared direction the telemetry does not
+contradict: **P3 on RC→PS (positive)** and **P10 on PS→RC (positive, corrected from
+Di-Select's stated sign)**. Security posture, maintainability and ecosystem maturity
+are selection-time knowledge and stay with Di-Select. Reliability is genuine runtime
+state but no MetricType routes to it yet.
 
-The reason to exclude rather than seed-and-freeze is mechanical. An edge with no
-observations has `effective ≡ prior`, so it contributes a constant to the
-sensitivity sum and nothing at all to a comparison between machines, at every
-sample count and after any operator adjustment. Frozen edges change no decision;
-what they do change is `mean_confidence`, which divides by the number of edges
-present. Carrying them makes the agent's self-report worse without making its
-decisions better.
+Two exclusions were made by measurement rather than on principle, and both are
+recorded in `prior_weights.json` beside the propositions they removed. **CO** carried
+only network throughput, which arrives at ~10⁻⁵ of the link capacity it is normalised
+against, leaving the derived construct at 1.4 × 10⁻⁴ — fittable and unable to move any
+answer — so CO and P13 with it were dropped. **P2** was dropped as a duplicate: its
+subject is scheduling throughput, which is not measured here, and once its sign is
+corrected for this deployment's polarity it is P3's contrapositive on the same signal.
+A third route, `io_pressure_ratio`, was removed for a sharper reason: it was observed
+306 times and read exactly zero on every one of them, and since a derived property is
+the mean of its members, a constant-zero member **halved the construct it fed** —
+derived PS reported 0.0247 against a true stall fraction of 0.0495.
+
+The reason to exclude rather than seed-and-freeze is mechanical. A relationship with
+no observations reports `unknown` and has no effective value, so there is nothing for
+the sensitivity sum to read and it does not enter the arithmetic at all. Under the
+seeded design the conclusion was the same by a longer route: `effective ≡ prior` for
+an unobserved edge, so its deviation from that prior was exactly zero at every sample
+count and after any operator adjustment. Either way, frozen relations change no
+decision; what they do change is `mean_confidence`, which averages over the
+relationships present, and `n_unknown`, which counts the ones with nothing behind
+them. Carrying them makes the agent's self-report worse without making its decisions
+better.
+
+**One case is not inert, and it is why the scoping rule is stronger than "carry what
+is observable".** A relationship whose declared sign its machine contradicts *does*
+collect pairs — its gate refuses each one, so it holds a measured strength of zero,
+which is indistinguishable from a quiet system by the strength alone. Two of the four
+propositions the specification carried until recently were in that state on every
+cluster, contradicted in 45% to 100% of paired observations. The map now declares a
+polarity per construct and per metric route, reconciles the two at ingestion, and
+counts sign agreements and conflicts per relationship, so a wrong declaration is a
+number the agent publishes rather than an inference a reader has to make.
 
 ### The agent at a glance
 
@@ -201,26 +286,47 @@ Four distinct things can happen to this daemon. Each takes a different path.
 ```
 Collector.Collect()
   └─▶ []*MetricSample {NodeID, MetricType, Value, EventID}
-        └─▶ routing: MetricType → construct (e.g. cpu_utilization → RC)
-              └─▶ Ontology.Relationships(RC) → every proposition touching RC
-                    └─▶ statemap.ObserveEvent(property, value, at, eventID)
-                          └─▶ Storage: ema += α(value − ema); n_obs++; confidence = n_obs/N
+        ├─▶ polarity: NormalizeForConstruct — reflect within range if route and
+        │             construct disagree (v' = lo + hi − v), once, before storing
+        └─▶ statemap.ObserveEvent(property, value, at, eventID)   ← recorded FIRST,
+              │        so a metric no route names still becomes a property
+              ├─▶ property: ema += α(value − ema); n_obs++; confidence = n_obs/N
+              ├─▶ routing: MetricType → construct (e.g. cpu_utilization → RC)
+              │            → derived property recomputed from its members
+              └─▶ paired estimator, per relationship incident to what moved:
+                    both endpoints inside the tolerance window → one pair;
+                    strength = |r| over the window, zero if the sign is
+                    contradicted; SignAgreements/SignConflicts advance either way;
+                    recent EMA at α, established EMA at α_slow, bias-corrected
 ```
-*Idempotent per `(edge, event_id)` — replaying the same sample changes nothing.*
+*Idempotent per `(property, event_id)` — replaying the same sample changes nothing:
+not the value, not `n_observations`, not the estimator's pair window.*
 
 **② A decision is requested** — the loop that makes the agent useful.
 
 ```
 GET /cost?task=pod-scheduling&node=master
   └─▶ Reasoner.CostOfAction
-        ├─▶ Storage.AllEdges()          — current EMA, prior, confidence per edge
-        ├─▶ Ontology.Propositions()     — skip anything Deprecated
-        └─▶ for each RC-destination edge:
-              effective = (1−c)·prior + c·ema
-              ResourceCost += (effective − prior) · sign(direction)
-        └─▶ ActionCost {ResourceCost, Confidence, Rationale, GraphPathUsed}
+        ├─▶ cost roles from spec.CostModel — which construct is resource, which pressure
+        ├─▶ state.Decide(id) → DecisionBuilder: every read is recorded by the reading
+        ├─▶ LEVEL      = b.Property(construct).Value        ← the estimate itself
+        └─▶ SENSITIVITY, reported beside the level, never added into it:
+              for each relationship INTO the construct, source property present:
+                eff, known := rel.Effective()   ← assertion | established | recent
+                if !known { continue }          ← absent from the sum, not a zero
+                sum += eff · sign(direction)
+        └─▶ ActionCost {ResourceCost=level, ResourceSensitivity=sum,
+                        Confidence, Rationale, GraphPathUsed, DecisionID}
 ```
-*Pure read. No state changes. Always returns a rationale naming the edges used.*
+*Pure read. No state changes. Always returns a rationale naming the relationships used
+and a `DecisionID` that reproduces its inputs afterwards via `GET
+/state/decisions/{id}`. Retired relationships leave the traversal, so deprecation needs
+no separate filter here. The level/sensitivity split is empirical: on 182 replayed runs
+the observed level ranked the next interval's pressure at 0.622 top-1 accuracy, and
+adding the relation term degraded it monotonically to 0.582 at unit weight with no
+mixing coefficient improving on the level alone. Sensitivity answers the question the
+level cannot — what happens if the source construct changes — which is what
+`SimulateOutcome` asks and `CostOfAction` does not.*
 
 **③ The graph is mutated** — the loop that keeps the agent honest.
 
@@ -325,26 +431,37 @@ Compliance suites exist for all five contracts (`compliance/{collector,ontology,
 
 ### End-to-end validation: integration scenarios
 
-Compliance proves each part works in isolation. **Scenarios prove the parts compose** into the behaviors the architecture promises. `internal/minimal/tests/scenarios_test.go` runs six narrated end-to-end flows against the same wiring the production daemon uses; each emits `t.Logf` snapshots so `go test -v -run TestScenario` reads like a paper results section while hard assertions guard the mechanics that must not regress:
+Compliance proves each part works in isolation. **Scenarios prove the parts compose** into the behaviors the architecture promises. `internal/minimal/tests/scenarios_test.go` runs seven narrated end-to-end flows against the same wiring the production daemon uses; each emits `t.Logf` snapshots so `go test -v -run TestScenario` reads like a paper results section while hard assertions guard the mechanics that must not regress:
 
 | Scenario                            | Demonstrates                                                                                          |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `ColdStart`                         | every declared relationship seeded, confidence=0, effective value == prior — agent defers entirely to the calibration |
-| `ConvergenceOnOneEdge`              | 500 obs at fixed value: the learned strength drifts prior → observed, confidence climbs 0→1, effective crosses over |
-| `PerKDDecisionsDiffer`              | Two agents with same query but different `-kd`: cost outputs diverge — the per-KD priors steer        |
-| `DeprecationShrinksGraph`           | After `Deprecate("P1")`: graph path length drops by exactly 1; the model retains the retired relationship |
-| `IdempotentReplay`                  | 200 obs replayed with same eventIDs is a no-op; new eventIDs accumulate — idempotency is per-event    |
-| `AuditTrailRecordsEverything`       | Four operator mutations through the facade → each appears in the journal, in chronological order       |
+| `ColdStart`                                    | every declared relationship present with confidence=0 and **no effective value at all** — `Effective()` reports not-known, so the agent says it does not know rather than reporting a constant |
+| `ConvergenceOnOneEdge`                         | observations at a fixed value: the recent layer converges, the established layer follows more slowly, confidence climbs 0→1 |
+| `PerKDAgentsAreIdenticalUntilTheyObserve`      | two agents built with different `-kd` produce **identical** cost answers until telemetry arrives — the inversion of the old expectation, and the point: nothing distinguishes them but what they measure |
+| `DeprecationShrinksGraph`                      | after `Deprecate(...)`: graph path length drops by exactly 1; the model retains the retired relationship with its learned strength |
+| `IdempotentReplay`                             | observations replayed with the same eventIDs are a no-op; new eventIDs accumulate — idempotency is per-event, for value, count and pair window alike |
+| `AuditTrailRecordsEverything`                  | four operator mutations through the facade → each appears in the journal, in chronological order |
+| `CoordinationOffload`                          | a peer's cost query, the trust-weighted ranking, and the offload accept/reject path end to end |
 
-A separate numerical verification (`pkg/profiles/build_priors_test.go::TestBuildAppliesPerKDPriors`) confirms that for every KD in `prior_weights.json` and every proposition in the model, the seeded prior matches the file to 1e-6 precision. It runs through `Build` with the same Config literal the daemon constructs, which a library-level test of the seeder could not do — and that distinction caught a real failure once, when the convergence harness passed `-proposer false` and Go's flag package silently dropped every flag after it, including `-priors` and `-kd`.
+A separate verification (`pkg/profiles/build_priors_test.go::TestBuildSeedsStructureAndNoMagnitude`)
+asserts the inverse of what its predecessor did: for every KD in `prior_weights.json`
+and every proposition in the map, the seeded relationship has **no** effective value and
+basis `unknown`. The test it replaced confirmed that each seeded prior matched the file
+to 1e-6; the inversion is deliberate, and the failure it now guards against is a number
+appearing where nothing has been measured. It still runs through `Build` with the same
+Config literal the daemon constructs, which a library-level test of the seeder could not
+do — and that distinction caught a real failure once, when the convergence harness
+passed `-proposer false` and Go's flag package silently dropped every flag after it,
+including `-priors` and `-kd`.
 
-`TestBuildKeepsOntologyAndStorageInAgreement` pins a second invariant: the prior a
-caller reads from `GET /propositions` is the one every answer is computed from. Per-KD
-seeding writes the calibrated weight into the state model *and* back into the
-ontology's proposition strength. Before that write-back existed the two layers
-disagreed for the whole cold-start period — k0s P2 was exposed as the global 0.55
-while the operative value was the calibrated 0.319 — and the first operator tune
-recorded its transition from a number the agent had never used.
+`TestBuildKeepsOntologyAndStorageInAgreement` pins a second invariant: the strength a
+caller reads from `GET /propositions` is the one every answer is computed from. This
+mattered acutely under the seeded design, where per-KD seeding wrote a calibrated weight
+into the state model but left the declaration layer at its global value — k0s P2 was
+exposed as the global 0.55 while the operative value was the calibrated 0.319, and the
+first operator tune recorded its transition from a number the agent had never used. With
+no magnitudes seeded the two layers cannot disagree at startup, and the test now guards
+the same property across operator mutations instead, where an assertion must reach both.
 
 #### Evolution scenarios
 
@@ -352,21 +469,29 @@ recorded its transition from a number the agent had never used.
 
 | Scenario                              | Demonstrates                                                                                                |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `ColdToWarmConvergence`               | Constant CPU=0.8 for 500 ticks; P2/P3/P10 EMA → 0.8, confidence 0→1, advisor flags the 6 high-Δ edges        |
-| `RegimeChange`                        | Step pattern 0.3→0.85→0.3 over 800 ticks; EMA tracks each regime, ending pulled back toward 0.3              |
-| `ConflictPairCoupling`                | P2 (RC→PS−) and P3 (RC→PS+) share EMA + confidence updates from one observation; reasoner aggregates both    |
-| `MultiConstructStress`                | Four simultaneous patterns drive RC, CO, PS; edges touching observed constructs converge, others stay prior |
-| `DeprecationFromContradiction`        | Low CO evidence pushes P5 off prior; advisor fires (|Δeff|+conf); operator deprecates; path shrinks by 1     |
-| `NewEdgeProposeConfirm`               | MI proposer detects MU↔PS correlation; operator confirms; backbone grows 15→16 (evidence: `proposer-mi`)     |
+| `ColdToWarmConvergence`               | a sustained pattern drives both endpoints; the recent layer converges and confidence climbs 0→1               |
+| `RegimeChange`                        | a step pattern: the recent layer tracks each regime while the established layer lags, which is the divergence `novelty` reports |
+| `ConflictPairCoupling`                | two relationships over one construct pair receive the same pairs and learn the same magnitude — Pearson correlation is symmetric, so direction comes from the declaration and not from the evidence |
+| `MultiConstructStress`                | simultaneous patterns across constructs; relationships whose *both* endpoints vary converge, and one driven on a single endpoint never advances |
+| `DeprecationFromContradiction`        | evidence departs from the established baseline; the advisor fires; the operator deprecates; the traversal path shrinks by 1 |
+| `NewEdgeProposeConfirm`               | the MI proposer detects an undeclared correlation; the operator confirms; the backbone grows by one, at no strength, evidence `proposer-mi` |
+
+Two notes on reading that table. `ConflictPairCoupling` demonstrates a *limit* rather
+than a capability: the multigraph can host two claims over one pair, and the estimator
+cannot tell them apart. And these scenarios run against the `ScriptedCollector`, so they
+exercise construct pairs the committed specification no longer declares — that is
+deliberate, because the compliance suites assert against whatever specification is
+loaded rather than a fixed graph, and the scripted spec is how behaviour on a larger
+graph stays tested after the committed one was narrowed.
 
 ### The ontology is alive
 
-The ontology is not a static reference. Empirical priors get recalibrated as new papers land, operators deprecate claims that the deployment's evidence contradicts, and new domains may introduce new constructs. The contract therefore admits four kinds of mutation, each emitting one `OntologyEvent` to an append-only audit log:
+The ontology is not a static reference. Operators assert strengths when they know something the estimator does not, deprecate claims the deployment's evidence contradicts, and new domains may introduce new constructs. The contract therefore admits four kinds of mutation, each emitting one `OntologyEvent` to an append-only audit log:
 
 | Mutation                          | Method                                       | Typical caller                          | Write to the state model |
 | --------------------------------- | -------------------------------------------- | --------------------------------------- | ------------------------ |
-| Claim magnitude recalibrated      | `SetPropositionStrength(propID, strength)`   | `prior_init` pipeline; operator tuning  | asserts the `Prior` on every relationship carrying that label, with actor and reason |
-| New claim added (validated)       | `AddValidatedProposition(p)`                 | `Proposer.Confirm` (post-review)        | declares the relationship at its prior with zero confidence; declares an endpoint property first if nothing routes to that construct |
+| Claim magnitude asserted          | `SetPropositionStrength(propID, strength)`   | Operator tuning                         | writes `Assertion` on every relationship carrying that label, with actor and reason; both learned layers are left untouched |
+| New claim added (validated)       | `AddValidatedProposition(p)`                 | `Proposer.Confirm` (post-review)        | declares the relationship with no strength and zero confidence; declares an endpoint property first if nothing routes to that construct |
 | New construct added               | `AddConstruct(c)`                            | Operator (new domain extension)         | declares an observed property at zero confidence — nothing routes to it, so a derived one would summarise nothing |
 | Existing claim retired (soft)     | `Deprecate(propID, reason)`                  | Operator (evidence-against accumulated) | retires the relationship: it leaves the traversal, keeps its record, and reads as deprecated on the graph surfaces |
 
@@ -374,7 +499,27 @@ The ontology is not a static reference. Empirical priors get recalibrated as new
 
 **It is now structural rather than a rule to remember.** The declaration layer no longer *has* a strength to set or a flag to raise, so there is no longer a way to perform half of one of these mutations: `SetPropositionStrength` and `Deprecate` exist only on the facade, and each returns `ErrNotModelled` — rendered as 404 — when no relationship carries the named proposition, rather than reporting success for an action that landed nowhere. The invariant survived the removal of the storage graph unchanged, then stopped needing to be an invariant. `pkg/semmap/ontology_sync_test.go` and `strength_propagation_test.go` pin each mutation's effect on the model.
 
-The separation of `Prior` from `Strength` is what makes recalibration safe. An assertion moves the prior; what was learned from this system stays where it is, and the effective strength blends the two by confidence — so on a well-observed relationship an operator's number moves the answer very little, and the response says so rather than letting the operator assume otherwise.
+The separation of `Assertion` from the two learned layers is what makes an operator
+override safe *and* effective. An assertion is a field of its own: what was learned from
+this system stays where it is and remains readable at `GET /edges`, while the assertion
+outranks both layers in `Effective()` and therefore reaches the decision in full at any
+confidence.
+
+That precedence replaced a blend, and the reason is worth recording because the blend
+looked reasonable. The effective strength used to be `(1 − c)·prior + c·learned`, with an
+operator adjustment writing the prior — so a declared δ moved the answer by `(1 − c)·δ`,
+and at `c = 1` by exactly nothing. Measured on a saturated k0s daemon, `prioritize
+performance` moved both sensitivities by 0.000000 while recording itself faithfully in
+the audit log. The inversion — *the better the agent knows its machine, the less an
+operator can steer it* — was a defect and not a considered trade-off. Under the current
+precedence the same operation moves the effective strength from an established 0.6023 to
+an asserted 0.7223, and the sensitivity by the declared 0.1200.
+
+Anchoring is the remaining subtlety. A delta applies to whatever the relationship
+currently reports — its established baseline where it has one, its recent estimate
+otherwise, and a neutral 0.5 on a relationship that has measured nothing, with the
+anchoring recorded in the adjustment's rationale so a placeholder is never mistaken for a
+measurement.
 
 What is stable, what is not:
 
@@ -437,7 +582,7 @@ store behind the snapshot file.
 | Layer                                       | Language   | Why                                                                                                                           |
 | ------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | Contract interfaces + compliance suites     | **Go**     | The contract surface and the only definition of correctness. Co-located with the implementations they check                    |
-| Prior initialization pipeline               | **Python** | One-time data wrangling from P1–P5; scipy for the rank correlations. A build-time step — nothing here runs on a node          |
+| Structural initialization pipeline          | **Python** | One-time data wrangling from P1–P5 to decide which propositions the agent carries. A build-time step — nothing here runs on a node          |
 | `cloud-full` profile service                | **Python** | scipy for a Bayesian estimator; correlation miner; SLM integration. Specified, not implemented (§3)                           |
 | `edge-minimal` and `edge-standard` daemons  | **Go**     | Single ARM binary, <10 MB footprint, no runtime to manage on edge nodes, goroutines for concurrent telemetry, predictable GC  |
 
@@ -460,9 +605,12 @@ language implementation actually arrives, the interface it has to satisfy is the
 passing suite behind it — which is the useful direction for the boundary to run.
 
 What remains of the Python layer is `prior_init/`: it reads the published constants from
-P1–P5 and emits `prior_weights.json`, which the daemon seeds relationship priors from. It
-was the part doing real work, and it is verifiable in the way the mirror was not — the
-committed artefact reproduces byte for byte from a fresh run (README §5).
+P1–P5 and emits `prior_weights.json`, which the daemon seeds *structure* from — which
+propositions it instantiates, which it declines and why, and where it overrides a
+direction Di-Select states against a quantity this deployment does not measure. It no
+longer emits a strength; §"What the artefact contains" records why. It is verifiable in
+the way the removed Go mirror was not — the committed artefact reproduces byte for byte
+from a fresh run (README §5).
 
 ---
 
@@ -514,27 +662,49 @@ responding to evidence while aggregates keep tracing a smooth curve. A replay
 harness that passed network throughput in raw bytes per second produced exactly
 that failure, silently.
 
-| `MetricType`            | Construct | Note                                                       |
-| ----------------------- | --------- | ---------------------------------------------------------- |
-| `cpu_utilization`       | RC        |                                                            |
-| `memory_utilization`    | RC        |                                                            |
-| `cpu_throttle_ratio`    | RC        | cgroup `cpu.stat` throttled_periods / total_periods        |
-| `block_io_util`         | RC        | block device utilization                                   |
-| `energy_joules`         | RC        | from RAPL or the P4 energy model, normalized to a budget    |
-| `network_rx_bps`        | CO        | fraction of link capacity                                  |
-| `network_tx_bps`        | CO        | fraction of link capacity                                  |
-| `network_loss_ratio`    | CO        |                                                            |
-| `network_latency_ms`    | CO        | RTT to a peer, normalized against a budget                 |
-| `pod_startup_ms`        | PS        | creation timestamp → Running, normalized against a budget  |
-| `scheduling_latency_ms` | PS        | Pending → Scheduled, likewise                              |
-| `cpu_pressure_ratio`    | PS        | PSI `cpu.some` stall fraction                              |
-| `io_pressure_ratio`     | PS        | PSI `io.some` stall fraction                               |
+| `MetricType`            | Construct | Polarity | Note                                                       |
+| ----------------------- | --------- | -------- | ---------------------------------------------------------- |
+| `cpu_utilization`       | RC        | worse    |                                                            |
+| `memory_utilization`    | RC        | worse    |                                                            |
+| `cpu_throttle_ratio`    | RC        | worse    | cgroup `cpu.stat` throttled_periods / total_periods        |
+| `block_io_util`         | RC        | worse    | block device utilization                                   |
+| `energy_joules`         | RC        | worse    | from RAPL or the P4 energy model, normalized to a budget    |
+| `network_rx_bps`        | CO        | better   | fraction of link capacity                                  |
+| `network_tx_bps`        | CO        | better   | fraction of link capacity                                  |
+| `network_loss_ratio`    | CO        | worse    | **inverted at ingestion** — opposed to CO                  |
+| `network_latency_ms`    | CO        | worse    | **inverted at ingestion** — RTT to a peer, against a budget |
+| `pod_startup_ms`        | PS        | worse    | creation timestamp → Running, normalized against a budget  |
+| `scheduling_latency_ms` | PS        | worse    | Pending → Scheduled, likewise                              |
+| `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall fraction                              |
+| `io_pressure_ratio`     | PS        | worse    | PSI `io.some` stall fraction                               |
 
 An unrouted `MetricType` is ignored rather than rejected: forward compatibility is
 deliberate, so a collector upgraded ahead of the specification does not break
 ingestion. Adding a construct and routing metrics to it is a specification change;
 see §2 on why constructs that cannot change while the cluster runs are not routed
 at all.
+
+**Polarity, and why a route needs one.** Each construct declares the direction its
+value runs — `RC` and `PS` are penalties (`higher_is_worse`), `CO` is a capability
+(`higher_is_better`) — and each route declares the direction of the raw metric. When
+they disagree the ingestion path reflects the reading within its declared range,
+`v' = lo + hi − v`, once, in `Spec.NormalizeForConstruct`, before anything stores or
+learns from it.
+
+This is not tidiness. Two failures were live without it, both silent:
+
+- **A construct fed by opposed metrics averaged quantities that cancel.** `CO`
+  summarised throughput *and* loss and latency from the same raw scale, so a link
+  getting faster and a link getting lossier pushed its value the same way.
+- **A proposition's declared sign was unfalsifiable.** A relationship inherited from a
+  framework that phrased its outcome as a goodness quantity ("resource overhead reduces
+  *throughput*"), attached to a construct measured as a badness quantity (latency,
+  pressure), asserts a correlation the system never shows. Its evidence gate never
+  opens, so it holds zero strength — indistinguishable, from the strength alone, from a
+  relationship on a quiet system. `Relationship.SignConflicts` and `SignSuspect()` are
+  what make the difference visible, and `relationships_sign_suspect` carries it into
+  the census so an aggregate reader cannot miss it. Polarity is what gives that check
+  a fixed reference to test against.
 
 **How many observations a relationship gets.** A relationship advances on a *pair*, so
 its `n_obs` counts the times both its endpoints were observed close enough together —
@@ -557,7 +727,7 @@ than stored, so a summary can never disagree with what it summarises. A framewor
 evaluation constructs live here as derived properties over the metrics that evidence
 them, which keeps prior knowledge without the graph being about the framework.
 
-**Edges are relationships**, each carrying its provenance: `seeded` from prior
+**Edges are relationships**, each carrying its provenance: `seeded` when only its structure came from prior
 knowledge, `learned` from observing this system, `asserted` by an operator. An agent
 that cannot say why it believes an edge cannot be audited, so provenance is data.
 
@@ -603,7 +773,10 @@ and no decision — which is what it did until this was wired.
 cost construct. A sensitivity is per unit change in a source construct — the signed sum
 of effective strengths, NOT multiplied by the source's current value. Multiplying would
 duplicate what the level already reports and would collapse the term to zero before any
-telemetry arrived, which is precisely when the calibrated priors are all the agent has.
+telemetry arrived. Note what this no longer buys: with no seeded magnitudes the sum is
+*empty* on a fresh agent rather than approximate, so a cold-start agent cannot answer a
+counterfactual at all — which is an honest report, and the gap §"What the artefact
+contains" accepts in exchange for never reporting an unmeasured number.
 `/state/estimate` reports both, and calls the value-weighted one a contribution.
 
 **Details.** `CostOfAction` reads the cost constructs' levels and
@@ -680,10 +853,13 @@ implement two.
 
 **What it does.** A relationship advances only when both endpoints have been observed
 within the pairing window (default 15 s). The strength learned is `|r|`, the magnitude of
-the Pearson correlation over a sliding window of pairs — the same quantity the priors were
-calibrated as, since `prior_weights.json` records `spearman_rho` per proposition — so prior
-and evidence sit on one scale and the confidence blend interpolates between comparable
-numbers.
+the Pearson correlation over a sliding window of pairs, on `[0, 1]` — which is the scale a
+proposition strength was always meant to be on. It is folded twice from the same pairs: a
+recent estimate at `α = 0.20` (memory ≈ 5 pairs) and an established baseline at `α_slow =
+0.001` (memory ≈ 1000 pairs), the latter bias-corrected by `1 − (1 − α_slow)ⁿ` so it does
+not spend its first thousand pairs reporting the zero it started from. The pairing is what
+makes the two comparable; nothing interpolates between them, because `Effective()` chooses
+by authority rather than by arithmetic.
 
 Two properties follow:
 
@@ -723,9 +899,9 @@ covers retries and batch replays rather than all history.
 **What it does not claim.** Correlation is not causation. A relationship's existence and
 direction come from the grounded-theory backbone; what is learned is the magnitude of the
 association this system exhibits and whether the declared sign is the sign it shows. `|r|`
-carries no significance test, matching how the priors were calibrated (`p = 0.188` on the
-RC→PS pair), so a weak relation estimated over a short window can still produce a sizeable
-magnitude.
+carries no significance test, so a weak relation estimated over a short window can still
+produce a sizeable magnitude; `confidence` reports how many pairs stand behind it, and is
+the field a caller should read before trusting a strength.
 
 ### The graph surfaces are a projection
 
@@ -735,9 +911,13 @@ a storage graph, deliberately — the clients kept working — but the numbers a
 that decide things.
 
 The mapping: endpoints from the relationship's endpoints, `proposition_id` from its label,
-direction from its sign, `prior_weight` from its prior, `ema_weight` from its learned
-strength, `confidence` from how much of that rests on paired observation here, `deprecated`
-from retirement. A relationship between metric-level properties appears too; the store only
+direction from its sign, `established` and `assertion` from those two fields (absent when
+there is none, because zero is the claim that a relationship is worth nothing and absence
+is not that claim), `effective` and `basis` from `Effective()`, `ema_weight` from the
+recent layer, `confidence` from how much rests on paired observation here, `deprecated`
+from retirement. The descriptor carried a `prior_weight` until the magnitudes were removed;
+nothing replaced it with a default, and the `mapctl` column that rendered it was retired
+with it rather than left showing zeros. A relationship between metric-level properties appears too; the store only
 ever held construct-level edges, and hiding the extras would make the surface a filtered
 view that claims to be whole.
 
@@ -746,15 +926,22 @@ view that claims to be whole.
 `CostOfAction` reports two quantities per cost construct, and keeping them apart is
 the substance of the design rather than presentation:
 
-| | source | informed at cold start | moved by |
+| | source | available at cold start | moved by |
 | --- | --- | --- | --- |
-| **level** | the construct's own descriptor, confidence-blended | no — blends to a neutral prior | telemetry only |
-| **sensitivity** | weighted sum over the edges terminating at it, signed by direction | yes — from the calibrated priors | telemetry, operator tuning, deprecation |
+| **level** | the construct's own derived property, recomputed from its members | from the first sample, at low confidence | telemetry only |
+| **sensitivity** | signed sum of effective strengths over the relationships terminating at it, per unit | no — the sum is empty until something is measured or asserted | telemetry, operator assertion, deprecation |
 
 A level answers *what is it now*; a sensitivity answers *what would it become if load
-changed*. The two halves are useful at opposite ends of a deployment: the priors
-carry the sensitivities and are fully informed on day one, while the levels
-accumulate and are worthless until they do.
+changed*. The level is what `CostOfAction` reports as the estimate, and the ordering is
+empirical rather than aesthetic: on 182 replayed runs the observed level ranked the next
+interval's pressure at 0.622 top-1 accuracy against 0.582 for the graph-adjusted form,
+with no mixing coefficient improving on the level alone. The sensitivity is reported
+beside it because it answers the question the level cannot — and there the ordering
+reverses: on 5928 held-out bins of a calm→loaded transition, where no observed level for
+the load exists, the learned strengths cut prediction error 72% against "pressure stays
+put" and held 0.909 admission accuracy at a budget where a fixed table fell below the
+majority-class floor. Which of the two an agent is doing decides whether learning the
+strengths can matter at all.
 
 They are reported side by side and never summed. That is an empirical constraint,
 not a preference: over 182 replayed runs the observed level was the best available
@@ -838,13 +1025,15 @@ synthetic benchmark loads from the P1/P2 study (controlled exercise
 runs), so cross-KD divergence in its output reflects *the recorded test
 harness inputs*, not natural deployment behavior.
 
-Mechanically, compare builds N independent `SemanticMap`s — one per KD,
-each seeded with that KD's calibrated priors from `prior_weights.json` —
+Mechanically, compare builds N independent `SemanticMap`s — one per KD, each seeded
+with the same structure from `prior_weights.json` and no magnitudes, so any divergence
+between them is entirely what their telemetry produced —
 feeds each only its own KD's parquet rows, snapshots every map's final
 edge set, and emits a per-edge × per-KD inspection table (plus JSON/CSV
-for downstream tooling). `Effective = (1−c)·prior + c·ema` is what the
-Reasoner would consume; `Range = max − min` flags inputs that ingestion
-propagated differently per KD.
+for downstream tooling). The `effective` column is what the Reasoner
+would consume — `assertion`, else `established`, else `recent`, and blank
+where a relationship has none — and `Range = max − min` flags inputs that
+ingestion propagated differently per KD.
 
 Compare deliberately **breaks the cmd/replay HTTP rule** and imports
 `pkg/profiles` + `pkg/semmap` directly. The reason is mechanism
@@ -907,7 +1096,7 @@ case "my-profile":
     // that passes none gets it built with the defaults, because an agent without a
     // state model can answer nothing. Seeding must run before the map is handed out
     // — it is what declares a property per routed metric and per construct, and a
-    // relationship per proposition, with this cluster's calibrated priors.
+    // relationship per proposition — structure only, with no magnitude on any of them.
     seedStateMap(cfg.StateMap, spec, pw, cfg.KD)
     sm := semmap.New(ontology, reasoner, proposer, tuner)
     sm.AttachState(cfg.StateMap)
@@ -925,18 +1114,25 @@ No other file needs to change.
 
 | Publication                                 | Role in Semantic Map                                                          |
 | ------------------------------------------- | ----------------------------------------------------------------------------- |
-| P1 (Performance & Resource Efficiency)      | Initial priors: pod-startup latency, throughput constants per KD              |
-| P2 (Security, Resilience & Maintainability) | Initial priors: security compliance scores, recovery time constants           |
-| P3 (Di-Select Framework)                    | The causal claims the specification declares: construct pairs, directions, priors |
-| P4 (Energy Analysis / DVFS)                 | Initial priors: J/pod, mJ/op, interrupt amplification ratios per KD           |
-| P5 (Overhead Decomposition)                 | Initial priors: per-component CPU overhead (kube-apiserver = 66.7% idle)      |
-| **P6 (this work)**                          | The Semantic Map itself — schema, prior initialization, convergence study     |
+| P1 (Performance & Resource Efficiency)      | Evidence behind the propositions the specification declares; the workloads the convergence study replays |
+| P2 (Security, Resilience & Maintainability) | Evidence for the constructs a running cluster *cannot* move, which is why they stay at selection time |
+| P3 (Di-Select Framework)                    | The causal claims the specification declares: which construct pairs relate, and in which direction |
+| P4 (Energy Analysis / DVFS)                 | The reason energy is *not* routed: the model is calibrated for one hardware class, and no node here measures a joule |
+| P5 (Overhead Decomposition)                 | Per-container evidence that the orchestration tax is real and small; k0s-only, so not a cross-cluster input |
+| **P6 (this work)**                          | The Semantic Map itself — schema, structural initialization, convergence study |
+
+What the agent takes from P1–P5 is **structure, not magnitude**: which constructs relate
+and in which direction. That is knowledge one machine's telemetry cannot produce — a node
+watching itself can measure how strongly two of its own signals move together, but cannot
+establish that the relation is worth positing, cannot rule out the pairs it might
+otherwise correlate spuriously, and cannot establish a direction, because correlation is
+symmetric and causation is not.
 | P7 (Decentralized Framework)                | Extends the Semantic Map with P2P trust edges and gossip-based peer discovery |
 
 **P6 scientific contributions:**
 1. Contract-based architecture enabling RPi4-to-cloud profile switching without changing agent logic
-2. Prior initialization protocol connecting Di-Select to agent runtime (grounded in P1–P5 empirical constants)
-3. Convergence study: how quickly does deployment evidence override generic priors?
+2. Structural initialization protocol connecting Di-Select to agent runtime, with the propositions it declines and the directions it overrides recorded in the artefact
+3. Convergence study: how quickly does a machine's own evidence accumulate, and what does the converged state describe?
 4. Propose-then-confirm loop: controlled automatic backbone extension with structural validation
 
 **Theoretical framing.** The architecture reported here can be read as a concrete instance of the *graph stage* in Andrew Ng's progression from single-loop to graph-based agentic workflows (Ng, *What's Next for AI Agentic Workflows*, Sequoia AI Ascent 2024; Schluntz & Zhang, *Building Effective Agents*, Anthropic 2024). Ng characterises the graph stage as one in which shared state is externalised into a durable, queryable structure that agents read from and write to via typed handoffs, rather than living in prompts and transcripts. A knowledge graph, in this framing, plays three complementary roles: shared memory for orchestrator–worker configurations, grounding layer for evaluator–optimiser loops, and persistent world model for reflective loops. The Semantic Map instantiates the latter two directly for the orchestration-selection domain.
@@ -991,11 +1187,11 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | GET  | `/propositions`                   | —                                                                      | `[]PropositionDTO`            | All propositions including those soft-deleted by `Deprecate` (the DTO carries a `deprecated` flag)     |
 | GET  | `/history`                        | `?since=` (RFC3339 timestamp or Go duration like `1h`; omitted → zero) | `[]OntologyEventDTO`          | Append-only audit log of mutations                                                                     |
 | GET  | `/neighbors`                      | `?node=ID` (required)                                                  | `[]string`                    | IDs of constructs reachable in one hop                                                                 |
-| POST | `/ontology/strength`              | `SetStrengthRequest`                                                   | `204 No Content`              | Recalibrate `prior_strength` for one proposition; audit-logged                                          |
+| POST | `/ontology/strength`              | `SetStrengthRequest`                                                   | `204 No Content`              | Assert a strength for one proposition; writes `Assertion` on its relationships, outranking both learned layers; audit-logged |
 | POST | `/ontology/deprecate`             | `DeprecateRequest`                                                     | `204 No Content`              | Soft-delete a proposition (the relationship is retired: out of the traversal, kept for audit)          |
 | POST | `/ontology/construct`             | `AddConstructRequest`                                                  | `204 No Content`              | Append a new construct (append-only; constructs are domain-stable)                                     |
 | POST | `/ontology/proposition`           | `AddPropositionRequest` (`direction` is `"+"` or `"-"`)                | `204 No Content`              | Add a validated proposition; `ValidateProposition` rejects direction contradictions                    |
-| POST | `/agent/reset`                    | `ResetRequest`                                                         | `204 No Content`              | Reset the EMA for a `(from, to)` pair back to its prior — does not delete the edge                     |
+| POST | `/agent/reset`                    | `ResetRequest`                                                         | `204 No Content`              | Discard what a `(from, to)` pair learned: both layers cleared, confidence to zero, pair window emptied, discard count journalled. Keeps the claim and any assertion; does not delete the relationship |
 | POST | `/candidates/{id}/confirm`        | path only                                                              | `204 No Content`              | Promote a proposer candidate to a validated proposition                                                |
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session                                                    |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Keep the candidate pending; re-surface on next review                                                  |
@@ -1036,13 +1232,13 @@ There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` 
 | Subcommand                          | Wraps                                       | Notes                                                       |
 | ----------------------------------- | ------------------------------------------- | ----------------------------------------------------------- |
 | `graph`                             | `GET /graph`                                | Default table; `--json` for raw                             |
-| `edges --from --to`                 | `GET /edges`                                | Multigraph: returns both edges for RC→PS, CO→RR, CE→MU      |
+| `edges --from --to`                 | `GET /edges`                                | Per-relationship basis, effective, established, assertion and recent; the multigraph fan-out when a specification declares two claims over one pair |
 | `history --since`                   | `GET /history`                              | RFC3339 or duration                                         |
-| `strength <id> <value>`             | `POST /ontology/strength`                   | Recalibrate one proposition                                 |
+| `strength <id> <value>`             | `POST /ontology/strength`                   | Assert a strength on one proposition                        |
 | `deprecate <id> <reason>`           | `POST /ontology/deprecate`                  | Soft-delete                                                 |
 | `construct add <id> <name> <desc>`  | `POST /ontology/construct`                  |                                                             |
 | `proposition add <id> <f> <t> ±<s>` | `POST /ontology/proposition`                |                                                             |
-| `reset <from> <to>`                 | `POST /agent/reset`                         | EMA → prior                                                 |
+| `reset <from> <to>`                 | `POST /agent/reset`                         | Discard the evidence, keep the claim                        |
 | `candidates [list|confirm|reject|defer]` | `GET/POST /candidates*`                 |                                                             |
 | `recommend` / `simulate`            | the corresponding POST                      | Existing endpoints                                          |
 | `watch graph|edges`                 | polled GET                                  | 2s ticker; clear-screen unless `--no-color`                 |
@@ -1154,17 +1350,18 @@ Operators express priorities in natural language. The Tuner maps intent to struc
 ### Pipeline
 
 ```
-POST /agent/tune {"intent": "prioritize security", "operator": "alice"}
+POST /agent/tune {"intent": "prioritize performance", "operator": "alice"}
           ↓
 TunerContract.ParseIntent(text) → []TuneIntent{PropositionID, Delta}
           ↓
-SemanticMap.Tune: resolve current magnitudes from the state model's relationship
-                  priors (NOT from ontology.Propositions())
+SemanticMap.Tune: resolve each relationship's CURRENT effective strength from the
+                  state model — assertion, else established, else recent, else a
+                  neutral 0.5 with the anchoring recorded in the rationale
                   → newStrength = clamp(old+delta, floor, ceil)
           ↓
 TunerContract.Validate(adjustments) — hard bounds check
           ↓
-SemanticMap.SetPropositionStrength × N        ← asserts the prior on the model, with
+SemanticMap.SetPropositionStrength × N        ← writes Assertion on the model, with
                                                 actor and reason, per proposition
 statemap.RecordOperatorIntent(text, operator) ← one operator.intent event naming the
                                                 whole act and what it touched
@@ -1174,36 +1371,52 @@ Return []TuneAdjustment: PropositionID, OldStrength, NewStrength, Rationale
 
 Two details in that flow are load-bearing and were both once wrong.
 
-**The delta anchors to the relationship's magnitude, not the proposition's strength.** Those differ by construction: the state model is seeded from `prior_weights.json`'s per-distribution `distribution_edge_weights` table while the ontology carries the global `propositions` table. On a k0s-seeded daemon P1's edge sits at 0.2138 against a proposition strength of 0.620. Anchoring a +0.12 nudge to the global figure would jump the edge from 0.2138 to 0.740, discarding per-distribution calibration in a single operator action. It also makes the SC-adjacent floor of 0.30 unreachable — anchored to per-KD magnitudes, P11 (0.0089 + 0.12 = 0.1289) clamps to it immediately.
+**The delta anchors to what the relationship currently reports, not to a fixed table.** On a saturated agent that is its established baseline; on a warm one its recent estimate; on one that has measured nothing, a neutral 0.5 with the anchoring stated in the rationale. Anchoring to a table instead would let a +0.12 nudge overwrite what the machine measured, which is the direction of authority this design deliberately reverses — an operator overriding evidence should have to say so, and the audit record should show both numbers. The neutral anchor exists so an operator can steer a fresh agent, when their knowledge is worth most; it differs from the seeded prior it replaces in that it appears only because someone asked for it, carries their actor and reason, and reports provenance `asserted`.
 
 **Adjustments apply through `SemanticMap.SetPropositionStrength`.** There is no longer an ontology method of that name to call by mistake — see §2 on why it was removed. The consolidated intent is journalled alongside the individual assertions, because reading those separately afterwards gives no way to tell one coordinated adjustment from several unrelated ones that landed together.
 
-The resulting effect is predictable in closed form, and the form is worth stating precisely because it bounds what operator tuning can do. A tune writes the prior; the Reasoner reads `effective = (1 − c)·prior + c·learned`. A prior change of δ therefore moves the sensitivity by `(1 − c)·δ` and moves the reported *levels* not at all, since those are the constructs' own observed values. At `c = 1` a tune is exactly inert — measured: on a k0s daemon after one idle run every edge reaches c = 1.000, and `prioritize performance` moves both sensitivities by 0.000000 while faithfully recording itself in the audit log.
+**A tune reaches the decision in full, and that is a correction rather than a design choice.** The effective strength used to be `(1 − c)·prior + c·learned`, with a tune writing the prior — so a declared δ moved the sensitivity by `(1 − c)·δ`, and at `c = 1` by exactly nothing. That was measured: on a saturated k0s daemon `prioritize performance` moved both sensitivities by 0.000000 while recording itself faithfully in the audit log. It was reported for a while as intended arithmetic with a real limitation attached — *the better the agent knows its machine, the less an operator can steer it* — and that reading was wrong. The inversion was a defect of the write target, not a property of tuning.
 
-That is the intended arithmetic rather than a defect, but it is a real limitation of tuning priors as an operator instrument: the better the agent knows its machine, the less an assertion about the prior can change. Deprecation is not attenuated the same way — it removes an edge from the sensitivity sum outright, and selectively: retiring the sole edge terminating at the resource construct took `ResourceSensitivity` from −0.0576 to exactly 0 while leaving the pressure term untouched. An operator wanting to influence a converged agent has the structural path, not the magnitude path.
+An assertion is now a field of its own that outranks both learned layers and does not decay. The same operation on the same saturated agent moves the effective strength from an established 0.6023 to an asserted 0.7223 and the sensitivity by the declared 0.1200. The established layer still reads 0.6023 at `GET /edges`, so the audit shows what was measured beside what was asserted, and `Basis()` names which one answered.
+
+Deprecation remains distinct, and now differs in *meaning* rather than in reach. It removes a relationship from the sensitivity sum outright and selectively: retiring the sole relationship terminating at the pressure construct takes that sensitivity and its contribution to exactly zero while the one terminating at the resource construct is untouched. A tune says the relation is worth something else; a deprecation withdraws the claim while keeping the measurement. Neither moves a reported *level*, because a level is a measurement and an assertion is not one — an operator cannot make a machine less busy by declaring a preference.
 
 ### Hard bounds
 
 | Proposition class | Floor | Ceiling |
 |---|---|---|
-| SC-related (P1, P4, P11, P14) | 0.30 | 0.95 |
-| All others | 0.10 | 0.95 |
+| Per-proposition floor (`per_proposition_floor`) | as declared | 0.95 |
+| All others (`global_floor`) | 0.10 | 0.95 |
 
-Security propositions have a higher floor: operators cannot fully deprioritize security compliance even under resource pressure.
+The per-proposition table is **empty in the committed specification**. It previously raised the floor to 0.30 on the four security-adjacent propositions, so that operators could not fully deprioritize security compliance under resource pressure; those propositions are no longer in the graph. The mechanism is retained because a floor is a property of a claim rather than of a construct, and it is keyed by proposition so a new claim can be given a policy at runtime without a code change.
 
 ### V1 rule table (RuleBasedTuner)
 
+The vocabulary is declared in `domain_spec.json`, not compiled in. The committed
+specification declares **three** rules, because the graph it describes carries two
+relationships:
+
 | Keyword group | Example phrase | Propositions adjusted |
 |---|---|---|
-| security, secure, compliance | "prioritize security" | P1 +0.12, P11 +0.12 |
-| performance, throughput, latency | "focus on throughput" | P3 +0.12, P2 −0.10 |
-| energy, power, efficient | "prioritize energy efficiency" | P10 +0.12, P8 +0.08 |
-| reliability, resilience, ha | "prioritize reliability" | P5 +0.12, P15 +0.12 |
-| maintainability, simple, admin | "simplify operations" | P7 +0.12, P8 +0.10 |
-| connectivity, offline | "offline capability" | P5 +0.12, P13 +0.08 |
-| community, ecosystem | "leverage community" | P7 +0.12, P11 +0.08 |
+| performance, throughput, latency, fast, speed | "focus on throughput" | P3 +0.12 |
+| energy, power, efficient, battery, watt, cost | "prioritize energy efficiency" | P10 +0.12 |
+| responsive, tail, p95, p99, jitter, pressure | "improve tail latency" | P3 +0.08 |
 
-Direction modifiers: "deprioritize / reduce / lower / minimize" negate all deltas. Default (no direction word) = increase.
+Where an intent string matches more than one rule, the larger magnitude wins per
+proposition — so a phrase matching both `performance` and `responsiveness` resolves P3 to
++0.12, not +0.20. Direction modifiers ("deprioritize / reduce / lower / minimize") negate
+all deltas; the default is increase.
+
+Four rules were retired with the constructs and propositions they addressed, and
+`retired_intents` records each one with what it would have adjusted rather than deleting
+it: **security**, **reliability**, **maintainability** and **community** for constructs a
+running cluster cannot exhibit or nothing routes to, and **connectivity** for one this
+deployment measures at ~10⁻⁵ of its normalisation reference. An operator asking for those
+is asking about a selection-time property, and the answer belongs to Di-Select. The
+mechanism still supports signed per-proposition deltas — a rule raising one relationship
+while suppressing another — but no committed rule uses it, because dropping P2 and P13
+emptied every negative delta the vocabulary declared. The tuner's compliance suite
+exercises that path instead.
 
 ### SLM back-end (cloud-full)
 
@@ -1248,9 +1461,9 @@ and maps:
 - `system.net InOctets` (kb/s) → `NetworkRxBps` normalized to [0,1] vs 1 Gbps reference
 - `system.net OutOctets` (sign-flipped) → `NetworkTxBps` normalized similarly
 
-At idle k0s, CPU utilization is ≈ 0.05 — well below the Di-Select priors (RC propositions are calibrated to heavier workloads). The bursty regime (α=0.30, N=200) converges faster, so diag-1 accumulates confidence and cost quicker than the stable VMs (α=0.05, N=1000).
+At idle k0s, CPU utilization is ≈ 0.05, so the reported resource level is low and the pressure series is close to flat — which means the paired estimator forms few pairs and declines to move on what it does form, and confidence stays near zero. That is the estimator working rather than the demo failing; §"What determines the saturation point" is the general form. The bursty regime (α=0.30, N=200) reaches saturation sooner, so diag-1 accumulates confidence faster than the stable VMs (α=0.05, N=1000).
 
-**Note on `stress-ng`**: High CPU pushes CPUUtilization above the RC priors. Because P8 (MU→RC, direction −) and P10 (PS→RC, direction −) have negative direction, their contributions subtract from cost when EMA exceeds priors, which can push `ResourceCost` to zero. The coordinator demo works cleanly at idle or light load without `stress-ng`.
+**Note on `stress-ng`**: driving CPU is what gives *both* endpoints something to vary, which is the condition a pair needs — an idle demo can run indefinitely and teach the map nothing. Load also makes the reported levels move, and since the cost estimate now leads with the level rather than accumulating deviations, `ResourceCost` tracks utilization directly instead of being pushed toward zero by negative-direction terms as it once was. The coordinator demo works cleanly at idle or light load without `stress-ng`.
 
 ### Coordinator demo
 
@@ -1375,9 +1588,9 @@ The system prompt lives at [`cmd/agent/prompts/explain-v1.md`](go/cmd/agent/prom
 
 ```json
 {
-  "answer": "The dominant edge is P10 (PS→RC, prior 0.645, effective 0.62 at confidence 0.03).",
+  "answer": "The dominant relationship is P10 (PS→RC, effective 0.62 from its recent estimate at confidence 0.03; no established baseline yet).",
   "citations": [
-    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.03, "n_observations": 15}
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "effective": 0.62, "basis": "recent", "confidence": 0.03, "n_observations": 15}
   ],
   "confidence": "high",
   "proposal": null,
