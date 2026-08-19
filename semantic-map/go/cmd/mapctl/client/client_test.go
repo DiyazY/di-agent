@@ -35,7 +35,7 @@ func TestClient_Graph(t *testing.T) {
 		jsonOK(t, w, GraphSnapshot{
 			Constructs:   []ConstructDTO{{ConstructID: "RC", Name: "Resource & Cost"}},
 			Propositions: []PropositionDTO{{PropositionID: "P3", FromConstruct: "RC", ToConstruct: "PS", Direction: "+", PriorStrength: 0.7}},
-			Edges:        []EdgeDTO{{FromID: "RC", ToID: "PS", PropositionID: "P3", Direction: "+", PriorWeight: 0.7}},
+			Edges:        []EdgeDTO{{FromID: "RC", ToID: "PS", PropositionID: "P3", Direction: "+", Established: f64(0.7), Effective: f64(0.7), Basis: "established"}},
 		})
 	})
 	c, cleanup := newCannedServer(t, mux)
@@ -294,3 +294,8 @@ func TestClient_ErrorResponse_DecodesErrorField(t *testing.T) {
 		t.Errorf("expected error to include server message, got %q", err.Error())
 	}
 }
+
+// f64 returns a pointer to a float literal. Established, Assertion and Effective are
+// pointers because absence is a distinct state from zero, so a test fixture needs a
+// one-liner to express "this one has a value".
+func f64(v float64) *float64 { return &v }
