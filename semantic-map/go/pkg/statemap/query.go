@@ -64,6 +64,14 @@ type StateCounts struct {
 	Learned            int `json:"learned"`
 	Asserted           int `json:"asserted"`
 	Unobserved         int `json:"properties_unobserved"`
+
+	// RelationshipsSignSuspect counts relationships that every paired observation has
+	// contradicted (see Relationship.SignSuspect). It belongs in the census and not
+	// only on the relationship, because this is the failure that hides inside an
+	// aggregate: such a relationship reports zero strength, which reads as "quiet
+	// system" wherever it is summarised. A non-zero count here says the graph carries
+	// a claim the machine keeps refuting.
+	RelationshipsSignSuspect int `json:"relationships_sign_suspect"`
 }
 
 // State answers a Query.
@@ -222,6 +230,9 @@ func (m *Map) censusLocked() StateCounts {
 			c.Learned++
 		case Asserted:
 			c.Asserted++
+		}
+		if r.SignSuspect() {
+			c.RelationshipsSignSuspect++
 		}
 	}
 	return c

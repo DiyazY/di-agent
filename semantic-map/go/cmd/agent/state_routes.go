@@ -194,16 +194,20 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			return
 		}
 		rel, _ := sm.Relationship(r.PathValue("id"))
-		// Returning the effective strength alongside the asserted prior is the honest
-		// answer: on a well-observed relationship the assertion moves the prior a lot
-		// and the effective strength barely at all, and an operator should see that
-		// rather than assume their number is now in force.
-		writeJSON(w, map[string]any{
+		eff, known := rel.Effective()
+		resp := map[string]any{
 			"relationship": rel,
-			"effective":    rel.Effective(),
-			"note": "the assertion set the prior; effective strength blends it with " +
-				"observation by confidence, so at high confidence it moves little",
-		})
+			"basis":        rel.Basis(),
+			"note": "an assertion outranks both learned layers and takes effect in " +
+				"full; the learned estimates are kept beside it so what was measured " +
+				"stays readable",
+		}
+		if known {
+			resp["effective"] = eff
+		} else {
+			resp["effective"] = nil
+		}
+		writeJSON(w, resp)
 	})
 
 	// GET /state/journal?since=<revision>&limit=N — the change record.
@@ -297,6 +301,10 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			Sign         int     `json:"sign"`
 			Contribution float64 `json:"contribution"`
 			Provenance   string  `json:"provenance"`
+			// Basis names which layer the strength came from, or "unknown" when the
+			// relationship has none — in which case Strength and Contribution are
+			// absent rather than zero.
+			Basis string `json:"basis"`
 		}
 		var influences []influence
 		var sensitivity, contributions float64
@@ -309,12 +317,23 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			// how the cost path briefly reported a sensitivity that was really a
 			// contribution: a sensitivity is per unit change in the source, a
 			// contribution is that times the source's current value.
-			sensitivity += rel.Effective() * float64(rel.Sign)
-			contribution := rel.Effective() * float64(rel.Sign) * src.Value
+			// A relationship with nothing measured behind it is absent from both sums
+			// rather than contributing zero, and it is still listed, so a reader can see
+			// that an influence exists and has not been quantified yet.
+			eff, known := rel.Effective()
+			if !known {
+				influences = append(influences, influence{
+					Relationship: rel.ID, Source: rel.From, SourceValue: src.Value,
+					Sign: rel.Sign, Provenance: string(rel.Provenance), Basis: rel.Basis(),
+				})
+				continue
+			}
+			sensitivity += eff * float64(rel.Sign)
+			contribution := eff * float64(rel.Sign) * src.Value
 			contributions += contribution
 			influences = append(influences, influence{
 				Relationship: rel.ID, Source: rel.From, SourceValue: src.Value,
-				Strength: rel.Effective(), Sign: rel.Sign,
+				Strength: eff, Sign: rel.Sign, Basis: rel.Basis(),
 				Contribution: contribution, Provenance: string(rel.Provenance),
 			})
 		}

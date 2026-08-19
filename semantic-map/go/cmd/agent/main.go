@@ -63,7 +63,15 @@ var BuildCommit = ""
 func main() {
 	profileName := flag.String("profile", "edge-minimal", "deployment profile")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
-	alpha := flag.Float64("alpha", 0.2, "EMA decay factor (0 < alpha < 1)")
+	alpha := flag.Float64("alpha", 0.2, "EMA decay factor for the RECENT layer (0 < alpha < 1)")
+	alphaSlow := flag.Float64("alpha-slow", 0.001,
+		"EMA decay factor for the ESTABLISHED layer: the same paired observations read on a "+
+			"slower clock, answering what is normal for this machine rather than what is "+
+			"happening now. The default is derived rather than chosen — a memory of ~2.3 "+
+			"workload regimes, fitted against the requirement that a baseline distinguish "+
+			"machines without depending on the order the machine was exercised in. See "+
+			"convergence/derive_alpha_slow.py. Exposed so that derivation can be confirmed "+
+			"against the daemon itself rather than against a re-implementation.")
 	convergence := flag.Float64("convergence", 500, "observations for confidence=1.0")
 	minTrust := flag.Float64("min-trust", 0.5, "minimum peer trust score")
 	priorsPath := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
@@ -231,6 +239,7 @@ func main() {
 
 	cfg := profiles.Config{
 		EMAAlpha:             *alpha,
+		EMAAlphaSlow:         *alphaSlow,
 		ConvergenceThreshold: *convergence,
 		MinTrustScore:        *minTrust,
 		PriorWeightsPath:     *priorsPath,
@@ -269,6 +278,7 @@ func main() {
 		RetireAfter:             *retireAfter,
 		ConvergenceObservations: int(*convergence),
 		Alpha:                   *alpha,
+		AlphaSlow:               *alphaSlow,
 		AdmitUnknown:            !*noAdmit,
 		Learn:                   !*noLearn,
 		LearnConfig: statemap.LearnConfig{

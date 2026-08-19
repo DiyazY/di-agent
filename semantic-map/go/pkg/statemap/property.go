@@ -106,12 +106,11 @@ type Property struct {
 	// observations reports 0, which is the difference between "idle" and "not yet
 	// known", and a reader acting on a value has to be able to tell those apart.
 	//
-	// Note what it does NOT do, since the relationship field of the same name does
-	// exactly that: it gates no blend. A property's Value is a pure EMA of what was
-	// observed, so confidence describes the value without adjusting it. A
-	// relationship's Effective() really does blend prior and evidence by confidence,
-	// because a relationship has a prior worth blending and an unobserved property
-	// has no second number to fall back on.
+	// It gates nothing. A property's Value is a pure EMA of what was observed, so
+	// confidence describes the value without adjusting it — and the same is now true of
+	// a relationship, whose Effective() picks a layer by authority rather than blending
+	// by confidence. An earlier arrangement did blend, between a seeded prior and the
+	// evidence, which is why this note used to draw a distinction there is no longer.
 	Confidence float64 `json:"confidence"`
 
 	NObservations int `json:"n_observations"`
@@ -164,14 +163,54 @@ type Relationship struct {
 	// Sign is +1 when From rising accompanies To rising, -1 for the converse.
 	Sign int `json:"sign"`
 
-	// Strength is the current estimate in [0,1], and Confidence how much of it
-	// rests on observation of this system.
+	// Strength is the *recent* estimate in [0,1] — the fast EMA over the most recent
+	// pairs — and Confidence reports how much of it rests on observation. It carries no
+	// meaning until NObservations > 0; a relationship nothing has been observed about
+	// has no strength rather than a strength of zero.
 	Strength   float64 `json:"strength"`
-	Prior      float64 `json:"prior"`
 	Confidence float64 `json:"confidence"`
+
+	// Established is the long-run estimate: what this machine has shown across
+	// regimes, accumulated from the same pairs on a slower time constant than
+	// Strength. It is nil until it has support.
+	//
+	// It is *learned, not given*. Nothing seeds it, and no calibration writes it. The
+	// field this replaced held a cross-distribution constant derived from published
+	// proxies, and two things went wrong with that which cannot go wrong here: the
+	// number entered every decision with weight (1 − confidence), so it counted for
+	// most exactly when the agent had least evidence to correct it, and its magnitude
+	// was never a measurement of this machine at all. An established value is a claim
+	// about this machine, made by this machine.
+	Established *float64 `json:"established,omitempty"`
+
+	// Assertion is an operator's override, and outranks both learned layers.
+	//
+	// It is a separate field rather than a write into one of them because those are
+	// records of what was observed, and an audit exists to keep "what I measured" and
+	// "what I was told" apart. Keeping it separate also removes a defect in the
+	// arrangement it replaces: an operator adjustment used to reach a decision scaled
+	// by (1 − confidence), so on a well-observed machine — every saturated cell in
+	// §7.5 — a tune moved the decision by nothing at all. The better the agent knew
+	// its system, the less an operator could steer it. An assertion does not decay.
+	Assertion *float64 `json:"assertion,omitempty"`
 
 	NObservations int        `json:"n_observations"`
 	Provenance    Provenance `json:"provenance"`
+
+	// SignAgreements and SignConflicts count the paired observations whose
+	// correlation agreed with, and contradicted, the sign this relationship declares.
+	// Both are reported because their ratio separates two states that the strength
+	// alone renders identical: a relationship near zero because the system is quiet,
+	// and one near zero because it asserts a direction the system never shows. The
+	// second is a defect in the declaration rather than a fact about the machine —
+	// the gate keeps zeroing an estimate whose real message is that the claim is
+	// backwards — and without these counters it is indistinguishable from
+	// "not yet observed".
+	SignAgreements int `json:"sign_agreements"`
+	SignConflicts  int `json:"sign_conflicts"`
+	// SignSuspectFlag mirrors SignSuspect() into the serialised form, so a reader of
+	// the JSON does not have to re-derive the predicate to see the verdict.
+	SignSuspectFlag bool `json:"sign_suspect"`
 
 	Status        Status    `json:"status"`
 	FirstObserved time.Time `json:"first_observed,omitzero"`
@@ -180,12 +219,93 @@ type Relationship struct {
 	Note          string    `json:"note,omitempty"`
 }
 
-// Effective is the strength the agent should reason with: the prior until this
-// system has been observed, the learned estimate once it has, and a continuous
-// blend in between.
-func (r *Relationship) Effective() float64 {
-	c := clamp01(r.Confidence)
-	return (1-c)*r.Prior + c*r.Strength
+// Effective is the strength the agent should reason with, and whether there is one
+// at all.
+//
+// Precedence is by authority, not by arithmetic: an operator's assertion outranks
+// what was measured, the machine's established behaviour outranks its most recent
+// few pairs, and a relationship nothing has been observed about has no strength to
+// offer. The boolean is the point of the signature — the previous version could
+// always return a number because an unobserved relationship fell back to a seeded
+// constant, so "I do not know yet" was unrepresentable and every caller was handed
+// a figure as though it had been measured.
+func (r *Relationship) Effective() (float64, bool) {
+	if r.Assertion != nil {
+		return clamp01(*r.Assertion), true
+	}
+	if r.Established != nil {
+		return clamp01(*r.Established), true
+	}
+	if r.NObservations > 0 {
+		return clamp01(r.Strength), true
+	}
+	return 0, false
+}
+
+// EffectiveOrZero is Effective with the unknown case flattened to zero, for callers
+// that are summing contributions and for which an absent relationship and one of
+// strength zero are the same thing — a term of zero.
+//
+// Use it only where that is genuinely true. It is separate from Effective so that
+// treating "unknown" as "zero" is a visible decision at the call site rather than a
+// property of the accessor.
+func (r *Relationship) EffectiveOrZero() float64 {
+	v, _ := r.Effective()
+	return v
+}
+
+// Basis names which layer Effective answered from, for a decision record and for an
+// operator reading a rationale.
+func (r *Relationship) Basis() string {
+	switch {
+	case r.Assertion != nil:
+		return "asserted"
+	case r.Established != nil:
+		return "established"
+	case r.NObservations > 0:
+		return "recent"
+	default:
+		return "unknown"
+	}
+}
+
+// SignSuspectMinPairs is the support a conflict share needs before it means anything.
+const SignSuspectMinPairs = 30
+
+// SignSuspectConflictShare is the share of paired observations that must contradict a
+// declared sign before it is reported suspect.
+//
+// The neutral point is 0.5, not 0: under no association the two counts are symmetric,
+// so a windowed correlation on real telemetry crosses zero often and a backwards claim
+// still collects agreements from noise. On the study testbed a backwards proposition
+// ran at a 0.69 conflict share while its correctly-signed sibling over the same
+// endpoints ran at 0.31 — the mirror image, as two opposite signs on one pair must be.
+// 0.60 sits clear of both, and clear of the genuinely ambiguous case: a relationship
+// whose sign is regime-dependent lands near 0.5 and is not flagged, because that is a
+// fact about the system rather than a defect in the declaration.
+const SignSuspectConflictShare = 0.60
+
+// SignConflictShare is the fraction of paired observations that contradicted the
+// declared sign, or 0 when none have been folded in.
+func (r *Relationship) SignConflictShare() float64 {
+	n := r.SignAgreements + r.SignConflicts
+	if n == 0 {
+		return 0
+	}
+	return float64(r.SignConflicts) / float64(n)
+}
+
+// SignSuspect reports whether the machine contradicts this relationship's declared
+// sign often enough that the declaration, not the system, is the likely error: a
+// relationship seeded with the wrong direction, or attached to an endpoint whose
+// polarity was not what its author assumed.
+//
+// The distinction this exists to draw is between a strength near zero because the
+// system is quiet and a strength near zero because the gate never opens. Both look
+// identical in the strength, and only the second is a bug.
+func (r *Relationship) SignSuspect() bool {
+	n := r.SignAgreements + r.SignConflicts
+	return n >= SignSuspectMinPairs && r.SignConflictShare() >= SignSuspectConflictShare
 }
 
 // Config bounds the lifecycle. Zero values fall back to the defaults below.
@@ -212,8 +332,40 @@ type Config struct {
 	// ConvergenceObservations is how many observations bring confidence to 1.
 	ConvergenceObservations int
 
-	// Alpha is the EMA weight on each new observation.
+	// Alpha is the EMA weight on each new observation for the RECENT layer — a
+	// relationship's Strength and a property's Value.
 	Alpha float64
+
+	// AlphaSlow is the EMA weight for the ESTABLISHED layer: the same pairs, read on a
+	// slower clock, answering what is normal for this machine rather than what is
+	// happening now.
+	//
+	// The default sits on a measured trade-off; it is not a derived optimum, and an
+	// earlier comment here claimed otherwise. Both layers smooth one input — |r| over a
+	// trailing window of pairs — so the only free parameter is the time constant, and it
+	// was fitted against what the layer is for: a baseline must distinguish machines
+	// (signal) without depending on the order the machine happened to be exercised in
+	// (noise). An offline fit reported an interior maximum in that ratio. Sweeping the
+	// constant against the daemon itself, over 135 accumulated streams of ~9000 pairs,
+	// showed the maximum to be an artefact of the offline streams being ~6x shorter: at
+	// deployment scale the ratio rises monotonically toward slower constants and peaks
+	// where the memory exceeds the whole history, at which point the estimate is the
+	// running mean of every pair and is order-invariant by definition.
+	//
+	// What the sweep does establish is the trade-off. From alpha 0.20 to 0.0001,
+	// order-invariance improves 16-fold (noise 0.211 -> 0.013) while the baseline's span
+	// over a stream falls 0.539 -> 0.099, so the slow end buys stability by ceasing to
+	// move. 0.001 gives ten times the recent layer's order-invariance and keeps about a
+	// third of its responsiveness. Anything at or above 0.01 is not a second timescale:
+	// at 0.20 the established layer correlates with the recent one at 1.000.
+	//
+	// Pinning a single value needs a requirement the data cannot supply — how fast a
+	// baseline ought to follow a change that persists. Until that is stated, roughly
+	// 0.004 to 0.0005 is defensible and this sits in the middle.
+	//
+	// See convergence/derive_alpha_slow.py (offline fit) and
+	// convergence/sweep_alpha_slow.sh (daemon-fidelity sweep that corrected it).
+	AlphaSlow float64
 
 	// AdmitUnknown controls whether an observation of an unknown property creates
 	// it. On by default, because a model of a changing system that cannot represent
@@ -239,6 +391,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Alpha <= 0 || c.Alpha > 1 {
 		c.Alpha = 0.2
+	}
+	if c.AlphaSlow <= 0 || c.AlphaSlow > 1 {
+		c.AlphaSlow = 0.001
 	}
 	return c
 }
@@ -662,20 +817,11 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 				r.ID, existing.Sign, r.Sign)
 		}
 		detail := map[string]any{}
-		// A re-declaration carrying a different prior updates it, unless an operator has
-		// asserted one. Ignoring the new value silently kept a stale number whenever a
-		// calibration was reloaded — the declaration looked accepted and changed
-		// nothing. An assertion outranks a seed, so it is not overwritten.
-		if r.Prior != 0 && r.Prior != existing.Prior && existing.Provenance != Asserted {
-			detail["prior_old"] = existing.Prior
-			detail["prior_new"] = r.Prior
-			existing.Prior = r.Prior
-			if existing.NObservations == 0 {
-				// Nothing observed yet, so the strength IS the prior; leaving the old one
-				// would make Effective() blend toward a number nobody supplied.
-				existing.Strength = r.Prior
-			}
-		}
+		// A re-declaration carries structure — endpoints, sign, label, note — and no
+		// magnitude, because there is no longer a magnitude for a declaration to supply.
+		// The branch that used to live here reconciled an incoming calibration against
+		// the stored prior; reloading a specification now cannot change what a
+		// relationship believes, only what it is a relationship *between*.
 		if r.Note != "" && r.Note != existing.Note {
 			existing.Note = r.Note
 		}
@@ -694,13 +840,12 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	if nr.Status == "" {
 		nr.Status = Active
 	}
-	if nr.Strength == 0 {
-		nr.Strength = nr.Prior
-	}
+	// A newly declared relationship holds no strength. It has been asserted to exist
+	// and to run in a direction; what it is worth is for the machine to say.
 	m.relationships[nr.ID] = &nr
 	m.bump(EventRelationshipDeclared, nr.ID, "system", map[string]any{
 		"from": nr.From, "to": nr.To, "label": nr.Label, "sign": nr.Sign,
-		"prior": nr.Prior, "provenance": string(nr.Provenance),
+		"provenance": string(nr.Provenance), "basis": nr.Basis(),
 	}, now)
 	return nil
 }
@@ -760,9 +905,16 @@ func (m *Map) ObserveRelationshipEvent(id string, strength float64, at time.Time
 // AssertRelationshipStrength is the operator path: it overrides the strength and
 // records who did it.
 //
-// It writes the prior rather than the learned estimate, and says so in the
-// journal. Writing the estimate would erase the distinction between what was
-// observed and what was asserted — the distinction an audit exists to preserve.
+// It writes its own field rather than either learned layer, and says so in the
+// journal. Writing a learned estimate would erase the distinction between what was
+// observed and what was asserted — the distinction an audit exists to preserve —
+// and the operator's value would then decay as fresh pairs arrived.
+//
+// The assertion takes effect in full and does not decay. The arrangement this
+// replaced wrote a prior that reached a decision scaled by (1 − confidence), so an
+// operator correcting a well-observed agent changed nothing; §7.3 measured that as
+// an asymmetry between tuning and deprecation, and it was an artefact of the write
+// target rather than a property of either operation.
 func (m *Map) AssertRelationshipStrength(id string, strength float64, actor, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -771,16 +923,27 @@ func (m *Map) AssertRelationshipStrength(id string, strength float64, actor, rea
 	if !ok {
 		return fmt.Errorf("relationship %q not found", id)
 	}
-	old := r.Prior
-	r.Prior = clamp01(strength)
+	before, hadBefore := r.Effective()
+	v := clamp01(strength)
+	r.Assertion = &v
 	r.Provenance = Asserted
-	m.bump(EventRelationshipAsserted, id, actor, map[string]any{
-		"prior_old": old, "prior_new": r.Prior, "reason": reason,
+	after, _ := r.Effective()
+	detail := map[string]any{
+		"assertion":               v,
+		"reason":                  reason,
 		"confidence_at_assertion": r.Confidence,
-		"effective_after":         r.Effective(),
-		"note": "an assertion moves the prior; at high confidence the effective " +
-			"strength barely moves, which is the blend behaving as designed",
-	}, m.now())
+		"effective_after":         after,
+		"note": "an assertion outranks both learned layers and takes effect in full; " +
+			"the learned estimates are kept, so what was measured stays readable " +
+			"beside what was asserted",
+	}
+	if hadBefore {
+		detail["effective_before"] = before
+	} else {
+		detail["effective_before"] = nil
+		detail["was_unknown"] = true
+	}
+	m.bump(EventRelationshipAsserted, id, actor, detail, m.now())
 	return nil
 }
 
@@ -846,9 +1009,12 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 		"discarded_observations": discarded,
 		"strength_before":        oldStrength,
 		"confidence_before":      oldConfidence,
-		"prior":                  r.Prior,
-		"note": "evidence discarded; the prior stands as the estimate and the pair " +
-			"window was cleared so nothing from before the reset can complete it",
+		"basis_after":            r.Basis(),
+		"note": "evidence discarded and the pair window cleared, so nothing from " +
+			"before the reset can complete it. The relationship falls back to whatever " +
+			"still stands: an assertion if one was made, otherwise nothing — a reset " +
+			"with no assertion returns the claim to unknown rather than to a seeded " +
+			"number, because there is no longer a seeded number to return it to",
 	}, m.now())
 	return nil
 }
@@ -953,8 +1119,13 @@ func (r *Relationship) String() string {
 	if label != "" {
 		label = "[" + label + "]"
 	}
-	return fmt.Sprintf("%s%s->%s(%s%.3f,c=%.2f,%s)",
-		r.From, label, r.To, sign, r.Effective(), r.Confidence, r.Provenance)
+	eff, known := r.Effective()
+	if !known {
+		return fmt.Sprintf("%s%s->%s(%sunknown,c=%.2f,%s)",
+			r.From, label, r.To, sign, r.Confidence, r.Provenance)
+	}
+	return fmt.Sprintf("%s%s->%s(%s%.3f,c=%.2f,%s/%s)",
+		r.From, label, r.To, sign, eff, r.Confidence, r.Provenance, r.Basis())
 }
 
 // describe is used by query rendering to keep property listings stable.

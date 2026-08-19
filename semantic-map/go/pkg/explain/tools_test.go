@@ -98,7 +98,7 @@ func TestValidate_AcceptsGroundedCitations(t *testing.T) {
 	resp := &explain.ExplainResponse{
 		Answer: "Cost is dominated by " + e.PropositionID + ".",
 		Citations: []explain.Citation{
-			{Kind: "edge", ID: e.PropositionID, EMAWeight: e.EMAWeight, PriorWeight: e.PriorWeight, Confidence: e.Confidence},
+			{Kind: "edge", ID: e.PropositionID, EMAWeight: e.EMAWeight, Confidence: e.Confidence},
 		},
 	}
 	v := explain.Validate(r, resp)

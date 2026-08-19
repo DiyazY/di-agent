@@ -137,7 +137,10 @@ type EdgeDTO struct {
 	ToID             string   `json:"to"`
 	PropositionID    string   `json:"proposition_id"`
 	Direction        string   `json:"direction"`
-	PriorWeight      float64  `json:"prior_weight"`
+	Established      *float64 `json:"established,omitempty"`
+	Assertion        *float64 `json:"assertion,omitempty"`
+	Effective        *float64 `json:"effective,omitempty"`
+	Basis            string   `json:"basis,omitempty"`
 	EMAWeight        float64  `json:"ema_weight"`
 	Confidence       float64  `json:"confidence"`
 	NObservations    int      `json:"n_observations"`
@@ -271,7 +274,10 @@ func edgeToDTO(e *types.EdgeDescriptor) EdgeDTO {
 		ToID:             e.ToID,
 		PropositionID:    e.PropositionID,
 		Direction:        directionToString(e.Direction),
-		PriorWeight:      e.PriorWeight,
+		Established:      e.Established,
+		Assertion:        e.Assertion,
+		Effective:        e.Effective,
+		Basis:            e.Basis,
 		EMAWeight:        e.EMAWeight,
 		Confidence:       e.Confidence,
 		NObservations:    e.NObservations,

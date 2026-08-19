@@ -30,12 +30,28 @@ const (
 // as a second copy.
 
 type EdgeDescriptor struct {
-	FromID           string
-	ToID             string
-	PropositionID    string
-	Direction        Direction
-	PriorWeight      float64
-	EMAWeight        float64
+	FromID        string
+	ToID          string
+	PropositionID string
+	Direction     Direction
+
+	// EMAWeight is the recent estimate — the fast EMA over the most recent pairs. It
+	// carries no meaning when NObservations is 0.
+	EMAWeight float64
+
+	// Established is the long-run estimate this machine has accumulated, and Assertion
+	// an operator's override. Both are nil when absent, because zero is the claim that
+	// a relationship is worth nothing and absence is not that claim. Neither is ever
+	// seeded from a calibration: the field these replaced was, and a number nobody
+	// measured then entered every decision with weight (1 − confidence).
+	Established *float64
+	Assertion   *float64
+
+	// Effective is the value the agent reasons with, nil when there is not one yet,
+	// and Basis names which of the three layers it came from.
+	Effective *float64
+	Basis     string
+
 	Confidence       float64
 	NObservations    int
 	Deprecated       bool     // mirrors Proposition.Deprecated; set by SemanticMap.Deprecate

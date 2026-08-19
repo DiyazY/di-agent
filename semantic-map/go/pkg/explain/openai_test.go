@@ -147,7 +147,7 @@ func TestExplain_UsesTool_ThenAnswers(t *testing.T) {
 	answerJSON, _ := json.Marshal(map[string]any{
 		"answer": fmt.Sprintf("Fetched edges and confirmed %s exists.", e0.PropositionID),
 		"citations": []map[string]any{
-			{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight, "prior_weight": e0.PriorWeight, "confidence": e0.Confidence, "n_observations": e0.NObservations},
+			{"kind": "edge", "id": e0.PropositionID, "ema_weight": e0.EMAWeight, "confidence": e0.Confidence, "n_observations": e0.NObservations},
 		},
 		"confidence": "high",
 	})
@@ -190,7 +190,7 @@ func TestExplain_ReflectionLoop_FixesFabrication(t *testing.T) {
 
 	badAnswer := `{"answer":"P99 explains everything.","citations":[{"kind":"edge","id":"P99","ema_weight":0.42}],"confidence":"high"}`
 	goodAnswer := fmt.Sprintf(`{"answer":"Actually %s is the driver.","citations":[{"kind":"edge","id":"%s","ema_weight":%f,"prior_weight":%f,"confidence":%f}],"confidence":"high"}`,
-		e0.PropositionID, e0.PropositionID, e0.EMAWeight, e0.PriorWeight, e0.Confidence)
+		e0.PropositionID, e0.PropositionID, e0.EMAWeight, 0.0, e0.Confidence)
 
 	llm := &scriptedLLM{responses: []string{assistantOnly(badAnswer), assistantOnly(goodAnswer)}}
 	srv := httptest.NewServer(llm.handler())
@@ -283,7 +283,11 @@ func firstEdge(t *testing.T, sm *semmap.SemanticMap) edgeFacts {
 		t.Fatalf("AllEdges: %v (n=%d)", err, len(edges))
 	}
 	e := edges[0]
-	return edgeFacts{ID: e.PropositionID, EMA: e.EMAWeight, Prior: e.PriorWeight, Conf: e.Confidence}
+	var est float64
+	if e.Established != nil {
+		est = *e.Established
+	}
+	return edgeFacts{ID: e.PropositionID, EMA: e.EMAWeight, Prior: est, Conf: e.Confidence}
 }
 
 func TestExplain_PlannerRunsToolsBeforeAnswering(t *testing.T) {

@@ -137,12 +137,12 @@ func snap(t *testing.T, state *statemap.Map, propID string) edgeSnap {
 			From:          r.From,
 			To:            r.To,
 			Direction:     dir,
-			Prior:         r.Prior,
+			Prior:         established(r),
 			EMA:           r.Strength,
-			Effective:     r.Effective(),
+			Effective:     r.EffectiveOrZero(),
 			Confidence:    r.Confidence,
 			NObservations: r.NObservations,
-			Delta:         r.Effective() - r.Prior,
+			Delta:         r.EffectiveOrZero() - established(r),
 			Deprecated:    r.Status == statemap.Retired,
 		}
 	}
@@ -168,7 +168,7 @@ func allSnaps(t *testing.T, state *statemap.Map) []edgeSnap {
 	return out
 }
 
-// propLessNumeric sorts firstSpecProp(),"P2",…"P9","P10",…"P15" by their numeric tail.
+// propLessNumeric sorts proposition IDs by their numeric tail.
 func propLessNumeric(a, b string) bool {
 	return propNum(a) < propNum(b)
 }
@@ -291,7 +291,7 @@ func TestEvolution_ColdToWarmConvergence(t *testing.T) {
 	t.Log("observed is not an observation of any association.")
 	t.Log("")
 
-	focus := []string{"P2", "P3", "P10"}
+	focus := allSpecProps()
 	checkpoints := []int{0, 20, 100, 250, 500}
 	cursor := 0
 	for tick := 0; tick < 500; tick++ {
@@ -340,12 +340,19 @@ func TestEvolution_ColdToWarmConvergence(t *testing.T) {
 // ── Scenario 2: regime change ────────────────────────────────────────────────
 
 func TestEvolution_RegimeChange(t *testing.T) {
+	// Both endpoints are driven, and driven differently. A relationship advances on a
+	// PAIR, so stepping one construct alone would leave every relationship at zero
+	// observations — which is Scenario 1's subject, not this one. The pressure series
+	// steps with resource but on a different amplitude, so the association has
+	// something to estimate rather than being a copy of one signal.
 	col := scripted.New("node_1",
 		scripted.NewStepPattern(types.CPUUtilization, "node_1", []scripted.StepPoint{
 			{Tick: 0, Value: 0.3},
 			{Tick: 300, Value: 0.85},
 			{Tick: 600, Value: 0.3},
 		}),
+		scripted.SineWavePattern{Metric: types.CPUPressureRatio, Node: "node_1",
+			Mid: 0.4, Amp: 0.3, PeriodTicks: 60, EndTick: -1},
 	)
 	a := newEvolutionAgent(t, col, nil)
 
@@ -353,7 +360,7 @@ func TestEvolution_RegimeChange(t *testing.T) {
 	t.Log("Expected: EMA tracks each regime; the third regime drags EMA back toward 0.3.")
 	t.Log("")
 
-	focus := []string{"P2", "P3", "P10"}
+	focus := allSpecProps()
 	checkpoints := []int{0, 100, 300, 400, 600, 800}
 	cursor := 0
 	for tick := 0; tick <= 800; tick++ {
@@ -366,22 +373,28 @@ func TestEvolution_RegimeChange(t *testing.T) {
 		}
 	}
 
-	// Invariants.
-	p2at300 := snap(t, a.state, "P2")
-	// At tick 300 we have observed 300 samples at 0.3. EMA converged.
-	// (Note: tick==300 prints BEFORE the next runTicks call, so we already
-	// have 300 ticks worth — checkpoint sequencing matches.)
-	if math.Abs(p2at300.EMA-0.3) > 0.05 {
-		// Skip the strict assertion here — checkpoint print order interleaves
-		// with runTicks, so the captured value is after 300 ticks of obs.
+	// Invariants, read from the CONSTRUCT rather than from a relationship.
+	//
+	// This scenario is about a value following its regime, and a relationship's
+	// strength is not that value: since the endpoint estimator was removed a
+	// relationship holds |r| over a window of pairs — an association, dimensionless and
+	// with no reason to approach 0.3 whatever the resource series does. The assertions
+	// below used to read a relationship and pass only because its strength was then an
+	// EMA of one endpoint's magnitude.
+	rc := mustSpec().CostModel.ResourceConstruct
+	final, ok := a.state.Property(rc)
+	if !ok {
+		t.Fatalf("construct %s absent", rc)
 	}
-
-	final := snap(t, a.state, "P2")
-	if final.EMA > 0.55 {
-		t.Errorf("at T=800 EMA should be moving back toward 0.3 (regime 3); got %.3f", final.EMA)
+	if final.NObservations == 0 {
+		t.Fatalf("construct %s was never observed", rc)
 	}
-	if final.EMA < 0.3 {
-		t.Errorf("at T=800 EMA should not have undershot 0.3; got %.3f", final.EMA)
+	if final.Value > 0.55 {
+		t.Errorf("at T=800 %s should be moving back toward the third regime's 0.3; got %.3f",
+			rc, final.Value)
+	}
+	if final.Value < 0.25 {
+		t.Errorf("at T=800 %s undershot the third regime's 0.3; got %.3f", rc, final.Value)
 	}
 
 	printSummary(t, "regime-change", a.state)
@@ -408,7 +421,14 @@ func TestEvolution_ConflictPairCoupling(t *testing.T) {
 	)
 	a := newEvolutionAgent(t, col, nil)
 
-	t.Log("Scenario 3: conflict-pair coupling — P2 (RC→PS−) and P3 (RC→PS+) on the same pair.")
+	idA, idB, ok := conflictPair()
+	if !ok {
+		t.Skip("the loaded specification declares no conflict pair — two propositions " +
+			"over one pair with opposite signs. The pair that used to serve here was " +
+			"not one: both stated the same mechanism, against outcome measures of " +
+			"opposite polarity, so one of them asserted a sign its machine never showed.")
+	}
+	t.Logf("Scenario 3: conflict-pair coupling — %s and %s on the same pair.", idA, idB)
 	t.Log("Both must receive identical EMA updates from one observation but contribute opposite signs in CostOfAction.")
 	t.Log("")
 
@@ -419,8 +439,8 @@ func TestEvolution_ConflictPairCoupling(t *testing.T) {
 	cursor := 0
 	for tick := 0; tick <= 500; tick++ {
 		if cursor < len(checkpoints) && tick == checkpoints[cursor] {
-			p2 := snap(t, a.state, "P2")
-			p3 := snap(t, a.state, "P3")
+			p2 := snap(t, a.state, idA)
+			p3 := snap(t, a.state, idB)
 			t.Logf("  T=%d", tick)
 			t.Logf("    %s", p2)
 			t.Logf("    %s", p3)
@@ -465,19 +485,23 @@ func TestEvolution_ConflictPairCoupling(t *testing.T) {
 // association, so the estimator now declines to move on it, and a scenario that wants
 // relationships to learn has to drive something that actually varies.
 func TestEvolution_MultiConstructStress(t *testing.T) {
-	col := scripted.New("node_1",
-		// CPU and pod-startup move together; memory moves against them; network drifts
-		// independently. Which of those the map can confirm is bounded by what the
-		// specification routes.
-		scripted.SineWavePattern{Metric: types.CPUUtilization, Node: "node_1",
-			Mid: 0.5, Amp: 0.3, PeriodTicks: 40, EndTick: -1},
-		scripted.SineWavePattern{Metric: types.PodStartupMs, Node: "node_1",
-			Mid: 0.5, Amp: 0.25, PeriodTicks: 40, EndTick: -1},
-		scripted.SineWavePattern{Metric: types.MemoryUtilization, Node: "node_1",
-			Mid: 0.5, Amp: 0.2, PeriodTicks: 40, StartTick: 20, EndTick: -1},
-		scripted.RampPattern{Metric: types.NetworkRxBps, Node: "node_1",
-			From: 0.1, To: 0.9, StartTick: 0, EndTick: 500},
-	)
+	// Drive one varying pattern per metric the specification actually routes, phase-
+	// shifted so different constructs move against one another. Naming metrics
+	// literally is what broke this scenario when the graph was scoped down: it fed
+	// pod-startup and network receive, both of which stopped being routed, so nothing
+	// reached the pressure construct and no relationship could form a pair.
+	routes := mustSpec().MetricRouting
+	if len(routes) < 2 {
+		t.Skipf("specification routes %d metrics; this scenario needs at least two", len(routes))
+	}
+	patterns := make([]scripted.Pattern, 0, len(routes))
+	for i, r := range routes {
+		patterns = append(patterns, scripted.SineWavePattern{
+			Metric: types.MetricType(r.MetricType), Node: "node_1",
+			Mid: 0.5, Amp: 0.3, PeriodTicks: 40, StartTick: int64(i * 3), EndTick: -1,
+		})
+	}
+	col := scripted.New("node_1", patterns...)
 	a := newEvolutionAgent(t, col, nil)
 
 	t.Log("Scenario 4: multi-construct stress — four varying patterns.")
@@ -797,4 +821,13 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	t.Logf("Candidates confirmed:  1")
 	t.Logf("Backbone size change:  %d → %d (+1)", before, len(afterProps))
 	t.Logf("New proposition:       %s  evidence=%v", newProp.PropositionID, newProp.EvidenceSources)
+}
+
+// established reports the long-run layer as a plain float for snapshot comparison,
+// zero when the machine has not established one yet.
+func established(r statemap.Relationship) float64 {
+	if r.Established == nil {
+		return 0
+	}
+	return *r.Established
 }

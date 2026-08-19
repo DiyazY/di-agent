@@ -217,9 +217,16 @@ type Citation struct {
 	// Value is the cited value of a property, checked against the state model — the
 	// model the agent reasons from. Citing a property is the form an answer about
 	// what the system is currently doing should take.
-	Value         float64 `json:"value,omitempty"`
-	EMAWeight     float64 `json:"ema_weight,omitempty"`
-	PriorWeight   float64 `json:"prior_weight,omitempty"`
+	Value     float64 `json:"value,omitempty"`
+	EMAWeight float64 `json:"ema_weight,omitempty"`
+
+	// Established and Effective are pointers so that citing a relationship the map has
+	// no strength for is distinguishable from citing one whose strength is zero. An
+	// answer that names a number the map does not hold is the failure this validator
+	// exists to catch, and the old float form made it unrepresentable.
+	Established *float64 `json:"established,omitempty"`
+	Effective   *float64 `json:"effective,omitempty"`
+
 	Confidence    float64 `json:"confidence,omitempty"`
 	NObservations int     `json:"n_observations,omitempty"`
 	Trust         float64 `json:"trust,omitempty"`      // peers only

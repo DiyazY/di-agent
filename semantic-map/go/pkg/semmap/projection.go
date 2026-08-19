@@ -37,10 +37,17 @@ var ErrNoStateModel = errors.New(
 //	FromID, ToID     ← the relationship's endpoints (construct-level properties)
 //	PropositionID    ← its label, which is where the proposition ID is carried
 //	Direction        ← its sign
-//	PriorWeight      ← its prior, the calibrated strength before this system spoke
-//	EMAWeight        ← its learned strength
+//	Established      ← its long-run learned baseline, nil until pairs accumulate
+//	Assertion        ← an operator's override, nil unless one was set
+//	Effective        ← the value the agent reasons with, nil when there is not one
+//	Basis            ← which of the three answered: asserted, established, recent, unknown
+//	EMAWeight        ← its recent learned strength
 //	Confidence       ← how much of that rests on paired observation here
 //	Deprecated       ← retired, with the reason retirement recorded
+//
+// The descriptor carried a PriorWeight until seeded magnitudes were removed. Nothing
+// replaced it with a default, because a relationship with no evidence has no strength
+// and reporting zero would be the claim that it is worth nothing.
 
 // edgeFromRelationship renders one relationship as the edge descriptor the graph
 // surfaces speak in.
@@ -54,7 +61,10 @@ func edgeFromRelationship(r statemap.Relationship) *types.EdgeDescriptor {
 		ToID:          r.To,
 		PropositionID: r.Label,
 		Direction:     direction,
-		PriorWeight:   r.Prior,
+		Established:   r.Established,
+		Assertion:     r.Assertion,
+		Effective:     effectivePtr(r),
+		Basis:         r.Basis(),
 		EMAWeight:     r.Strength,
 		Confidence:    r.Confidence,
 		NObservations: r.NObservations,
@@ -97,7 +107,14 @@ func (m *SemanticMap) projectedPropositions() ([]*types.Proposition, error) {
 		if !ok {
 			continue
 		}
-		p.PriorStrength = r.Prior
+		// The declaration layer reports what the map has, which may be nothing. A
+		// proposition with no measurement behind it reads 0 here and Instantiated
+		// true: declared, and not yet worth anything.
+		if v, known := r.Effective(); known {
+			p.PriorStrength = v
+		} else {
+			p.PriorStrength = 0
+		}
 		p.Instantiated = true
 		if r.Status == statemap.Retired {
 			p.Deprecated = true
@@ -182,4 +199,14 @@ func (m *SemanticMap) projectedEdges() []*types.EdgeDescriptor {
 		return out[i].PropositionID < out[j].PropositionID
 	})
 	return out
+}
+
+// effectivePtr renders a relationship's effective strength for a wire descriptor,
+// nil when there is not one, so a caller cannot read an absent estimate as zero.
+func effectivePtr(r statemap.Relationship) *float64 {
+	v, known := r.Effective()
+	if !known {
+		return nil
+	}
+	return &v
 }

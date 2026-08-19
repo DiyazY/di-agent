@@ -58,8 +58,11 @@ func buildCriticPrompt(question string, candidate *ExplainResponse, evidence str
 	} else {
 		for _, c := range candidate.Citations {
 			fmt.Fprintf(&b, "- kind=%s id=%s", c.Kind, c.ID)
-			if c.PriorWeight != 0 {
-				fmt.Fprintf(&b, " prior=%.4f", c.PriorWeight)
+			if c.Established != nil {
+				fmt.Fprintf(&b, " established=%.4f", *c.Established)
+			}
+			if c.Effective != nil {
+				fmt.Fprintf(&b, " effective=%.4f", *c.Effective)
 			}
 			if c.EMAWeight != 0 {
 				fmt.Fprintf(&b, " ema=%.4f", c.EMAWeight)

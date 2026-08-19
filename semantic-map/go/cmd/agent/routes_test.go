@@ -99,20 +99,44 @@ func TestGetEdges_NoFilterReturnsFifteen(t *testing.T) {
 	}
 }
 
-func TestGetEdges_FilterByFromTo_RC_PS_ReturnsBothP2AndP3(t *testing.T) {
+// TestGetEdges_FilterByFromTo_ReturnsEveryEdgeOnThePair pins the filter against the
+// loaded specification rather than against a remembered pair of proposition IDs. It
+// named P2 and P3 literally and required exactly two, which stopped describing the
+// shipped model when the graph was scoped down — and did so quietly, because Go's test
+// cache does not reliably notice that a specification read at runtime from outside the
+// package directory has changed.
+func TestGetEdges_FilterByFromTo_ReturnsEveryEdgeOnThePair(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
+
+	spec := mustSpec(t)
+	if len(spec.Propositions) == 0 {
+		t.Skip("specification declares no propositions")
+	}
+	first := spec.Propositions[0]
+	want := map[string]bool{}
+	for _, p := range spec.Propositions {
+		if p.FromConstruct == first.FromConstruct && p.ToConstruct == first.ToConstruct {
+			want[p.PropositionID] = true
+		}
+	}
+
 	var edges []EdgeDTO
-	getJSON(t, base+"/edges?from=RC&to=PS", &edges)
-	if len(edges) != 2 {
-		t.Fatalf("RC→PS pair: got %d edges, want 2 (P2 and P3)", len(edges))
+	getJSON(t, base+"/edges?from="+first.FromConstruct+"&to="+first.ToConstruct, &edges)
+	if len(edges) != len(want) {
+		t.Fatalf("%s→%s: got %d edges, want %d",
+			first.FromConstruct, first.ToConstruct, len(edges), len(want))
 	}
-	seen := map[string]bool{}
 	for _, e := range edges {
-		seen[e.PropositionID] = true
+		if !want[e.PropositionID] {
+			t.Errorf("filter returned %s, which the specification does not declare on "+
+				"%s→%s", e.PropositionID, first.FromConstruct, first.ToConstruct)
+		}
+		delete(want, e.PropositionID)
 	}
-	if !seen["P2"] || !seen["P3"] {
-		t.Errorf("expected P2 and P3 in RC→PS pair; got %v", seen)
+	for id := range want {
+		t.Errorf("filter omitted %s, declared on %s→%s",
+			id, first.FromConstruct, first.ToConstruct)
 	}
 }
 
@@ -462,9 +486,17 @@ func TestResetEdge_DiscardsEvidenceAndKeepsThePrior(t *testing.T) {
 		if e.Confidence != 0.0 {
 			t.Errorf("edge %s: confidence=%.3f after reset; want 0.0", e.PropositionID, e.Confidence)
 		}
-		if e.PriorWeight != before.Prior {
-			t.Errorf("edge %s: prior %.3f after reset, want the untouched %.3f — a reset "+
-				"discards evidence, not the claim", e.PropositionID, e.PriorWeight, before.Prior)
+		// A reset discards evidence, not the claim: the relationship still exists and
+		// still runs in its declared direction. With nothing asserted it now has no
+		// strength at all, which is the honest report — the arrangement this replaced
+		// left a seeded number standing and called it the estimate.
+		if e.Effective != nil {
+			t.Errorf("edge %s: effective %.3f after reset; want none, since the evidence "+
+				"was discarded and no operator asserted a value",
+				e.PropositionID, *e.Effective)
+		}
+		if e.Basis != "unknown" {
+			t.Errorf("edge %s: basis %q after reset, want unknown", e.PropositionID, e.Basis)
 		}
 	}
 

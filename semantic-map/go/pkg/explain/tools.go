@@ -242,15 +242,17 @@ func dispatchGetEdges(r SemanticMapReader, args map[string]any) (*ToolResult, er
 	}
 	// Trim: give the LLM just what it needs, not the internal fields.
 	type edgeOut struct {
-		From          string  `json:"from"`
-		To            string  `json:"to"`
-		PropositionID string  `json:"proposition_id"`
-		Direction     string  `json:"direction"`
-		PriorWeight   float64 `json:"prior_weight"`
-		EMAWeight     float64 `json:"ema_weight"`
-		Confidence    float64 `json:"confidence"`
-		NObservations int     `json:"n_observations"`
-		Deprecated    bool    `json:"deprecated"`
+		From          string   `json:"from"`
+		To            string   `json:"to"`
+		PropositionID string   `json:"proposition_id"`
+		Direction     string   `json:"direction"`
+		Established   *float64 `json:"established,omitempty"`
+		Effective     *float64 `json:"effective,omitempty"`
+		Basis         string   `json:"basis,omitempty"`
+		EMAWeight     float64  `json:"ema_weight"`
+		Confidence    float64  `json:"confidence"`
+		NObservations int      `json:"n_observations"`
+		Deprecated    bool     `json:"deprecated"`
 	}
 	out := make([]edgeOut, 0, len(edges))
 	for _, e := range edges {
@@ -260,7 +262,8 @@ func dispatchGetEdges(r SemanticMapReader, args map[string]any) (*ToolResult, er
 		}
 		out = append(out, edgeOut{
 			From: e.FromID, To: e.ToID, PropositionID: e.PropositionID, Direction: dir,
-			PriorWeight: e.PriorWeight, EMAWeight: e.EMAWeight, Confidence: e.Confidence,
+			Established: e.Established, Effective: e.Effective, Basis: e.Basis,
+			EMAWeight: e.EMAWeight, Confidence: e.Confidence,
 			NObservations: e.NObservations, Deprecated: e.Deprecated,
 		})
 	}

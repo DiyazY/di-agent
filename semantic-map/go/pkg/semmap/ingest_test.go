@@ -2,11 +2,13 @@ package semmap_test
 
 import (
 	"errors"
-	"github.com/DiyazY/di-agent/pkg/semmap"
 	"strconv"
 	"testing"
 
+	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/domain"
+	"github.com/DiyazY/di-agent/pkg/profiles"
+	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -171,4 +173,57 @@ func metricFor(spec *domain.Spec, construct string) string {
 		}
 	}
 	return ""
+}
+
+// TestIngestSampleNormalizesToConstructPolarity pins the reconciliation at the point it
+// happens. The value stored must be the one expressed in the construct's polarity, not
+// the raw reading, because everything downstream — the derived summary, the paired
+// estimator, and the sign a proposition declares — reads the stored value and has no
+// way to know which metrics arrived inverted.
+func TestIngestSampleNormalizesToConstructPolarity(t *testing.T) {
+	spec := mustSpec()
+
+	// Route a higher-is-better metric into a construct that runs higher-is-worse.
+	// Every committed construct is higher-is-worse, so this is the opposed case.
+	target := spec.Constructs[0].ConstructID
+	if err := spec.AddMetricRoute(domain.MetricRoute{
+		MetricType:  "synthetic_headroom",
+		ConstructID: target,
+		Unit:        "fraction",
+		Range:       [2]float64{0, 1},
+		Polarity:    domain.HigherIsBetter,
+	}); err != nil {
+		t.Fatalf("adding the opposed route: %v", err)
+	}
+	if got := spec.NormalizeForConstruct("synthetic_headroom", 0.25); got != 0.75 {
+		t.Fatalf("precondition: spec normalised 0.25 to %v, want 0.75", got)
+	}
+
+	state := statemap.New(statemap.Config{
+		Owner: "test-node", ConvergenceObservations: 10, Alpha: 0.5, AdmitUnknown: true,
+	}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec),
+		minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil),
+		minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	if err := sm.IngestSample(&types.MetricSample{
+		MetricType: "synthetic_headroom", Value: 0.25,
+		TimestampUnix: 1000, EventID: "h-1",
+	}); err != nil {
+		t.Fatalf("ingesting: %v", err)
+	}
+
+	p, ok := state.Property("synthetic_headroom")
+	if !ok {
+		t.Fatal("the property was not declared by the seed")
+	}
+	if p.Value != 0.75 {
+		t.Errorf("stored value %.4f, want 0.75 — a metric opposed to its construct must "+
+			"be reflected on the way in, or the construct summarises two quantities that "+
+			"cancel", p.Value)
+	}
 }

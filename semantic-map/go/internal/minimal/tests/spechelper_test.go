@@ -35,3 +35,36 @@ func firstSpecKeyword() string {
 	}
 	return s.IntentRules[0].Keywords[0]
 }
+
+// allSpecProps names every proposition the loaded specification declares, so a test
+// that wants "the graph's relationships" tracks the shipped model instead of a
+// remembered list. Hardcoded IDs here went stale silently when the graph was scoped
+// down: the propositions vanished from the spec, these tests kept asking for them, and
+// Go's test cache reported ok because the specification is read at runtime from a path
+// outside the package directory.
+func allSpecProps() []string {
+	s := mustSpec()
+	out := make([]string, 0, len(s.Propositions))
+	for _, p := range s.Propositions {
+		out = append(out, p.PropositionID)
+	}
+	return out
+}
+
+// conflictPair returns two propositions the specification declares over the same
+// endpoints with opposite signs, and false when it declares none. A conflict pair is a
+// property of a specification, not of the architecture, and the shipped one has no such
+// pair: the two that used to form one were the same claim written twice against
+// outcome measures of opposite polarity.
+func conflictPair() (string, string, bool) {
+	s := mustSpec()
+	for i, a := range s.Propositions {
+		for _, b := range s.Propositions[i+1:] {
+			if a.FromConstruct == b.FromConstruct && a.ToConstruct == b.ToConstruct &&
+				a.Direction != b.Direction {
+				return a.PropositionID, b.PropositionID, true
+			}
+		}
+	}
+	return "", "", false
+}

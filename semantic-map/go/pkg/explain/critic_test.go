@@ -80,7 +80,7 @@ func TestBuildCriticPrompt_IncludesQuestionAnswerAndCitations(t *testing.T) {
 		Answer:     "P10 dominates.",
 		Confidence: "high",
 		Citations: []Citation{
-			{Kind: "edge", ID: "P10", PriorWeight: 0.645, EMAWeight: 0.62, Confidence: 0.6, NObservations: 15},
+			{Kind: "edge", ID: "P10", Established: ptr(0.645), EMAWeight: 0.62, Confidence: 0.6, NObservations: 15},
 		},
 	}
 	got := buildCriticPrompt("Why is cost high?", candidate, "EVIDENCE: get_cost → 0.035")
@@ -89,7 +89,7 @@ func TestBuildCriticPrompt_IncludesQuestionAnswerAndCitations(t *testing.T) {
 		"Why is cost high?",
 		"P10 dominates.",
 		"kind=edge id=P10",
-		"prior=0.6450",
+		"established=0.6450",
 		"n_obs=15",
 		"SELF-REPORTED CONFIDENCE: high",
 		"EVIDENCE: get_cost → 0.035",
@@ -150,3 +150,7 @@ func TestFormatCriticVerdictForLLM_RejectionCarriesIssuesAndRevision(t *testing.
 		t.Error("revision prompt should re-assert the grounding requirement")
 	}
 }
+
+// ptr is a local helper for the pointer-valued strength layers, which are pointers so
+// that "no measurement" is distinguishable from "measured as zero".
+func ptr(f float64) *float64 { return &f }
