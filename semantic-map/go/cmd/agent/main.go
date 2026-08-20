@@ -67,11 +67,14 @@ func main() {
 	alphaSlow := flag.Float64("alpha-slow", 0.001,
 		"EMA decay factor for the ESTABLISHED layer: the same paired observations read on a "+
 			"slower clock, answering what is normal for this machine rather than what is "+
-			"happening now. The default is derived rather than chosen — a memory of ~2.3 "+
-			"workload regimes, fitted against the requirement that a baseline distinguish "+
-			"machines without depending on the order the machine was exercised in. See "+
-			"convergence/derive_alpha_slow.py. Exposed so that derivation can be confirmed "+
-			"against the daemon itself rather than against a re-implementation.")
+			"happening now. The default is a design choice on a measured trade-off, not a "+
+			"derived optimum: order-invariance and responsiveness trade off monotonically, "+
+			"so the measurement supports a band (roughly 0.004 to 0.0005) and 0.001 sits "+
+			"mid-band with ~10x the recent layer's order-invariance and about a third of "+
+			"its responsiveness. Pinning one value needs a stated requirement about how "+
+			"fast a baseline should follow a persistent change. An offline fit reported an "+
+			"interior maximum; a 135-stream sweep against this daemon refuted it as an "+
+			"artefact of the offline streams being ~6x shorter than a deployment's.")
 	convergence := flag.Float64("convergence", 500, "observations for confidence=1.0")
 	minTrust := flag.Float64("min-trust", 0.5, "minimum peer trust score")
 	priorsPath := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")

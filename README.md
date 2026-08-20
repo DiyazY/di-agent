@@ -12,7 +12,7 @@ Implementation artifact for the dissertation *A Context-Aware Agentic Framework 
 
 `di-agent` is an autonomous orchestration agent designed for resource-constrained edge nodes (Raspberry Pi 4 and equivalent). It makes context-aware task scheduling and offloading decisions without a centralised control plane.
 
-The agent's decision logic is driven by the **Semantic Map** — an adaptive behavioral data structure that starts from scientifically grounded priors (derived from five empirical publications) and continuously refines its knowledge with live deployment telemetry. As observations accumulate, decisions shift from generic literature knowledge toward deployment-specific behavioral patterns, without labeling or manual tuning.
+The agent's decision logic is driven by the **Semantic Map** — an adaptive behavioral data structure that takes its *structure* from five empirical publications (which properties relate, and in which direction) and learns every *magnitude* from live deployment telemetry. A freshly started agent reports that it does not yet know what any relationship is worth, rather than reporting a constant nobody measured; as paired observations accumulate it answers from what this machine has done, without labeling or manual tuning.
 
 The implementation is organized around a contract-based architecture: six swappable interfaces (Collector, Storage, Ontology, Updater, Reasoner, Proposer) allow the same agent binary to run on a Raspberry Pi (`edge-minimal` profile) or a cloud VM (`cloud-full` profile) by changing a single startup flag.
 
@@ -31,11 +31,11 @@ The agent synthesises findings from five prior publications:
 
 | Publication | What it contributes to di-agent |
 |-------------|--------------------------------|
-| P1 — [Performance & Resource Efficiency](https://link.springer.com/chapter/10.1007/978-3-031-84617-5_7) | Initial priors: pod-startup latency, throughput constants per distribution |
-| P2 — [Security, Resilience & Maintainability](https://link.springer.com/chapter/10.1007/978-3-031-84617-5_8) | Initial priors: security compliance scores, recovery time constants |
+| P1 — [Performance & Resource Efficiency](https://link.springer.com/chapter/10.1007/978-3-031-84617-5_7) | Evidence behind the declared propositions; the workloads the convergence study replays per distribution |
+| P2 — [Security, Resilience & Maintainability](https://link.springer.com/chapter/10.1007/978-3-031-84617-5_8) | Evidence for the constructs a running cluster cannot move, which is why they stay at selection time. Recovery time constants |
 | P3 — Di-Select Orchestration Selection Framework | Backbone topology: 7 constructs, 15 causal propositions (P1–P15) |
-| P4 — Energy Analysis (DVFS / CPU microarchitecture) | Initial priors: J/pod, mJ/op, interrupt amplification ratios |
-| P5 — Overhead Decomposition (k0s cgroup analysis) | Initial priors: per-component CPU overhead fractions |
+| P4 — Energy Analysis (DVFS / CPU microarchitecture) | Why energy is *not* routed: the model is calibrated for one hardware class and no node here measures a joule |
+| P5 — Overhead Decomposition (k0s cgroup analysis) | Per-container evidence that the orchestration tax is real and small; k0s-only |
 
 ---
 
@@ -65,7 +65,7 @@ P5: Overhead decomposition
 
 ## Status
 
-Early implementation — contracts, edge-minimal daemon, and prior initialization pipeline are in active development. Code will be published here as P6 matures toward submission.
+Early implementation — contracts, edge-minimal daemon, and the structural initialization pipeline are in active development. Code will be published here as P6 matures toward submission.
 
 ## Quick start
 
@@ -87,4 +87,4 @@ go build ./... && go test ./...     # verify the checkout
 | [`DEVELOPING.md`](DEVELOPING.md) | **Changing code?** Install, the inner loop, how to extend (collectors, MetricTypes, contracts, profiles, endpoints, explain tools), testing, conventions, troubleshooting. |
 | [`OPERATING.md`](OPERATING.md) | **Deploying it?** Security posture (read this first — there is no auth), resource footprint, systemd unit, health checks, monitoring, multi-node setup, upgrades, what it touches on your system. |
 | [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the six contracts and why, multigraph backbone, coordination, the natural-language layer. |
-| [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, prior initialization, PoC quickstart. |
+| [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, structural initialization, PoC quickstart. |

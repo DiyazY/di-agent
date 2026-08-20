@@ -13,7 +13,7 @@ If you are changing code, read [`DEVELOPING.md`](DEVELOPING.md) instead. If you 
 | Assumption | Consequence for you |
 | ---------- | ------------------- |
 | **No authentication on any endpoint.** No TLS, no bearer tokens, no middleware. | Anyone who can reach the port can read the **whole model** — `GET /state` returns every property, relationship, decision and journal entry, not only the graph — *and mutate it*: deprecate propositions, reset edges, retune weights. Agents fetch each other's `/state` the same way, so a reachable agent also discloses to any host that can pose as a peer. Treat the listen address as fully trusted. |
-| **State is in memory unless `-state-file` is set.** | Without it, a restart discards every learned strength, confidence and journal entry, and the agent returns to cold-start priors. With it, the map and its journal are snapshotted periodically and on shutdown, and a snapshot naming a different owner is refused. |
+| **State is in memory unless `-state-file` is set.** | Without it, a restart discards every learned strength, confidence and journal entry, and the agent returns to cold start — every relationship reporting `unknown` again. With it, the map and its journal are snapshotted periodically and on shutdown, and a snapshot naming a different owner is refused. |
 | **`-addr :8080` binds every interface.** | On a multi-homed host this is reachable from anywhere routable. Bind explicitly. |
 
 None of these are oversights — they are recorded scope decisions ([ARCHITECTURE §10](semantic-map/ARCHITECTURE.md#10-coordination)) for a lab-network deployment, with production hardening deferred to P7. But they mean the deployment rule is simple:
@@ -65,7 +65,7 @@ Set `-proposer=false` on nodes where you want to reclaim the ring-buffer overhea
 | Netdata (optional) | For richer host metrics. `-netdata-url ""` disables it. Tested against v1.42 and v1.33. |
 | Nothing else | Static Go binary. No interpreter, no shared libraries, no package manager. |
 
-The agent does **not** require Kubernetes to run. `-kd` only selects which set of priors to seed from; it does not talk to an API server.
+The agent does **not** require Kubernetes to run. `-kd` only names the distribution for the record and is validated against the artefact's `distributions` list; it selects no magnitude and does not talk to an API server.
 
 ---
 
@@ -98,15 +98,15 @@ sudo mkdir -p /etc/di-agent
 di-agent --help          # confirm it runs
 ```
 
-### Optional: priors file
+### Optional: initialization artefact
 
-`prior_weights.json` seeds the graph with the calibrated constants from publications P1–P5 instead of the hardcoded defaults. Without it the agent still works — it uses the built-in Di-Select proposition strengths.
+`prior_weights.json` declares which propositions the agent carries and in which direction — structure, and no strength for any of them. Without it the agent still works — it uses the built-in Di-Select proposition strengths.
 
 ```bash
 sudo install -m 0644 semantic-map/prior_weights.json /etc/di-agent/prior_weights.json
 ```
 
-Pass it with `-priors /etc/di-agent/prior_weights.json`. Combine with `-kd` to get per-distribution weights.
+Pass it with `-priors /etc/di-agent/prior_weights.json`. `-kd` names this node's distribution and is validated against the file; it no longer selects a magnitude, so two agents differing only in `-kd` answer identically until telemetry arrives.
 
 ---
 
@@ -120,7 +120,7 @@ Everything is command-line flags — there is no config file. The full table is 
 | ---- | ------------ |
 | `-addr` | **Bind explicitly.** `-addr 127.0.0.1:8080` for local-only, or `-addr 10.0.0.5:8080` for one interface. The `:8080` default listens everywhere. |
 | `-node-id` | Identifies this agent in observations and event IDs. Defaults to `os.Hostname()`. Set it if hostnames are not stable. |
-| `-kd` | `k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`. With `-priors`, seeds distribution-specific weights. Wrong value = wrong priors, and the agent will not tell you. |
+| `-kd` | `k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`. Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. Selects no magnitude, so a wrong-but-valid value changes no answer. Wrong value = a mislabelled record, and the agent will not tell you. |
 
 ### Should tune
 
@@ -341,7 +341,7 @@ curl -s http://$ADDR/version | jq -r .agent_version    # confirm
 
 Rollback is the same procedure with the old binary. Keep the previous one around.
 
-**Plan for the state loss.** Every upgrade resets the graph to cold-start priors, and the agent needs `-convergence` observations per edge to re-converge (500 at default, ~40 minutes at a 5 s collect interval). Upgrade during a period when degraded decision quality is acceptable, and stagger across nodes rather than restarting a whole mesh at once.
+**Plan for the state loss.** Without `-state-file` every upgrade returns the graph to cold start — every relationship reporting `unknown` — and the agent needs `-convergence` *paired* observations per relationship to re-converge (500 at default, ~40 minutes at a 5 s collect interval). Upgrade during a period when degraded decision quality is acceptable, and stagger across nodes rather than restarting a whole mesh at once.
 
 If you need the learned state, snapshot it before stopping — `GET /graph` returns everything, and it is a reasonable audit record even though the agent cannot reload it:
 
@@ -362,7 +362,7 @@ Full inventory, so you can reason about it before deploying.
 | --------------- | ---- | --- |
 | `/sys/fs/cgroup/**` | Every `-collect-interval` | CPU/memory/IO metrics. Read-only. Disable with `-cgroup-root ""`. |
 | `$NETDATA_URL/api/v1/data` | Every `-collect-interval` | Host metrics. Disable with `-netdata-url ""`. |
-| `-priors` file | Once, at startup | Calibrated prior weights. |
+| `-priors` file | Once, at startup | Structure: which propositions to instantiate, in which direction. No magnitudes. |
 | `-explain-prompt` files | Once, at startup | Only when the explain layer is enabled. |
 
 ### Writes
@@ -407,11 +407,15 @@ If the loop is up, test the source directly: `curl -s localhost:19999/api/v1/dat
 curl -s http://$ADDR/graph | jq -r '.edges[] | select(.deprecated == true) | .proposition_id'
 ```
 
-`POST /agent/reset` restores an edge's EMA to its prior but does **not** un-deprecate — there is no un-deprecate operation by design, since the audit trail must stay honest. Restart the agent for a clean backbone (and accept the state loss).
+`POST /agent/reset` discards what a relationship learned — both layers cleared, confidence to zero, pair window emptied, the discard journalled — but does **not** un-deprecate — there is no un-deprecate operation by design, since the audit trail must stay honest. Restart the agent for a clean backbone (and accept the state loss).
 
 **Confidence stuck at ~0.60.** Expected and correct. See [§6](#6-monitor).
 
-**`ResourceCost` is 0 or negative under heavy load.** Counter-intuitive but correct. The cost formula is deviation-from-prior: `(effective − prior) × sign(direction)`. Driving CPU far *above* the calibrated priors makes negative-direction contributions cancel positive ones. Synthetic load generators are the wrong tool for demonstrating cost differentiation — the signal is clearest at idle-to-moderate load.
+**`ResourceCost` is 0 or negative under heavy load.** This was a real effect of the old cost function, which accumulated `(effective − prior) × sign(direction)`, so driving CPU far above the calibrated priors let negative-direction contributions cancel positive ones. **It no longer applies.** The estimate now leads with the observed *level* of the construct, so `ResourceCost` tracks utilization directly and rises under load. The relation sum is reported separately as a per-unit sensitivity and can legitimately be negative or zero — that is a slope, not a cost.
+
+**Confidence stays at 0 no matter how long the agent runs.** Check that *both* endpoints of a relationship are varying, not just present. A relationship advances on a *pair*, and a correlation over a constant series is undefined, so the estimator declines to move on it rather than reporting a coefficient it did not measure. A well-provisioned control-plane host whose stall-pressure reads identically zero will run for hours and learn nothing — correctly. `GET /state` reports `n_unknown` beside the mean confidence for exactly this case.
+
+**A relationship shows strength 0 with a high `sign_conflicts` count.** That is not a quiet system; it is a wrong declaration. The machine is producing the opposite sign to the one the specification declares, every pair is being rejected at the gate, and `sign_suspect` flags it past 30 pairs at 60% conflict. Fix the declared direction or the route's polarity in `domain_spec.json` — do not wait for it to converge, because it cannot.
 
 **`/recommend` returns no peer.** Check, in order: peers registered (`GET /peers`), trust at or above `-min-trust` (default `0.5`), peers reachable (`curl` their `/healthz` from this node), and that at least one peer has a *lower* cost than local — a recommendation requires positive savings.
 
@@ -419,7 +423,7 @@ curl -s http://$ADDR/graph | jq -r '.edges[] | select(.deprecated == true) | .pr
 
 **Learned state vanished.** The process restarted. Check `systemctl show -p NRestarts di-agent`. All state is in memory; see [§8](#8-upgrade-and-rollback).
 
-**Everything looks right but decisions seem wrong for the distribution.** Verify `-kd` matches reality. A mismatch silently seeds the wrong priors — `curl -s $ADDR/version` does not echo it, so check the process args: `systemctl show -p ExecStart di-agent`.
+**Everything looks right but decisions seem wrong.** `-kd` is no longer a candidate: it seeds no magnitude, so a mismatch mislabels the record and changes no answer. Check instead what the agent is actually reading — `GET /edges` gives `basis` per relationship, and `basis: unknown` on a relationship you expected to be learned means no pairs have formed. `GET /state/decisions/{id}` reproduces the inputs of any cost answer.
 
 ---
 
