@@ -28,8 +28,8 @@ header()  { echo "${BOLD}${CYAN}$*${RESET}"; }
 announce(){ echo "${BOLD}${GREEN}→ $*${RESET}"; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-get_vm_ip() {
-    virsh domifaddr "$1" | awk '/ipv4/ {print $4}' | cut -d'/' -f1 | head -n1
+vm_ip() {
+    uc machine ls | awk -v vm="$1" '$1 == vm {split($5, endpoints, ","); split(endpoints[1], addr, ":"); print addr[1]}'
 }
 
 # JSON parsing: prefer python3, fall back to jq
@@ -70,18 +70,13 @@ fi
 
 ROUNDS="${ROUNDS:-8}"
 INTERVAL="${INTERVAL:-10}"
-DRAIN_ROUND=$(( ROUNDS / 2 ))   # halfway point: drain the second worker's trust on the first worker
-
-if [ "${#VMS[@]}" -lt 2 ]; then
-    err "At least two VMs are required: control plane followed by one or more workers"
-    exit 1
-fi
+DRAIN_ROUND=$(( ROUNDS / 2 ))   # halfway point: drain diag-2's trust on diag-1
 
 # ── discover IPs (bash 3.x compat — no associative arrays) ──────────────────
 IPS=()
 for idx in "${!VMS[@]}"; do
     vm="${VMS[$idx]}"
-    ip="$(get_vm_ip "$vm")"
+    ip="$(vm_ip "$vm")"
     if [ -z "$ip" ]; then
         err "Could not find IP for $vm — is it running?"
         exit 1
@@ -120,9 +115,6 @@ for round in $(seq 1 "$ROUNDS"); do
 
     COST_ARGS=()
     for idx in "${!VMS[@]}"; do
-        if [ "$idx" -eq 0 ]; then
-            continue
-        fi
         vm="${VMS[$idx]}"
         ip="${IPS[$idx]}"
         raw=$(curl -sf "http://${ip}:9090/cost?taskType=pod-scheduling&nodeID=master" 2>/dev/null || echo "{}")
@@ -168,14 +160,14 @@ for round in $(seq 1 "$ROUNDS"); do
 
     # ── 4. mid-point trust drain ──────────────────────────────────────────────
     if [ "$round" -eq "$DRAIN_ROUND" ] && [ "$DRAIN_DONE" = "false" ]; then
-        if [ "${#VMS[@]}" -lt 3 ]; then
-            info "Skipping trust drain: need at least 2 worker VMs"
+        if [ "${#VMS[@]}" -lt 2 ]; then
+            info "Skipping trust drain: need at least 2 VMs"
             DRAIN_DONE=true
             continue
         fi
 
-        DRAIN_TARGET_VM="${VMS[2]}"  # second worker VM
-        DRAIN_HOST="${VMS[1]}"       # first worker VM
+        DRAIN_TARGET_VM="${VMS[1]}"  # diag-2 (second VM)
+        DRAIN_HOST="${VMS[0]}"       # draining from diag-1 (first VM)
         drain_ip=$(ip_for "$DRAIN_HOST")
         drain_target_ip=$(ip_for "$DRAIN_TARGET_VM")
 
@@ -209,8 +201,8 @@ for p in peers:
             else
                 ok "  Trust drain applied: $DRAIN_TARGET_VM (id=$drain_peer_id) trust=0.15 on $DRAIN_HOST"
             fi
-            if [ "${#VMS[@]}" -ge 4 ]; then
-                announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[3]} to win next rounds"
+            if [ "${#VMS[@]}" -ge 3 ]; then
+                announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
             else
                 announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect other eligible peers to win next rounds"
             fi
