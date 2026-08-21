@@ -19,8 +19,8 @@ ok()   { echo "${GREEN}[peers] $*${RESET}"; }
 err()  { echo "${RED}[peers] $*${RESET}" >&2; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-vm_internal_ip() { 
-    uc machine ls | awk -v vm="$1" '$1 == vm {split($5, endpoints, ","); split(endpoints[1], addr, ":"); print addr[1]}'
+get_vm_ip() {
+    virsh domifaddr "$1" | awk '/ipv4/ {print $4}' | cut -d'/' -f1 | head -n1
 }
 
 register_peer() {
@@ -77,7 +77,7 @@ fi
 # ── discover IPs (bash 3.x compat — arrays only) ────────────────────────────
 IPS=()
 for vm in "${VMS[@]}"; do
-    ip=$(vm_internal_ip "$vm")
+    ip=$(get_vm_ip "$vm")
     if [ -z "$ip" ]; then
         err "Could not find IP for $vm — is it running?"
         exit 1
@@ -90,10 +90,10 @@ done
 info ""
 info "Registering peer relationships ..."
 
-for i in "${!VMS[@]}"; do
+for ((i = 1; i < ${#VMS[@]}; i++)); do
     target_vm="${VMS[$i]}"
     target_ip="${IPS[$i]}"
-    for j in "${!VMS[@]}"; do
+    for ((j = 1; j < ${#VMS[@]}; j++)); do
         [ "$i" -eq "$j" ] && continue
         peer_vm="${VMS[$j]}"
         peer_ip="${IPS[$j]}"
@@ -104,7 +104,7 @@ done
 # ── verify ────────────────────────────────────────────────────────────────────
 info ""
 info "Verifying peer lists ..."
-for i in "${!VMS[@]}"; do
+for ((i = 1; i < ${#VMS[@]}; i++)); do
     vm="${VMS[$i]}"
     ip="${IPS[$i]}"
     peer_count=$(curl -sf "http://${ip}:9090/peers" 2>/dev/null \
