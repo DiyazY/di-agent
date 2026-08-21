@@ -1,4 +1,3 @@
-
 # Build artifacts
 semantic-map/go/agent
 
@@ -7,3 +6,15 @@ semantic-map/go/agent
 # compiled output rather than to anything anyone wrote.
 __pycache__/
 *.pyc
+
+terraform.*
+
+.terraform.*
+.terraform
+
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform.lock.hcl
+
+tfplan
