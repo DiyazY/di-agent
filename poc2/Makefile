@@ -25,7 +25,7 @@ SCRIPTS := ./scripts
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
 
-all: provision uncloud agent peers
+all: provision k8s kafka agent peers
 
 provision:
 	@bash $(SCRIPTS)/01-provision.sh
@@ -33,14 +33,17 @@ provision:
 k8s:
 	@bash $(SCRIPTS)/02-k8s.sh $(VMS)
 
+kafka:
+	@bash $(SCRIPTS)/03-kafka.sh $(VMS)
+
 agent:
-	@bash $(SCRIPTS)/03-agent.sh $(VMS)
+	@bash $(SCRIPTS)/04-agent.sh $(VMS)
 
 peers:
-	@bash $(SCRIPTS)/04-peers.sh $(VMS)
+	@bash $(SCRIPTS)/05-peers.sh $(VMS)
 
 uncloud:
-	@bash $(SCRIPTS)/02-uncloud.sh $(VMS)
+	@bash $(SCRIPTS)/uncloud.sh $(VMS)
 
 start-vms:
 	@bash $(SCRIPTS)/startVMS.sh $(VMS)
@@ -104,7 +107,7 @@ get-ip-%:
 		exit 1; \
 	fi
 
-.PHONY: all provision uncloud netdata agent peers start-vms stop-vms deploy demo \
+.PHONY: all provision uncloud netdata agent peers kafka start-vms stop-vms deploy demo \
         workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
 # Help target

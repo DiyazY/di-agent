@@ -60,6 +60,13 @@ if [ "${#WORKER_VMS[@]}" -eq 0 ]; then
     exit 1
 fi
 
+# Kafka broker address (see 05-kafka.sh); defaults to the second VM
+# (KAFKA_VM), where the Kafka broker is deployed with hostNetwork on port
+# 9092, falling back to the control-plane if no other VM was given.
+KAFKA_VM="${KAFKA_VM:-${VMS[1]:-$CONTROL_PLANE_VM}}"
+KAFKA_IP_FOR_BROKERS=$(get_vm_ip "$KAFKA_VM")
+KAFKA_BROKERS="${KAFKA_BROKERS:-${KAFKA_IP_FOR_BROKERS}:9092}"
+
 # ── build ─────────────────────────────────────────────────────────────────────
 info "Building di-agent for ${BUILD_GOOS}/${BUILD_GOARCH} from $GO_SRC ..."
 if [ ! -d "$GO_SRC" ]; then
@@ -150,6 +157,8 @@ spec:
               value: "${vm}"
             - name: REGIME
               value: "${regime}"
+            - name: KAFKA_BROKERS
+              value: "${KAFKA_BROKERS}"
           ports:
             - containerPort: 9090
 ---
