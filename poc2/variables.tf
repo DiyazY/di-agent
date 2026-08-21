@@ -10,7 +10,7 @@ variable "vm_hostname" {
 
 variable "vm_count" {
   description = "Number of VMs to create"
-  default     = 3
+  default     = 4
 }
 
 variable "pool_name" {

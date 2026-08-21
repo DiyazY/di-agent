@@ -145,7 +145,6 @@ func main() {
 	regime := flag.String("regime", "",
 		"dynamics preset (stable|default|bursty|volatile); overrides -alpha and -convergence when set")
 	var useProposer bool
-	var useRuleBasedTuner bool
 	flag.BoolVar(&useProposer, "proposer", true, "enable MI correlation proposer (disable for low-CPU devices)")
 	var useTuner bool
 	flag.BoolVar(&useTuner, "tuner", true,

@@ -30,14 +30,17 @@ all: provision uncloud agent peers
 provision:
 	@bash $(SCRIPTS)/01-provision.sh
 
-uncloud:
-	@bash $(SCRIPTS)/02-uncloud.sh $(VMS)
+k8s:
+	@bash $(SCRIPTS)/02-k8s.sh $(VMS)
 
 agent:
-	@bash $(SCRIPTS)/03-agent.sh
+	@bash $(SCRIPTS)/03-agent.sh $(VMS)
 
 peers:
 	@bash $(SCRIPTS)/04-peers.sh $(VMS)
+
+uncloud:
+	@bash $(SCRIPTS)/02-uncloud.sh $(VMS)
 
 start-vms:
 	@bash $(SCRIPTS)/startVMS.sh $(VMS)

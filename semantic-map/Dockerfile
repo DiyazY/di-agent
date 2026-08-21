@@ -7,7 +7,7 @@ WORKDIR /app
 
 # Copy the pre-built binary from your host (adjust the source path if needed)
 # The script used BINARY_OUT; here we assume it's ./cmd/agent/tmp/di-agent-poc
-COPY ./cmd/agent/tmp/di-agent-poc /tmp/di-agent
+COPY ./go/cmd/agent/tmp/di-agent-poc /tmp/di-agent
 
 # Install the binary to /usr/local/bin and make it executable
 RUN mv /tmp/di-agent /usr/local/bin/di-agent && \
@@ -16,8 +16,11 @@ RUN mv /tmp/di-agent /usr/local/bin/di-agent && \
 # Create the directory for the environment file
 RUN mkdir -p /etc/di-agent
 
+# Copy the domain_spec.json 
+COPY domain_spec.json /etc/di-agent/domain_spec.json
+
 # Copy an entrypoint script that generates /etc/di-agent/env from environment variables
-COPY entrypoint.sh /entrypoint.sh
+COPY go/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Expose the port the agent listens on
