@@ -1,6 +1,6 @@
 services:
   di-agent:
-    build: ./go
+    build: .
     restart: unless-stopped
     deploy:
       mode: global
