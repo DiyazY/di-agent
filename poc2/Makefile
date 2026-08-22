@@ -45,6 +45,9 @@ peers:
 genset:
 	@bash $(SCRIPTS)/06-genset.sh $(VMS)
 
+propulsion:
+	@bash $(SCRIPTS)/06b-propulsion.sh $(VMS)
+
 influxdb:
 	@bash $(SCRIPTS)/07-influxdb.sh $(VMS)
 

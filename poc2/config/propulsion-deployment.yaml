@@ -1,0 +1,31 @@
+# propulsion-deployment.yaml.tmpl — Kubernetes Deployment manifest for
+# scripts/06b-propulsion.sh. Rendered with `envsubst` before being applied via
+# kubectl; placeholders are populated from config/.env plus values
+# resolved at deploy time (PROPULSION_VM, KAFKA_BROKERS).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: propulsion
+  labels:
+    app: propulsion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: propulsion
+  template:
+    metadata:
+      labels:
+        app: propulsion
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${PROPULSION_VM}
+      containers:
+        - name: propulsion
+          image: ${IMAGE_NAME}:${IMAGE_TAG}
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BROKERS
+              value: "${KAFKA_BROKERS}"
+            - name: KAFKA_TOPIC
+              value: "${KAFKA_TOPIC}"
