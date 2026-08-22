@@ -48,6 +48,9 @@ genset:
 influxdb:
 	@bash $(SCRIPTS)/07-influxdb.sh $(VMS)
 
+telemetry-writer:
+	@bash $(SCRIPTS)/07b-telemetry-writer.sh $(VMS)
+
 grafana:
 	@bash $(SCRIPTS)/08-grafana.sh $(VMS)
 

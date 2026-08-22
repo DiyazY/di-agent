@@ -1,0 +1,43 @@
+# telemetry-writer-deployment.yaml.tmpl — Kubernetes Deployment manifest for
+# scripts/07b-telemetry-writer.sh. Rendered with `envsubst` before being
+# applied via kubectl; placeholders are populated from
+# config/.env plus values resolved at deploy time
+# (WRITER_VM, KAFKA_BROKERS, INFLUXDB_URL, INFLUXDB_ADMIN_TOKEN).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-writer
+  labels:
+    app: telemetry-writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-writer
+  template:
+    metadata:
+      labels:
+        app: telemetry-writer
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${WRITER_VM}
+      hostNetwork: true
+      containers:
+        - name: telemetry-writer
+          image: ${IMAGE_NAME}:${IMAGE_TAG}
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BROKERS
+              value: "${KAFKA_BROKERS}"
+            - name: KAFKA_TOPIC
+              value: "${KAFKA_TOPIC}"
+            - name: KAFKA_GROUP_ID
+              value: "${KAFKA_GROUP_ID}"
+            - name: INFLUXDB_URL
+              value: "${INFLUXDB_URL}"
+            - name: INFLUXDB_ORG
+              value: "${INFLUXDB_ORG}"
+            - name: INFLUXDB_BUCKET
+              value: "${INFLUXDB_BUCKET}"
+            - name: INFLUXDB_TOKEN
+              value: "${INFLUXDB_ADMIN_TOKEN}"
