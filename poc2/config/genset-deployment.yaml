@@ -1,0 +1,31 @@
+# genset-deployment.yaml.tmpl — Kubernetes Deployment manifest for
+# scripts/06-genset.sh. Rendered with `envsubst` before being applied via
+# kubectl; placeholders are populated from config/.env plus values
+# resolved at deploy time (GENSET_VM, KAFKA_BROKERS).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genset
+  labels:
+    app: genset
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: genset
+  template:
+    metadata:
+      labels:
+        app: genset
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${GENSET_VM}
+      containers:
+        - name: genset
+          image: ${IMAGE_NAME}:${IMAGE_TAG}
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BROKERS
+              value: "${KAFKA_BROKERS}"
+            - name: KAFKA_TOPIC
+              value: "${KAFKA_TOPIC}"
