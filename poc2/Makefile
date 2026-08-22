@@ -42,6 +42,15 @@ agent:
 peers:
 	@bash $(SCRIPTS)/05-peers.sh $(VMS)
 
+genset:
+	@bash $(SCRIPTS)/06-genset.sh $(VMS)
+
+influxdb:
+	@bash $(SCRIPTS)/07-influxdb.sh $(VMS)
+
+grafana:
+	@bash $(SCRIPTS)/08-grafana.sh $(VMS)
+
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
 
