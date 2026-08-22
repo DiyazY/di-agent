@@ -7,14 +7,14 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from kafka import KafkaConsumer
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
-KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "genset.telemetry")
+GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
 PROPULSION_KAFKA_TOPIC = os.environ.get("PROPULSION_KAFKA_TOPIC", "propulsion.telemetry")
-KAFKA_TOPICS = [KAFKA_TOPIC, PROPULSION_KAFKA_TOPIC]
+KAFKA_TOPICS = [GENSET_KAFKA_TOPIC, PROPULSION_KAFKA_TOPIC]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
 
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "di-agent")
-INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "genset-telemetry")
+INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "telemetry")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
 
 # Each entry maps the tag key identifying a message's source to the measurement

@@ -29,8 +29,8 @@ spec:
           env:
             - name: KAFKA_BROKERS
               value: "${KAFKA_BROKERS}"
-            - name: KAFKA_TOPIC
-              value: "${KAFKA_TOPIC}"
+            - name: GENSET_KAFKA_TOPIC
+              value: "${GENSET_KAFKA_TOPIC}"
             - name: PROPULSION_KAFKA_TOPIC
               value: "${PROPULSION_KAFKA_TOPIC}"
             - name: KAFKA_GROUP_ID

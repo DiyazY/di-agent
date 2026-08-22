@@ -70,14 +70,14 @@ WRITER_VM="${WRITER_VM:-${VMS[1]:-$CONTROL_PLANE_VM}}"
 KAFKA_VM="${KAFKA_VM:-${VMS[1]:-$CONTROL_PLANE_VM}}"
 KAFKA_IP_FOR_BROKERS=$(get_vm_ip "$KAFKA_VM")
 KAFKA_BROKERS="${KAFKA_BROKERS:-${KAFKA_IP_FOR_BROKERS}:9092}"
-KAFKA_TOPIC="${KAFKA_TOPIC:-genset.telemetry}"
+GENSET_KAFKA_TOPIC="${GENSET_KAFKA_TOPIC:-genset.telemetry}"
 PROPULSION_KAFKA_TOPIC="${PROPULSION_KAFKA_TOPIC:-propulsion.telemetry}"
 KAFKA_GROUP_ID="${KAFKA_GROUP_ID:-telemetry-writer}"
 
 # InfluxDB connection details (see 07-influxdb.sh); defaults to the second VM.
 INFLUXDB_PORT="${INFLUXDB_PORT:-8086}"
 INFLUXDB_ORG="${INFLUXDB_ORG:-di-agent}"
-INFLUXDB_BUCKET="${INFLUXDB_BUCKET:-genset-telemetry}"
+INFLUXDB_BUCKET="${INFLUXDB_BUCKET:-telemetry}"
 INFLUXDB_ADMIN_TOKEN="${INFLUXDB_ADMIN_TOKEN:-di-agent-genset-admin-token}"
 INFLUXDB_VM="${INFLUXDB_VM:-${VMS[1]:-$CONTROL_PLANE_VM}}"
 INFLUXDB_IP=$(get_vm_ip "$INFLUXDB_VM")
@@ -108,11 +108,11 @@ ok "Image imported"
 CP_IP=$(get_vm_ip "$CONTROL_PLANE_VM")
 info "Applying telemetry-writer manifest via kubectl on $CONTROL_PLANE_VM (pod scheduled on $WRITER_VM) ..."
 WRITER_VM="$WRITER_VM" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
-KAFKA_BROKERS="$KAFKA_BROKERS" KAFKA_TOPIC="$KAFKA_TOPIC" PROPULSION_KAFKA_TOPIC="$PROPULSION_KAFKA_TOPIC" \
+KAFKA_BROKERS="$KAFKA_BROKERS" GENSET_KAFKA_TOPIC="$GENSET_KAFKA_TOPIC" PROPULSION_KAFKA_TOPIC="$PROPULSION_KAFKA_TOPIC" \
 KAFKA_GROUP_ID="$KAFKA_GROUP_ID" \
 INFLUXDB_URL="$INFLUXDB_URL" INFLUXDB_ORG="$INFLUXDB_ORG" INFLUXDB_BUCKET="$INFLUXDB_BUCKET" \
 INFLUXDB_ADMIN_TOKEN="$INFLUXDB_ADMIN_TOKEN" \
-    envsubst '${WRITER_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${KAFKA_BROKERS} ${KAFKA_TOPIC} ${PROPULSION_KAFKA_TOPIC} ${KAFKA_GROUP_ID} ${INFLUXDB_URL} ${INFLUXDB_ORG} ${INFLUXDB_BUCKET} ${INFLUXDB_ADMIN_TOKEN}' \
+    envsubst '${WRITER_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${KAFKA_BROKERS} ${GENSET_KAFKA_TOPIC} ${PROPULSION_KAFKA_TOPIC} ${KAFKA_GROUP_ID} ${INFLUXDB_URL} ${INFLUXDB_ORG} ${INFLUXDB_BUCKET} ${INFLUXDB_ADMIN_TOKEN}' \
     < "$DEPLOYMENT_TMPL" \
     | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
 
@@ -121,4 +121,4 @@ ok "Deployment applied"
 info "Waiting for telemetry-writer pod to be Ready ..."
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config wait --for=condition=Ready pod -l app=telemetry-writer --timeout=180s"
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config get pods -o wide -l app=telemetry-writer"
-ok "Writing ${KAFKA_TOPIC} from ${KAFKA_BROKERS} into ${INFLUXDB_URL} (org=${INFLUXDB_ORG}, bucket=${INFLUXDB_BUCKET})"
+ok "Writing ${GENSET_KAFKA_TOPIC} and ${PROPULSION_KAFKA_TOPIC} from ${KAFKA_BROKERS} into ${INFLUXDB_URL} (org=${INFLUXDB_ORG}, bucket=${INFLUXDB_BUCKET})"
