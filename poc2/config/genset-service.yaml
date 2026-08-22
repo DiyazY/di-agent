@@ -1,0 +1,14 @@
+# genset-service.yaml — stable in-cluster DNS name/port for the genset pod
+# (no template placeholders: selector/port match genset-deployment.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: genset
+  labels:
+    app: genset
+spec:
+  selector:
+    app: genset
+  ports:
+    - port: 8000
+      targetPort: 8000

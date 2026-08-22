@@ -1,0 +1,15 @@
+# propulsion-service.yaml — stable in-cluster DNS name/port for the
+# propulsion pod (no template placeholders: selector/port match
+# propulsion-deployment.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: propulsion
+  labels:
+    app: propulsion
+spec:
+  selector:
+    app: propulsion
+  ports:
+    - port: 8000
+      targetPort: 8000

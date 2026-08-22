@@ -57,6 +57,9 @@ telemetry-writer:
 grafana:
 	@bash $(SCRIPTS)/08-grafana.sh $(VMS)
 
+playground:
+	@bash $(SCRIPTS)/09-playground.sh $(VMS)
+
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
 
@@ -123,7 +126,7 @@ get-ip-%:
 	fi
 
 .PHONY: all provision uncloud netdata agent peers kafka start-vms stop-vms deploy demo \
-        workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
+        workload-heavy workload-light workload-stop teardown status list-vms get-ip-% playground
 
 # Help target
 help:

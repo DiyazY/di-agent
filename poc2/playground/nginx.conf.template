@@ -1,0 +1,23 @@
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri /index.html;
+    }
+
+    # Proxied to the genset/propulsion Services (see poc2/config/*-service.yaml)
+    # so the browser never needs the pod/VM IPs directly.
+    location /api/genset/ {
+        proxy_pass http://${GENSET_UPSTREAM}/;
+        proxy_set_header Host $host;
+    }
+
+    location /api/propulsion/ {
+        proxy_pass http://${PROPULSION_UPSTREAM}/;
+        proxy_set_header Host $host;
+    }
+}

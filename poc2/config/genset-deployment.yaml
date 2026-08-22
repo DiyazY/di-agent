@@ -24,6 +24,8 @@ spec:
         - name: genset
           image: ${IMAGE_NAME}:${IMAGE_TAG}
           imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
           env:
             - name: KAFKA_BROKERS
               value: "${KAFKA_BROKERS}"

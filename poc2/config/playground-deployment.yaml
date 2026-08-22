@@ -1,0 +1,48 @@
+# playground-deployment.yaml.tmpl — Kubernetes Deployment + NodePort Service
+# for scripts/09-playground.sh. Rendered with `envsubst` before being applied
+# via kubectl; placeholders are populated from config/.env plus values
+# resolved at deploy time (PLAYGROUND_VM).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playground
+  labels:
+    app: playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playground
+  template:
+    metadata:
+      labels:
+        app: playground
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${PLAYGROUND_VM}
+      containers:
+        - name: playground
+          image: ${IMAGE_NAME}:${IMAGE_TAG}
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          env:
+            - name: GENSET_UPSTREAM
+              value: "${GENSET_UPSTREAM}"
+            - name: PROPULSION_UPSTREAM
+              value: "${PROPULSION_UPSTREAM}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playground
+  labels:
+    app: playground
+spec:
+  type: NodePort
+  selector:
+    app: playground
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: ${PLAYGROUND_NODE_PORT}
