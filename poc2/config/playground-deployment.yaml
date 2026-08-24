@@ -31,6 +31,8 @@ spec:
               value: "${GENSET_UPSTREAM}"
             - name: PROPULSION_UPSTREAM
               value: "${PROPULSION_UPSTREAM}"
+            - name: SWITCHBOARD_UPSTREAM
+              value: "${SWITCHBOARD_UPSTREAM}"
 ---
 apiVersion: v1
 kind: Service

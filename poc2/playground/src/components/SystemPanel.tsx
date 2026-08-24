@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchHealth, fetchStatus, setLoad, SystemName, SystemStatus } from "../api";
+import {
+  fetchHealth,
+  fetchStatus,
+  fetchSwitchboardStatus,
+  setLoad,
+  SystemName,
+  SystemStatus,
+} from "../api";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -13,6 +20,9 @@ export default function SystemPanel({ system }: Props) {
   const [sliderValue, setSliderValue] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Only tracked for propulsion: the switchboard's total available supply,
+  // used to gate the slider since propulsion no longer sees genset power directly.
+  const [switchboardSupplyKw, setSwitchboardSupplyKw] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -22,6 +32,10 @@ export default function SystemPanel({ system }: Props) {
       ]);
       setHealthy(health.status === "ok");
       setStatus(statusData);
+      if (system === "propulsion") {
+        const switchboardStatus = await fetchSwitchboardStatus();
+        setSwitchboardSupplyKw(switchboardStatus.available_supply_kw);
+      }
       setError(null);
     } catch (err) {
       setHealthy(false);
@@ -40,6 +54,10 @@ export default function SystemPanel({ system }: Props) {
       setSliderValue(Math.round(status.target_load_ratio * 100));
     }
   }, [status?.target_load_ratio]);
+
+  // Propulsion can only be loaded once the switchboard has power to allocate.
+  const switchboardPowerAvailable =
+    system !== "propulsion" || (switchboardSupplyKw ?? 0) > 0;
 
   const handleApply = async () => {
     setSubmitting(true);
@@ -76,6 +94,16 @@ export default function SystemPanel({ system }: Props) {
           {status ? `${(status.target_load_ratio * 100).toFixed(1)}%` : "--"}
         </strong>
       </div>
+      {system === "propulsion" && (
+        <div className="metric-row">
+          <span>Allocated power</span>
+          <strong>
+            {status?.allocated_power_kw !== undefined
+              ? `${status.allocated_power_kw.toFixed(1)} kW`
+              : "--"}
+          </strong>
+        </div>
+      )}
 
       <div className="load-control">
         <label htmlFor={`${system}-slider`}>Set target load ratio</label>
@@ -87,13 +115,22 @@ export default function SystemPanel({ system }: Props) {
             max={100}
             step={1}
             value={sliderValue}
+            disabled={!switchboardPowerAvailable}
             onChange={(e) => setSliderValue(Number(e.target.value))}
           />
           <span className="value">{sliderValue}%</span>
         </div>
-        <button onClick={handleApply} disabled={submitting}>
+        <button
+          onClick={handleApply}
+          disabled={submitting || !switchboardPowerAvailable}
+        >
           {submitting ? "Applying..." : "Apply"}
         </button>
+        {!switchboardPowerAvailable && (
+          <p className="hint-text">
+            Switchboard has no power available, propulsion load can't be adjusted.
+          </p>
+        )}
       </div>
 
       {error && <p className="error-text">{error}</p>}

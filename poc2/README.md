@@ -40,6 +40,7 @@ The scripts are written so the first VM in the list is treated as the control pl
 - peer registration: `scripts/05-peers.sh`
 - synthetic power-plant simulation:
   - `scripts/06-genset.sh`
+  - `scripts/06a-switchboard.sh`
   - `scripts/06b-propulsion.sh`
 - time-series storage: `scripts/07-influxdb.sh`
 - Kafka-to-InfluxDB bridge: `scripts/07b-telemetry-writer.sh`
@@ -72,6 +73,7 @@ make kafka
 make agent
 make peers
 make genset
+make switchboard
 make propulsion
 make influxdb
 make telemetry-writer
@@ -119,6 +121,7 @@ poc2/
 │   ├── influxdb-deployment.yaml
 │   ├── grafana-deployment.yaml
 │   ├── genset-deployment.yaml
+│   ├── switchboard-deployment.yaml
 │   ├── propulsion-deployment.yaml
 │   └── telemetry-writer-deployment.yaml
 ├── scripts/
@@ -128,6 +131,7 @@ poc2/
 │   ├── 04-agent.sh
 │   ├── 05-peers.sh
 │   ├── 06-genset.sh
+│   ├── 06a-switchboard.sh
 │   ├── 06b-propulsion.sh
 │   ├── 07-influxdb.sh
 │   ├── 07b-telemetry-writer.sh
@@ -138,6 +142,7 @@ poc2/
 │   └── ...
 ├── system/
 │   ├── genset/
+│   ├── switchboard/
 │   ├── propulsion/
 │   └── telemetry-writer/
 ├── main.tf

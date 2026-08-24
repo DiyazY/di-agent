@@ -13,5 +13,6 @@ COPY --from=build /app/dist /usr/share/nginx/html
 # nginx's entrypoint envsubst's *.template into conf.d/ on startup.
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 ENV GENSET_UPSTREAM=genset.default.svc.cluster.local:8000 \
-    PROPULSION_UPSTREAM=propulsion.default.svc.cluster.local:8000
+    PROPULSION_UPSTREAM=propulsion.default.svc.cluster.local:8000 \
+    SWITCHBOARD_UPSTREAM=switchboard.default.svc.cluster.local:8000
 EXPOSE 80

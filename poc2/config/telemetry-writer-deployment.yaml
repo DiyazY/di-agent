@@ -33,6 +33,8 @@ spec:
               value: "${GENSET_KAFKA_TOPIC}"
             - name: PROPULSION_KAFKA_TOPIC
               value: "${PROPULSION_KAFKA_TOPIC}"
+            - name: SWITCHBOARD_KAFKA_TOPIC
+              value: "${SWITCHBOARD_KAFKA_TOPIC}"
             - name: KAFKA_GROUP_ID
               value: "${KAFKA_GROUP_ID}"
             - name: INFLUXDB_URL

@@ -1,0 +1,40 @@
+# switchboard-deployment.yaml.tmpl — Kubernetes Deployment manifest for
+# scripts/06a-switchboard.sh. Rendered with `envsubst` before being applied
+# via kubectl; placeholders are populated from config/.env plus values
+# resolved at deploy time (SWITCHBOARD_VM, KAFKA_BROKERS). The switchboard
+# sits between genset(s) and consumers such as propulsion: it aggregates
+# genset supply and consumer power requests and publishes each consumer's
+# allocation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switchboard
+  labels:
+    app: switchboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: switchboard
+  template:
+    metadata:
+      labels:
+        app: switchboard
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${SWITCHBOARD_VM}
+      containers:
+        - name: switchboard
+          image: ${IMAGE_NAME}:${IMAGE_TAG}
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KAFKA_BROKERS
+              value: "${KAFKA_BROKERS}"
+            - name: KAFKA_TOPIC
+              value: "${KAFKA_TOPIC}"
+            - name: GENSET_KAFKA_TOPIC
+              value: "${GENSET_KAFKA_TOPIC}"
+            - name: REQUEST_KAFKA_TOPIC
+              value: "${REQUEST_KAFKA_TOPIC}"

@@ -9,7 +9,8 @@ from kafka import KafkaConsumer
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
 PROPULSION_KAFKA_TOPIC = os.environ.get("PROPULSION_KAFKA_TOPIC", "propulsion.telemetry")
-KAFKA_TOPICS = [GENSET_KAFKA_TOPIC, PROPULSION_KAFKA_TOPIC]
+SWITCHBOARD_KAFKA_TOPIC = os.environ.get("SWITCHBOARD_KAFKA_TOPIC", "switchboard.telemetry")
+KAFKA_TOPICS = [GENSET_KAFKA_TOPIC, PROPULSION_KAFKA_TOPIC, SWITCHBOARD_KAFKA_TOPIC]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
 
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://localhost:8086")
@@ -26,7 +27,11 @@ MESSAGE_SCHEMAS = {
     },
     "propulsion_id": {
         "measurement": "propulsion_telemetry",
-        "fields": ("load_ratio", "power_output_kw", "power_input_kw"),
+        "fields": ("load_ratio", "power_output_kw", "power_input_kw", "allocated_power_kw"),
+    },
+    "consumer_id": {
+        "measurement": "switchboard_telemetry",
+        "fields": ("requested_power_kw", "allocated_power_kw", "available_supply_kw", "total_demand_kw"),
     },
 }
 

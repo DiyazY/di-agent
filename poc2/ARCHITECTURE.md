@@ -46,7 +46,7 @@ The deployment is orchestrated by a shell-script pipeline rather than a single d
 - `03-kafka.sh`: deploy a single-node KRaft Kafka broker
 - `04-agent.sh`: build the di-agent binary and deploy it to each worker node as a pod
 - `05-peers.sh`: register peer URLs and set trust values
-- `06-genset.sh` and `06b-propulsion.sh`: generate telemetry workloads
+- `06-genset.sh`, `06a-switchboard.sh` and `06b-propulsion.sh`: generate telemetry workloads for one or more gensets, a central switchboard, and one or more propulsion consumers
 - `07-influxdb.sh`: create the time-series database
 - `07b-telemetry-writer.sh`: stream Kafka messages into InfluxDB
 - `08-grafana.sh`: provision Grafana with an InfluxDB datasource
@@ -111,6 +111,17 @@ Their behavior is intentionally simple:
 - they emit telemetry records to Kafka with timestamps and physical metrics
 
 The genset and propulsion workloads are not just monitoring tools; they model a real system under load.
+
+### switchboard
+
+`system/switchboard/` is the central power-management authority between gensets and consumers. Rather than every consumer summing raw genset telemetry itself (which only works for one genset talking to one consumer), the switchboard is the single place that:
+
+- consumes `genset.telemetry` from every genset and sums it into total available bus supply
+- consumes `switchboard.requests` from every consumer (e.g. propulsion), each carrying a requested power and a load-shedding priority
+- every tick, allocates the available supply across consumers in priority order — high-priority consumers are served first, and low-priority ones are shed if supply can't cover total demand
+- publishes each consumer's grant to `switchboard.telemetry`, and exposes the full picture (per-genset supply, per-consumer request/allocation) over `/status`
+
+This is the same role a physical switchboard plays on a vessel: it is the shared busbar all generators feed and all loads draw from, with a power-management layer that decides who gets power when supply is short. It also makes the topology genuinely multi-source/multi-consumer: adding a second genset or a second propulsion drive only means pointing them at the same switchboard, with no consumer needing to know how many gensets exist.
 
 ### telemetry writer
 

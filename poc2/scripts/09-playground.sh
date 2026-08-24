@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 09-playground.sh — build the playground (React) frontend image and deploy
 #                    it to the kubeadm cluster (see 02-k8s.sh) as a
-#                    NodePort-exposed Deployment. Also ensures the genset and
-#                    propulsion Services exist, since the frontend proxies to
-#                    them by in-cluster DNS name (see nginx.conf.template).
+#                    NodePort-exposed Deployment. Also ensures the genset,
+#                    switchboard and propulsion Services exist, since the
+#                    frontend proxies to them by in-cluster DNS name (see
+#                    nginx.conf.template).
 #
 # Usage: ./09-playground.sh [vm1 vm2 vm3]
 #   VM names default to ubuntu-vm1 ubuntu-vm2 ubuntu-vm3. The playground pod
@@ -31,6 +32,7 @@ ENV_FILE="$CONFIG_DIR/.env"
 DEPLOYMENT_TMPL="$CONFIG_DIR/playground-deployment.yaml"
 GENSET_SERVICE="$CONFIG_DIR/genset-service.yaml"
 PROPULSION_SERVICE="$CONFIG_DIR/propulsion-service.yaml"
+SWITCHBOARD_SERVICE="$CONFIG_DIR/switchboard-service.yaml"
 
 # ── config (see config/.env; existing exports still take priority) ──────────
 if [ -f "$ENV_FILE" ]; then
@@ -45,6 +47,7 @@ IMAGE_TAG="${PLAYGROUND_IMAGE_TAG:-latest}"
 PLAYGROUND_NODE_PORT="${PLAYGROUND_NODE_PORT:-30080}"
 GENSET_UPSTREAM="${GENSET_UPSTREAM:-genset.default.svc.cluster.local:8000}"
 PROPULSION_UPSTREAM="${PROPULSION_UPSTREAM:-propulsion.default.svc.cluster.local:8000}"
+SWITCHBOARD_UPSTREAM="${SWITCHBOARD_UPSTREAM:-switchboard.default.svc.cluster.local:8000}"
 
 # ── ssh / vm helpers (matches 02-k8s.sh / 06-genset.sh / 06b-propulsion.sh) ──
 SSH_USER="${SSH_USER:-ubuntu}"
@@ -96,15 +99,17 @@ ok "Image imported"
 # ── deploy ────────────────────────────────────────────────────────────────────
 CP_IP=$(get_vm_ip "$CONTROL_PLANE_VM")
 
-info "Ensuring genset/propulsion Services exist (playground proxies to them by DNS name) ..."
+info "Ensuring genset/switchboard/propulsion Services exist (playground proxies to them by DNS name) ..."
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -" < "$GENSET_SERVICE"
+ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -" < "$SWITCHBOARD_SERVICE"
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -" < "$PROPULSION_SERVICE"
 
 info "Applying playground manifest via kubectl on $CONTROL_PLANE_VM (pod scheduled on $PLAYGROUND_VM) ..."
 PLAYGROUND_VM="$PLAYGROUND_VM" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
 GENSET_UPSTREAM="$GENSET_UPSTREAM" PROPULSION_UPSTREAM="$PROPULSION_UPSTREAM" \
+SWITCHBOARD_UPSTREAM="$SWITCHBOARD_UPSTREAM" \
 PLAYGROUND_NODE_PORT="$PLAYGROUND_NODE_PORT" \
-    envsubst '${PLAYGROUND_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${GENSET_UPSTREAM} ${PROPULSION_UPSTREAM} ${PLAYGROUND_NODE_PORT}' \
+    envsubst '${PLAYGROUND_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${GENSET_UPSTREAM} ${PROPULSION_UPSTREAM} ${SWITCHBOARD_UPSTREAM} ${PLAYGROUND_NODE_PORT}' \
     < "$DEPLOYMENT_TMPL" \
     | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
 

@@ -1,5 +1,6 @@
 import "./App.css";
 import SystemPanel from "./components/SystemPanel";
+import SwitchboardPanel from "./components/SwitchboardPanel";
 
 export default function App() {
   return (
@@ -10,6 +11,7 @@ export default function App() {
       </p>
       <div className="panels">
         <SystemPanel system="genset" />
+        <SwitchboardPanel />
         <SystemPanel system="propulsion" />
       </div>
     </div>

@@ -45,6 +45,9 @@ peers:
 genset:
 	@bash $(SCRIPTS)/06-genset.sh $(VMS)
 
+switchboard:
+	@bash $(SCRIPTS)/06a-switchboard.sh $(VMS)
+
 propulsion:
 	@bash $(SCRIPTS)/06b-propulsion.sh $(VMS)
 

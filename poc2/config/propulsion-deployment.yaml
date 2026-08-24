@@ -1,7 +1,10 @@
 # propulsion-deployment.yaml.tmpl — Kubernetes Deployment manifest for
 # scripts/06b-propulsion.sh. Rendered with `envsubst` before being applied via
 # kubectl; placeholders are populated from config/.env plus values
-# resolved at deploy time (PROPULSION_VM, KAFKA_BROKERS).
+# resolved at deploy time (PROPULSION_VM, KAFKA_BROKERS). The propulsion
+# drive requests power from, and is allocated power by, the switchboard
+# (see scripts/06a-switchboard.sh) rather than reading genset telemetry
+# directly.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,3 +34,7 @@ spec:
               value: "${KAFKA_BROKERS}"
             - name: KAFKA_TOPIC
               value: "${KAFKA_TOPIC}"
+            - name: REQUEST_KAFKA_TOPIC
+              value: "${REQUEST_KAFKA_TOPIC}"
+            - name: ALLOCATION_KAFKA_TOPIC
+              value: "${ALLOCATION_KAFKA_TOPIC}"

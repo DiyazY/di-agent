@@ -5,14 +5,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY propulsion.py controller.py main.py .
+COPY switchboard.py controller.py main.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
-    KAFKA_TOPIC=propulsion.telemetry \
+    KAFKA_TOPIC=switchboard.telemetry \
+    GENSET_KAFKA_TOPIC=genset.telemetry \
     REQUEST_KAFKA_TOPIC=switchboard.requests \
-    ALLOCATION_KAFKA_TOPIC=switchboard.telemetry \
-    STEP_INTERVAL_S=1 \
-    RAMP_RATE_PER_S=0.05
+    STEP_INTERVAL_S=1
 
 EXPOSE 8000
 
