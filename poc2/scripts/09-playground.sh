@@ -33,6 +33,8 @@ DEPLOYMENT_TMPL="$CONFIG_DIR/playground-deployment.yaml"
 GENSET_SERVICE="$CONFIG_DIR/genset-service.yaml"
 PROPULSION_SERVICE="$CONFIG_DIR/propulsion-service.yaml"
 SWITCHBOARD_SERVICE="$CONFIG_DIR/switchboard-service.yaml"
+BATTERY_SERVICE="$CONFIG_DIR/battery-service.yaml"
+AUXLOAD_SERVICE="$CONFIG_DIR/auxload-service.yaml"
 
 # ── config (see config/.env; existing exports still take priority) ──────────
 if [ -f "$ENV_FILE" ]; then
@@ -45,9 +47,54 @@ fi
 IMAGE_NAME="${PLAYGROUND_IMAGE_NAME:-playground}"
 IMAGE_TAG="${PLAYGROUND_IMAGE_TAG:-latest}"
 PLAYGROUND_NODE_PORT="${PLAYGROUND_NODE_PORT:-30080}"
-GENSET_UPSTREAM="${GENSET_UPSTREAM:-genset.default.svc.cluster.local:8000}"
-PROPULSION_UPSTREAM="${PROPULSION_UPSTREAM:-propulsion.default.svc.cluster.local:8000}"
+GENSET_COUNT="${GENSET_COUNT:-4}"
+PROPULSION_COUNT="${PROPULSION_COUNT:-2}"
+BATTERY_COUNT="${BATTERY_COUNT:-1}"
+AUXLOAD_COUNT="${AUXLOAD_COUNT:-1}"
 SWITCHBOARD_UPSTREAM="${SWITCHBOARD_UPSTREAM:-switchboard.default.svc.cluster.local:8000}"
+
+# Build one nginx location block per genset/propulsion/battery/auxload
+# instance (proxying to that instance's own Service DNS name; see
+# config/*-service.yaml) plus a config.json listing all instance ids, so
+# the frontend can discover and address each instance individually (see
+# playground/src/App.tsx).
+GENSET_LOCATIONS=""
+GENSET_IDS_JSON=""
+for i in $(seq 1 "$GENSET_COUNT"); do
+    id="genset-${i}"
+    GENSET_LOCATIONS+="location /api/genset/${id}/ { proxy_pass http://${id}.default.svc.cluster.local:8000/; proxy_set_header Host \$host; } "
+    [ -n "$GENSET_IDS_JSON" ] && GENSET_IDS_JSON+=","
+    GENSET_IDS_JSON+="\"${id}\""
+done
+
+PROPULSION_LOCATIONS=""
+PROPULSION_IDS_JSON=""
+for i in $(seq 1 "$PROPULSION_COUNT"); do
+    id="propulsion-${i}"
+    PROPULSION_LOCATIONS+="location /api/propulsion/${id}/ { proxy_pass http://${id}.default.svc.cluster.local:8000/; proxy_set_header Host \$host; } "
+    [ -n "$PROPULSION_IDS_JSON" ] && PROPULSION_IDS_JSON+=","
+    PROPULSION_IDS_JSON+="\"${id}\""
+done
+
+BATTERY_LOCATIONS=""
+BATTERY_IDS_JSON=""
+for i in $(seq 1 "$BATTERY_COUNT"); do
+    id="battery-${i}"
+    BATTERY_LOCATIONS+="location /api/battery/${id}/ { proxy_pass http://${id}.default.svc.cluster.local:8000/; proxy_set_header Host \$host; } "
+    [ -n "$BATTERY_IDS_JSON" ] && BATTERY_IDS_JSON+=","
+    BATTERY_IDS_JSON+="\"${id}\""
+done
+
+AUXLOAD_LOCATIONS=""
+AUXLOAD_IDS_JSON=""
+for i in $(seq 1 "$AUXLOAD_COUNT"); do
+    id="auxload-${i}"
+    AUXLOAD_LOCATIONS+="location /api/auxload/${id}/ { proxy_pass http://${id}.default.svc.cluster.local:8000/; proxy_set_header Host \$host; } "
+    [ -n "$AUXLOAD_IDS_JSON" ] && AUXLOAD_IDS_JSON+=","
+    AUXLOAD_IDS_JSON+="\"${id}\""
+done
+
+CONFIG_JSON="{\"gensetIds\":[${GENSET_IDS_JSON}],\"propulsionIds\":[${PROPULSION_IDS_JSON}],\"batteryIds\":[${BATTERY_IDS_JSON}],\"auxloadIds\":[${AUXLOAD_IDS_JSON}]}"
 
 # ── ssh / vm helpers (matches 02-k8s.sh / 06-genset.sh / 06b-propulsion.sh) ──
 SSH_USER="${SSH_USER:-ubuntu}"
@@ -99,17 +146,36 @@ ok "Image imported"
 # ── deploy ────────────────────────────────────────────────────────────────────
 CP_IP=$(get_vm_ip "$CONTROL_PLANE_VM")
 
-info "Ensuring genset/switchboard/propulsion Services exist (playground proxies to them by DNS name) ..."
-ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -" < "$GENSET_SERVICE"
+info "Ensuring genset/switchboard/propulsion/battery/auxload Services exist (playground proxies to them by DNS name) ..."
+for i in $(seq 1 "$GENSET_COUNT"); do
+    GENSET_NAME="genset-${i}" GENSET_ID="genset-${i}" \
+        envsubst '${GENSET_NAME} ${GENSET_ID}' < "$GENSET_SERVICE" \
+        | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
+done
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -" < "$SWITCHBOARD_SERVICE"
-ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -" < "$PROPULSION_SERVICE"
+for i in $(seq 1 "$PROPULSION_COUNT"); do
+    PROPULSION_NAME="propulsion-${i}" PROPULSION_ID="propulsion-${i}" \
+        envsubst '${PROPULSION_NAME} ${PROPULSION_ID}' < "$PROPULSION_SERVICE" \
+        | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
+done
+for i in $(seq 1 "$BATTERY_COUNT"); do
+    BATTERY_NAME="battery-${i}" BATTERY_ID="battery-${i}" \
+        envsubst '${BATTERY_NAME} ${BATTERY_ID}' < "$BATTERY_SERVICE" \
+        | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
+done
+for i in $(seq 1 "$AUXLOAD_COUNT"); do
+    AUXLOAD_NAME="auxload-${i}" AUXLOAD_ID="auxload-${i}" \
+        envsubst '${AUXLOAD_NAME} ${AUXLOAD_ID}' < "$AUXLOAD_SERVICE" \
+        | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
+done
 
 info "Applying playground manifest via kubectl on $CONTROL_PLANE_VM (pod scheduled on $PLAYGROUND_VM) ..."
 PLAYGROUND_VM="$PLAYGROUND_VM" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
-GENSET_UPSTREAM="$GENSET_UPSTREAM" PROPULSION_UPSTREAM="$PROPULSION_UPSTREAM" \
-SWITCHBOARD_UPSTREAM="$SWITCHBOARD_UPSTREAM" \
+GENSET_LOCATIONS="$GENSET_LOCATIONS" PROPULSION_LOCATIONS="$PROPULSION_LOCATIONS" \
+BATTERY_LOCATIONS="$BATTERY_LOCATIONS" AUXLOAD_LOCATIONS="$AUXLOAD_LOCATIONS" \
+SWITCHBOARD_UPSTREAM="$SWITCHBOARD_UPSTREAM" CONFIG_JSON="$CONFIG_JSON" \
 PLAYGROUND_NODE_PORT="$PLAYGROUND_NODE_PORT" \
-    envsubst '${PLAYGROUND_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${GENSET_UPSTREAM} ${PROPULSION_UPSTREAM} ${SWITCHBOARD_UPSTREAM} ${PLAYGROUND_NODE_PORT}' \
+    envsubst '${PLAYGROUND_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${GENSET_LOCATIONS} ${PROPULSION_LOCATIONS} ${BATTERY_LOCATIONS} ${AUXLOAD_LOCATIONS} ${SWITCHBOARD_UPSTREAM} ${CONFIG_JSON} ${PLAYGROUND_NODE_PORT}' \
     < "$DEPLOYMENT_TMPL" \
     | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
 

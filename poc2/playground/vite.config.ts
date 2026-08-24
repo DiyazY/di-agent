@@ -10,16 +10,20 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
+      // Strips both the "/api/genset" prefix and the "/<id>" instance
+      // segment, since local dev only points at a single genset/propulsion
+      // instance (see public/config.json for the matching dev id list).
       "/api/genset": {
         target: GENSET_DEV_TARGET,
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/genset/, ""),
+        rewrite: (path) => path.replace(/^\/api\/genset\/[^/]+/, ""),
       },
       "/api/propulsion": {
         target: PROPULSION_DEV_TARGET,
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/propulsion/, ""),
+        rewrite: (path) => path.replace(/^\/api\/propulsion\/[^/]+/, ""),
       },
     },
   },
 });
+

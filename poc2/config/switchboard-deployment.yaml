@@ -2,9 +2,9 @@
 # scripts/06a-switchboard.sh. Rendered with `envsubst` before being applied
 # via kubectl; placeholders are populated from config/.env plus values
 # resolved at deploy time (SWITCHBOARD_VM, KAFKA_BROKERS). The switchboard
-# sits between genset(s) and consumers such as propulsion: it aggregates
-# genset supply and consumer power requests and publishes each consumer's
-# allocation.
+# sits between power sources (genset, battery) and consumers such as
+# propulsion and the auxiliary load: it aggregates genset/battery supply and
+# consumer power requests and publishes each consumer's allocation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,5 +36,7 @@ spec:
               value: "${KAFKA_TOPIC}"
             - name: GENSET_KAFKA_TOPIC
               value: "${GENSET_KAFKA_TOPIC}"
+            - name: BATTERY_KAFKA_TOPIC
+              value: "${BATTERY_KAFKA_TOPIC}"
             - name: REQUEST_KAFKA_TOPIC
               value: "${REQUEST_KAFKA_TOPIC}"

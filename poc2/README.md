@@ -42,6 +42,8 @@ The scripts are written so the first VM in the list is treated as the control pl
   - `scripts/06-genset.sh`
   - `scripts/06a-switchboard.sh`
   - `scripts/06b-propulsion.sh`
+  - `scripts/06c-battery.sh`
+  - `scripts/06d-auxload.sh`
 - time-series storage: `scripts/07-influxdb.sh`
 - Kafka-to-InfluxDB bridge: `scripts/07b-telemetry-writer.sh`
 - Grafana dashboard: `scripts/08-grafana.sh`
@@ -75,6 +77,8 @@ make peers
 make genset
 make switchboard
 make propulsion
+make battery
+make auxload
 make influxdb
 make telemetry-writer
 make grafana
@@ -123,6 +127,8 @@ poc2/
 │   ├── genset-deployment.yaml
 │   ├── switchboard-deployment.yaml
 │   ├── propulsion-deployment.yaml
+│   ├── battery-deployment.yaml
+│   ├── auxload-deployment.yaml
 │   └── telemetry-writer-deployment.yaml
 ├── scripts/
 │   ├── 01-provision.sh
@@ -133,6 +139,8 @@ poc2/
 │   ├── 06-genset.sh
 │   ├── 06a-switchboard.sh
 │   ├── 06b-propulsion.sh
+│   ├── 06c-battery.sh
+│   ├── 06d-auxload.sh
 │   ├── 07-influxdb.sh
 │   ├── 07b-telemetry-writer.sh
 │   ├── 08-grafana.sh
@@ -144,6 +152,8 @@ poc2/
 │   ├── genset/
 │   ├── switchboard/
 │   ├── propulsion/
+│   ├── battery/
+│   ├── auxiliary-load/
 │   └── telemetry-writer/
 ├── main.tf
 ├── variables.tf

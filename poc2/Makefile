@@ -51,6 +51,12 @@ switchboard:
 propulsion:
 	@bash $(SCRIPTS)/06b-propulsion.sh $(VMS)
 
+battery:
+	@bash $(SCRIPTS)/06c-battery.sh $(VMS)
+
+auxload:
+	@bash $(SCRIPTS)/06d-auxload.sh $(VMS)
+
 influxdb:
 	@bash $(SCRIPTS)/07-influxdb.sh $(VMS)
 

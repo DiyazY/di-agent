@@ -1,22 +1,27 @@
 # genset-deployment.yaml.tmpl — Kubernetes Deployment manifest for
 # scripts/06-genset.sh. Rendered with `envsubst` before being applied via
-# kubectl; placeholders are populated from config/.env plus values
-# resolved at deploy time (GENSET_VM, KAFKA_BROKERS).
+# kubectl, once per genset instance; placeholders are populated from
+# config/.env plus values resolved at deploy time (GENSET_NAME, GENSET_ID,
+# GENSET_VM, KAFKA_BROKERS). GENSET_NAME/GENSET_ID default to "genset" for a
+# single-instance deployment, and to "genset-<N>" when scripts/06-genset.sh
+# loops over GENSET_COUNT instances.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: genset
+  name: ${GENSET_NAME}
   labels:
     app: genset
+    genset-id: ${GENSET_ID}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: genset
+      genset-id: ${GENSET_ID}
   template:
     metadata:
       labels:
         app: genset
+        genset-id: ${GENSET_ID}
     spec:
       nodeSelector:
         kubernetes.io/hostname: ${GENSET_VM}
@@ -27,6 +32,8 @@ spec:
           ports:
             - containerPort: 8000
           env:
+            - name: GENSET_ID
+              value: "${GENSET_ID}"
             - name: KAFKA_BROKERS
               value: "${KAFKA_BROKERS}"
             - name: KAFKA_TOPIC

@@ -5,14 +5,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY switchboard.py controller.py main.py .
+COPY aux_load.py controller.py main.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
-    KAFKA_TOPIC=switchboard.telemetry \
-    GENSET_KAFKA_TOPIC=genset.telemetry \
-    BATTERY_KAFKA_TOPIC=battery.telemetry \
+    KAFKA_TOPIC=auxload.telemetry \
     REQUEST_KAFKA_TOPIC=switchboard.requests \
-    STEP_INTERVAL_S=1
+    ALLOCATION_KAFKA_TOPIC=switchboard.telemetry \
+    STEP_INTERVAL_S=1 \
+    RAMP_RATE_PER_S=0.05 \
+    INITIAL_LOAD_RATIO=0.5
 
 EXPOSE 8000
 

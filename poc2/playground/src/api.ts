@@ -1,10 +1,17 @@
-export type SystemName = "genset" | "propulsion";
-export type ServiceName = SystemName | "switchboard";
+export type SystemName = "genset" | "propulsion" | "battery" | "auxload";
+
+export interface PlaygroundConfig {
+  gensetIds: string[];
+  propulsionIds: string[];
+  batteryIds: string[];
+  auxloadIds: string[];
+}
 
 export interface SystemStatus {
   target_load_ratio: number;
   current_load_ratio: number;
   allocated_power_kw?: number;
+  soc?: number;
   [key: string]: unknown;
 }
 
@@ -13,6 +20,7 @@ export interface SwitchboardStatus {
   available_supply_kw: number;
   total_demand_kw: number;
   gensets: Record<string, { power_kw: number; stale: boolean }>;
+  batteries: Record<string, { power_kw: number; stale: boolean }>;
   consumers: Record<
     string,
     { requested_power_kw: number; priority: number; allocated_power_kw: number; stale: boolean }
@@ -31,12 +39,23 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function fetchHealth(system: ServiceName): Promise<{ status: string }> {
-  return apiFetch(`/api/${system}/health`);
+// Discovers which genset/propulsion/battery/auxload instances are deployed,
+// generated at deploy time from GENSET_COUNT/PROPULSION_COUNT/BATTERY_COUNT/
+// AUXLOAD_COUNT (see nginx.conf.template and scripts/09-playground.sh).
+export function fetchConfig(): Promise<PlaygroundConfig> {
+  return apiFetch(`/config.json`);
 }
 
-export function fetchStatus(system: SystemName): Promise<SystemStatus> {
-  return apiFetch(`/api/${system}/status`);
+export function fetchHealth(system: SystemName, id: string): Promise<{ status: string }> {
+  return apiFetch(`/api/${system}/${id}/health`);
+}
+
+export function fetchStatus(system: SystemName, id: string): Promise<SystemStatus> {
+  return apiFetch(`/api/${system}/${id}/status`);
+}
+
+export function fetchSwitchboardHealth(): Promise<{ status: string }> {
+  return apiFetch(`/api/switchboard/health`);
 }
 
 export function fetchSwitchboardStatus(): Promise<SwitchboardStatus> {
@@ -45,10 +64,12 @@ export function fetchSwitchboardStatus(): Promise<SwitchboardStatus> {
 
 export function setLoad(
   system: SystemName,
+  id: string,
   loadRatio: number
 ): Promise<{ target_load_ratio: number }> {
-  return apiFetch(`/api/${system}/load`, {
+  return apiFetch(`/api/${system}/${id}/load`, {
     method: "POST",
     body: JSON.stringify({ load_ratio: loadRatio }),
   });
 }
+

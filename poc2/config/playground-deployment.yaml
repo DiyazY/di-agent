@@ -27,12 +27,18 @@ spec:
           ports:
             - containerPort: 80
           env:
-            - name: GENSET_UPSTREAM
-              value: "${GENSET_UPSTREAM}"
-            - name: PROPULSION_UPSTREAM
-              value: "${PROPULSION_UPSTREAM}"
+            - name: GENSET_LOCATIONS
+              value: "${GENSET_LOCATIONS}"
+            - name: PROPULSION_LOCATIONS
+              value: "${PROPULSION_LOCATIONS}"
+            - name: BATTERY_LOCATIONS
+              value: "${BATTERY_LOCATIONS}"
+            - name: AUXLOAD_LOCATIONS
+              value: "${AUXLOAD_LOCATIONS}"
             - name: SWITCHBOARD_UPSTREAM
               value: "${SWITCHBOARD_UPSTREAM}"
+            - name: CONFIG_JSON
+              value: '${CONFIG_JSON}'
 ---
 apiVersion: v1
 kind: Service

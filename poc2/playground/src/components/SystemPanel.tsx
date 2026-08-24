@@ -12,27 +12,29 @@ const POLL_INTERVAL_MS = 2000;
 
 interface Props {
   system: SystemName;
+  id: string;
 }
 
-export default function SystemPanel({ system }: Props) {
+export default function SystemPanel({ system, id }: Props) {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [sliderValue, setSliderValue] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Only tracked for propulsion: the switchboard's total available supply,
-  // used to gate the slider since propulsion no longer sees genset power directly.
+  // Tracked for propulsion/auxload: the switchboard's total available
+  // supply, used to gate the slider since consumers no longer see genset
+  // power directly.
   const [switchboardSupplyKw, setSwitchboardSupplyKw] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const [health, statusData] = await Promise.all([
-        fetchHealth(system),
-        fetchStatus(system),
+        fetchHealth(system, id),
+        fetchStatus(system, id),
       ]);
       setHealthy(health.status === "ok");
       setStatus(statusData);
-      if (system === "propulsion") {
+      if (system === "propulsion" || system === "auxload") {
         const switchboardStatus = await fetchSwitchboardStatus();
         setSwitchboardSupplyKw(switchboardStatus.available_supply_kw);
       }
@@ -41,7 +43,7 @@ export default function SystemPanel({ system }: Props) {
       setHealthy(false);
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [system]);
+  }, [system, id]);
 
   useEffect(() => {
     refresh();
@@ -55,14 +57,15 @@ export default function SystemPanel({ system }: Props) {
     }
   }, [status?.target_load_ratio]);
 
-  // Propulsion can only be loaded once the switchboard has power to allocate.
+  // Propulsion and the auxiliary load can only be loaded once the
+  // switchboard has power to allocate.
   const switchboardPowerAvailable =
-    system !== "propulsion" || (switchboardSupplyKw ?? 0) > 0;
+    (system !== "propulsion" && system !== "auxload") || (switchboardSupplyKw ?? 0) > 0;
 
   const handleApply = async () => {
     setSubmitting(true);
     try {
-      await setLoad(system, sliderValue / 100);
+      await setLoad(system, id, sliderValue / 100);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -79,7 +82,7 @@ export default function SystemPanel({ system }: Props) {
             healthy === null ? "" : healthy ? "ok" : "error"
           }`}
         />
-        {system}
+        {id}
       </h2>
 
       <div className="metric-row">
@@ -94,7 +97,7 @@ export default function SystemPanel({ system }: Props) {
           {status ? `${(status.target_load_ratio * 100).toFixed(1)}%` : "--"}
         </strong>
       </div>
-      {system === "propulsion" && (
+      {(system === "propulsion" || system === "auxload") && (
         <div className="metric-row">
           <span>Allocated power</span>
           <strong>
@@ -104,12 +107,20 @@ export default function SystemPanel({ system }: Props) {
           </strong>
         </div>
       )}
+      {system === "battery" && (
+        <div className="metric-row">
+          <span>State of charge</span>
+          <strong>
+            {status?.soc !== undefined ? `${(status.soc * 100).toFixed(1)}%` : "--"}
+          </strong>
+        </div>
+      )}
 
       <div className="load-control">
-        <label htmlFor={`${system}-slider`}>Set target load ratio</label>
+        <label htmlFor={`${id}-slider`}>Set target load ratio</label>
         <div className="slider-row">
           <input
-            id={`${system}-slider`}
+            id={`${id}-slider`}
             type="range"
             min={0}
             max={100}
@@ -128,7 +139,7 @@ export default function SystemPanel({ system }: Props) {
         </button>
         {!switchboardPowerAvailable && (
           <p className="hint-text">
-            Switchboard has no power available, propulsion load can't be adjusted.
+            Switchboard has no power available, load can't be adjusted.
           </p>
         )}
       </div>

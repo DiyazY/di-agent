@@ -1,15 +1,19 @@
-# propulsion-service.yaml — stable in-cluster DNS name/port for the
-# propulsion pod (no template placeholders: selector/port match
-# propulsion-deployment.yaml).
+# propulsion-service.yaml.tmpl — stable in-cluster DNS name/port for a
+# single propulsion pod (selector matches only that instance's
+# propulsion-id, so multiple propulsion instances each get their own
+# addressable Service; see propulsion-deployment.yaml and
+# scripts/06b-propulsion.sh). Rendered with `envsubst` once per instance;
+# PROPULSION_NAME/PROPULSION_ID default to "propulsion".
 apiVersion: v1
 kind: Service
 metadata:
-  name: propulsion
+  name: ${PROPULSION_NAME}
   labels:
     app: propulsion
+    propulsion-id: ${PROPULSION_ID}
 spec:
   selector:
-    app: propulsion
+    propulsion-id: ${PROPULSION_ID}
   ports:
     - port: 8000
       targetPort: 8000

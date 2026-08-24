@@ -1,0 +1,18 @@
+# battery-service.yaml.tmpl — stable in-cluster DNS name/port for a single
+# battery pod (selector matches only that instance's battery-id, so
+# multiple battery instances each get their own addressable Service; see
+# battery-deployment.yaml and scripts/06c-battery.sh). Rendered with
+# `envsubst` once per instance; BATTERY_NAME/BATTERY_ID default to "battery".
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${BATTERY_NAME}
+  labels:
+    app: battery
+    battery-id: ${BATTERY_ID}
+spec:
+  selector:
+    battery-id: ${BATTERY_ID}
+  ports:
+    - port: 8000
+      targetPort: 8000

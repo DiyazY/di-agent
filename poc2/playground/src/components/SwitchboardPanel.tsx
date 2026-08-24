@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchHealth, fetchSwitchboardStatus, SwitchboardStatus } from "../api";
+import { fetchSwitchboardHealth, fetchSwitchboardStatus, SwitchboardStatus } from "../api";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -11,7 +11,7 @@ export default function SwitchboardPanel() {
   const refresh = useCallback(async () => {
     try {
       const [health, statusData] = await Promise.all([
-        fetchHealth("switchboard"),
+        fetchSwitchboardHealth(),
         fetchSwitchboardStatus(),
       ]);
       setHealthy(health.status === "ok");
@@ -53,7 +53,27 @@ export default function SwitchboardPanel() {
         </strong>
       </div>
 
-      {status && Object.keys(status.consumers).length > 0 && (
+      {status && Object.keys(status.gensets ?? {}).length > 0 && (
+        <ul className="entry-list">
+          {Object.entries(status.gensets).map(([id, genset]) => (
+            <li key={id}>
+              {id}: {genset.power_kw.toFixed(1)} kW{genset.stale ? " (stale)" : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {status && Object.keys(status.batteries ?? {}).length > 0 && (
+        <ul className="entry-list">
+          {Object.entries(status.batteries).map(([id, battery]) => (
+            <li key={id}>
+              {id}: {battery.power_kw.toFixed(1)} kW{battery.stale ? " (stale)" : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {status && Object.keys(status.consumers ?? {}).length > 0 && (
         <ul className="entry-list">
           {Object.entries(status.consumers).map(([id, consumer]) => (
             <li key={id}>

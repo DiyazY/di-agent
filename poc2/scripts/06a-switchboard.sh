@@ -76,7 +76,9 @@ KAFKA_BROKERS="${KAFKA_BROKERS:-${KAFKA_IP_FOR_BROKERS}:9092}"
 KAFKA_TOPIC="${SWITCHBOARD_KAFKA_TOPIC:-switchboard.telemetry}"
 # Genset telemetry topic (see 06-genset.sh) the switchboard sums into supply.
 GENSET_KAFKA_TOPIC="${GENSET_KAFKA_TOPIC:-genset.telemetry}"
-# Power request topic (see 06b-propulsion.sh) consumers publish demand to.
+# Battery telemetry topic (see 06c-battery.sh) also summed into supply.
+BATTERY_KAFKA_TOPIC="${BATTERY_KAFKA_TOPIC:-battery.telemetry}"
+# Power request topic (see 06b-propulsion.sh, 06d-auxload.sh) consumers publish demand to.
 REQUEST_KAFKA_TOPIC="${REQUEST_KAFKA_TOPIC:-switchboard.requests}"
 
 # ── image ─────────────────────────────────────────────────────────────────────
@@ -105,8 +107,9 @@ CP_IP=$(get_vm_ip "$CONTROL_PLANE_VM")
 info "Applying switchboard manifest via kubectl on $CONTROL_PLANE_VM (pod scheduled on $SWITCHBOARD_VM) ..."
 SWITCHBOARD_VM="$SWITCHBOARD_VM" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
 KAFKA_BROKERS="$KAFKA_BROKERS" KAFKA_TOPIC="$KAFKA_TOPIC" \
-GENSET_KAFKA_TOPIC="$GENSET_KAFKA_TOPIC" REQUEST_KAFKA_TOPIC="$REQUEST_KAFKA_TOPIC" \
-    envsubst '${SWITCHBOARD_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${KAFKA_BROKERS} ${KAFKA_TOPIC} ${GENSET_KAFKA_TOPIC} ${REQUEST_KAFKA_TOPIC}' \
+GENSET_KAFKA_TOPIC="$GENSET_KAFKA_TOPIC" BATTERY_KAFKA_TOPIC="$BATTERY_KAFKA_TOPIC" \
+REQUEST_KAFKA_TOPIC="$REQUEST_KAFKA_TOPIC" \
+    envsubst '${SWITCHBOARD_VM} ${IMAGE_NAME} ${IMAGE_TAG} ${KAFKA_BROKERS} ${KAFKA_TOPIC} ${GENSET_KAFKA_TOPIC} ${BATTERY_KAFKA_TOPIC} ${REQUEST_KAFKA_TOPIC}' \
     < "$DEPLOYMENT_TMPL" \
     | ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config apply -f -"
 

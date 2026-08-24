@@ -13,6 +13,8 @@ KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "switchboard.telemetry")
 # Genset telemetry: sums into the power available on the bus.
 GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
+# Battery telemetry: another power source summed into the available supply.
+BATTERY_KAFKA_TOPIC = os.environ.get("BATTERY_KAFKA_TOPIC", "battery.telemetry")
 # Consumers (propulsion, hotel load, ...) publish their power demand here.
 REQUEST_KAFKA_TOPIC = os.environ.get("REQUEST_KAFKA_TOPIC", "switchboard.requests")
 SWITCHBOARD_ID = os.environ.get("SWITCHBOARD_ID", "switchboard-1")
@@ -67,24 +69,31 @@ class SwitchboardController:
         self._lock = threading.Lock()
         # genset_id -> (power_kw, received_at)
         self._genset_power_kw: dict[str, tuple[float, float]] = {}
+        # battery_id -> (power_kw, received_at)
+        self._battery_power_kw: dict[str, tuple[float, float]] = {}
         # consumer_id -> (requested_power_kw, priority, received_at)
         self._consumer_requests: dict[str, tuple[float, int, float]] = {}
         self._last_allocations: dict[str, float] = {}
 
         self._producer: KafkaProducer | None = None
         self._genset_consumer: KafkaConsumer | None = None
+        self._battery_consumer: KafkaConsumer | None = None
         self._request_consumer: KafkaConsumer | None = None
         self._stop_event = threading.Event()
         self._genset_thread: threading.Thread | None = None
+        self._battery_thread: threading.Thread | None = None
         self._request_thread: threading.Thread | None = None
         self._allocation_thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._producer = _make_producer()
         self._genset_consumer = _make_consumer(GENSET_KAFKA_TOPIC)
+        self._battery_consumer = _make_consumer(BATTERY_KAFKA_TOPIC)
         self._request_consumer = _make_consumer(REQUEST_KAFKA_TOPIC)
         self._genset_thread = threading.Thread(target=self._consume_genset_telemetry, daemon=True)
         self._genset_thread.start()
+        self._battery_thread = threading.Thread(target=self._consume_battery_telemetry, daemon=True)
+        self._battery_thread.start()
         self._request_thread = threading.Thread(target=self._consume_requests, daemon=True)
         self._request_thread.start()
         self._allocation_thread = threading.Thread(target=self._run, daemon=True)
@@ -94,9 +103,16 @@ class SwitchboardController:
         self._stop_event.set()
         if self._genset_consumer is not None:
             self._genset_consumer.close()
+        if self._battery_consumer is not None:
+            self._battery_consumer.close()
         if self._request_consumer is not None:
             self._request_consumer.close()
-        for thread in (self._genset_thread, self._request_thread, self._allocation_thread):
+        for thread in (
+            self._genset_thread,
+            self._battery_thread,
+            self._request_thread,
+            self._allocation_thread,
+        ):
             if thread is not None:
                 thread.join(timeout=STEP_INTERVAL_S * 2)
         if self._producer is not None:
@@ -115,6 +131,13 @@ class SwitchboardController:
                         "stale": self._is_stale(received_at),
                     }
                     for genset_id, (power_kw, received_at) in self._genset_power_kw.items()
+                },
+                "batteries": {
+                    battery_id: {
+                        "power_kw": power_kw,
+                        "stale": self._is_stale(received_at),
+                    }
+                    for battery_id, (power_kw, received_at) in self._battery_power_kw.items()
                 },
                 "consumers": {
                     consumer_id: {
@@ -147,6 +170,22 @@ class SwitchboardController:
             if not self._stop_event.is_set():
                 raise
 
+    def _consume_battery_telemetry(self) -> None:
+        try:
+            for record in self._battery_consumer:
+                if self._stop_event.is_set():
+                    break
+                value = record.value
+                battery_id = value.get("battery_id", record.key)
+                power_kw = value.get("power_kw")
+                if power_kw is None:
+                    continue
+                with self._lock:
+                    self._battery_power_kw[battery_id] = (float(power_kw), time.time())
+        except Exception:
+            if not self._stop_event.is_set():
+                raise
+
     def _consume_requests(self) -> None:
         try:
             for record in self._request_consumer:
@@ -169,13 +208,10 @@ class SwitchboardController:
                 raise
 
     def _get_available_supply_kw(self) -> float:
-        """Sum of power output from gensets whose telemetry isn't stale. Must
-        be called with self._lock held."""
-        return sum(
-            power_kw
-            for power_kw, received_at in self._genset_power_kw.values()
-            if not self._is_stale(received_at)
-        )
+        """Sum of power output from gensets and batteries whose telemetry
+        isn't stale. Must be called with self._lock held."""
+        sources = list(self._genset_power_kw.values()) + list(self._battery_power_kw.values())
+        return sum(power_kw for power_kw, received_at in sources if not self._is_stale(received_at))
 
     def _get_total_demand_kw(self) -> float:
         """Must be called with self._lock held."""

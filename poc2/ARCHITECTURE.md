@@ -46,7 +46,7 @@ The deployment is orchestrated by a shell-script pipeline rather than a single d
 - `03-kafka.sh`: deploy a single-node KRaft Kafka broker
 - `04-agent.sh`: build the di-agent binary and deploy it to each worker node as a pod
 - `05-peers.sh`: register peer URLs and set trust values
-- `06-genset.sh`, `06a-switchboard.sh` and `06b-propulsion.sh`: generate telemetry workloads for one or more gensets, a central switchboard, and one or more propulsion consumers
+- `06-genset.sh`, `06a-switchboard.sh`, `06b-propulsion.sh`, `06c-battery.sh` and `06d-auxload.sh`: generate telemetry workloads for one or more gensets, a central switchboard, one or more propulsion consumers, one or more batteries, and one or more auxiliary (hotel) loads
 - `07-influxdb.sh`: create the time-series database
 - `07b-telemetry-writer.sh`: stream Kafka messages into InfluxDB
 - `08-grafana.sh`: provision Grafana with an InfluxDB datasource
@@ -102,7 +102,7 @@ Because the broker runs on a VM and the other components also use host networkin
 
 ### data producers
 
-The workload simulators are containerized Python services in `system/genset/` and `system/propulsion/`.
+The workload simulators are containerized Python services in `system/genset/`, `system/battery/`, `system/propulsion/`, and `system/auxiliary-load/`.
 
 Their behavior is intentionally simple:
 
@@ -110,18 +110,18 @@ Their behavior is intentionally simple:
 - they adjust a simulated load ratio over time
 - they emit telemetry records to Kafka with timestamps and physical metrics
 
-The genset and propulsion workloads are not just monitoring tools; they model a real system under load.
+The genset, battery, propulsion, and auxiliary-load workloads are not just monitoring tools; they model a real system under load. The genset and battery are power sources feeding the bus (the battery also tracks its own state of charge and stops discharging once empty); propulsion and the auxiliary load are consumers drawing from it, both with an adjustable target load ratio via API, representing e.g. a variable hotel load (HVAC, lighting, galley, ...).
 
 ### switchboard
 
-`system/switchboard/` is the central power-management authority between gensets and consumers. Rather than every consumer summing raw genset telemetry itself (which only works for one genset talking to one consumer), the switchboard is the single place that:
+`system/switchboard/` is the central power-management authority between power sources (genset, battery) and consumers (propulsion, auxiliary load). Rather than every consumer summing raw source telemetry itself (which only works for one source talking to one consumer), the switchboard is the single place that:
 
-- consumes `genset.telemetry` from every genset and sums it into total available bus supply
-- consumes `switchboard.requests` from every consumer (e.g. propulsion), each carrying a requested power and a load-shedding priority
+- consumes `genset.telemetry` from every genset and `battery.telemetry` from every battery, summing both into total available bus supply
+- consumes `switchboard.requests` from every consumer (e.g. propulsion, auxiliary load), each carrying a requested power and a load-shedding priority
 - every tick, allocates the available supply across consumers in priority order — high-priority consumers are served first, and low-priority ones are shed if supply can't cover total demand
-- publishes each consumer's grant to `switchboard.telemetry`, and exposes the full picture (per-genset supply, per-consumer request/allocation) over `/status`
+- publishes each consumer's grant to `switchboard.telemetry`, and exposes the full picture (per-source supply, per-consumer request/allocation) over `/status`
 
-This is the same role a physical switchboard plays on a vessel: it is the shared busbar all generators feed and all loads draw from, with a power-management layer that decides who gets power when supply is short. It also makes the topology genuinely multi-source/multi-consumer: adding a second genset or a second propulsion drive only means pointing them at the same switchboard, with no consumer needing to know how many gensets exist.
+This is the same role a physical switchboard plays on a vessel: it is the shared busbar all generators and batteries feed and all loads draw from, with a power-management layer that decides who gets power when supply is short. It also makes the topology genuinely multi-source/multi-consumer: adding a second genset, a battery, or a second propulsion drive only means pointing them at the same switchboard, with no consumer needing to know how many sources exist.
 
 ### telemetry writer
 
