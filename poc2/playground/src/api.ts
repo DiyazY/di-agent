@@ -19,7 +19,12 @@ export interface SwitchboardStatus {
   switchboard_id: string;
   available_supply_kw: number;
   total_demand_kw: number;
-  gensets: Record<string, { power_kw: number; stale: boolean }>;
+  total_co2_kg_per_s: number;
+  total_nox_kg_per_s: number;
+  gensets: Record<
+    string,
+    { power_kw: number; co2_kg_per_s: number; nox_kg_per_s: number; stale: boolean }
+  >;
   batteries: Record<string, { power_kw: number; stale: boolean }>;
   consumers: Record<
     string,

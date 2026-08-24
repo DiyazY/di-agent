@@ -67,8 +67,8 @@ class SwitchboardController:
         self.switchboard_id = SWITCHBOARD_ID
 
         self._lock = threading.Lock()
-        # genset_id -> (power_kw, received_at)
-        self._genset_power_kw: dict[str, tuple[float, float]] = {}
+        # genset_id -> (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
+        self._genset_power_kw: dict[str, tuple[float, float, float, float]] = {}
         # battery_id -> (power_kw, received_at)
         self._battery_power_kw: dict[str, tuple[float, float]] = {}
         # consumer_id -> (requested_power_kw, priority, received_at)
@@ -125,12 +125,17 @@ class SwitchboardController:
                 "switchboard_id": self.switchboard_id,
                 "available_supply_kw": self._get_available_supply_kw(),
                 "total_demand_kw": self._get_total_demand_kw(),
+                "total_co2_kg_per_s": self._get_total_co2_kg_per_s(),
+                "total_nox_kg_per_s": self._get_total_nox_kg_per_s(),
                 "gensets": {
                     genset_id: {
                         "power_kw": power_kw,
+                        "co2_kg_per_s": co2_kg_per_s,
+                        "nox_kg_per_s": nox_kg_per_s,
                         "stale": self._is_stale(received_at),
                     }
-                    for genset_id, (power_kw, received_at) in self._genset_power_kw.items()
+                    for genset_id, (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
+                    in self._genset_power_kw.items()
                 },
                 "batteries": {
                     battery_id: {
@@ -164,8 +169,15 @@ class SwitchboardController:
                 power_kw = value.get("power_kw")
                 if power_kw is None:
                     continue
+                co2_kg_per_s = float(value.get("co2_kg_per_s", 0.0))
+                nox_kg_per_s = float(value.get("nox_kg_per_s", 0.0))
                 with self._lock:
-                    self._genset_power_kw[genset_id] = (float(power_kw), time.time())
+                    self._genset_power_kw[genset_id] = (
+                        float(power_kw),
+                        co2_kg_per_s,
+                        nox_kg_per_s,
+                        time.time(),
+                    )
         except Exception:
             if not self._stop_event.is_set():
                 raise
@@ -210,8 +222,35 @@ class SwitchboardController:
     def _get_available_supply_kw(self) -> float:
         """Sum of power output from gensets and batteries whose telemetry
         isn't stale. Must be called with self._lock held."""
-        sources = list(self._genset_power_kw.values()) + list(self._battery_power_kw.values())
-        return sum(power_kw for power_kw, received_at in sources if not self._is_stale(received_at))
+        genset_power_kw = [
+            power_kw
+            for power_kw, _co2, _nox, received_at in self._genset_power_kw.values()
+            if not self._is_stale(received_at)
+        ]
+        battery_power_kw = [
+            power_kw
+            for power_kw, received_at in self._battery_power_kw.values()
+            if not self._is_stale(received_at)
+        ]
+        return sum(genset_power_kw) + sum(battery_power_kw)
+
+    def _get_total_co2_kg_per_s(self) -> float:
+        """Whole-system CO2 emission rate: sum across all non-stale gensets.
+        Must be called with self._lock held."""
+        return sum(
+            co2_kg_per_s
+            for _power_kw, co2_kg_per_s, _nox, received_at in self._genset_power_kw.values()
+            if not self._is_stale(received_at)
+        )
+
+    def _get_total_nox_kg_per_s(self) -> float:
+        """Whole-system NOx emission rate: sum across all non-stale gensets.
+        Must be called with self._lock held."""
+        return sum(
+            nox_kg_per_s
+            for _power_kw, _co2, nox_kg_per_s, received_at in self._genset_power_kw.values()
+            if not self._is_stale(received_at)
+        )
 
     def _get_total_demand_kw(self) -> float:
         """Must be called with self._lock held."""
@@ -225,6 +264,8 @@ class SwitchboardController:
         while not self._stop_event.is_set():
             with self._lock:
                 available_supply_kw = self._get_available_supply_kw()
+                total_co2_kg_per_s = self._get_total_co2_kg_per_s()
+                total_nox_kg_per_s = self._get_total_nox_kg_per_s()
                 active_requests = [
                     ConsumerRequest(consumer_id, requested_power_kw, priority, received_at)
                     for consumer_id, (requested_power_kw, priority, received_at)
@@ -248,6 +289,8 @@ class SwitchboardController:
                     "allocated_power_kw": allocations.get(request.consumer_id, 0.0),
                     "available_supply_kw": available_supply_kw,
                     "total_demand_kw": total_demand_kw,
+                    "total_co2_kg_per_s": total_co2_kg_per_s,
+                    "total_nox_kg_per_s": total_nox_kg_per_s,
                 }
                 self._producer.send(KAFKA_TOPIC, key=request.consumer_id, value=message)
 
@@ -256,6 +299,7 @@ class SwitchboardController:
             )
             print(
                 f"supply={available_supply_kw:.1f}kW demand={total_demand_kw:.1f}kW "
+                f"co2={total_co2_kg_per_s:.5f}kg/s nox={total_nox_kg_per_s:.6f}kg/s "
                 f"allocations=[{allocated_str}]"
             )
 

@@ -4,6 +4,7 @@ import threading
 import time
 
 import numpy as np
+from feems.types_for_feems import EmissionType
 from kafka import KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
@@ -91,6 +92,15 @@ class GensetController:
             fuel_flow_kg_per_s = float(
                 np.atleast_1d(run_point.fuel_flow_rate_kg_per_s.total_fuel_consumption)[0]
             )
+            # Tank-to-wake CO2 from combustion, derived from the fuel's GHG factor table.
+            # get_total_co2_emissions() returns an ndarray of GHGEmissions (one per power_kw entry).
+            co2_emissions = run_point.fuel_flow_rate_kg_per_s.get_total_co2_emissions()[0]
+            co2_kg_per_s = float(
+                np.atleast_1d(co2_emissions.tank_to_wake_kg_or_gco2eq_per_gfuel)[0]
+            )
+            nox_kg_per_s = float(
+                np.atleast_1d(run_point.emissions_g_per_s.get(EmissionType.NOX, 0.0))[0] / 1000
+            )
             message = {
                 "genset_id": self.genset_id,
                 "timestamp": time.time(),
@@ -98,6 +108,8 @@ class GensetController:
                 "power_kw": float(power_kw),
                 "fuel_flow_kg_per_s": fuel_flow_kg_per_s,
                 "bsfc_g_per_kwh": float(run_point.bsfc_g_per_kWh[0]),
+                "co2_kg_per_s": co2_kg_per_s,
+                "nox_kg_per_s": nox_kg_per_s,
             }
 
             with self._lock:
@@ -109,7 +121,9 @@ class GensetController:
                 f"load={message['load_ratio'] * 100:.1f}% "
                 f"power={message['power_kw']:.1f}kW "
                 f"fuel_flow={message['fuel_flow_kg_per_s']:.5f}kg/s "
-                f"bsfc={message['bsfc_g_per_kwh']:.1f}g/kWh"
+                f"bsfc={message['bsfc_g_per_kwh']:.1f}g/kWh "
+                f"co2={message['co2_kg_per_s']:.5f}kg/s "
+                f"nox={message['nox_kg_per_s']:.6f}kg/s"
             )
 
             self._stop_event.wait(STEP_INTERVAL_S)

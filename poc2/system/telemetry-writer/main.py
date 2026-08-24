@@ -23,7 +23,14 @@ INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
 MESSAGE_SCHEMAS = {
     "genset_id": {
         "measurement": "genset_telemetry",
-        "fields": ("load_ratio", "power_kw", "fuel_flow_kg_per_s", "bsfc_g_per_kwh"),
+        "fields": (
+            "load_ratio",
+            "power_kw",
+            "fuel_flow_kg_per_s",
+            "bsfc_g_per_kwh",
+            "co2_kg_per_s",
+            "nox_kg_per_s",
+        ),
     },
     "propulsion_id": {
         "measurement": "propulsion_telemetry",
@@ -31,7 +38,14 @@ MESSAGE_SCHEMAS = {
     },
     "consumer_id": {
         "measurement": "switchboard_telemetry",
-        "fields": ("requested_power_kw", "allocated_power_kw", "available_supply_kw", "total_demand_kw"),
+        "fields": (
+            "requested_power_kw",
+            "allocated_power_kw",
+            "available_supply_kw",
+            "total_demand_kw",
+            "total_co2_kg_per_s",
+            "total_nox_kg_per_s",
+        ),
     },
 }
 
