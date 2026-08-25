@@ -1,0 +1,126 @@
+# Default values for di-agent-system.
+# Any service can be scheduled on any node in the cluster: none of the
+# templates in this chart set a nodeSelector unless you populate one below.
+
+global:
+  # Prefixed onto every chart-built image's repository (genset, switchboard,
+  # propulsion, battery, auxload, telemetry-writer, playground). Public
+  # images (kafka, influxdb, grafana) are referenced by their full upstream
+  # repository path and are not affected by this value.
+  imageRegistry: ghcr.io/unlabs-dev
+  imageTag: latest
+  imagePullPolicy: IfNotPresent
+  # e.g. [{ name: ghcr-creds }] if the registry above is private.
+  imagePullSecrets: []
+  # Applied to every pod in this chart unless overridden per-service below.
+  nodeSelector: {}
+  namespace: default
+
+kafka:
+  image:
+    repository: apache/kafka
+    tag: latest
+  port: 9092
+  controllerPort: 9093
+  clusterId: ZGlhZ2VudC1rYWZrYS0
+  nodeSelector: {}
+  resources: {}
+
+genset:
+  image:
+    repository: genset
+    tag: ""
+  count: 4
+  kafkaTopic: genset.telemetry
+  nodeSelector: {}
+  resources: {}
+
+switchboard:
+  image:
+    repository: switchboard
+    tag: ""
+  # Topic the switchboard publishes per-consumer allocations to; must match
+  # propulsion.allocationKafkaTopic / auxload.allocationKafkaTopic below.
+  kafkaTopic: switchboard.telemetry
+  gensetKafkaTopic: genset.telemetry
+  batteryKafkaTopic: battery.telemetry
+  requestKafkaTopic: switchboard.requests
+  nodeSelector: {}
+  resources: {}
+
+propulsion:
+  image:
+    repository: propulsion
+    tag: ""
+  count: 2
+  kafkaTopic: propulsion.telemetry
+  requestKafkaTopic: switchboard.requests
+  allocationKafkaTopic: switchboard.telemetry
+  # One priority per instance; recycled round-robin if fewer than `count`.
+  priorities: [1]
+  nodeSelector: {}
+  resources: {}
+
+battery:
+  image:
+    repository: battery
+    tag: ""
+  count: 1
+  kafkaTopic: battery.telemetry
+  nodeSelector: {}
+  resources: {}
+
+auxload:
+  image:
+    repository: auxload
+    tag: ""
+  count: 1
+  kafkaTopic: auxload.telemetry
+  requestKafkaTopic: switchboard.requests
+  allocationKafkaTopic: switchboard.telemetry
+  initialLoadRatio: "0.5"
+  nodeSelector: {}
+  resources: {}
+
+influxdb:
+  image:
+    repository: influxdb
+    tag: "2.7"
+  port: 8086
+  org: di-agent
+  bucket: telemetry
+  adminUser: admin
+  # Change these before deploying anywhere beyond a local/throwaway cluster;
+  # prefer passing via `--set` or a separate untracked values file rather
+  # than committing real credentials here.
+  adminPassword: change-me
+  adminToken: change-me-too
+  nodeSelector: {}
+  resources: {}
+
+telemetryWriter:
+  image:
+    repository: telemetry-writer
+    tag: ""
+  kafkaGroupId: telemetry-writer
+  nodeSelector: {}
+  resources: {}
+
+grafana:
+  image:
+    repository: grafana/grafana
+    tag: latest
+  port: 3000
+  adminUser: admin
+  adminPassword: change-me
+  nodeSelector: {}
+  resources: {}
+
+playground:
+  image:
+    repository: playground
+    tag: ""
+  nodePort: 30080
+  switchboardUpstream: "switchboard:8000"
+  nodeSelector: {}
+  resources: {}

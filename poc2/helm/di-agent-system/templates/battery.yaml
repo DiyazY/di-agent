@@ -1,0 +1,59 @@
+# One Deployment + Service per battery instance (battery-1..N); publishes
+# power supply like a genset, summed by the switchboard into bus supply.
+{{- range $i := until (.Values.battery.count | int) }}
+{{- $n := add1 $i }}
+{{- $name := printf "battery-%d" $n }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: battery
+    battery-id: {{ $name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      battery-id: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: battery
+        battery-id: {{ $name }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" $.Values.battery.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: battery
+          image: {{ include "diagent.customImage" (dict "global" $.Values.global "image" $.Values.battery.image) }}
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: BATTERY_ID
+              value: {{ $name | quote }}
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ $.Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ $.Values.battery.kafkaTopic | quote }}
+          resources:
+            {{- toYaml $.Values.battery.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: battery
+    battery-id: {{ $name }}
+spec:
+  selector:
+    battery-id: {{ $name }}
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+{{- end }}

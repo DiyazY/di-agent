@@ -60,12 +60,11 @@ if [ "${#WORKER_VMS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# Kafka broker address (see 05-kafka.sh); defaults to the second VM
-# (KAFKA_VM), where the Kafka broker is deployed with hostNetwork on port
-# 9092, falling back to the control-plane if no other VM was given.
-KAFKA_VM="${KAFKA_VM:-${VMS[1]:-$CONTROL_PLANE_VM}}"
-KAFKA_IP_FOR_BROKERS=$(get_vm_ip "$KAFKA_VM")
-KAFKA_BROKERS="${KAFKA_BROKERS:-${KAFKA_IP_FOR_BROKERS}:9092}"
+# Kafka broker address: the broker is deployed by the Helm chart
+# (helm/di-agent-system) as an in-cluster ClusterIP Service, not pinned to
+# any particular VM, so it's reachable at its cluster DNS name.
+KAFKA_NAMESPACE="${KAFKA_NAMESPACE:-default}"
+KAFKA_BROKERS="${KAFKA_BROKERS:-kafka.${KAFKA_NAMESPACE}.svc.cluster.local:9092}"
 
 # ── build ─────────────────────────────────────────────────────────────────────
 info "Building di-agent for ${BUILD_GOOS}/${BUILD_GOARCH} from $GO_SRC ..."
@@ -148,6 +147,9 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${vm}
       hostNetwork: true
+      # hostNetwork pods don't use cluster DNS by default; needed to resolve
+      # the kafka.*.svc.cluster.local Service name above.
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: di-agent
           image: ${IMAGE_NAME}:${IMAGE_TAG}
