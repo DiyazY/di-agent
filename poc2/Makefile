@@ -67,13 +67,19 @@ helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 agent:
-	@bash $(SCRIPTS)/03-agent.sh $(VMS)
+	@bash $(SCRIPTS)/04-agent.sh $(VMS)
 
 peers:
-	@bash $(SCRIPTS)/04-peers.sh $(VMS)
+	@bash $(SCRIPTS)/05-peers.sh $(VMS)
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
+
+k3s:
+	@bash $(SCRIPTS)/k3s.sh $(VMS)
+
+kubeedge:
+	@bash $(SCRIPTS)/kubeedge.sh $(VMS)
 
 start-vms:
 	@bash $(SCRIPTS)/startVMS.sh $(VMS)
@@ -137,7 +143,7 @@ get-ip-%:
 		exit 1; \
 	fi
 
-.PHONY: all provision uncloud netdata agent peers images helm-lint helm-template \
+.PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
         workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
@@ -146,6 +152,8 @@ help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
 	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
+	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
+	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
 	@echo "                 telemetry-writer/playground images to REGISTRY (default $(REGISTRY))"
 	@echo "  helm-install - helm upgrade --install the di-agent-system chart (kafka..playground)"
 	@echo "  helm-upgrade - Alias for helm-install"

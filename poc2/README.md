@@ -9,7 +9,7 @@ The purpose is not just to "start a cluster." This PoC simulates a small edge en
 The flow is:
 
 1. Terraform creates a small libvirt VM fleet.
-2. A kubeadm bootstrap script installs Kubernetes across those VMs.
+2. A cluster bootstrap script installs kubeadm Kubernetes, k3s, or KubeEdge across those VMs.
 3. Kafka is deployed as a single-broker KRaft service.
 4. di-agent is built and deployed as one pod per worker node.
 5. Each agent registers the others as peers and sets trust values.
@@ -35,18 +35,12 @@ The scripts are written so the first VM in the list is treated as the control pl
 
 - Terraform: builds the VMs and libvirt storage pool in `main.tf`
 - kubeadm bootstrap: `scripts/02-k8s.sh`
-- Kafka: `scripts/03-kafka.sh` with `config/kafka-deployment.yaml`
+- k3s bootstrap: `scripts/02-k3s.sh`
+- KubeEdge bootstrap: `scripts/03-kubeedge.sh` (requires an existing control plane)
+- Helm deployment: `helm/di-agent-system`
 - di-agent deployment: `scripts/04-agent.sh`
 - peer registration: `scripts/05-peers.sh`
-- synthetic power-plant simulation:
-  - `scripts/06-genset.sh`
-  - `scripts/06a-switchboard.sh`
-  - `scripts/06b-propulsion.sh`
-  - `scripts/06c-battery.sh`
-  - `scripts/06d-auxload.sh`
-- time-series storage: `scripts/07-influxdb.sh`
-- Kafka-to-InfluxDB bridge: `scripts/07b-telemetry-writer.sh`
-- Grafana dashboard: `scripts/08-grafana.sh`
+- image builds: `scripts/build-push-images.sh`
 - trust-routing demo: `scripts/coordinator.sh`
 
 ## Prerequisites
@@ -66,22 +60,28 @@ The scripts expect the SSH key to be at:
 
 ## Quick start
 
-From this directory:
+From this directory, choose one cluster distribution:
 
 ```bash
 make provision
-make k8s
-make kafka
+make k8s       # kubeadm, or use: make k3s
+make images
+make helm-install
 make agent
 make peers
-make genset
-make switchboard
-make propulsion
-make battery
-make auxload
-make influxdb
-make telemetry-writer
-make grafana
+```
+
+For KubeEdge, use a control-plane VM and separate edge VMs. The edge VMs must
+not also run a k3s or kubeadm worker:
+
+```bash
+make kubeedge VMS="ubuntu-vm1 ubuntu-vm2 ubuntu-vm3"
+```
+
+The remaining Helm deployment commands are:
+
+```bash
+make helm-upgrade
 ```
 
 This is the intended end-to-end setup sequence. The project is not a single monolithic deployment; it is a scripted pipeline that stages infrastructure, then service workloads, then telemetry and demo traffic.
