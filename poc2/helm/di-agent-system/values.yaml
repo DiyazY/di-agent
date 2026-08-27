@@ -93,7 +93,7 @@ influxdb:
   # Change these before deploying anywhere beyond a local/throwaway cluster;
   # prefer passing via `--set` or a separate untracked values file rather
   # than committing real credentials here.
-  adminPassword: change-me
+  adminPassword: admin12345
   adminToken: change-me-too
   nodeSelector: {}
   resources: {}
@@ -112,7 +112,7 @@ grafana:
     tag: latest
   port: 3000
   adminUser: admin
-  adminPassword: change-me
+  adminPassword: admin12345
   nodeSelector: {}
   resources: {}
 
