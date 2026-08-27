@@ -67,10 +67,10 @@ helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 agent:
-	@bash $(SCRIPTS)/04-agent.sh $(VMS)
+	@bash $(SCRIPTS)/03-agent.sh $(VMS)
 
 peers:
-	@bash $(SCRIPTS)/05-peers.sh $(VMS)
+	@bash $(SCRIPTS)/04-peers.sh $(VMS)
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
