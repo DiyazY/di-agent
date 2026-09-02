@@ -48,6 +48,44 @@ type Construct struct {
 	ConstructID string `json:"construct_id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+
+	// Polarity is the direction this construct's value runs: HigherIsWorse for a
+	// cost or a penalty, HigherIsBetter for a capability or a headroom. Empty
+	// defaults to HigherIsWorse.
+	//
+	// It exists because a proposition's declared direction is only meaningful
+	// against a stated polarity on both endpoints. Leaving polarity implicit made a
+	// whole class of error undetectable: a proposition inherited from a framework
+	// that phrased its outcome as a *goodness* quantity ("reduces throughput")
+	// attached to a construct measured as a *badness* quantity (latency, pressure)
+	// asserts a sign the system can never show, so its evidence gate never opens and
+	// it sits at zero strength looking merely unobserved.
+	Polarity Polarity `json:"polarity,omitempty"`
+}
+
+// Polarity says which way "better" runs for a measured quantity.
+type Polarity string
+
+const (
+	// HigherIsWorse suits latency, pressure, utilisation, loss and cost.
+	HigherIsWorse Polarity = "higher_is_worse"
+	// HigherIsBetter suits throughput, headroom and availability.
+	HigherIsBetter Polarity = "higher_is_better"
+)
+
+func (p Polarity) withDefault() Polarity {
+	if p == "" {
+		return HigherIsWorse
+	}
+	return p
+}
+
+func (p Polarity) valid() bool {
+	switch p.withDefault() {
+	case HigherIsWorse, HigherIsBetter:
+		return true
+	}
+	return false
 }
 
 // MetricRoute binds one MetricType to the construct it informs. Range is
@@ -58,6 +96,13 @@ type MetricRoute struct {
 	ConstructID string     `json:"construct_id"`
 	Unit        string     `json:"unit"`
 	Range       [2]float64 `json:"range"`
+
+	// Polarity is the direction the raw metric runs, which need not be the
+	// direction its construct runs. When they differ the ingestion path reflects the
+	// value within Range before it reaches the map, so a construct fed by both a
+	// latency and a throughput summarises two quantities that agree rather than
+	// averaging two that cancel. Empty defaults to HigherIsWorse.
+	Polarity Polarity `json:"polarity,omitempty"`
 }
 
 type Proposition struct {
@@ -138,6 +183,10 @@ func (s *Spec) Validate() error {
 		if known[c.ConstructID] {
 			return fmt.Errorf("duplicate construct %q", c.ConstructID)
 		}
+		if !c.Polarity.valid() {
+			return fmt.Errorf("construct %q has unknown polarity %q (want %q or %q)",
+				c.ConstructID, c.Polarity, HigherIsWorse, HigherIsBetter)
+		}
 		known[c.ConstructID] = true
 	}
 
@@ -152,6 +201,10 @@ func (s *Spec) Validate() error {
 		seenMetric[r.MetricType] = true
 		if r.Range[1] <= r.Range[0] {
 			return fmt.Errorf("metric %q has empty range [%v, %v]", r.MetricType, r.Range[0], r.Range[1])
+		}
+		if !r.Polarity.valid() {
+			return fmt.Errorf("metric %q has unknown polarity %q (want %q or %q)",
+				r.MetricType, r.Polarity, HigherIsWorse, HigherIsBetter)
 		}
 	}
 
@@ -232,6 +285,43 @@ func (s *Spec) RangeForMetric(metricType string) ([2]float64, bool) {
 		}
 	}
 	return [2]float64{}, false
+}
+
+// PolarityForConstruct reports the direction a construct's value runs.
+func (s *Spec) PolarityForConstruct(constructID string) (Polarity, bool) {
+	for _, c := range s.Constructs {
+		if c.ConstructID == constructID {
+			return c.Polarity.withDefault(), true
+		}
+	}
+	return "", false
+}
+
+// NormalizeForConstruct expresses a raw metric value in its construct's polarity,
+// reflecting it within the declared range when the two disagree:
+//
+//	v' = range.lo + range.hi - v
+//
+// An unrouted metric is returned unchanged: it becomes a property in its own right
+// and belongs to no construct, so there is no polarity to reconcile it with.
+//
+// This is the one place the reconciliation happens. Doing it at ingestion rather
+// than at read time means the stored property, every derived summary over it, and
+// every relationship learned from it all speak the same direction — so a
+// proposition's declared sign can be checked against an observed correlation
+// without a caller having to know which metrics were inverted on the way in.
+func (s *Spec) NormalizeForConstruct(metricType string, value float64) float64 {
+	for _, r := range s.MetricRouting {
+		if r.MetricType != metricType {
+			continue
+		}
+		want, ok := s.PolarityForConstruct(r.ConstructID)
+		if !ok || r.Polarity.withDefault() == want {
+			return value
+		}
+		return r.Range[0] + r.Range[1] - value
+	}
+	return value
 }
 
 // FloorFor returns the adjustment floor for a proposition: its per-proposition

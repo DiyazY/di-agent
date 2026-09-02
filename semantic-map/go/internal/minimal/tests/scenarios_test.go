@@ -93,9 +93,9 @@ func snapEdgeByPropID(t *testing.T, state *statemap.Map, propID string) edgeSnap
 			FromID:        r.From,
 			ToID:          r.To,
 			PropID:        r.Label,
-			PriorWeight:   r.Prior,
+			PriorWeight:   establishedOf(r),
 			EMAWeight:     r.Strength,
-			Effective:     r.Effective(),
+			Effective:     r.EffectiveOrZero(),
 			Confidence:    r.Confidence,
 			NObservations: r.NObservations,
 		}
@@ -110,7 +110,8 @@ func TestScenario_ColdStart(t *testing.T) {
 	a := newScenarioAgent(t)
 
 	t.Log("Scenario: cold start — ontology bootstrapped, no observations yet.")
-	t.Log("Expected: confidence=0 on every edge, effective value equals the prior, EMA equals the prior.")
+	t.Log("Expected: confidence=0 on every edge and no effective value at all — nothing")
+	t.Log("seeds a magnitude, so basis is \"unknown\" until evidence or an assertion arrives.")
 
 	// Every relationship the specification declares between observable constructs. A
 	// proposition naming a construct nothing routes to is deliberately absent: seeding
@@ -129,9 +130,12 @@ func TestScenario_ColdStart(t *testing.T) {
 		if r.Confidence != 0.0 {
 			t.Errorf("%s starts with confidence=%.3f; expected 0.0", r.ID, r.Confidence)
 		}
-		if r.Effective() != r.Prior {
-			t.Errorf("%s effective=%.3f != prior=%.3f at cold start — with no evidence the "+
-				"prior IS the estimate", r.ID, r.Effective(), r.Prior)
+		// At cold start there is no estimate at all. Nothing seeds a magnitude, so a
+		// relationship reports that it does not know what it is worth rather than
+		// reporting a number nobody measured.
+		if _, known := r.Effective(); known {
+			t.Errorf("%s has an effective strength %.3f at cold start — with no evidence "+
+				"and no assertion there should be none", r.ID, r.EffectiveOrZero())
 		}
 		if r.NObservations != 0 {
 			t.Errorf("%s has %d observations at cold start; expected 0", r.ID, r.NObservations)
@@ -149,14 +153,14 @@ func TestScenario_ColdStart(t *testing.T) {
 	t.Logf("  relationships seeded: %d", len(rels))
 	t.Logf("  aggregate confidence: %.3f", cost.Confidence)
 	t.Logf("  decision latency estimate: %.3f  resource cost: %.3f", cost.LatencyEstimate, cost.ResourceCost)
-	t.Logf("  graph path length: %d (all edges contribute via priors)", len(cost.GraphPathUsed))
+	t.Logf("  graph path length: %d (relationships read; none contributes a magnitude yet)", len(cost.GraphPathUsed))
 }
 
 // ── Scenario 2: Convergence on a single edge ─────────────────────────────────
 
 func TestScenario_ConvergenceOnOneEdge(t *testing.T) {
 	a := newScenarioAgent(t)
-	const target = "P10" // PS→RC negative — performance reducing resource overhead
+	target := firstSpecProp()
 	const observed = 0.85
 	const totalObs = 500
 
@@ -223,111 +227,75 @@ func (a *scenarioAgent) streamObservation(t *testing.T, fromID, toID string, val
 	}
 }
 
-// ── Scenario 3: Per-KD decisions differ ──────────────────────────────────────
+// ── Scenario 3: two clusters are identical until each observes its own ───────
 
-func TestScenario_PerKDDecisionsDiffer(t *testing.T) {
+// TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve replaces a scenario that
+// asserted the opposite, and the inversion is the point.
+//
+// It used to build two agents with different -kd and require their cold-start
+// sensitivities to differ, because per-cluster calibration wrote a magnitude onto every
+// relationship at seed time. Those magnitudes were rank-derived — min-max normalised
+// construct scores over five distributions, so one cluster sat at 0.0 and another at
+// 1.0 on a dimension whose association nobody had measured — and they reached every
+// decision with weight (1 - confidence), hardest at the moment the agent knew least.
+//
+// Nothing seeds a magnitude now. Two agents differing only in -kd are therefore the
+// same agent until each has watched its own machine, and a difference between them at
+// cold start would mean a number had come from somewhere other than measurement.
+func TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve(t *testing.T) {
 	pwPath := findPriorWeightsFileForScenarios(t)
-
-	smK3s, _, err := profiles.Build("edge-minimal", profiles.Config{
-		DomainSpec: mustSpec(),
-		StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
-		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
-		PriorWeightsPath: pwPath, KD: "k3s",
-	})
-	if err != nil {
-		t.Fatal(err)
+	build := func(kd string) *semmap.SemanticMap {
+		sm, _, err := profiles.Build("edge-minimal", profiles.Config{
+			DomainSpec: mustSpec(),
+			StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
+			EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
+			PriorWeightsPath: pwPath, KD: kd,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sm
 	}
-	smK0s, _, err := profiles.Build("edge-minimal", profiles.Config{
-		DomainSpec: mustSpec(),
-		StateMap:   statemap.New(statemap.Config{}, statemap.NewJournal(0)),
-		EMAAlpha:   0.2, ConvergenceThreshold: 500, MinTrustScore: 0.5,
-		PriorWeightsPath: pwPath, KD: "k0s",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	smK3s, smK0s := build("k3s"), build("k0s")
 
 	costK3s, _ := smK3s.CostOfAction("pod-scheduling", "node_1")
 	costK0s, _ := smK0s.CostOfAction("pod-scheduling", "node_1")
 
-	t.Log("Scenario: two agents, same query, different -kd. Per-cluster calibration lives on the")
-	t.Log("edges, so at cold start it shows up in the SENSITIVITIES, not in the levels: neither")
-	t.Log("agent has observed anything yet, and an honest level says so.")
-	t.Log("")
+	t.Log("Two agents, same query, different -kd, neither having observed anything.")
 	t.Logf("  k3s  →  level(resource)=%.3f level(pressure)=%.3f  dR=%+.4f dP=%+.4f  conf=%.3f",
 		costK3s.ResourceCost, costK3s.LatencyEstimate,
 		costK3s.ResourceSensitivity, costK3s.PressureSensitivity, costK3s.Confidence)
 	t.Logf("  k0s  →  level(resource)=%.3f level(pressure)=%.3f  dR=%+.4f dP=%+.4f  conf=%.3f",
 		costK0s.ResourceCost, costK0s.LatencyEstimate,
 		costK0s.ResourceSensitivity, costK0s.PressureSensitivity, costK0s.Confidence)
-	t.Log("")
 
-	if costK3s.ResourceSensitivity == costK0s.ResourceSensitivity &&
-		costK3s.PressureSensitivity == costK0s.PressureSensitivity {
-		t.Errorf("k3s and k0s agents produced identical sensitivities — per-KD seeding is not "+
-			"steering behaviour (dR %.6f vs %.6f, dP %.6f vs %.6f)",
+	if costK3s.ResourceSensitivity != costK0s.ResourceSensitivity ||
+		costK3s.PressureSensitivity != costK0s.PressureSensitivity {
+		t.Errorf("cold-start sensitivities differ by -kd (dR %.6f vs %.6f, dP %.6f vs %.6f); "+
+			"nothing has been measured on either machine, so a difference means a "+
+			"magnitude was seeded from a calibration",
 			costK3s.ResourceSensitivity, costK0s.ResourceSensitivity,
 			costK3s.PressureSensitivity, costK0s.PressureSensitivity)
 	}
-
-	// The levels must agree, and that is the point rather than a shortcoming: two
-	// agents that have observed nothing know nothing about their machines' state,
-	// whatever their calibration says about how the constructs relate.
-	if costK3s.ResourceCost != costK0s.ResourceCost {
-		t.Errorf("cold-start levels differ (%.6f vs %.6f); with no observations on either "+
-			"machine the observed level cannot be cluster-specific",
-			costK3s.ResourceCost, costK0s.ResourceCost)
-	}
 	if costK3s.Confidence != 0 || costK0s.Confidence != 0 {
-		t.Errorf("cold-start confidence should be zero; got %.4f and %.4f",
+		t.Errorf("cold-start confidence is non-zero (%.4f, %.4f); an agent that has "+
+			"observed nothing must report that it knows nothing",
 			costK3s.Confidence, costK0s.Confidence)
 	}
 
-	// A simulation applies the sensitivity to an assumed demand. It needs a non-zero
-	// level to act on: with every property unobserved the projection is negative for
-	// both agents and clamps to zero, so the difference in calibration is real but
-	// invisible in the reported cost. Feeding each agent a little telemetry first is
-	// what a simulation on a running system would have.
-	for _, pair := range []struct {
-		sm *semmap.SemanticMap
-		id string
-	}{{smK3s, "k3s"}, {smK0s, "k0s"}} {
-		for i := 0; i < 20; i++ {
-			for _, m := range costMetrics(t) {
-				if err := pair.sm.IngestSample(&types.MetricSample{
-					NodeID: "node_1", MetricType: types.MetricType(m), Value: 0.6,
-					TimestampUnix: int64(1700000000 + i), EventID: pair.id + m + itoaScenario(i),
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
+	// And the sensitivity is absent rather than zero-by-coincidence: no relationship
+	// carries a strength yet.
+	edges, err := smK0s.AllEdges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range edges {
+		if e.Effective != nil {
+			t.Errorf("%s has effective strength %.4f before any observation",
+				e.PropositionID, *e.Effective)
 		}
 	}
-
-	size := int64(16 * 1024 * 1024)
-	simK3s, err := smK3s.SimulateOutcome(&types.OffloadContext{
-		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	simK0s, err := smK0s.SimulateOutcome(&types.OffloadContext{
-		TaskType: "pod-scheduling", DataSizeBytes: size}, "node_1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("  simulated with a %d MiB task:", size/(1024*1024))
-	t.Logf("    k3s  →  expected_latency=%.4f expected_resource=%.4f",
-		simK3s.ExpectedLatency, simK3s.ExpectedResourceCost)
-	t.Logf("    k0s  →  expected_latency=%.4f expected_resource=%.4f",
-		simK0s.ExpectedLatency, simK0s.ExpectedResourceCost)
-	if simK3s.ExpectedLatency == simK0s.ExpectedLatency &&
-		simK3s.ExpectedResourceCost == simK0s.ExpectedResourceCost {
-		t.Error("per-cluster calibration did not reach the simulated outcome: with levels " +
-			"observed and sensitivities differing, the projection should differ too")
-	}
 }
-
-// ── Scenario 4: Deprecation shrinks the graph (but preserves the edge) ───────
 
 func TestScenario_DeprecationShrinksGraph(t *testing.T) {
 	a := newScenarioAgent(t)
@@ -400,7 +368,7 @@ func TestScenario_IdempotentReplay(t *testing.T) {
 	t.Log("Expected: state byte-identical after replay. Then re-stream with NEW eventIDs — state changes.")
 	t.Log("")
 
-	const target = "P10" // PS→RC
+	target := firstSpecProp()
 	startSnap := snapEdgeByPropID(t, a.state, target)
 
 	// First pass.
@@ -450,7 +418,7 @@ func TestScenario_AuditTrailRecordsEverything(t *testing.T) {
 	t.Log("History must record every one, against the single journal.")
 	t.Log("")
 
-	if err := a.sm.SetPropositionStrength("P3", 0.77); err != nil {
+	if err := a.sm.SetPropositionStrength(firstSpecProp(), 0.77); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.sm.AddConstruct(&types.Construct{
@@ -1103,3 +1071,12 @@ func costMetrics(t *testing.T) []string {
 }
 
 func itoaScenario(i int) string { return strconv.Itoa(i) }
+
+// establishedOf reports the long-run layer as a plain float for snapshot comparison,
+// zero when this machine has not established one yet.
+func establishedOf(r statemap.Relationship) float64 {
+	if r.Established == nil {
+		return 0
+	}
+	return *r.Established
+}

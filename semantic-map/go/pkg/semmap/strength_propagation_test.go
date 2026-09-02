@@ -36,9 +36,17 @@ func newSplitMap(t *testing.T, priors map[string]float64) (*semmap.SemanticMap, 
 	return m, state
 }
 
+// relPrior reads what the relationship currently stands at. The operator path writes
+// an assertion rather than a prior now, so this reads the effective value — which is
+// the assertion when one has been made, and is what every answer is computed from.
 func relPrior(t *testing.T, state *statemap.Map, propID string) float64 {
 	t.Helper()
-	return relationshipFor(t, state, propID).Prior
+	rel := relationshipFor(t, state, propID)
+	v, known := rel.Effective()
+	if !known {
+		t.Fatalf("relationship for %s has no strength", propID)
+	}
+	return v
 }
 
 func TestSetPropositionStrengthReachesTheModel(t *testing.T) {
@@ -99,8 +107,8 @@ func TestSetPropositionStrengthPreservesEvidence(t *testing.T) {
 	if after.NObservations != before.NObservations {
 		t.Errorf("observation count changed %d -> %d", before.NObservations, after.NObservations)
 	}
-	if math.Abs(after.Prior-0.55) > 1e-9 {
-		t.Errorf("prior = %v, want the asserted 0.55", after.Prior)
+	if after.Assertion == nil || math.Abs(*after.Assertion-0.55) > 1e-9 {
+		t.Errorf("assertion = %v, want the asserted 0.55", after.Assertion)
 	}
 }
 

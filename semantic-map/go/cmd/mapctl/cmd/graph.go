@@ -60,11 +60,12 @@ func renderGraphTables(w io.Writer, snap *client.GraphSnapshot) {
 	for _, e := range snap.Edges {
 		eRows = append(eRows, []string{
 			e.PropositionID, e.FromID, e.ToID, e.Direction,
-			fmt.Sprintf("%.3f", e.PriorWeight),
+			edgeBasis(e.Basis),
+			ptrToString(e.Effective, "%.3f"),
 			fmt.Sprintf("%.3f", e.EMAWeight),
 			fmt.Sprintf("%.2f", e.Confidence),
 			fmt.Sprintf("%d", e.NObservations),
 		})
 	}
-	render.Table(w, []string{"PropID", "From", "To", "Dir", "Prior", "EMA", "Conf", "N"}, eRows)
+	render.Table(w, []string{"PropID", "From", "To", "Dir", "Basis", "Effective", "Recent", "Conf", "N"}, eRows)
 }

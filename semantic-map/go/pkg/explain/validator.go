@@ -69,8 +69,21 @@ func Validate(reader SemanticMapReader, resp *ExplainResponse) ValidationResult 
 			if c.EMAWeight != 0 && !floatMatch(c.EMAWeight, edge.EMAWeight) {
 				issues = append(issues, fmt.Sprintf("%s: ema_weight %.4f ≠ live %.4f", prefix, c.EMAWeight, edge.EMAWeight))
 			}
-			if c.PriorWeight != 0 && !floatMatch(c.PriorWeight, edge.PriorWeight) {
-				issues = append(issues, fmt.Sprintf("%s: prior_weight %.4f ≠ live %.4f", prefix, c.PriorWeight, edge.PriorWeight))
+			if c.Established != nil {
+				if edge.Established == nil {
+					issues = append(issues, prefix+": cites an established strength the map does not have")
+				} else if !floatMatch(*c.Established, *edge.Established) {
+					issues = append(issues, fmt.Sprintf("%s: established %.4f ≠ live %.4f",
+						prefix, *c.Established, *edge.Established))
+				}
+			}
+			if c.Effective != nil {
+				if edge.Effective == nil {
+					issues = append(issues, prefix+": cites an effective strength for a relationship that has none yet")
+				} else if !floatMatch(*c.Effective, *edge.Effective) {
+					issues = append(issues, fmt.Sprintf("%s: effective %.4f ≠ live %.4f",
+						prefix, *c.Effective, *edge.Effective))
+				}
 			}
 			if c.Confidence != 0 && !floatMatch(c.Confidence, edge.Confidence) {
 				issues = append(issues, fmt.Sprintf("%s: confidence %.4f ≠ live %.4f", prefix, c.Confidence, edge.Confidence))
@@ -86,8 +99,11 @@ func Validate(reader SemanticMapReader, resp *ExplainResponse) ValidationResult 
 				issues = append(issues, prefix+": no proposition with this ID exists")
 				continue
 			}
-			if c.PriorWeight != 0 && !floatMatch(c.PriorWeight, p.PriorStrength) {
-				issues = append(issues, fmt.Sprintf("%s: prior_weight %.4f ≠ prior_strength %.4f", prefix, c.PriorWeight, p.PriorStrength))
+			// A proposition's reported strength is whatever the map currently stands at
+			// for it, so an effective citation is what there is to check against.
+			if c.Effective != nil && !floatMatch(*c.Effective, p.PriorStrength) {
+				issues = append(issues, fmt.Sprintf("%s: effective %.4f ≠ reported strength %.4f",
+					prefix, *c.Effective, p.PriorStrength))
 			}
 			citedProps[c.ID] = struct{}{}
 

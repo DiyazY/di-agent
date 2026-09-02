@@ -49,7 +49,7 @@ If both commands succeed you have a working checkout. Nothing else on this list 
 
 | You want to… | Also install |
 | ------------ | ------------ |
-| Regenerate `prior_weights.json` from the P1–P5 constants | Python 3.9+ and scipy (`semantic-map/requirements.txt`). Run `python3 -m prior_init.pipeline --root ../../ --out prior_weights.json` from `semantic-map/` — the root is the mega-research checkout, since the pipeline reads the analysis results in its sibling directories |
+| Regenerate `prior_weights.json` (the structural artefact) from the P1–P5 constants | Python 3.9+ and scipy (`semantic-map/requirements.txt`). Run `python3 -m prior_init.pipeline --root ../../ --out prior_weights.json` from `semantic-map/` — the root is the mega-research checkout, since the pipeline reads the analysis results in its sibling directories |
 | Replay the dissertation's Netdata parquets | The parquet dataset — see [§3](#3-running-for-real). Not in this repo (it is ~GB of private experimental data). |
 | Use `POST /explain` | A local OpenAI-compatible LLM. [Ollama](https://ollama.com) is smallest: `brew install ollama && ollama pull qwen2.5:7b-instruct` |
 | Run the 3-VM PoC | [Multipass](https://multipass.run) |
@@ -117,7 +117,7 @@ di-agent \
 
 The full flag table is in [README §3](semantic-map/README.md#3-running-the-edge-daemon). The four that matter most:
 
-- **`-kd`** selects per-distribution priors from `-priors`. Omit it and you get the global Di-Select strengths. This is the difference between "an agent that knows it is on k0s" and "an agent that knows it is on *some* Kubernetes".
+- **`-kd`** names this node's distribution and is validated against the artefact's `distributions` list. It selects no magnitude: two agents differing only in `-kd` answer identically until telemetry arrives, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts. What makes an agent "know it is on k0s" is what it has measured on k0s.
 - **`-regime`** (`stable`/`default`/`bursty`/`volatile`) sets `-alpha` and `-convergence` to a pre-characterised bundle. Calibrated against the k0s workload matrix; prefer it over tuning the two numbers by hand.
 - **`-collect-interval 0`** disables the autonomous collection loop. The manual `POST /ingest-sample` path still works — useful for replay and tests.
 - **`-proposer=false`** on low-CPU nodes. The MI proposer keeps ring buffers per construct pair.
@@ -330,7 +330,7 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 | Add or remove a `MetricType` | `ARCHITECTURE.md` §5 |
 | Add a collector implementation | `ARCHITECTURE.md` §5, `README.md` §1 |
 | Change the Agent API (endpoints, fields, flags) | `README.md` §2 and §3 |
-| Change the prior initialization pipeline | `README.md` §5; regenerate `prior_weights.json` if constants changed |
+| Change the structural initialization pipeline | `semantic-map/README.md` §5; regenerate `prior_weights.json` and re-run `pkg/profiles` tests |
 
 **README is the quick-start** (structure, API, commands). **ARCHITECTURE is the design record** (why, how, what is stable). Keep them separate — no rationale in README, no commands in ARCHITECTURE.
 
@@ -360,7 +360,7 @@ Never commit absolute local paths (`/Users/…`).
 
 **Confidence plateaus below 1.0 and never rises.** Expected. Only 9 of 15 edges touch constructs observable from CPU/RAM/network metrics, so mean confidence ceilings around 0.60. It is a property of the metric-coverage boundary, not a bug — see `convergence/NOTES.md` in the private repo.
 
-**`ResourceCost` is 0 under heavy synthetic load.** Also expected, and counter-intuitive. The cost formula is deviation-from-prior: `(effective − prior) × sign(direction)`. Driving CPU far *above* the Di-Select priors makes the negative-direction contributions (P8, P10) cancel the positive ones. `stress-ng` is the wrong tool for demoing cost differentiation; idle-to-light load shows it correctly.
+**`ResourceCost` is 0 under heavy synthetic load.** This was a real effect of the old cost function, which accumulated `(effective − prior) × sign(direction)` and let negative-direction contributions cancel positive ones once CPU ran above the calibrated priors. **It no longer applies:** the estimate leads with the observed level, so `ResourceCost` rises with utilization. `stress-ng` is now the *right* tool for a different reason — it makes both endpoints vary, which is what a pair needs, and an idle demo can run indefinitely and teach the map nothing. Note the relation sum, reported separately as a sensitivity, can still be zero or negative; that is a slope, not a cost. Correctly.
 
 **`go test` green but you changed nothing that should pass.** Check the test count (see [§5](#5-testing)). A deleted or renamed test file does not fail.
 

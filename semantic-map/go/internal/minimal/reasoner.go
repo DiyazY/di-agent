@@ -371,9 +371,11 @@ func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressur
 	// by each one's direction. It deliberately does NOT multiply by the source's
 	// current value — that would make it a contribution to the current level, which
 	// the level already reports, and it would collapse the whole term to zero before
-	// any telemetry has arrived. Keeping it per-unit is what makes the calibrated
-	// priors informative at cold start, which is the one moment they are all the agent
-	// has.
+	// any telemetry has arrived. Keeping it per-unit is what lets it answer a
+	// counterfactual — what the target would do if the source changed — which is the
+	// question the observed level cannot answer, and the one offload simulation asks.
+	// It used to be justified by making seeded priors informative at cold start; those
+	// are gone, and at cold start the sum is now empty rather than approximate.
 	//
 	// The source properties are still read, because the decision record should show
 	// which properties the sensitivity was assembled from even when their values do
@@ -384,7 +386,13 @@ func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressur
 			if _, ok := b.Property(rel.From); !ok {
 				continue
 			}
-			sum += rel.Effective() * float64(rel.Sign)
+			// A relationship with no measurement behind it contributes nothing. It is
+			// not a term of zero because it is worth zero; it is absent from the sum.
+			eff, known := rel.Effective()
+			if !known {
+				continue
+			}
+			sum += eff * float64(rel.Sign)
 		}
 		return sum
 	}

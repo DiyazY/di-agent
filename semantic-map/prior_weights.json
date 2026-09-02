@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "generated_at": "2026-07-31",
+  "generated_at": "2026-08-19",
   "evidence_papers": [
     "P1",
     "P2",
@@ -15,24 +15,29 @@
     "openYurt"
   ],
   "warnings": [
-    "P2 (domain_override): \u03c1=0.000",
     "P3 (proxy reversal \u2014 investigate): \u03c1=0.000",
     "P10 (proxy reversal \u2014 investigate): \u03c1=0.000"
   ],
   "scope": {
     "telemetry_constructs": [
       "RC",
-      "CO",
       "PS"
     ],
     "diselect_propositions": 15,
     "agent_propositions": [
-      "P2",
       "P3",
-      "P10",
-      "P13"
+      "P10"
     ],
-    "rationale": "The agent's graph carries only propositions whose both endpoints are observable at runtime. An edge with no observable endpoint is inert in the Reasoner: cost accumulates (effective - prior), and an unobserved edge has effective == prior, so it contributes exactly zero regardless of its prior or of operator action. Di-Select remains the origin of the causal claims; the agent instantiates the subset it can observe."
+    "excluded_propositions": {
+      "P2": "duplicates P3 on the signals this setup measures. P2 states RC\u2192PS against scheduling *throughput* and P3 against startup *latency*; every metric routed to PS is a latency or pressure quantity, so on one PS axis the two are contrapositives of a single claim and carrying both double-counts it. P2's prior was also the one domain_override in the calibration rather than a measured quantity."
+    },
+    "sign_overrides": {
+      "P10": {
+        "direction": "positive",
+        "reason": "Di-Select states PS\u2192RC against an efficiency measure, where better efficiency lowers cost. PS here is stall pressure, so the same mechanism appears as a positive association: a machine under pressure is consuming more. Observed conflict share against the declared negative sign was 0.45\u20131.00 across five clusters."
+      }
+    },
+    "rationale": "The agent's graph carries only propositions whose both endpoints this deployment measures, less those listed in excluded_propositions, and only where the telemetry does not contradict the declared direction. A relationship with no observable endpoint is inert in the Reasoner: it reports 'unknown', has no effective value, and is absent from the sensitivity sum rather than contributing a term of zero. This artefact supplies STRUCTURE ONLY -- no strength for any relationship -- because which constructs relate and in which direction is knowledge one machine's telemetry cannot produce, while what a relation is worth is a measurement that only this machine is entitled to make. Di-Select remains the origin of the causal claims; sign_overrides records where Di-Select states a direction against a quantity this deployment does not measure."
   },
   "constructs": [
     {
@@ -41,32 +46,14 @@
       "description": "CPU, memory and energy cost of running the workload"
     },
     {
-      "construct_id": "CO",
-      "name": "Connectivity & Offline Resilience",
-      "description": "network throughput, loss and latency to peers"
-    },
-    {
       "construct_id": "PS",
       "name": "Performance & Scalability",
       "description": "scheduling and startup latency; resource pressure experienced"
     }
   ],
   "propositions": {
-    "P2": {
-      "prior_strength": 0.55,
-      "direction": "negative",
-      "from_construct": "RC",
-      "to_construct": "PS",
-      "spearman_rho": 0.0,
-      "p_value": 1.0,
-      "sign_consistent": 0,
-      "n_distributions": 5,
-      "method": "domain_override",
-      "calibration_note": "P2/P3 conflict: RC\u2192PS has opposing mechanisms (overhead vs efficiency). \u03c1=+0.70 confirms P3 direction. P2 assigned conservative \u03bb=0.55 via domain knowledge; kubeEdge throughput penalty (75% lower than k8s) provides direct empirical support.",
-      "prior_weight": 0.55
-    },
     "P3": {
-      "prior_strength": 0.3,
+      "would_have_been": 0.3,
       "direction": "positive",
       "from_construct": "RC",
       "to_construct": "PS",
@@ -75,12 +62,11 @@
       "sign_consistent": 0,
       "n_distributions": 5,
       "method": "spearman",
-      "calibration_note": "|\u03c1|=0.300 (p=1.000); direction reversed \u2014 proxy limitation",
-      "prior_weight": 0.3
+      "calibration_note": "|\u03c1|=0.300 (p=1.000); direction reversed \u2014 proxy limitation"
     },
     "P10": {
-      "prior_strength": 0.3,
-      "direction": "negative",
+      "would_have_been": 0.3,
+      "direction": "positive",
       "from_construct": "PS",
       "to_construct": "RC",
       "spearman_rho": 0.0,
@@ -88,260 +74,43 @@
       "sign_consistent": 0,
       "n_distributions": 5,
       "method": "spearman",
-      "calibration_note": "|\u03c1|=0.300 (p=1.000); direction reversed \u2014 proxy limitation",
-      "prior_weight": 0.3
-    },
-    "P13": {
-      "prior_strength": 0.6,
-      "direction": "negative",
-      "from_construct": "CO",
-      "to_construct": "PS",
-      "spearman_rho": -0.6,
-      "p_value": 0.2848,
-      "sign_consistent": 1,
-      "n_distributions": 5,
-      "method": "spearman",
-      "calibration_note": "|\u03c1|=0.600 (p=0.285); direction confirmed",
-      "prior_weight": 0.6
+      "calibration_note": "|\u03c1|=0.300 (p=1.000); direction reversed \u2014 proxy limitation"
     }
   },
   "distribution_construct_scores": {
     "k3s": {
       "PS": 0.9123,
-      "SC": 0.0,
-      "RR": 0.6,
-      "MU": 1.0,
-      "RC": 0.4265,
-      "CO": 0.1158,
-      "CE": 0.2514
+      "RC": 0.4265
     },
     "k0s": {
       "PS": 0.9214,
-      "SC": 0.3448,
-      "RR": 0.54,
-      "MU": 1.0,
-      "RC": 0.0,
-      "CO": 0.3,
-      "CE": 0.0185
+      "RC": 0.0
     },
     "k8s": {
       "PS": 0.9852,
-      "SC": 1.0,
-      "RR": 0.36,
-      "MU": 0.6957,
-      "RC": 1.0,
-      "CO": 0.2938,
-      "CE": 1.0
+      "RC": 1.0
     },
     "kubeEdge": {
       "PS": 0.0,
-      "SC": 1.0,
-      "RR": 0.46,
-      "MU": 0.0,
-      "RC": 0.8302,
-      "CO": 0.7,
-      "CE": 0.0712
+      "RC": 0.8302
     },
     "openYurt": {
       "PS": 0.7936,
-      "SC": 1.0,
-      "RR": 0.4,
-      "MU": 0.0,
-      "RC": 0.4562,
-      "CO": 0.9569,
-      "CE": 0.0
+      "RC": 0.4562
     }
   },
-  "distribution_edge_weights": {
-    "k3s": {
-      "RC\u2192PS:P2": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P2",
-        "direction": "negative",
-        "prior_weight": 0.2346,
-        "ema_weight": 0.2346,
-        "calibrated": true
-      },
-      "RC\u2192PS:P3": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P3",
-        "direction": "positive",
-        "prior_weight": 0.1279,
-        "ema_weight": 0.1279,
-        "calibrated": true
-      },
-      "PS\u2192RC:P10": {
-        "from_id": "PS",
-        "to_id": "RC",
-        "proposition_id": "P10",
-        "direction": "negative",
-        "prior_weight": 0.2737,
-        "ema_weight": 0.2737,
-        "calibrated": true
-      },
-      "CO\u2192PS:P13": {
-        "from_id": "CO",
-        "to_id": "PS",
-        "proposition_id": "P13",
-        "direction": "negative",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      }
+  "agent_edges": [
+    {
+      "from_id": "RC",
+      "to_id": "PS",
+      "proposition_id": "P3",
+      "direction": "positive"
     },
-    "k0s": {
-      "RC\u2192PS:P2": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P2",
-        "direction": "negative",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      },
-      "RC\u2192PS:P3": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P3",
-        "direction": "positive",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      },
-      "PS\u2192RC:P10": {
-        "from_id": "PS",
-        "to_id": "RC",
-        "proposition_id": "P10",
-        "direction": "negative",
-        "prior_weight": 0.2764,
-        "ema_weight": 0.2764,
-        "calibrated": true
-      },
-      "CO\u2192PS:P13": {
-        "from_id": "CO",
-        "to_id": "PS",
-        "proposition_id": "P13",
-        "direction": "negative",
-        "prior_weight": 0.18,
-        "ema_weight": 0.18,
-        "calibrated": true
-      }
-    },
-    "k8s": {
-      "RC\u2192PS:P2": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P2",
-        "direction": "negative",
-        "prior_weight": 0.55,
-        "ema_weight": 0.55,
-        "calibrated": true
-      },
-      "RC\u2192PS:P3": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P3",
-        "direction": "positive",
-        "prior_weight": 0.3,
-        "ema_weight": 0.3,
-        "calibrated": true
-      },
-      "PS\u2192RC:P10": {
-        "from_id": "PS",
-        "to_id": "RC",
-        "proposition_id": "P10",
-        "direction": "negative",
-        "prior_weight": 0.2956,
-        "ema_weight": 0.2956,
-        "calibrated": true
-      },
-      "CO\u2192PS:P13": {
-        "from_id": "CO",
-        "to_id": "PS",
-        "proposition_id": "P13",
-        "direction": "negative",
-        "prior_weight": 0.1763,
-        "ema_weight": 0.1763,
-        "calibrated": true
-      }
-    },
-    "kubeEdge": {
-      "RC\u2192PS:P2": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P2",
-        "direction": "negative",
-        "prior_weight": 0.4566,
-        "ema_weight": 0.4566,
-        "calibrated": true
-      },
-      "RC\u2192PS:P3": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P3",
-        "direction": "positive",
-        "prior_weight": 0.2491,
-        "ema_weight": 0.2491,
-        "calibrated": true
-      },
-      "PS\u2192RC:P10": {
-        "from_id": "PS",
-        "to_id": "RC",
-        "proposition_id": "P10",
-        "direction": "negative",
-        "prior_weight": 0.1,
-        "ema_weight": 0.1,
-        "calibrated": true
-      },
-      "CO\u2192PS:P13": {
-        "from_id": "CO",
-        "to_id": "PS",
-        "proposition_id": "P13",
-        "direction": "negative",
-        "prior_weight": 0.42,
-        "ema_weight": 0.42,
-        "calibrated": true
-      }
-    },
-    "openYurt": {
-      "RC\u2192PS:P2": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P2",
-        "direction": "negative",
-        "prior_weight": 0.2509,
-        "ema_weight": 0.2509,
-        "calibrated": true
-      },
-      "RC\u2192PS:P3": {
-        "from_id": "RC",
-        "to_id": "PS",
-        "proposition_id": "P3",
-        "direction": "positive",
-        "prior_weight": 0.1369,
-        "ema_weight": 0.1369,
-        "calibrated": true
-      },
-      "PS\u2192RC:P10": {
-        "from_id": "PS",
-        "to_id": "RC",
-        "proposition_id": "P10",
-        "direction": "negative",
-        "prior_weight": 0.2381,
-        "ema_weight": 0.2381,
-        "calibrated": true
-      },
-      "CO\u2192PS:P13": {
-        "from_id": "CO",
-        "to_id": "PS",
-        "proposition_id": "P13",
-        "direction": "negative",
-        "prior_weight": 0.5741,
-        "ema_weight": 0.5741,
-        "calibrated": true
-      }
+    {
+      "from_id": "PS",
+      "to_id": "RC",
+      "proposition_id": "P10",
+      "direction": "positive"
     }
-  }
+  ]
 }

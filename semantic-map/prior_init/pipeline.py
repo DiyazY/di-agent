@@ -24,7 +24,8 @@ from pathlib import Path
 
 from .calibration import (compute_construct_scores, compute_proposition_strengths,
                           PROPOSITIONS, KDS, TELEMETRY_CONSTRUCTS, CONSTRUCT_META,
-                          DISELECT_PROPOSITIONS)
+                          DISELECT_PROPOSITIONS, EXCLUDED_PROPOSITIONS,
+                          SIGN_OVERRIDES)
 
 
 # TELEMETRY_CONSTRUCTS is imported from calibration, which is the single source
@@ -41,81 +42,49 @@ EDGE_PRIOR_FLOOR = 0.10
 EDGE_PRIOR_CEIL = 0.95
 
 
-def build_edge_weights(
-    construct_scores: dict[str, dict[str, float]],
-    proposition_strengths: dict[str, dict],
-) -> dict[str, dict[str, dict]]:
+def build_agent_edges() -> list[dict]:
     """
-    Build per-distribution edge descriptors for storage seeding.
+    Emit the STRUCTURE of each relationship the agent instantiates, and no magnitude.
 
-    For each (distribution, proposition) pair, produce an edge descriptor:
+    For each proposition in scope, one descriptor:
       from_id        – source construct ID
       to_id          – target construct ID
-      proposition_id – P1..P15
+      proposition_id – the label, which is what lets two mechanisms relate one pair
       direction      – positive | negative
-      prior_weight   – see below
-      ema_weight     – same as prior_weight at T=0 (no observations yet)
 
-    Per-distribution calibration is restricted to edges whose SOURCE construct
-    has an instrumented runtime-telemetry proxy (PS, RC, CO). For those, the
-    prior is the distribution's construct score modulated by the proposition
-    strength, as before.
+    This replaced a per-distribution `distribution_edge_weights` block that carried a
+    `prior_weight` and an `ema_weight` for every (distribution, proposition) pair. Three
+    reasons it went, and the third is the one that makes this a correctness fix rather
+    than a simplification:
 
-    Edges sourced from SC, MU or CE fall back to the global proposition strength
-    with no per-distribution modulation. Their proxies do not survive scrutiny as
-    empirical calibration inputs: SC is a CIS score produced by a third-party
-    scanner, CE is a GitHub star count, and MU is setup time measured in human
-    hours. None is a system measurement, and min-max normalising three such
-    proxies across five distributions produced magnitudes that read as empirical
-    but encoded only a rank within the sample. Falling back to the global lambda
-    states the honest position: those constructs carry Di-Select's structural
-    prior and nothing distribution-specific.
+      1. The magnitudes were rank-derived, not measured — see
+         `calibration.compute_proposition_strengths` for the full account.
+      2. The daemon stopped reading them. `profiles.seedStateMap` declares structure and
+         leaves every relationship reporting `unknown` until this machine measures it.
+      3. So the block was generated, committed, parsed into a Go struct, and never read
+         by anything — which is precisely the failure mode this project treats as worse
+         than a missing number, because nothing about a number on a page looks wrong.
 
-    This also makes the treatment consistent end to end. SC, MU, CE and RR have
-    no runtime telemetry analog, so they never accumulate evidence (paper §5.2);
-    they are now equally uncalibrated per-distribution at initialization. They
-    are structural priors at every stage, revisable only by explicit operator
-    action.
-
-    Every emitted prior is finally clamped to [EDGE_PRIOR_FLOOR,
-    EDGE_PRIOR_CEIL]. The clamp is applied to the product, not to the construct
-    score, because multiplying a floored score by a strength below 1.0 drags it
-    back under the floor.
+    The structure is the same for every distribution, because which constructs relate and
+    in which direction is a property of the domain rather than of a cluster. Emitting it
+    once instead of five times says that, where the per-KD table implied the opposite.
     """
-    edges: dict[str, dict[str, dict]] = {}
-
-    for kd in KDS:
-        edges[kd] = {}
-        for prop_id, from_c, to_c, direction in PROPOSITIONS:
-            strength = proposition_strengths[prop_id]["prior_weight"] = \
-                       proposition_strengths[prop_id]["prior_strength"]
-
-            if from_c in TELEMETRY_CONSTRUCTS:
-                raw = construct_scores[kd][from_c] * strength
-            else:
-                raw = strength
-
-            prior = round(min(EDGE_PRIOR_CEIL, max(EDGE_PRIOR_FLOOR, raw)), 4)
-
-            edge_key = f"{from_c}→{to_c}:{prop_id}"
-            edges[kd][edge_key] = {
-                "from_id":        from_c,
-                "to_id":          to_c,
-                "proposition_id": prop_id,
-                "direction":      direction,
-                "prior_weight":   prior,
-                "ema_weight":     prior,   # identical at cold-start
-                "calibrated":     from_c in TELEMETRY_CONSTRUCTS,
-            }
-
-    return edges
+    return [
+        {
+            "from_id":        from_c,
+            "to_id":          to_c,
+            "proposition_id": prop_id,
+            "direction":      direction,
+        }
+        for prop_id, from_c, to_c, direction in PROPOSITIONS
+    ]
 
 
 def run(root_dir: str | None = None, out_path: str | None = None) -> dict:
     """Execute the pipeline and return the output document."""
     construct_scores  = compute_construct_scores(root_dir)
     prop_strengths    = compute_proposition_strengths(construct_scores)
-    edge_weights      = build_edge_weights(construct_scores, prop_strengths)
+    agent_edges       = build_agent_edges()
 
     # Summarise reversed propositions.  Overridden ones are noted separately.
     warnings = []
@@ -146,20 +115,46 @@ def run(root_dir: str | None = None, out_path: str | None = None) -> dict:
             "telemetry_constructs": TELEMETRY_CONSTRUCTS,
             "diselect_propositions": len(DISELECT_PROPOSITIONS),
             "agent_propositions":   [p[0] for p in PROPOSITIONS],
+            "excluded_propositions": {
+                pid: reason for pid, reason in EXCLUDED_PROPOSITIONS.items()
+            },
+            "sign_overrides": {
+                pid: {"direction": d, "reason": why}
+                for pid, (d, why) in SIGN_OVERRIDES.items()
+            },
             "rationale": (
-                "The agent's graph carries only propositions whose both endpoints "
-                "are observable at runtime. An edge with no observable endpoint is "
-                "inert in the Reasoner: cost accumulates (effective - prior), and "
-                "an unobserved edge has effective == prior, so it contributes "
-                "exactly zero regardless of its prior or of operator action. "
-                "Di-Select remains the origin of the causal claims; the agent "
-                "instantiates the subset it can observe."
+                "The agent's graph carries only propositions whose both endpoints this "
+                "deployment measures, less those listed in excluded_propositions, and "
+                "only where the telemetry does not contradict the declared direction. "
+                "A relationship with no observable endpoint is inert in the Reasoner: "
+                "it reports 'unknown', has no effective value, and is absent from the "
+                "sensitivity sum rather than contributing a term of zero. This artefact "
+                "supplies STRUCTURE ONLY -- no strength for any relationship -- because "
+                "which constructs relate and in which direction is knowledge one "
+                "machine's telemetry cannot produce, while what a relation is worth is "
+                "a measurement that only this machine is entitled to make. Di-Select "
+                "remains the origin of the causal claims; sign_overrides records where "
+                "Di-Select states a direction against a quantity this deployment does "
+                "not measure."
             ),
         },
         "constructs":     constructs,
+        # Diagnostics per proposition, with no strength among them. `would_have_been`
+        # records what the retired calibration would have emitted, so its exclusion is
+        # checkable from the artefact rather than only asserted in prose.
         "propositions":   prop_strengths,
-        "distribution_construct_scores":  construct_scores,
-        "distribution_edge_weights":      edge_weights,
+        # Restricted to the constructs in scope. Emitting scores for the other four
+        # published a number per construct the agent does not carry, several of them
+        # min-max proxies over five distributions, which read as measurements of this
+        # cluster and were not.
+        "distribution_construct_scores": {
+            kd: {cid: score for cid, score in scores.items()
+                 if cid in TELEMETRY_CONSTRUCTS}
+            for kd, scores in construct_scores.items()
+        },
+        # Structure only. The per-distribution edge-weight table this replaced carried
+        # magnitudes that nothing read; see build_agent_edges.
+        "agent_edges":    agent_edges,
     }
 
     # Write output

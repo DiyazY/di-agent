@@ -63,7 +63,18 @@ var BuildCommit = ""
 func main() {
 	profileName := flag.String("profile", "edge-minimal", "deployment profile")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
-	alpha := flag.Float64("alpha", 0.2, "EMA decay factor (0 < alpha < 1)")
+	alpha := flag.Float64("alpha", 0.2, "EMA decay factor for the RECENT layer (0 < alpha < 1)")
+	alphaSlow := flag.Float64("alpha-slow", 0.001,
+		"EMA decay factor for the ESTABLISHED layer: the same paired observations read on a "+
+			"slower clock, answering what is normal for this machine rather than what is "+
+			"happening now. The default is a design choice on a measured trade-off, not a "+
+			"derived optimum: order-invariance and responsiveness trade off monotonically, "+
+			"so the measurement supports a band (roughly 0.004 to 0.0005) and 0.001 sits "+
+			"mid-band with ~10x the recent layer's order-invariance and about a third of "+
+			"its responsiveness. Pinning one value needs a stated requirement about how "+
+			"fast a baseline should follow a persistent change. An offline fit reported an "+
+			"interior maximum; a 135-stream sweep against this daemon refuted it as an "+
+			"artefact of the offline streams being ~6x shorter than a deployment's.")
 	convergence := flag.Float64("convergence", 500, "observations for confidence=1.0")
 	minTrust := flag.Float64("min-trust", 0.5, "minimum peer trust score")
 	priorsPath := flag.String("priors", "", "path to prior_weights.json from initialization pipeline")
@@ -231,6 +242,7 @@ func main() {
 
 	cfg := profiles.Config{
 		EMAAlpha:             *alpha,
+		EMAAlphaSlow:         *alphaSlow,
 		ConvergenceThreshold: *convergence,
 		MinTrustScore:        *minTrust,
 		PriorWeightsPath:     *priorsPath,
@@ -269,6 +281,7 @@ func main() {
 		RetireAfter:             *retireAfter,
 		ConvergenceObservations: int(*convergence),
 		Alpha:                   *alpha,
+		AlphaSlow:               *alphaSlow,
 		AdmitUnknown:            !*noAdmit,
 		Learn:                   !*noLearn,
 		LearnConfig: statemap.LearnConfig{

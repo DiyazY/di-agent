@@ -2,7 +2,7 @@
 
 An adaptive behavioral data structure for autonomous edge orchestration agents.
 
-The Semantic Map is the "brain" of an edge agent: it starts with scientifically grounded priors derived from the [Di-Select framework](../di-select/) and five empirical publications, then continuously refines those priors with real deployment telemetry. As observations accumulate, the agent's decisions shift from generic literature knowledge toward deployment-specific behavioral patterns — without any labeling or manual tuning.
+The Semantic Map is the "brain" of an edge agent: a live model of one machine's state — the properties it exhibits, and how they relate. Its *structure* comes from the [Di-Select framework](../di-select/) and five empirical publications: which properties relate, and in which direction, is knowledge one machine's telemetry cannot produce. Every *number* comes from the machine itself. A freshly started agent reports that it does not know what any relationship is worth, and learns on two timescales — what is happening now, and what is normal here — without any labeling or manual tuning.
 
 For design rationale, contract decisions, language strategy, and research connection see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
@@ -21,7 +21,7 @@ For design rationale, contract decisions, language strategy, and research connec
 - [2. The Agent API](#2-the-agent-api)
 - [3. Running the Edge Daemon](#3-running-the-edge-daemon)
 - [4. Compliance Tests](#4-compliance-tests)
-- [5. Prior Initialization](#5-prior-initialization)
+- [5. Structural Initialization](#5-structural-initialization)
 - [6. Coordination](#6-coordination)
 - [7. PoC — Live Multi-VM Demo](#7-poc--live-multi-vm-demo)
 - [8. Natural-Language Explain (`/explain`)](#8-natural-language-explain-explain)
@@ -44,10 +44,10 @@ go run ./cmd/agent -profile edge-minimal -addr :8080 -domain ../domain_spec.json
 curl -s localhost:8080/graph | jq '{constructs:(.constructs|length),
                                     propositions:(.propositions|length),
                                     edges:(.edges|length)}'
-# → {"constructs":3,"propositions":4,"edges":4}   with the committed domain_spec.json
+# → {"constructs":2,"propositions":2,"edges":2}   with the committed domain_spec.json
 
-curl -s 'localhost:8080/edges?from=RC&to=PS' | jq 'length'
-# → 2  (P2 and P3 — the multigraph conflict pair)
+curl -s 'localhost:8080/edges?from=RC&to=PS' | jq '.[] | {proposition_id, basis, effective}'
+# → one edge, basis "unknown" and no effective value until telemetry arrives
 ```
 
 ```bash
@@ -56,8 +56,8 @@ go run ./cmd/mapctl graph                 # table view of the snapshot
 go run ./cmd/mapctl edges --from RC --to PS
 go run ./cmd/mapctl deprecate P1 "smoke test"   # soft-delete a proposition
 go run ./cmd/mapctl history --since 1h    # audit log entries
-go run ./cmd/mapctl reset RC PS           # EMA → prior
-go run ./cmd/mapctl tune "prioritize security"   # natural-language weight adjustment
+go run ./cmd/mapctl reset RC PS           # discard evidence → back to unknown
+go run ./cmd/mapctl tune "prioritize performance" # natural-language strength assertion
 ```
 
 ```bash
@@ -87,12 +87,13 @@ semantic-map/
 │
 │  ── Python layer (the calibration pipeline — a build-time step) ──
 │
-├── prior_weights.json          Calibrated prior strengths output by the init pipeline
+├── prior_weights.json          Init-pipeline output: which propositions the agent carries, which
+│                               it declines, and where it overrides a declared direction. No strengths.
 ├── requirements.txt            scipy (spearmanr); the pipeline's only outside dependency
 │
-├── prior_init/                 Prior initialization pipeline (Step 4)
+├── prior_init/                 Structural initialization pipeline (Step 4)
 │   ├── pipeline.py             Entry point — reads P1–P5 constants, writes prior_weights.json
-│   ├── calibration.py          Construct scoring + proposition strength computation
+│   ├── calibration.py          Construct scoring + per-proposition diagnostics (no strengths)
 │   ├── constants.py            Publication constants (J/pod, mJ/op, CIS scores, …)
 │   └── loaders.py              CSV / result file loaders
 │
@@ -133,7 +134,7 @@ semantic-map/
     │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
     │       ├── profiles.go     Build("edge-minimal", cfg) + ontology seeding + peer wire-up
-    │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties, calibrated priors
+    │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties; structure only
     │
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
@@ -165,7 +166,7 @@ semantic-map/
     │   └── tuner.go            RunTunerCompliance(t, factory)
     │
     ├── pkg/profiles/
-    │   ├── build_priors_test.go  Numerical verification: per-KD prior seeding, through Build
+    │   ├── build_priors_test.go  Asserts structure arrives and no magnitude does, through Build
     │   └── profiles_test.go      KD validation + prior_weights.json discovery
     │
     ├── cmd/agent/              Daemon binary
@@ -216,8 +217,9 @@ semantic-map/
         │   ├── runner.go       Build a SemanticMap per KD, stream parquet rows,
         │   │                   snapshot edges. Skips HTTP — driven on pkg/semmap
         │   │                   directly. See top-of-file comment for rationale.
-        │   ├── divergence.go   Effective=(1-c)·prior+c·ema; Range, sample StdDev,
-        │   │                   sorted by Range desc (most discriminative first)
+        │   ├── divergence.go   effective (assertion|established|recent); Range,
+        │   │                   sample StdDev, sorted by Range desc (most
+        │   │                   discriminative first)
         │   ├── output.go       Table / JSON / CSV formatters
         │   ├── runner_test.go  Two synthesized "KDs" diverge as expected; 5-run
         │   │                   averaging differs from single-run snapshot
@@ -345,7 +347,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/ontology/strength`                | `{proposition_id, strength}`                             | Phase 1  | `404` when the proposition is declared but not modelled here |
 | POST | `/ontology/deprecate`               | `{proposition_id, reason}`                               | Phase 1  | `404` likewise |
 | POST | `/ontology/construct`               | `{construct_id, name, description}`                      | Phase 1  |
-| POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-", prior_strength}` | Phase 1 |
+| POST | `/ontology/proposition`             | `{proposition_id, from, to, direction:"+"|"-"}` | Phase 1 |
 | POST | `/agent/reset`                      | `{from, to}`                                             | Phase 1  |
 | POST | `/agent/tune`                       | `TuneRequest{intent, operator?}`                         | Step 7   | Map natural-language intent to proposition strength adjustments |
 | POST | `/candidates/{id}/confirm`          | path only                                                | Phase 1  |
@@ -434,7 +436,47 @@ curl -s 'localhost:8080/state/estimate?target=PS&id=why-slow' | jq '.answer, .in
 curl -s -X DELETE 'localhost:8080/state/properties/gpu_util?reason=device+removed&actor=me'
 curl -s -X POST localhost:8080/state/sweep | jq
 curl -s 'localhost:8080/state/journal?limit=10' | jq '.held, .dropped'
+
+# does the graph assert a direction this machine keeps contradicting?
+curl -s localhost:8080/state | jq '.counts.relationships_sign_suspect'
+curl -s localhost:8080/state \
+  | jq '.relationships[] | select(.sign_suspect) | {label, from, to, sign, strength, sign_conflicts, sign_agreements}'
 ```
+
+**The three strength layers.** A relationship reports `recent` (the fast EMA, as
+`ema_weight`), `established` (the long-run learned baseline), `assertion` (an operator's
+override), the `effective` value the agent reasons with, and `basis` naming which of the
+three that came from. `effective` and the two pointer layers are **absent rather than
+zero** when they do not exist, because zero is the claim that a relationship is worth
+nothing and absence is not that claim.
+
+```bash
+# what each relationship is worth, and on what basis
+curl -s localhost:8080/edges \
+  | jq '.[] | {proposition_id, basis, effective, established, assertion, ema_weight, n_observations}'
+
+# relationships the agent has no measurement for yet
+curl -s localhost:8080/edges | jq '[.[] | select(.basis == "unknown") | .proposition_id]'
+```
+
+Nothing seeds a magnitude. A freshly started agent reports `basis: "unknown"` for every
+relationship and no `effective` value at all; strengths appear as pairs accumulate.
+`established` needs roughly 1000 pairs — about two workloads, or half an hour at 1 Hz —
+so it survives restarts by design rather than by accident.
+
+**Sign-suspect relationships.** A relationship whose declared sign the machine
+contradicts holds zero strength — the estimator's gate treats a correlation of the
+opposite sign as evidence *against* that relationship, which is what lets two opposed
+claims over one pair separate. The cost of that design is a reporting ambiguity: zero
+strength also describes a relationship on a quiet system, and only one of the two is a
+bug. `sign_conflicts`, `sign_agreements` and `sign_suspect` on each relationship, and
+`counts.relationships_sign_suspect` in the census, are what tell them apart. A
+relationship is flagged when at least 30 pairs have been folded in and 60% or more of
+them contradicted its sign; a sign that is merely regime-dependent lands near 50% and
+is not flagged, because that is a fact about the system rather than a wrong
+declaration. Investigate a flagged relationship as a defect in the specification —
+usually a direction inherited from a framework that phrased its outcome in the opposite
+polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarity).
 
 A metric the specification never declared still becomes a property: `/ingest-sample`
 answers 202 with `routed:false` rather than rejecting it, because a reading the system
@@ -502,9 +544,12 @@ rather than withheld.
 
 A relationship advances on a *pair*: both endpoints observed within
 `-pair-window-seconds` (default 15s). What it learns is `|r|`, the correlation
-magnitude over the last `-pair-history` pairs, which is the same quantity the priors
-were calibrated as — so prior and evidence are on one scale and the confidence blend
-interpolates between comparable numbers.
+magnitude over the last `-pair-history` pairs, on `[0, 1]`. It is folded twice from the
+same pairs: a **recent** estimate at `-alpha` (default 0.20, memory ≈ 5 pairs) and an
+**established** baseline at `-alpha-slow` (default 0.001, memory ≈ 1000 pairs,
+bias-corrected). `Effective()` picks between them by authority rather than by arithmetic
+— an operator assertion first, else the established baseline, else the recent estimate,
+else `unknown` — and `basis` on every edge names which one answered.
 
 ```bash
 agent -profile edge-minimal -domain ../domain_spec.json \
@@ -515,13 +560,28 @@ agent -profile edge-minimal -domain ../domain_spec.json \
 Two consequences worth knowing before reading a number off `/edges`:
 
 - **One endpoint moving proves nothing.** A stream that drives `cpu_utilization` and
-  nothing else leaves every relationship at its prior with confidence 0, however long
-  it runs. That is the honest report: the magnitude of a construct is not a measurement
-  of how strongly it influences another.
-- **Conflict pairs separate.** Two claims over the same pair with opposite signs are
-  two relationships, and evidence matching one sibling's declared direction drives the
-  other to zero. Live, 20 correlated pairs leave the positive sibling at 0.995 and the
-  negative one at 0.000.
+  nothing else leaves every relationship at `basis: unknown` with confidence 0, however
+  long it runs. That is the honest report: the magnitude of a construct is not a
+  measurement of how strongly it influences another. The same holds for a *constant*
+  endpoint — a correlation over a flat series is undefined, and the estimator declines to
+  move rather than reporting a coefficient it did not measure. On this testbed the NUC
+  control plane exhibits exactly that: its cpu stall-pressure reads identically zero, so
+  nine full workloads leave it with no baseline at all.
+- **A contradicted sign is distinguishable from silence, and only because it is
+  counted.** A relationship whose declared sign the machine refutes collects pairs, has
+  each one rejected at the gate, and holds a strength of zero — which is also what a
+  relationship on a quiet system holds. Every relationship therefore carries
+  `sign_agreements` and `sign_conflicts`, exposes a conflict share, and is flagged
+  `sign_suspect` past 30 pairs at 60% conflict; the census of every view reports how many
+  relationships the machine persistently refutes. This is not hypothetical: two of the
+  four propositions an earlier specification carried sat in that state on every cluster,
+  and nothing in the aggregate metrics showed it.
+
+- **Two claims over one pair learn the same number.** Where a specification declares both
+  directions over a construct pair, both relationships receive the same pairs and Pearson
+  correlation is symmetric, so their magnitudes agree to four decimals. Direction comes
+  from the declaration and is not inferred; what the pair gives the Reasoner is a
+  sensitivity for each construct's own cost term, not two independent measurements.
 
 `-pair-window-seconds` is a tolerance, not smoothing: collectors sample on independent
 grids (`system.*` on 0, 5, 10 …, PSI on 2, 6, 12 …), so without it no pair ever forms.
@@ -616,8 +676,8 @@ the shape of the real thing.
 | `-alpha`            | `0.2`            | EMA decay factor                                                         |
 | `-convergence`      | `500`            | Observations until confidence = 1.0                                      |
 | `-min-trust`        | `0.5`            | Minimum peer trust score for offloading                                  |
-| `-priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline            |
-| `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). When set together with `-priors`, the per-KD edge weights in the file seed the graph instead of the global Di-Select strengths. |
+| `-priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
+| `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `-kd` answer identically until telemetry arrives. |
 | `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
@@ -635,7 +695,7 @@ the shape of the real thing.
 | `-retire-after`          | `0`     | Silence after which a property is retired automatically. `0` leaves retirement to an operator. Retirement is soft and cascades to relationships that reference the property. |
 | `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
 | `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
-| `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at its seeded prior with confidence 0 — an honest report that nothing has been learned, and a map that never improves on what it was told. |
+| `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |
 | `-pair-window-seconds`   | `15`    | How far apart two observations may be and still count as simultaneous. Collectors sample on independent grids, so without a tolerance no pair ever forms. |
 | `-pair-support`          | `8`     | Pairs a relationship needs before its strength moves at all. Below it the pair is buffered and confidence keeps reporting that nothing has been learned. |
 | `-pair-history`          | `60`    | Recent pairs the estimate is computed over. Older pairs fall out, which is what lets a relationship follow a system whose behaviour changes rather than averaging its whole history. |
@@ -692,9 +752,11 @@ cd go && go test ./...
 
 ---
 
-## 5. Prior Initialization
+## 5. Structural Initialization
 
-Run once before deploying to a new cluster to replace bootstrap edge weights with values grounded in P1–P5 empirical data:
+Run once to produce the artefact the daemon loads at startup. It declares **which
+propositions the agent instantiates and in which direction** — and no magnitude for any
+of them:
 
 ```bash
 # from semantic-map/
@@ -712,49 +774,79 @@ committed `prior_weights.json` byte for byte — propositions, per-KD edge weigh
 construct scores, scope and warnings all identical — which is what makes it a replication
 artefact rather than a checked-in number.
 
-The pipeline reads publication constants (J/pod, mJ/op, overhead fractions, throughput and latency) for the constructs a running cluster exhibits and writes:
+The pipeline reads publication constants for the constructs a running cluster exhibits
+and writes:
 
-- `propositions[P*].prior_strength` — one calibrated λ per proposition (global)
-- `distribution_edge_weights[kd][edge_key].prior_weight` — per-KD edge weights, one per proposition in scope
-- `distribution_construct_scores[kd][construct]` — per-KD construct scores (informational)
-- `constructs` and `scope` — which constructs the calibration covers and why, so a
-  reader can tell the artefact's scope from the artefact
+- `agent_edges[]` — the structure of each relationship the agent instantiates:
+  `from_id`, `to_id`, `proposition_id`, `direction`. **No strength.** Not per-distribution
+  either, because which constructs relate and in which direction is a property of the
+  domain rather than of a cluster.
+- `propositions[P*]` — per-proposition *diagnostics*: `spearman_rho`, `p_value`,
+  `sign_consistent`, `method`, and `would_have_been`, which records the magnitude the
+  retired calibration would have emitted so that its exclusion is checkable from the
+  artefact rather than only asserted in prose.
+- `scope` — `telemetry_constructs`, `agent_propositions`, `excluded_propositions` with a
+  reason each, `sign_overrides` with a reason each, and a `rationale`
+- `distribution_construct_scores[kd][construct]` — restricted to the constructs in scope,
+  informational only
+- `constructs` and `warnings`
 
-Every emitted prior is clamped to the specification's `[global_floor,
-global_ceiling]` — the same bounds the operator tuner enforces, so the pipeline
-cannot emit a value an operator would be forbidden to set. The floor also keeps
-the divergence measure meaningful: Bernoulli KL grows without bound as the prior
-approaches zero, so a zero-valued prior would report the degeneracy of the prior
-rather than the informativeness of the evidence.
+### Why there is no strength in it
 
-Propositions are included only when *both* endpoints are constructs the pipeline
-can calibrate from telemetry, which is the same rule the daemon's specification
-applies (ARCHITECTURE.md §2). An earlier version calibrated all seven Di-Select
-constructs, including from a third-party CIS scanner, a GitHub star count, and
-setup time in human hours; min-max normalisation over five distributions put the
-worst performer on each dimension at exactly zero, so those magnitudes encoded a
-rank within the sample rather than a measurement, and adding a sixth distribution
-would have rescaled every prior.
+The file used to emit `propositions[P*].prior_strength` and a
+`distribution_edge_weights[kd][key].prior_weight` table, and the daemon seeded every
+relationship from them, blending each into decisions with weight `(1 − confidence)` —
+hardest, that is, exactly when the agent had least evidence to correct it. Three findings
+retired that:
 
-### Loading priors at startup
+1. **The numbers were not measurements of an association.** Each came from a rank
+   correlation between construct proxies across five distributions, and for both
+   propositions that survive the scoping the pipeline reports `spearman_rho: 0.0`,
+   `p_value: 1.0`, and its own *proxy reversal — investigate* warning. The per-cluster
+   values came from min-max normalised construct scores over the same five distributions,
+   so k0s sat at exactly 0.0 on the resource proxy and k8s at exactly 1.0 **by
+   construction**, and a sixth distribution scoring below the current minimum would have
+   rescaled every value including those of clusters whose measurements had not changed.
+2. **A wrong magnitude is not inert.** Two of the four propositions the graph then carried
+   asserted a direction the machine contradicted in 45% to 100% of paired observations.
+   Their evidence gate never opened, so their learned strength stayed at zero — while
+   their residual prior still entered the cost sum with the declared sign, and subtracted.
+3. **The cold-start window they covered is about a minute** at 1 Hz, on an agent that runs
+   for weeks.
 
-The daemon loads the file via `-priors`. Without `-kd`, the global proposition strengths seed every edge. With `-kd`, the per-distribution edge weights override the global values for that KD:
+An earlier version also calibrated all seven Di-Select constructs, including from a
+third-party CIS scanner, a GitHub star count, and setup time in human hours. Those were
+dropped first, on the same rule one level up: **if there is no measurement, do not
+manufacture a score.** Dropping the magnitudes is that rule reaching the last place it had
+not been applied.
+
+Propositions are included only when *both* endpoints are constructs this deployment
+measures **and** the telemetry does not contradict the declared direction — the same rule
+the daemon's specification applies (ARCHITECTURE.md §2). What is declined and what is
+overridden is recorded in `scope` rather than applied silently.
+
+### Loading the artefact at startup
+
+The daemon loads the file via `-priors`. `-kd` names the distribution running on this
+node; it is validated against the file's `distributions` list and the daemon refuses to
+start if the name is not there.
 
 ```bash
-# Global Di-Select strengths only
-agent -priors /etc/semantic-map/prior_weights.json
-
-# Per-KD edge weights (recommended for production)
 agent -priors /etc/semantic-map/prior_weights.json -kd k0s
 ```
 
-If the supplied `-kd` is not in the file's `distributions` list, the daemon refuses to start.
+**Both agents built with different `-kd` values produce identical answers until telemetry
+arrives**, which `TestScenario_PerKDAgentsAreIdenticalUntilTheyObserve` asserts directly.
+That is the inversion of the old expectation — the scenario used to be called
+`PerKDDecisionsDiffer` — and it is the point: nothing distinguishes two agents but what
+they measure.
 
-The calibrated weight is written into both layers — the storage edge the Reasoner
-reads and the ontology's proposition strength `GET /propositions` reports. They
-must agree: when they did not, the exposed prior was one the agent never used and
-the first operator tune recorded its transition from that unused number.
-`TestBuildKeepsOntologyAndStorageInAgreement` pins this for all five KDs.
+`TestBuildSeedsStructureAndNoMagnitude` asserts the other half for every distribution in
+the file and every proposition in the map: structure arrives, `basis` is `unknown`, and
+`established`, `assertion` and `effective` are all absent. It also greps the committed
+artefact for `prior_strength`, `prior_weight` and `ema_weight` and fails if any is
+present — because the artefact carried that table for a while after the daemon had
+stopped reading it, and a magnitude nothing reads is worse than an absent one.
 
 Re-run the pipeline if new empirical papers are incorporated, if the KD set
 changes, or if `domain_spec.json` changes which propositions are in scope — the
@@ -878,7 +970,7 @@ make -C poc teardown
 
 ### What the demo shows
 
-1. diag-1 under `stress-ng` → RC-adjacent edge EMA drifts below k0s efficiency priors → `ResourceCost` rises.
+1. diag-1 under `stress-ng` → the RC level rises and both endpoints vary, so the RC-adjacent relationship starts accumulating pairs → `ResourceCost` rises with the level and confidence climbs.
 2. `POST /recommend` on diag-1 → diag-2 recommended (lower cost, trust=0.8, highest trust-weighted savings).
 3. Round 4: diag-2 trust set to 0.15 via `POST /peers/diag-2/trust {"value":0.15}` — below min-trust floor 0.5.
 4. Rounds 5–8: recommendation flips to diag-3. Trust-weighted routing confirmed on live VMs.
@@ -923,10 +1015,10 @@ Any backend that speaks the OpenAI `/v1/chat/completions` surface works — `lla
 
 ```json
 {
-  "answer": "P10 (PS→RC, direction −) dominates with effective 0.62 vs prior 0.645, followed by P3 (RC→PS, direction +) at effective 0.30. Both have 15 observations at confidence 0.03.",
+  "answer": "P10 (PS→RC, direction +) dominates with effective 0.62 from its recent estimate, followed by P3 (RC→PS, direction +) at effective 0.30. Both have 15 observations at confidence 0.03.",
   "citations": [
-    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "prior_weight": 0.645, "confidence": 0.03, "n_observations": 15},
-    {"kind": "edge", "id": "P3",  "ema_weight": 0.30, "prior_weight": 0.406, "confidence": 0.03, "n_observations": 15}
+    {"kind": "edge", "id": "P10", "ema_weight": 0.62, "effective": 0.62, "basis": "recent", "confidence": 0.03, "n_observations": 15},
+    {"kind": "edge", "id": "P3",  "ema_weight": 0.30, "effective": 0.30, "basis": "recent", "confidence": 0.03, "n_observations": 15}
   ],
   "confidence": "high",
   "proposal": null,
@@ -946,7 +1038,7 @@ If the LLM asks *"should I…?"* it can also return a `proposal` — a suggested
 
 - **Groundedness.** Every value the LLM cites is checked against live graph state before the answer leaves the daemon. Fabricated proposition IDs, wrong EMA values, and references to deprecated edges are rejected — the LLM gets a critique and up to two more attempts. See [ARCHITECTURE.md §13](ARCHITECTURE.md#13-natural-language-explain-layer-pkgexplain) for the reflection-loop shape.
 - **Read-only.** The LLM's tool set is `get_cost`, `get_edges`, `get_history`, `get_peers`, `get_recommend`, `get_graph`. No mutation tool exists in the registry; the LLM literally cannot call `POST /agent/tune` or `POST /ontology/deprecate`. That preserves the human-judgment anchor from [ARCHITECTURE.md §8](ARCHITECTURE.md#8-connection-to-research).
-- **Determinism where it counts.** The reasoner, updater, and prior-init pipeline stay pure Go. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `-explain-provider=none`.
+- **Determinism where it counts.** The reasoner and the state model stay pure Go, and the initialization pipeline is a build-time Python step that touches no node. Explain is on the operator-facing surface, not on the ingestion or reasoning path. All P6 results reported in `research-docs/` use `-explain-provider=none`.
 
 ### v2 features (opt-in per request)
 

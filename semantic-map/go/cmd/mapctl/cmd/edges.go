@@ -42,7 +42,10 @@ func renderEdgesTable(w io.Writer, edges []client.EdgeDTO) {
 	for _, e := range edges {
 		rows = append(rows, []string{
 			e.PropositionID, e.FromID, e.ToID, e.Direction,
-			fmt.Sprintf("%.3f", e.PriorWeight),
+			edgeBasis(e.Basis),
+			ptrToString(e.Effective, "%.3f"),
+			ptrToString(e.Established, "%.3f"),
+			ptrToString(e.Assertion, "%.3f"),
 			fmt.Sprintf("%.3f", e.EMAWeight),
 			fmt.Sprintf("%.2f", e.Confidence),
 			fmt.Sprintf("%d", e.NObservations),
@@ -50,7 +53,17 @@ func renderEdgesTable(w io.Writer, edges []client.EdgeDTO) {
 			ptrToString(e.Sigma, "%.3f"),
 		})
 	}
-	render.Table(w, []string{"PropID", "From", "To", "Dir", "Prior", "EMA", "Conf", "N", "Mu", "Sigma"}, rows)
+	render.Table(w, []string{"PropID", "From", "To", "Dir", "Basis", "Effective", "Establ", "Assert", "Recent", "Conf", "N", "Mu", "Sigma"}, rows)
+}
+
+// edgeBasis renders an empty basis as "unknown" rather than blank. A relationship
+// with no evidence has a definite state and the table should say so; a blank cell
+// reads as a rendering gap.
+func edgeBasis(b string) string {
+	if b == "" {
+		return "unknown"
+	}
+	return b
 }
 
 // ptrToString formats a *float64 with the given verb, or "-" if nil.

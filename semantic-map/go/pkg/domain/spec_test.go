@@ -173,3 +173,68 @@ func TestFloorForFallsBackToGlobal(t *testing.T) {
 		t.Errorf("FloorFor(PY) = %v, want the 0.10 global floor", got)
 	}
 }
+
+// TestNormalizeForConstructReflectsOpposedPolarity covers the reconciliation that
+// makes a proposition's declared sign checkable. Without it a construct fed by a
+// latency and a throughput averages two quantities that move in opposite directions,
+// and no sign can be right for both.
+func TestNormalizeForConstructReflectsOpposedPolarity(t *testing.T) {
+	s := &Spec{
+		Constructs: []Construct{
+			// PS runs higher-is-worse: it summarises latency and pressure.
+			{ConstructID: "PS", Polarity: HigherIsWorse},
+		},
+		MetricRouting: []MetricRoute{
+			{MetricType: "latency_ms", ConstructID: "PS", Unit: "fraction",
+				Range: [2]float64{0, 1}, Polarity: HigherIsWorse},
+			{MetricType: "throughput", ConstructID: "PS", Unit: "fraction",
+				Range: [2]float64{0, 1}, Polarity: HigherIsBetter},
+		},
+	}
+
+	// Same polarity as its construct: untouched.
+	if got := s.NormalizeForConstruct("latency_ms", 0.25); got != 0.25 {
+		t.Errorf("latency_ms normalised to %v; a metric already in its construct's "+
+			"polarity must pass through unchanged", got)
+	}
+	// Opposed: reflected within the declared range, so high throughput becomes low
+	// badness rather than high badness.
+	if got := s.NormalizeForConstruct("throughput", 0.25); got != 0.75 {
+		t.Errorf("throughput normalised to %v, want 0.75", got)
+	}
+	// Unrouted metrics belong to no construct, so there is no polarity to reconcile.
+	if got := s.NormalizeForConstruct("unrouted", 0.25); got != 0.25 {
+		t.Errorf("unrouted metric normalised to %v; it summarises nothing and must be "+
+			"left alone", got)
+	}
+}
+
+// TestValidateRejectsUnknownPolarity keeps the field from silently defaulting on a typo.
+func TestValidateRejectsUnknownPolarity(t *testing.T) {
+	base := func() *Spec {
+		return &Spec{
+			Constructs: []Construct{{ConstructID: "PS"}},
+			MetricRouting: []MetricRoute{
+				{MetricType: "m", ConstructID: "PS", Range: [2]float64{0, 1}},
+			},
+			Propositions: []Proposition{},
+			Policy:       AdjustmentPolicy{GlobalFloor: 0.10, GlobalCeiling: 0.95},
+			CostModel:    CostModel{ResourceConstruct: "PS", PressureConstruct: "PS"},
+		}
+	}
+	s := base()
+	s.Constructs[0].Polarity = "higher_is_gooder"
+	if err := s.Validate(); err == nil {
+		t.Error("a construct with an unknown polarity validated; a typo must not fall " +
+			"back to a default that changes what the numbers mean")
+	}
+	s = base()
+	s.MetricRouting[0].Polarity = "sideways"
+	if err := s.Validate(); err == nil {
+		t.Error("a metric route with an unknown polarity validated")
+	}
+	// Empty is legal and means higher_is_worse.
+	if err := base().Validate(); err != nil {
+		t.Errorf("an unset polarity was rejected: %v", err)
+	}
+}

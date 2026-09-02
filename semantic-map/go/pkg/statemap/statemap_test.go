@@ -1,6 +1,7 @@
 package statemap
 
 import (
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -209,7 +210,7 @@ func TestRetiringAPropertyRetiresItsRelationships(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Prior: 0.5}); err != nil {
+	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,7 +252,7 @@ func TestRelationshipRejectsSelfLoopAndDirectionReversal(t *testing.T) {
 	}
 }
 
-func TestRelationshipBlendsPriorAndEvidence(t *testing.T) {
+func TestEffectiveIsUnknownUntilObservedThenReportsTheRecentEstimate(t *testing.T) {
 	m, c := newTestMap(t, Config{ConvergenceObservations: 10, Alpha: 1.0})
 	for _, id := range []string{"a", "b"} {
 		if err := m.DeclareProperty(Property{ID: id}); err != nil {
@@ -259,15 +260,25 @@ func TestRelationshipBlendsPriorAndEvidence(t *testing.T) {
 		}
 	}
 	if err := m.DeclareRelationship(Relationship{
-		From: "a", To: "b", Sign: 1, Prior: 0.8, Provenance: Seeded,
+		From: "a", To: "b", Sign: 1, Provenance: Seeded,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	id := RelationshipID("a", "b", "")
 
+	// A declared relationship asserts that two properties relate and in which
+	// direction. It says nothing about how strongly, and the map must not invent a
+	// figure — which is what the seeded prior it replaced did, at weight
+	// (1 - confidence), i.e. hardest when the agent knew least.
 	r, _ := m.Relationship(id)
-	if r.Effective() != 0.8 {
-		t.Errorf("unobserved relationship reports effective %.3f, want the prior 0.8", r.Effective())
+	if _, known := r.Effective(); known {
+		v, _ := r.Effective()
+		t.Errorf("a relationship nothing has been observed about reports effective "+
+			"%.3f; declaring that two properties relate is not a measurement of how "+
+			"strongly", v)
+	}
+	if r.Basis() != "unknown" {
+		t.Errorf("basis %q before any observation, want unknown", r.Basis())
 	}
 
 	for i := 0; i < 10; i++ {
@@ -277,9 +288,16 @@ func TestRelationshipBlendsPriorAndEvidence(t *testing.T) {
 		}
 	}
 	r, _ = m.Relationship(id)
-	if r.Effective() != 0.2 {
-		t.Errorf("fully observed relationship reports effective %.3f, want the "+
-			"observed 0.2", r.Effective())
+	v, known := r.Effective()
+	if !known {
+		t.Fatal("still unknown after ten observations")
+	}
+	if v != 0.2 {
+		t.Errorf("effective %.3f, want the observed 0.2", v)
+	}
+	if r.Basis() != "recent" {
+		t.Errorf("basis %q, want recent — nothing has established a long-run value "+
+			"and no operator has asserted one", r.Basis())
 	}
 	if r.Provenance != Learned {
 		t.Errorf("provenance %s after observation; a strength that came from this "+
@@ -287,55 +305,61 @@ func TestRelationshipBlendsPriorAndEvidence(t *testing.T) {
 	}
 }
 
-func TestAssertionMovesThePriorAndIsAttributed(t *testing.T) {
+func TestAssertionOutranksObservationAndDoesNotDecay(t *testing.T) {
 	m, c := newTestMap(t, Config{ConvergenceObservations: 4, Alpha: 1.0})
 	for _, id := range []string{"a", "b"} {
 		if err := m.DeclareProperty(Property{ID: id}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Prior: 0.5}); err != nil {
+	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1}); err != nil {
 		t.Fatal(err)
 	}
 	id := RelationshipID("a", "b", "")
+	// Drive it to full confidence first. This is the case that used to fail silently:
+	// an operator correcting a well-observed relationship wrote a prior that reached
+	// the decision scaled by (1 - confidence), so at confidence 1.0 the correction
+	// changed the effective strength by exactly nothing.
 	for i := 0; i < 4; i++ {
 		c.advance(time.Second)
 		if err := m.ObserveRelationship(id, 0.9, c.now()); err != nil {
 			t.Fatal(err)
 		}
 	}
+	r, _ := m.Relationship(id)
+	if r.Confidence != 1.0 {
+		t.Fatalf("precondition: confidence %.3f, want 1.0", r.Confidence)
+	}
 
 	if err := m.AssertRelationshipStrength(id, 0.1, "operator:ada", "measured by hand"); err != nil {
 		t.Fatal(err)
 	}
-	r, _ := m.Relationship(id)
-	if r.Prior != 0.1 {
-		t.Errorf("prior %.3f after assertion, want 0.1", r.Prior)
+	r, _ = m.Relationship(id)
+
+	v, known := r.Effective()
+	if !known {
+		t.Fatal("effective unknown after an assertion")
+	}
+	if v != 0.1 {
+		t.Errorf("effective %.3f after asserting 0.1 at full confidence; an operator "+
+			"correction must take effect in full, or the better the agent knows its "+
+			"machine the less an operator can steer it", v)
+	}
+	if r.Basis() != "asserted" {
+		t.Errorf("basis %q, want asserted", r.Basis())
+	}
+	if r.Assertion == nil || *r.Assertion != 0.1 {
+		t.Errorf("assertion field not set to 0.1")
 	}
 	if r.Strength != 0.9 {
 		t.Errorf("assertion overwrote the observed strength (%.3f); the distinction "+
-			"between what was observed and what was asserted is what an audit needs", r.Strength)
+			"between what was observed and what was asserted is what an audit needs",
+			r.Strength)
 	}
 	if r.Provenance != Asserted {
 		t.Errorf("provenance %s, want asserted", r.Provenance)
 	}
-
-	var attributed bool
-	for _, e := range m.Journal().Events(0, 0) {
-		if e.Kind == EventRelationshipAsserted && e.Actor == "operator:ada" {
-			attributed = true
-			if e.Detail["reason"] != "measured by hand" {
-				t.Errorf("journal lost the reason: %v", e.Detail["reason"])
-			}
-		}
-	}
-	if !attributed {
-		t.Error("no journal entry attributes the assertion to its actor")
-	}
 }
-
-// ── Queryable ─────────────────────────────────────────────────────────────────
-
 func TestStateQueryAnswersWhatTheSystemIsDoing(t *testing.T) {
 	m, c := newTestMap(t, Config{ConvergenceObservations: 2, StaleAfter: time.Minute})
 	seed(t, m, c)
@@ -528,7 +552,7 @@ func seed(t *testing.T, m *Map, c *clock) {
 		}
 	}
 	if err := m.DeclareRelationship(Relationship{
-		From: "resource_use", To: "pressure", Sign: 1, Prior: 0.6, Provenance: Seeded,
+		From: "resource_use", To: "pressure", Sign: 1, Provenance: Seeded,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -561,12 +585,12 @@ func TestMapLearnsRelationshipStrengthItself(t *testing.T) {
 	}
 	// A conflict pair: two mechanisms over the same endpoints, opposite signs.
 	if err := m.DeclareRelationship(Relationship{
-		From: "resource", To: "pressure", Label: "raises", Sign: 1, Prior: 0.5,
+		From: "resource", To: "pressure", Label: "raises", Sign: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.DeclareRelationship(Relationship{
-		From: "resource", To: "pressure", Label: "relieves", Sign: -1, Prior: 0.5,
+		From: "resource", To: "pressure", Label: "relieves", Sign: -1,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -603,9 +627,14 @@ func TestMapLearnsRelationshipStrengthItself(t *testing.T) {
 			"opposite sign is evidence against it, not a weaker version of it",
 			relieves.Strength)
 	}
-	if !(raises.Effective() > relieves.Effective()) {
-		t.Errorf("the pair did not separate: raises=%.4f relieves=%.4f",
-			raises.Effective(), relieves.Effective())
+	rEff, rKnown := raises.Effective()
+	vEff, vKnown := relieves.Effective()
+	if !rKnown || !vKnown {
+		t.Fatalf("both siblings should have an estimate after observation: raises known=%v relieves known=%v",
+			rKnown, vKnown)
+	}
+	if !(rEff > vEff) {
+		t.Errorf("the pair did not separate: raises=%.4f relieves=%.4f", rEff, vEff)
 	}
 }
 
@@ -623,7 +652,7 @@ func TestLearningIsIdempotentUnderReplay(t *testing.T) {
 			}
 		}
 		if err := m.DeclareRelationship(Relationship{
-			From: "a", To: "b", Sign: 1, Prior: 0.5,
+			From: "a", To: "b", Sign: 1,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -697,7 +726,7 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := m1.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Prior: 0.3}); err != nil {
+	if err := m1.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 30; i++ {
@@ -867,5 +896,378 @@ func TestSaveWritesPrivateFileMode(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("snapshot mode is %o, want 600 — a per-machine private snapshot should "+
 			"not be world-readable", perm)
+	}
+}
+
+// TestSignSuspectSeparatesAWrongDeclarationFromAQuietSystem covers the failure this
+// counter exists for. A relationship whose declared sign the machine never shows sits
+// at zero strength — which is exactly what a relationship on an idle system looks
+// like. The strength cannot tell the two apart, so nothing downstream can either, and
+// a graph carrying a backwards claim reports itself as merely unobserved.
+func TestSignSuspectSeparatesAWrongDeclarationFromAQuietSystem(t *testing.T) {
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 20,
+		Alpha:                   0.5,
+		Learn:                   true,
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 40},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "backwards" asserts that pressure falls as resource rises. The stream below shows
+	// the opposite, on every pair — the shape of a proposition inherited from a
+	// framework that phrased its outcome in the opposite polarity.
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "backwards", Sign: -1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "correct", Sign: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 40; i++ {
+		c.advance(5 * time.Second)
+		x := float64(i%10) / 10.0
+		if err := m.ObserveEvent("resource", x, c.now(), "r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(2 * time.Second)
+		if err := m.ObserveEvent("pressure", 0.9*x+0.02, c.now(), "p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backwards, _ := m.Relationship(RelationshipID("resource", "pressure", "backwards"))
+	correct, _ := m.Relationship(RelationshipID("resource", "pressure", "correct"))
+
+	if backwards.Strength != 0 {
+		t.Fatalf("precondition: the contradicted relationship should sit at zero, got %.4f",
+			backwards.Strength)
+	}
+	if backwards.SignConflicts == 0 {
+		t.Error("no sign conflict was counted; the gate zeroed the strength and left no " +
+			"trace, which is the state that made this class of defect invisible")
+	}
+	if backwards.SignAgreements != 0 {
+		t.Errorf("counted %d agreements on a stream of the opposite sign",
+			backwards.SignAgreements)
+	}
+	if !backwards.SignSuspect() {
+		t.Errorf("a relationship contradicted by every one of %d pairs is not reported "+
+			"suspect; it is indistinguishable from unobserved", backwards.SignConflicts)
+	}
+
+	if correct.SignAgreements == 0 {
+		t.Error("the supported relationship counted no agreements")
+	}
+	if correct.SignSuspect() {
+		t.Error("the supported relationship is reported suspect; a claim the machine " +
+			"confirms must never be flagged as a bad declaration")
+	}
+
+	// The census is where an aggregate reader would otherwise miss it entirely.
+	if got := m.Census().RelationshipsSignSuspect; got != 1 {
+		t.Errorf("census reports %d sign-suspect relationships, want 1", got)
+	}
+}
+
+// TestSignSuspectIsNotTrippedByAQuietSystem is the other half: a relationship that has
+// simply not been observed enough must not be accused of declaring the wrong sign.
+func TestSignSuspectIsNotTrippedByAQuietSystem(t *testing.T) {
+	m, _ := newTestMap(t, Config{ConvergenceObservations: 20, Learn: true})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "unobserved", Sign: -1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship(RelationshipID("resource", "pressure", "unobserved"))
+	if r.SignSuspect() {
+		t.Error("an unobserved relationship is reported sign-suspect; silence is not " +
+			"evidence that a declaration is wrong")
+	}
+	if got := m.Census().RelationshipsSignSuspect; got != 0 {
+		t.Errorf("census reports %d sign-suspect on an unobserved graph, want 0", got)
+	}
+}
+
+// TestSignSuspectIgnoresARegimeDependentSign is the false-positive guard. A relationship
+// whose sign genuinely changes with the workload collects both agreements and conflicts
+// in quantity. That is a fact about the system, not a defect in the declaration, and
+// flagging it would train an operator to ignore the flag.
+func TestSignSuspectIgnoresARegimeDependentSign(t *testing.T) {
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 20,
+		Alpha:                   0.5,
+		Learn:                   true,
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 4, Window: 12},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "regime", Sign: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Alternate the association: blocks where pressure tracks resource, blocks where it
+	// opposes it. Neither sign holds throughout.
+	for block := 0; block < 12; block++ {
+		positive := block%2 == 0
+		for i := 0; i < 12; i++ {
+			c.advance(5 * time.Second)
+			x := float64(i%10) / 10.0
+			if err := m.ObserveEvent("resource", x, c.now(),
+				"r"+itoa(block)+"_"+itoa(i)); err != nil {
+				t.Fatal(err)
+			}
+			y := 0.9*x + 0.02
+			if !positive {
+				y = 0.9*(1-x) + 0.02
+			}
+			c.advance(2 * time.Second)
+			if err := m.ObserveEvent("pressure", y, c.now(),
+				"p"+itoa(block)+"_"+itoa(i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	r, _ := m.Relationship(RelationshipID("resource", "pressure", "regime"))
+	if r.SignAgreements == 0 || r.SignConflicts == 0 {
+		t.Fatalf("precondition: expected both outcomes, got agree=%d conflict=%d",
+			r.SignAgreements, r.SignConflicts)
+	}
+	if r.SignSuspect() {
+		t.Errorf("a regime-dependent sign was flagged suspect at a conflict share of "+
+			"%.2f; a sign that holds in some regimes is a property of the system, not a "+
+			"wrong declaration", r.SignConflictShare())
+	}
+	if got := m.Census().RelationshipsSignSuspect; got != 0 {
+		t.Errorf("census reports %d sign-suspect, want 0", got)
+	}
+}
+
+// ── The established layer ────────────────────────────────────────────────────
+
+// feedPairs drives n paired observations whose correlation is controlled by `assoc`:
+// 1.0 gives a perfectly correlated pair stream, 0.0 an uncorrelated one.
+func feedPairs(t *testing.T, m *Map, c *clock, n int, assoc float64, tag string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		c.advance(time.Second)
+		x := float64(i%10) / 10.0
+		// Alternating perturbation breaks the correlation when assoc < 1 without
+		// changing either series' range, so the two cases differ in association only.
+		y := assoc*x + (1-assoc)*float64((i*7)%10)/10.0
+		if err := m.ObserveEvent("resource", x, c.now(), tag+"r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(time.Second)
+		if err := m.ObserveEvent("pressure", y, c.now(), tag+"p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func newLearningPair(t *testing.T, alphaSlow float64) (*Map, *clock, string) {
+	t.Helper()
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 500,
+		Alpha:                   0.2,
+		AlphaSlow:               alphaSlow,
+		Learn:                   true,
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 60},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{
+		From: "resource", To: "pressure", Label: "raises", Sign: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return m, c, RelationshipID("resource", "pressure", "raises")
+}
+
+// TestEstablishedAppearsOnlyWithSupportAndIsNeverSeeded pins the two halves of the
+// layer's contract: nothing puts a value there but observation, and it says nothing
+// until it has some.
+func TestEstablishedAppearsOnlyWithSupportAndIsNeverSeeded(t *testing.T) {
+	m, c, id := newLearningPair(t, 0.001)
+
+	r, _ := m.Relationship(id)
+	if r.Established != nil {
+		t.Errorf("a freshly declared relationship has an established strength %.4f; the "+
+			"long-run layer is accumulated from this machine's pairs and nothing seeds it",
+			*r.Established)
+	}
+	if r.Basis() != "unknown" {
+		t.Errorf("basis %q before observation, want unknown", r.Basis())
+	}
+
+	// Below the support threshold nothing folds at all, so still nothing established.
+	feedPairs(t, m, c, 4, 1.0, "a")
+	r, _ = m.Relationship(id)
+	if r.NObservations != 0 {
+		t.Fatalf("precondition: %d folds from 4 pairs, want 0 below MinSupport", r.NObservations)
+	}
+	if r.Established != nil {
+		t.Errorf("established %.4f with no folds", *r.Established)
+	}
+
+	feedPairs(t, m, c, 40, 1.0, "b")
+	r, _ = m.Relationship(id)
+	if r.NObservations == 0 {
+		t.Fatal("nothing folded after 44 pairs")
+	}
+	if r.Established == nil {
+		t.Fatal("established is still absent after folding began")
+	}
+	if r.Basis() != "established" {
+		t.Errorf("basis %q once a long-run value exists, want established", r.Basis())
+	}
+	eff, known := r.Effective()
+	if !known || eff != *r.Established {
+		t.Errorf("effective %.4f (known=%v) does not report the established value %.4f",
+			eff, known, *r.Established)
+	}
+}
+
+// TestEstablishedIsUnbiasedEarly is the property the bias correction exists for.
+//
+// Without it a slow layer spends thousands of pairs mostly reporting the zero it
+// started from: at alpha = 0.001, ten folds of a constant strength of 1.0 would leave
+// an uncorrected accumulator at 1 - 0.999^10 = 0.00996 — a hundredth of the truth, and
+// indistinguishable from a relationship the machine has refuted. That initialisation
+// dependence is what made the raw slow layer vary across replays by an order of
+// magnitude more than the fast one.
+func TestEstablishedIsUnbiasedEarly(t *testing.T) {
+	m, c, id := newLearningPair(t, 0.001)
+	// A perfectly correlated stream, so every fold sees a strength of exactly 1.0 and
+	// the long-run mean of what was observed is unambiguous.
+	feedPairs(t, m, c, 10, 1.0, "a")
+
+	r, _ := m.Relationship(id)
+	if r.NObservations == 0 {
+		t.Fatal("nothing folded")
+	}
+	if r.Established == nil {
+		t.Fatal("no established value after folding began")
+	}
+	uncorrected := 1 - math.Pow(1-0.001, float64(r.NObservations))
+	t.Logf("%d folds of strength 1.0: established %.6f (uncorrected would be %.6f)",
+		r.NObservations, *r.Established, uncorrected)
+
+	if *r.Established < 0.9 {
+		t.Errorf("established %.6f after %d folds of a constant 1.0; the long-run mean "+
+			"of a constant is that constant, and a value near %.4f would be the "+
+			"initialisation showing through", *r.Established, r.NObservations, uncorrected)
+	}
+	// The two layers should be close on a short stream — both are near the mean of the
+	// handful of folds so far — but not identical. Pairing produces same-tick and
+	// one-behind pairs, so fold strengths vary a little, and two time constants over a
+	// varying series do not have to coincide. Closeness is the claim; equality is not.
+	if math.Abs(*r.Established-r.Strength) > 0.05 {
+		t.Errorf("established %.6f and recent %.6f differ by more than 0.05 this early; "+
+			"before history accumulates there is nothing for them to disagree about",
+			*r.Established, r.Strength)
+	}
+}
+
+// TestTheTwoLayersSeparateOnARegimeChange is the point of having two. The recent layer
+// follows the machine's new behaviour; the established layer holds what the machine has
+// mostly done, and the gap between them is how unusual the present is.
+func TestTheTwoLayersSeparateOnARegimeChange(t *testing.T) {
+	m, c, id := newLearningPair(t, 0.001)
+
+	// A long stretch of strong association, then a stretch of none.
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	afterStrong, _ := m.Relationship(id)
+	if afterStrong.Established == nil {
+		t.Fatal("nothing established after 300 pairs")
+	}
+	establishedBefore := *afterStrong.Established
+
+	feedPairs(t, m, c, 120, 0.0, "weak")
+	after, _ := m.Relationship(id)
+
+	recentDrop := afterStrong.Strength - after.Strength
+	establishedDrop := establishedBefore - *after.Established
+	t.Logf("recent      %.4f -> %.4f  (moved %.4f)", afterStrong.Strength, after.Strength, recentDrop)
+	t.Logf("established %.4f -> %.4f  (moved %.4f)", establishedBefore, *after.Established, establishedDrop)
+
+	if recentDrop <= 0 {
+		t.Errorf("the recent layer did not fall when the association went away "+
+			"(%.4f -> %.4f)", afterStrong.Strength, after.Strength)
+	}
+	if establishedDrop >= recentDrop {
+		t.Errorf("the established layer moved as much as the recent one (%.4f vs %.4f); "+
+			"then it is a duplicate rather than a second timescale",
+			establishedDrop, recentDrop)
+	}
+	if math.Abs(after.Strength-*after.Established) < 0.05 {
+		t.Errorf("recent %.4f and established %.4f are within 0.05 after a regime "+
+			"change; the gap between them is the signal that the present is unusual",
+			after.Strength, *after.Established)
+	}
+}
+
+// TestAssertionOutranksTheEstablishedLayer keeps the precedence intact now that there
+// are two learned layers under it.
+func TestAssertionOutranksTheEstablishedLayer(t *testing.T) {
+	m, c, id := newLearningPair(t, 0.001)
+	feedPairs(t, m, c, 60, 1.0, "a")
+
+	r, _ := m.Relationship(id)
+	if r.Established == nil || r.Basis() != "established" {
+		t.Fatalf("precondition: basis %q, established %v", r.Basis(), r.Established)
+	}
+
+	if err := m.AssertRelationshipStrength(id, 0.13, "operator:ada", "measured by hand"); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = m.Relationship(id)
+	eff, known := r.Effective()
+	if !known || eff != 0.13 {
+		t.Errorf("effective %.4f after asserting 0.13; an operator's value outranks both "+
+			"learned layers and takes effect in full", eff)
+	}
+	if r.Basis() != "asserted" {
+		t.Errorf("basis %q, want asserted", r.Basis())
+	}
+	if r.Established == nil {
+		t.Error("the assertion discarded the established value; what was measured must " +
+			"stay readable beside what was asserted")
+	}
+}
+
+// TestAlphaSlowDefaultsToTheDerivedConstant guards the number against a silent change,
+// and records where it comes from.
+func TestAlphaSlowDefaultsToTheDerivedConstant(t *testing.T) {
+	got := Config{}.withDefaults().AlphaSlow
+	if got != 0.001 {
+		t.Errorf("AlphaSlow default is %v, want 0.001 — the point chosen on the "+
+			"order-invariance/responsiveness trade-off measured by "+
+			"convergence/sweep_alpha_slow.sh. Changing it changes what 'normal for this "+
+			"machine' means, so it should not drift by accident.", got)
+	}
+	fast := Config{}.withDefaults().Alpha
+	if got >= fast {
+		t.Errorf("AlphaSlow %v is not slower than Alpha %v", got, fast)
 	}
 }

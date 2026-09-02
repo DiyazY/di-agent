@@ -77,20 +77,23 @@ func seedStateMap(sm *statemap.Map, spec *domain.Spec, pw *priorWeightsFile, kd 
 		}
 	}
 
-	perKD := perKDEdgeWeights(pw, kd)
 	for _, prop := range spec.Propositions {
 		sign := 1
 		if prop.Direction == "negative" {
 			sign = -1
 		}
-		prior, source := relationshipPrior(pw, perKD, prop)
+		// Seeding declares structure and no magnitude. Which properties relate, and in
+		// which direction, is knowledge one machine's telemetry cannot produce and a
+		// specification legitimately supplies; what the relation is *worth* is a
+		// measurement, and this machine is the only thing entitled to make it.
+		//
 		// The proposition ID is the label, which is what lets two mechanisms relate the
 		// same pair in opposite directions without one erasing the other.
 		if err := sm.DeclareRelationship(statemap.Relationship{
 			From: prop.FromConstruct, To: prop.ToConstruct,
 			Label: prop.PropositionID, Sign: sign,
-			Prior: prior, Provenance: statemap.Seeded,
-			Note: prop.Description + " [prior: " + source + "]",
+			Provenance: statemap.Seeded,
+			Note:       prop.Description + " [strength: learned from this machine]",
 		}); err != nil {
 			// A proposition whose endpoints are not both present is skipped rather than
 			// fatal: a specification may declare a construct this deployment cannot
@@ -99,23 +102,4 @@ func seedStateMap(sm *statemap.Map, spec *domain.Spec, pw *priorWeightsFile, kd 
 		}
 	}
 	return sm.Census().PropertiesTotal, nil
-}
-
-// relationshipPrior resolves a proposition's seeded strength, preferring the
-// per-cluster calibrated edge weight, then the global proposition strength, then a
-// neutral 0.5. It returns the source alongside the number so the relationship's note
-// records which of the three it got — an operator reading a strength should be able
-// to tell a calibrated value from a placeholder.
-func relationshipPrior(pw *priorWeightsFile, perKD map[string]edgePrior,
-	prop domain.Proposition) (float64, string) {
-	key := edgeKey(prop.FromConstruct, prop.ToConstruct, prop.PropositionID)
-	if e, ok := perKD[key]; ok {
-		return e.PriorWeight, "per-cluster calibration"
-	}
-	if pw != nil {
-		if p, ok := pw.Propositions[prop.PropositionID]; ok && p.PriorStrength > 0 {
-			return p.PriorStrength, "global proposition strength"
-		}
-	}
-	return 0.5, "no calibration available: neutral placeholder"
 }

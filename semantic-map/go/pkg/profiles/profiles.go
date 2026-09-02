@@ -23,6 +23,10 @@ const defaultPeerTimeout = 2 * time.Second
 
 // Config holds profile-specific tuning parameters.
 type Config struct {
+	// EMAAlphaSlow is the decay factor for the established layer. Zero takes the
+	// derived default in statemap.Config.
+	EMAAlphaSlow float64
+
 	// EMAAlpha is the decay factor for the EMA updater (0 < alpha < 1).
 	// Higher = reacts faster to change; lower = more stable. Default: 0.2.
 	EMAAlpha float64
@@ -142,6 +146,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		EMAAlpha:             0.2,
+		EMAAlphaSlow:         0.001,
 		ConvergenceThreshold: 500,
 		MinTrustScore:        0.5,
 		PriorWeightsPath:     "",
@@ -154,29 +159,40 @@ func DefaultConfig() Config {
 
 // priorWeightsFile mirrors the top-level structure of prior_weights.json
 // produced by semantic_map.prior_init.pipeline.
+// The file supplies STRUCTURE and no magnitude. It carried a per-proposition
+// `prior_strength` and a per-distribution `prior_weight`/`ema_weight` table until the
+// seeded design was removed; those fields were still parsed here for a while after
+// nothing read them, which is the failure this project treats as worse than an absent
+// number. They are gone from the artefact and from this struct together.
 type priorWeightsFile struct {
-	Version                 string                          `json:"version"`
-	GeneratedAt             string                          `json:"generated_at"`
-	Distributions           []string                        `json:"distributions"`
-	Propositions            map[string]propositionPrior     `json:"propositions"`
-	DistributionEdgeWeights map[string]map[string]edgePrior `json:"distribution_edge_weights"`
+	Version       string              `json:"version"`
+	GeneratedAt   string              `json:"generated_at"`
+	Distributions []string            `json:"distributions"`
+	Propositions  map[string]propDiag `json:"propositions"`
+	AgentEdges    []agentEdge         `json:"agent_edges"`
 }
 
-type propositionPrior struct {
-	PriorStrength float64 `json:"prior_strength"`
-	Direction     string  `json:"direction"`
-	Method        string  `json:"method"`
+// propDiag is the per-proposition diagnostic block. It records what the retired
+// calibration would have produced and why it was not fit to seed a decision — the
+// rank correlation, its p-value, and whether the proxy agreed with the declared
+// direction. No field of it reaches a relationship.
+type propDiag struct {
+	WouldHaveBeen  float64 `json:"would_have_been"`
+	Direction      string  `json:"direction"`
+	SpearmanRho    float64 `json:"spearman_rho"`
+	PValue         float64 `json:"p_value"`
+	SignConsistent int     `json:"sign_consistent"`
+	Method         string  `json:"method"`
 }
 
-// edgePrior is one entry in distribution_edge_weights[kd][edge_key].
-// edge_key has the form "fromID→toID:propositionID".
-type edgePrior struct {
-	FromID        string  `json:"from_id"`
-	ToID          string  `json:"to_id"`
-	PropositionID string  `json:"proposition_id"`
-	Direction     string  `json:"direction"`
-	PriorWeight   float64 `json:"prior_weight"`
-	EMAWeight     float64 `json:"ema_weight"`
+// agentEdge is one entry in agent_edges: the structure of a relationship the agent
+// instantiates, with no magnitude. It is not per-distribution, because which
+// constructs relate and in which direction is a property of the domain.
+type agentEdge struct {
+	FromID        string `json:"from_id"`
+	ToID          string `json:"to_id"`
+	PropositionID string `json:"proposition_id"`
+	Direction     string `json:"direction"`
 }
 
 // loadPriorWeights reads prior_weights.json from the given path.
@@ -226,6 +242,7 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 			cfg.StateMap = statemap.New(statemap.Config{
 				ConvergenceObservations: int(cfg.ConvergenceThreshold),
 				Alpha:                   cfg.EMAAlpha,
+				AlphaSlow:               cfg.EMAAlphaSlow,
 				AdmitUnknown:            true,
 				Learn:                   true,
 			}, statemap.NewJournal(0))
@@ -347,18 +364,8 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 // is nothing left to reconcile and no window in which the exposed number and the used
 // number can differ.
 
-// perKDEdgeWeights returns the per-distribution edge map for kd, or nil if not
-// applicable. Callers must handle the nil case (fall back to global priors).
-// perKDEdgeWeights returns the calibrated edge priors for one cluster, or nil.
-func perKDEdgeWeights(pw *priorWeightsFile, kd string) map[string]edgePrior {
-	if pw == nil || kd == "" {
-		return nil
-	}
-	return pw.DistributionEdgeWeights[kd]
-}
-
-// edgeKey mirrors the key format produced by prior_init/pipeline.py:
-// "{from_c}→{to_c}:{prop_id}".
-func edgeKey(fromID, toID, propID string) string {
-	return fmt.Sprintf("%s→%s:%s", fromID, toID, propID)
-}
+// perKDEdgeWeights and edgeKey stood here. Both existed to look up a calibrated
+// magnitude for one cluster, and both were dead — no non-test caller remained once
+// seeding declared structure only. They are removed rather than kept "in case",
+// because a lookup helper for a field the artefact no longer emits is an invitation
+// to reintroduce the seeding it served.

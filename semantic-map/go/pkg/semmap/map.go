@@ -16,6 +16,11 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
+// neutralTuneAnchor is the base a tune delta uses for a relationship this machine has
+// not measured. It is not a prior: nothing consults it unless an operator tunes, and
+// the result is journalled as that operator's assertion.
+const neutralTuneAnchor = 0.5
+
 // SemanticMap wires the contracts and exposes the agent API. It also holds the peer
 // coordination handles (peers.Registry, peers.Client) so the HTTP layer and the
 // reasoner share a single source of truth for peers.
@@ -203,7 +208,18 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		return ErrNoStateModel
 	}
 
-	if err := m.state.ObserveEvent(string(sample.MetricType), sample.Value,
+	// Express the reading in its construct's polarity before anything stores or
+	// learns from it. A metric that runs opposite to the construct it informs would
+	// otherwise pull that construct's summary the wrong way, and every relationship
+	// learned from it would be asked to agree with a sign the reading contradicts.
+	// Unrouted and same-polarity metrics pass through untouched.
+	router := m.router()
+	value := sample.Value
+	if router != nil {
+		value = router.NormalizeForConstruct(string(sample.MetricType), value)
+	}
+
+	if err := m.state.ObserveEvent(string(sample.MetricType), value,
 		time.Unix(sample.TimestampUnix, 0), sample.EventID); err != nil {
 		return err
 	}
@@ -211,11 +227,9 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	// The proposer looks for relations the backbone does not declare, and it pairs
 	// construct values, so it needs the routed construct rather than the raw metric.
 	// An unrouted metric is simply not something it can propose about yet.
-	if m.proposer != nil {
-		if router := m.router(); router != nil {
-			if construct, routed := router.ConstructForMetric(string(sample.MetricType)); routed {
-				_ = m.proposer.ObserveConstruct(construct, sample.Value)
-			}
+	if m.proposer != nil && router != nil {
+		if construct, routed := router.ConstructForMetric(string(sample.MetricType)); routed {
+			_ = m.proposer.ObserveConstruct(construct, value)
 		}
 	}
 	return nil
@@ -281,9 +295,14 @@ func (m *SemanticMap) retireStateRelationships(propositionID, reason, actor stri
 	return n
 }
 
-// MetricRouter maps a metric type to the construct that summarises it.
+// MetricRouter maps a metric type to the construct that summarises it, and
+// expresses a raw reading in that construct's polarity.
 type MetricRouter interface {
 	ConstructForMetric(metricType string) (string, bool)
+	// NormalizeForConstruct reflects a value within its declared range when the
+	// metric and its construct run in opposite directions, and returns it unchanged
+	// otherwise. An unrouted metric is returned unchanged.
+	NormalizeForConstruct(metricType string, value float64) float64
 }
 
 // SpecCarrier is implemented by ontologies built from a domain specification. The
@@ -543,8 +562,8 @@ func (m *SemanticMap) AddValidatedProposition(p *types.Proposition) error {
 	}
 	return m.state.DeclareRelationship(statemap.Relationship{
 		From: p.FromConstruct, To: p.ToConstruct, Label: p.PropositionID,
-		Sign: sign, Prior: p.PriorStrength, Provenance: statemap.Seeded,
-		Note: "[prior: proposition " + p.PropositionID + " as declared]",
+		Sign: sign, Provenance: statemap.Seeded,
+		Note: "[declared: proposition " + p.PropositionID + "; strength is learned]",
 	})
 }
 
@@ -627,11 +646,28 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		return nil, ErrNoStateModel
 	}
 	strengthByID := map[string]float64{}
+	anchored := map[string]bool{}
 	for _, r := range m.state.Relationships("", "") {
 		if r.Status == statemap.Retired || r.Label == "" {
 			continue
 		}
-		strengthByID[r.Label] = r.Prior
+		// A tune is expressed as a delta, so it needs a base. The base is whatever the
+		// relationship currently stands at — an assertion, else what the machine has
+		// established, else its recent estimate.
+		//
+		// A relationship the machine has not measured has no base. It is anchored to the
+		// neutral midpoint instead of skipped, because cold start is when an operator's
+		// knowledge is worth most — "this link is lossy, I have run it for years" is
+		// exactly the claim an agent cannot yet make for itself. The anchoring is
+		// recorded on the adjustment, and the result is an assertion with an actor and a
+		// reason: unlike the seeded prior this replaced, a placeholder here exists only
+		// because somebody asked for it and is attributed to them.
+		if v, known := r.Effective(); known {
+			strengthByID[r.Label] = v
+		} else {
+			strengthByID[r.Label] = neutralTuneAnchor
+			anchored[r.Label] = true
+		}
 	}
 
 	// Build bounded adjustments.
@@ -649,11 +685,16 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 		if newS > m.tuneCeiling() {
 			newS = 0.95
 		}
+		rationale := intent.Rationale
+		if anchored[intent.PropositionID] {
+			rationale += " [anchored to the neutral midpoint: this machine has not " +
+				"measured this relationship, so the delta had no observed base]"
+		}
 		adjustments = append(adjustments, &types.TuneAdjustment{
 			PropositionID: intent.PropositionID,
 			OldStrength:   old,
 			NewStrength:   newS,
-			Rationale:     intent.Rationale,
+			Rationale:     rationale,
 		})
 	}
 

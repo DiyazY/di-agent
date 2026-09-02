@@ -54,7 +54,14 @@ KDS = ["k3s", "k0s", "k8s", "kubeEdge", "openYurt"]
 # Membership is a data decision, not a code one. Routing a new MetricType to a
 # construct (see the Bridge's routing table) is what makes it admissible here;
 # adding it to this set and regenerating is the whole change.
-TELEMETRY_CONSTRUCTS = ["RC", "CO", "PS"]
+#
+# CO was removed after measurement, not on principle. On this testbed it carried only
+# network throughput — `network_loss_ratio` and `network_latency_ms` are never collected
+# — and rx/tx arrive at ~1e-5 of the 1 Gbps reference they are normalised against,
+# leaving the derived construct at 1.4e-4 and any edge out of it contributing nothing to
+# an estimate. Restoring CO needs a live connectivity signal, or a normalisation
+# reference the deployment actually exhibits; it does not need a change here.
+TELEMETRY_CONSTRUCTS = ["RC", "PS"]
 
 CONSTRUCT_META = {
     "RC": ("Resource Constraints & Cost",
@@ -90,12 +97,39 @@ DISELECT_PROPOSITIONS = [
     ("P15", "MU", "RR", "positive"),
 ]
 
-# The agent's graph: propositions whose BOTH endpoints are observable. An edge
-# with one observable endpoint still receives observations through it, but its
-# far construct is a constant, so the edge cannot express a relation — see
-# research-docs/relational-edge-learning.md.
-PROPOSITIONS = [p for p in DISELECT_PROPOSITIONS
-                if p[1] in TELEMETRY_CONSTRUCTS and p[2] in TELEMETRY_CONSTRUCTS]
+# Propositions the agent does not instantiate even though both endpoints are
+# observable. Kept as data with a reason, so the omission is legible next to the
+# Di-Select backbone it departs from.
+EXCLUDED_PROPOSITIONS = {
+    "P2": ("duplicates P3 on the signals this setup measures. P2 states RC→PS against "
+           "scheduling *throughput* and P3 against startup *latency*; every metric routed "
+           "to PS is a latency or pressure quantity, so on one PS axis the two are "
+           "contrapositives of a single claim and carrying both double-counts it. P2's "
+           "prior was also the one domain_override in the calibration rather than a "
+           "measured quantity."),
+}
+
+# Directions Di-Select states against a quantity this setup does not measure, corrected
+# to the polarity of what it does. Recorded rather than edited into
+# DISELECT_PROPOSITIONS, which stays faithful to the published backbone.
+SIGN_OVERRIDES = {
+    "P10": ("positive", "Di-Select states PS→RC against an efficiency measure, where "
+                        "better efficiency lowers cost. PS here is stall pressure, so the "
+                        "same mechanism appears as a positive association: a machine under "
+                        "pressure is consuming more. Observed conflict share against the "
+                        "declared negative sign was 0.45–1.00 across five clusters."),
+}
+
+# The agent's graph: propositions whose BOTH endpoints are observable, less those
+# explicitly excluded. An edge with one observable endpoint still receives observations
+# through it, but its far construct is a constant, so the edge cannot express a relation
+# — see research-docs/relational-edge-learning.md.
+PROPOSITIONS = [
+    (pid, frm, to, SIGN_OVERRIDES.get(pid, (direction,))[0])
+    for pid, frm, to, direction in DISELECT_PROPOSITIONS
+    if frm in TELEMETRY_CONSTRUCTS and to in TELEMETRY_CONSTRUCTS
+    and pid not in EXCLUDED_PROPOSITIONS
+]
 
 
 def _norm_inv(vals: dict[str, float]) -> dict[str, float]:
@@ -220,8 +254,27 @@ def compute_proposition_strengths(
     construct_scores: dict[str, dict[str, float]]
 ) -> dict[str, dict]:
     """
-    Returns {prop_id: {prior_strength, direction, from_construct, to_construct,
-                        spearman_rho, calibration_note, method}}.
+    Returns {prop_id: {direction, from_construct, to_construct, spearman_rho,
+                        p_value, sign_consistent, calibration_note, method}}.
+
+    NO MAGNITUDE IS RETURNED. This function used to emit a `prior_strength` per
+    proposition, and the daemon seeded every relationship from it. Three findings
+    retired that:
+
+      1. The number was not a measurement of an association. It came from a rank
+         correlation between construct proxies across five distributions, and for
+         both propositions that survive the scoping it reports rho = 0.0, p = 1.0,
+         with this module's own "proxy reversal" warning attached.
+      2. Its per-cluster form came from min-max normalised construct scores over the
+         same five distributions, so one cluster sat at exactly 0.0 and another at
+         exactly 1.0 by construction, and a sixth distribution scoring below the
+         current minimum would have rescaled every value — including those of
+         clusters whose measurements had not changed.
+      3. The cold-start window it existed to cover is about a minute at 1 Hz.
+
+    The diagnostics ARE still returned, and that is deliberate: they are the record
+    of why no magnitude is emitted. A reader can see that the calibration was
+    attempted, what it produced, and why it was not fit to seed a decision.
 
     Method field: 'spearman' for proxy-based estimates, 'domain_override' for
     propositions where proxy adequacy is insufficient.
@@ -250,8 +303,12 @@ def compute_proposition_strengths(
                 f"direction {'confirmed' if sign_consistent else 'reversed — proxy limitation'}"
             )
 
+        # `strength` is computed above and deliberately NOT emitted; see the
+        # docstring. It is retained in the note so the artefact records what the
+        # calibration would have produced, which is what makes its exclusion
+        # checkable rather than merely asserted.
         results[prop_id] = {
-            "prior_strength":    round(strength, 4),
+            "would_have_been":   round(strength, 4),
             "direction":         direction,
             "from_construct":    from_c,
             "to_construct":      to_c,

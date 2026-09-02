@@ -67,7 +67,7 @@ func TestRoot_GraphJSON_AgainstFakeAgent(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(client.GraphSnapshot{
 			Constructs:   []client.ConstructDTO{{ConstructID: "RC", Name: "Resource & Cost"}},
 			Propositions: []client.PropositionDTO{{PropositionID: "P3", FromConstruct: "RC", ToConstruct: "PS", Direction: "+", PriorStrength: 0.7}},
-			Edges:        []client.EdgeDTO{{FromID: "RC", ToID: "PS", PropositionID: "P3", Direction: "+", PriorWeight: 0.7, EMAWeight: 0.7}},
+			Edges:        []client.EdgeDTO{{FromID: "RC", ToID: "PS", PropositionID: "P3", Direction: "+", Established: f64(0.7), Effective: f64(0.7), Basis: "established", EMAWeight: 0.7}},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -116,3 +116,7 @@ func TestRoot_HelpContainsKnownSubcommands(t *testing.T) {
 		}
 	}
 }
+
+// f64 returns a pointer to a float literal, for the optional strength fields on
+// EdgeDTO where absence and zero mean different things.
+func f64(v float64) *float64 { return &v }

@@ -54,17 +54,18 @@ func TestAddValidatedPropositionReachesTheModel(t *testing.T) {
 	}
 
 	rel := relationshipFor(t, state, "P90")
-	if rel.Prior != 0.42 {
-		t.Errorf("prior = %v, want 0.42", rel.Prior)
-	}
-	// Cold-start invariant: a freshly declared relationship carries no evidence, so its
-	// effective strength is the prior until telemetry arrives.
+	// Cold-start invariant: a freshly declared relationship carries no evidence and
+	// therefore no strength. The strength a declaration used to carry is gone — adding a
+	// proposition asserts that two properties relate, not what the relation is worth.
 	if rel.Confidence != 0 || rel.NObservations != 0 {
 		t.Errorf("new relationship should carry no evidence, got confidence=%v n=%d",
 			rel.Confidence, rel.NObservations)
 	}
-	if rel.Effective() != 0.42 {
-		t.Errorf("effective strength %v at cold start, want the prior 0.42", rel.Effective())
+	if v, known := rel.Effective(); known {
+		t.Errorf("effective strength %v on a freshly declared relationship; want unknown", v)
+	}
+	if rel.Basis() != "unknown" {
+		t.Errorf("basis %q at cold start, want unknown", rel.Basis())
 	}
 	if rel.Provenance != statemap.Seeded {
 		t.Errorf("provenance %s on a relationship nothing has observed, want seeded",

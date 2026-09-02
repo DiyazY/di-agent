@@ -36,14 +36,25 @@ type PropositionDTO struct {
 	DeprecatedReason string   `json:"deprecated_reason,omitempty"`
 }
 
-// EdgeDTO mirrors the server's EdgeDTO. Mu/Sigma are nil when the Gaussian
-// descriptor is unavailable.
+// EdgeDTO mirrors the server's EdgeDTO. Established, Assertion and Effective are
+// nil when absent, because zero is the claim that a relationship is worth nothing
+// and absence is not that claim; Basis names which of them answered. Mu/Sigma are
+// nil when the Gaussian descriptor is unavailable.
+//
+// This struct previously carried a PriorWeight decoded from "prior_weight". The
+// server stopped emitting that key when seeded magnitudes were removed, so the
+// field decoded to zero on every response and the CLI rendered a "Prior" column of
+// zeros — a number shown but not used, which is the failure the graph surfaces were
+// consolidated onto the state model to avoid. It is replaced rather than defaulted.
 type EdgeDTO struct {
 	FromID        string   `json:"from"`
 	ToID          string   `json:"to"`
 	PropositionID string   `json:"proposition_id"`
 	Direction     string   `json:"direction"`
-	PriorWeight   float64  `json:"prior_weight"`
+	Established   *float64 `json:"established"`
+	Assertion     *float64 `json:"assertion"`
+	Effective     *float64 `json:"effective"`
+	Basis         string   `json:"basis"`
 	EMAWeight     float64  `json:"ema_weight"`
 	Confidence    float64  `json:"confidence"`
 	NObservations int      `json:"n_observations"`
