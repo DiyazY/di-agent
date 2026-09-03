@@ -1,5 +1,5 @@
-# Kafka consumer that writes genset/propulsion/switchboard telemetry into
-# InfluxDB. No externally-exposed port (consumer only).
+# Kafka consumer that writes system telemetry into InfluxDB. No externally-
+# exposed port (consumer only).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,6 +32,10 @@ spec:
               value: {{ .Values.genset.kafkaTopic | quote }}
             - name: PROPULSION_KAFKA_TOPIC
               value: {{ .Values.propulsion.kafkaTopic | quote }}
+            - name: BATTERY_KAFKA_TOPIC
+              value: {{ .Values.battery.kafkaTopic | quote }}
+            - name: AUXLOAD_KAFKA_TOPIC
+              value: {{ .Values.auxload.kafkaTopic | quote }}
             - name: SWITCHBOARD_KAFKA_TOPIC
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
             - name: KAFKA_GROUP_ID

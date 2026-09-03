@@ -9,8 +9,16 @@ from kafka import KafkaConsumer
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
 PROPULSION_KAFKA_TOPIC = os.environ.get("PROPULSION_KAFKA_TOPIC", "propulsion.telemetry")
+BATTERY_KAFKA_TOPIC = os.environ.get("BATTERY_KAFKA_TOPIC", "battery.telemetry")
+AUXLOAD_KAFKA_TOPIC = os.environ.get("AUXLOAD_KAFKA_TOPIC", "auxload.telemetry")
 SWITCHBOARD_KAFKA_TOPIC = os.environ.get("SWITCHBOARD_KAFKA_TOPIC", "switchboard.telemetry")
-KAFKA_TOPICS = [GENSET_KAFKA_TOPIC, PROPULSION_KAFKA_TOPIC, SWITCHBOARD_KAFKA_TOPIC]
+KAFKA_TOPICS = [
+    GENSET_KAFKA_TOPIC,
+    PROPULSION_KAFKA_TOPIC,
+    BATTERY_KAFKA_TOPIC,
+    AUXLOAD_KAFKA_TOPIC,
+    SWITCHBOARD_KAFKA_TOPIC,
+]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
 
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://localhost:8086")
@@ -36,18 +44,29 @@ MESSAGE_SCHEMAS = {
         "measurement": "propulsion_telemetry",
         "fields": ("load_ratio", "power_output_kw", "power_input_kw", "allocated_power_kw"),
     },
+    "battery_id": {
+        "measurement": "battery_telemetry",
+        "fields": ("load_ratio", "power_kw", "soc"),
+    },
+    "auxload_id": {
+        "measurement": "auxload_telemetry",
+        "fields": ("load_ratio", "power_output_kw", "power_input_kw", "allocated_power_kw"),
+    },
     "consumer_id": {
         "measurement": "switchboard_telemetry",
         "fields": (
             "requested_power_kw",
             "allocated_power_kw",
-            "available_supply_kw",
-            "total_demand_kw",
-            "total_co2_kg_per_s",
-            "total_nox_kg_per_s",
         ),
     },
 }
+
+SWITCHBOARD_AGGREGATE_FIELDS = (
+    "available_supply_kw",
+    "total_demand_kw",
+    "total_co2_kg_per_s",
+    "total_nox_kg_per_s",
+)
 
 
 def _make_consumer() -> KafkaConsumer:
@@ -66,7 +85,7 @@ def _make_consumer() -> KafkaConsumer:
             time.sleep(5)
 
 
-def _to_point(message: dict) -> Point:
+def _to_points(message: dict) -> list[Point]:
     tag_key = next((key for key in MESSAGE_SCHEMAS if key in message), None)
     if tag_key is None:
         raise KeyError("message has none of the known id tags: " + ", ".join(MESSAGE_SCHEMAS))
@@ -76,7 +95,19 @@ def _to_point(message: dict) -> Point:
     for field in schema["fields"]:
         if field in message:
             point = point.field(field, float(message[field]))
-    return point.time(int(message["timestamp"] * 1e9), WritePrecision.NS)
+    timestamp = int(message["timestamp"] * 1e9)
+    points = [point.time(timestamp, WritePrecision.NS)]
+
+    if tag_key == "consumer_id":
+        aggregate = Point("switchboard_aggregate").tag(
+            "switchboard_id", message.get("switchboard_id", "unknown")
+        )
+        for field in SWITCHBOARD_AGGREGATE_FIELDS:
+            if field in message:
+                aggregate = aggregate.field(field, float(message[field]))
+        points.append(aggregate.time(timestamp, WritePrecision.NS))
+
+    return points
 
 
 def main() -> None:
@@ -91,8 +122,8 @@ def main() -> None:
         for record in consumer:
             message = record.value
             try:
-                point = _to_point(message)
-                write_api.write(bucket=INFLUXDB_BUCKET, record=point)
+                points = _to_points(message)
+                write_api.write(bucket=INFLUXDB_BUCKET, record=points)
             except (KeyError, ValueError, TypeError) as exc:
                 print(f"Skipping malformed message {message!r}: {exc}")
     finally:
