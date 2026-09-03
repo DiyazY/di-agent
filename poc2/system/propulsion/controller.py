@@ -25,7 +25,7 @@ REQUEST_KAFKA_TOPIC = os.environ.get("REQUEST_KAFKA_TOPIC", "switchboard.request
 ALLOCATION_KAFKA_TOPIC = os.environ.get("ALLOCATION_KAFKA_TOPIC", "switchboard.telemetry")
 # Load-shedding priority: consumers with a higher value are served first by
 # the switchboard when supply can't cover total demand.
-PROPULSION_PRIORITY = int(os.environ.get("PROPULSION_PRIORITY", "1"))
+PROPULSION_PRIORITY = int(os.environ.get("PROPULSION_PRIORITY", "2"))
 # An allocation is considered stale (treated as 0 kW available) if none was
 # received within this many seconds, e.g. the switchboard is down.
 ALLOCATION_STALE_TIMEOUT_S = float(os.environ.get("ALLOCATION_STALE_TIMEOUT_S", "5"))
