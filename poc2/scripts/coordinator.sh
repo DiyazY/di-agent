@@ -125,7 +125,7 @@ for round in $(seq 1 "$ROUNDS"); do
         fi
         vm="${VMS[$idx]}"
         ip="${IPS[$idx]}"
-        raw=$(curl -sf "http://${ip}:9090/cost?taskType=pod-scheduling&nodeID=master" 2>/dev/null || echo "{}")
+        raw=$(curl -sf "http://${ip}:9090/cost?task=pod-scheduling&node=master" 2>/dev/null || echo "{}")
         rc=$(json_get "$raw" "ResourceCost")
         conf=$(json_get "$raw" "Confidence")
         rc="${rc:-0.000}"
@@ -143,7 +143,7 @@ for round in $(seq 1 "$ROUNDS"); do
     busiest_ip=$(ip_for "$busiest_vm")
     rec_raw=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"task_type\":\"pod-scheduling\",\"source_node_id\":\"master\"}" \
+        -d "{\"TaskType\":\"pod-scheduling\",\"SourceNodeID\":\"master\"}" \
         "http://${busiest_ip}:9090/recommend" 2>/dev/null || echo "{}")
 
     peer_id=$(json_get "$rec_raw" "PeerID")
