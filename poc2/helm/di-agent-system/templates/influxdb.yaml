@@ -1,0 +1,74 @@
+# Single-instance InfluxDB, reachable in-cluster at influxdb:8086 (no
+# hostNetwork — can be scheduled on any node).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: influxdb
+  labels:
+    app: influxdb
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: influxdb
+  template:
+    metadata:
+      labels:
+        app: influxdb
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.influxdb.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: influxdb
+          image: {{ include "diagent.publicImage" .Values.influxdb.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.influxdb.port }}
+          env:
+            - name: DOCKER_INFLUXDB_INIT_MODE
+              value: "setup"
+            - name: DOCKER_INFLUXDB_INIT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: influxdb-credentials
+                  key: admin-user
+            - name: DOCKER_INFLUXDB_INIT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: influxdb-credentials
+                  key: admin-password
+            - name: DOCKER_INFLUXDB_INIT_ORG
+              value: {{ .Values.influxdb.org | quote }}
+            - name: DOCKER_INFLUXDB_INIT_BUCKET
+              value: {{ .Values.influxdb.bucket | quote }}
+            - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: influxdb-credentials
+                  key: admin-token
+          resources:
+            {{- toYaml .Values.influxdb.resources | nindent 12 }}
+          volumeMounts:
+            - name: influxdb-data
+              mountPath: /var/lib/influxdb2
+      volumes:
+        - name: influxdb-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb
+  labels:
+    app: influxdb
+spec:
+  selector:
+    app: influxdb
+  ports:
+    - port: {{ .Values.influxdb.port }}
+      targetPort: {{ .Values.influxdb.port }}

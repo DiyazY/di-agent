@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POC_DIR="$(dirname "$SCRIPT_DIR")"
 GO_SRC="$(dirname "$POC_DIR")/semantic-map/go"
 SERVICE_SRC="$POC_DIR/config/di-agent.service"
-BINARY_OUT="/tmp/di-agent-poc"
+BINARY_OUT="/tmp/di-agent"
 
 # ── args ─────────────────────────────────────────────────────────────────────
 if [ "$#" -eq 0 ]; then
