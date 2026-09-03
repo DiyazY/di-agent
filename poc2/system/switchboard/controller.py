@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -7,6 +8,8 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from switchboard import ConsumerRequest, allocate_power
+
+logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 # Topic the switchboard publishes per-consumer allocations to.
@@ -84,6 +87,7 @@ class SwitchboardController:
         self._battery_thread: threading.Thread | None = None
         self._request_thread: threading.Thread | None = None
         self._allocation_thread: threading.Thread | None = None
+        self._errors: list[str] = []
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -156,6 +160,28 @@ class SwitchboardController:
                 },
             }
 
+    def get_health(self) -> dict:
+        threads = {
+            "genset_consumer": self._genset_thread,
+            "battery_consumer": self._battery_thread,
+            "request_consumer": self._request_thread,
+            "allocation": self._allocation_thread,
+        }
+        with self._lock:
+            errors = list(self._errors)
+        thread_status = {
+            name: thread is not None and thread.is_alive() for name, thread in threads.items()
+        }
+        healthy = all(thread_status.values()) and not errors
+        return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+
+    def _record_error(self, message: str) -> None:
+        with self._lock:
+            self._errors.append(message)
+
+    def _send(self, topic: str, *, key: str, value: dict) -> None:
+        self._producer.send(topic, key=key, value=value).get(timeout=5)
+
     def _is_stale(self, received_at: float) -> bool:
         return time.time() - received_at > STALE_TIMEOUT_S
 
@@ -180,7 +206,8 @@ class SwitchboardController:
                     )
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Genset consumer stopped unexpectedly")
+                self._record_error("genset_consumer stopped unexpectedly")
 
     def _consume_battery_telemetry(self) -> None:
         try:
@@ -196,7 +223,8 @@ class SwitchboardController:
                     self._battery_power_kw[battery_id] = (float(power_kw), time.time())
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Battery consumer stopped unexpectedly")
+                self._record_error("battery_consumer stopped unexpectedly")
 
     def _consume_requests(self) -> None:
         try:
@@ -217,7 +245,8 @@ class SwitchboardController:
                     )
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Request consumer stopped unexpectedly")
+                self._record_error("request_consumer stopped unexpectedly")
 
     def _get_available_supply_kw(self) -> float:
         """Sum of power output from gensets and batteries whose telemetry
@@ -261,6 +290,13 @@ class SwitchboardController:
         )
 
     def _run(self) -> None:
+        try:
+            self._run_loop()
+        except Exception:
+            logger.exception("Allocation worker stopped unexpectedly")
+            self._record_error("allocation worker stopped unexpectedly")
+
+    def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             with self._lock:
                 available_supply_kw = self._get_available_supply_kw()
@@ -292,7 +328,7 @@ class SwitchboardController:
                     "total_co2_kg_per_s": total_co2_kg_per_s,
                     "total_nox_kg_per_s": total_nox_kg_per_s,
                 }
-                self._producer.send(KAFKA_TOPIC, key=request.consumer_id, value=message)
+                self._send(KAFKA_TOPIC, key=request.consumer_id, value=message)
 
             allocated_str = ", ".join(
                 f"{cid}={power_kw:.1f}kW" for cid, power_kw in allocations.items()
