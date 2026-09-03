@@ -4,8 +4,7 @@
 #
 # Usage: ./03-agent.sh [vm1 vm2 vm3]
 #   VM names default to ubuntu-vm1 ubuntu-vm2 ubuntu-vm3.
-#   The first VM is the control-plane and gets REGIME=bursty; all others
-#   get REGIME=stable.
+#   The first worker VM gets REGIME=bursty; all other workers get REGIME=stable.
 
 set -euo pipefail
 
@@ -122,8 +121,13 @@ CP_IP=$(get_vm_ip "$CONTROL_PLANE_VM")
 info "Applying di-agent manifests via kubectl on $CONTROL_PLANE_VM ..."
 
 {
-    for vm in "${WORKER_VMS[@]}"; do
-        regime="stable"
+    for worker_idx in "${!WORKER_VMS[@]}"; do
+        vm="${WORKER_VMS[$worker_idx]}"
+        if [ "$worker_idx" -eq 0 ]; then
+            regime="bursty"
+        else
+            regime="stable"
+        fi
         cat <<EOF
 apiVersion: apps/v1
 kind: Deployment
