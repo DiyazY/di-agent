@@ -27,6 +27,18 @@ STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
 STALE_TIMEOUT_S = float(os.environ.get("STALE_TIMEOUT_S", "5"))
 
 
+def _deserialize_value(raw_value: bytes) -> dict | None:
+    try:
+        value = json.loads(raw_value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        logger.warning("Ignoring malformed Kafka payload")
+        return None
+    if not isinstance(value, dict):
+        logger.warning("Ignoring Kafka payload that is not an object")
+        return None
+    return value
+
+
 def _make_producer() -> KafkaProducer:
     while True:
         try:
@@ -46,7 +58,7 @@ def _make_consumer(*topics: str) -> KafkaConsumer:
             return KafkaConsumer(
                 *topics,
                 bootstrap_servers=KAFKA_BROKERS,
-                value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+                value_deserializer=_deserialize_value,
                 auto_offset_reset="latest",
                 group_id=None,
             )
@@ -190,20 +202,25 @@ class SwitchboardController:
             for record in self._genset_consumer:
                 if self._stop_event.is_set():
                     break
-                value = record.value
-                genset_id = value.get("genset_id", record.key)
-                power_kw = value.get("power_kw")
-                if power_kw is None:
-                    continue
-                co2_kg_per_s = float(value.get("co2_kg_per_s", 0.0))
-                nox_kg_per_s = float(value.get("nox_kg_per_s", 0.0))
-                with self._lock:
-                    self._genset_power_kw[genset_id] = (
-                        float(power_kw),
-                        co2_kg_per_s,
-                        nox_kg_per_s,
-                        time.time(),
-                    )
+                try:
+                    value = record.value
+                    if value is None:
+                        continue
+                    genset_id = value.get("genset_id", record.key)
+                    power_kw = value.get("power_kw")
+                    if power_kw is None:
+                        continue
+                    co2_kg_per_s = float(value.get("co2_kg_per_s", 0.0))
+                    nox_kg_per_s = float(value.get("nox_kg_per_s", 0.0))
+                    with self._lock:
+                        self._genset_power_kw[genset_id] = (
+                            float(power_kw),
+                            co2_kg_per_s,
+                            nox_kg_per_s,
+                            time.time(),
+                        )
+                except Exception as error:
+                    logger.warning("Ignoring malformed genset telemetry: %s", error)
         except Exception:
             if not self._stop_event.is_set():
                 logger.exception("Genset consumer stopped unexpectedly")
@@ -214,13 +231,18 @@ class SwitchboardController:
             for record in self._battery_consumer:
                 if self._stop_event.is_set():
                     break
-                value = record.value
-                battery_id = value.get("battery_id", record.key)
-                power_kw = value.get("power_kw")
-                if power_kw is None:
-                    continue
-                with self._lock:
-                    self._battery_power_kw[battery_id] = (float(power_kw), time.time())
+                try:
+                    value = record.value
+                    if value is None:
+                        continue
+                    battery_id = value.get("battery_id", record.key)
+                    power_kw = value.get("power_kw")
+                    if power_kw is None:
+                        continue
+                    with self._lock:
+                        self._battery_power_kw[battery_id] = (float(power_kw), time.time())
+                except Exception as error:
+                    logger.warning("Ignoring malformed battery telemetry: %s", error)
         except Exception:
             if not self._stop_event.is_set():
                 logger.exception("Battery consumer stopped unexpectedly")
@@ -231,18 +253,23 @@ class SwitchboardController:
             for record in self._request_consumer:
                 if self._stop_event.is_set():
                     break
-                value = record.value
-                consumer_id = value.get("consumer_id", record.key)
-                requested_power_kw = value.get("requested_power_kw")
-                if consumer_id is None or requested_power_kw is None:
-                    continue
-                priority = int(value.get("priority", 1))
-                with self._lock:
-                    self._consumer_requests[consumer_id] = (
-                        float(requested_power_kw),
-                        priority,
-                        time.time(),
-                    )
+                try:
+                    value = record.value
+                    if value is None:
+                        continue
+                    consumer_id = value.get("consumer_id", record.key)
+                    requested_power_kw = value.get("requested_power_kw")
+                    if consumer_id is None or requested_power_kw is None:
+                        continue
+                    priority = int(value.get("priority", 1))
+                    with self._lock:
+                        self._consumer_requests[consumer_id] = (
+                            float(requested_power_kw),
+                            priority,
+                            time.time(),
+                        )
+                except Exception as error:
+                    logger.warning("Ignoring malformed consumer request: %s", error)
         except Exception:
             if not self._stop_event.is_set():
                 logger.exception("Request consumer stopped unexpectedly")
