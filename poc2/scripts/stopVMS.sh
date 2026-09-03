@@ -22,7 +22,7 @@ stop_vm() {
     fi
     
     # Get VM state
-    local state=$(virsh domstate "$vm_name" 2>/dev/null)
+    local state=$(virsh domstate "$vm_name" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
     case "$state" in
         "running")
@@ -45,7 +45,7 @@ stop_vm() {
                 return 1
             fi
             ;;
-        "shutoff")
+        "shut off")
             echo "  ✓ VM '$vm_name' is already stopped"
             ;;
         *)

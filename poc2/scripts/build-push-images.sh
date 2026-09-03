@@ -24,19 +24,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POC_DIR="$(dirname "$SCRIPT_DIR")"
 SYSTEM_DIR="$POC_DIR/system"
 
-REGISTRY="${REGISTRY:-ghcr.io/unlabs-dev}"
+REGISTRY="${REGISTRY:-ghcr.io/chuducanh242002}"
 TAG="${TAG:-latest}"
 
-# service-name -> build-context-dir
-declare -A SERVICE_DIRS=(
-    [genset]="$SYSTEM_DIR/genset"
-    [switchboard]="$SYSTEM_DIR/switchboard"
-    [propulsion]="$SYSTEM_DIR/propulsion"
-    [battery]="$SYSTEM_DIR/battery"
-    [auxload]="$SYSTEM_DIR/auxiliary-load"
-    [telemetry-writer]="$SYSTEM_DIR/telemetry-writer"
-    [playground]="$POC_DIR/playground"
-)
+service_dir() {
+    case "$1" in
+        genset) printf '%s\n' "$SYSTEM_DIR/genset" ;;
+        switchboard) printf '%s\n' "$SYSTEM_DIR/switchboard" ;;
+        propulsion) printf '%s\n' "$SYSTEM_DIR/propulsion" ;;
+        battery) printf '%s\n' "$SYSTEM_DIR/battery" ;;
+        auxload) printf '%s\n' "$SYSTEM_DIR/auxiliary-load" ;;
+        telemetry-writer) printf '%s\n' "$SYSTEM_DIR/telemetry-writer" ;;
+        playground) printf '%s\n' "$POC_DIR/playground" ;;
+        *) return 1 ;;
+    esac
+}
 
 if [ "$#" -eq 0 ]; then
     SERVICES=(genset switchboard propulsion battery auxload telemetry-writer playground)
@@ -45,8 +47,7 @@ else
 fi
 
 for name in "${SERVICES[@]}"; do
-    dir="${SERVICE_DIRS[$name]:-}"
-    if [ -z "$dir" ]; then
+    if ! dir="$(service_dir "$name")"; then
         err "Unknown service: $name"
         exit 1
     fi

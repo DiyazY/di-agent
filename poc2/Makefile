@@ -67,10 +67,10 @@ helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 agent:
-	@bash $(SCRIPTS)/04-agent.sh $(VMS)
+	@bash $(SCRIPTS)/03-agent.sh $(VMS)
 
 peers:
-	@bash $(SCRIPTS)/05-peers.sh $(VMS)
+	@bash $(SCRIPTS)/04-peers.sh $(VMS)
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
@@ -114,7 +114,7 @@ status:
 		echo "=== $(vm) ==="; \
 		ip=$$(virsh domifaddr $(vm) --source lease 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1); \
 		if [ -n "$$ip" ]; then \
-			curl -s "http://$$ip:8080/cost" 2>/dev/null || echo "Agent not responding on $(vm)"; \
+			curl -s "http://$$ip:9090/cost" 2>/dev/null || echo "Agent not responding on $(vm)"; \
 		else \
 			echo "VM $(vm) not running or no IP assigned"; \
 		fi; \

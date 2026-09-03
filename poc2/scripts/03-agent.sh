@@ -74,6 +74,7 @@ fi
 
 (
     cd "$GO_SRC"
+  mkdir -p "$(dirname "$BINARY_OUT")"
     GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" go build -o "$BINARY_OUT" ./cmd/agent/
 )
 ok "Binary built: $BINARY_OUT ($(du -sh "$BINARY_OUT" | cut -f1))"

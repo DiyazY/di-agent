@@ -7,7 +7,7 @@ global:
   # propulsion, battery, auxload, telemetry-writer, playground). Public
   # images (kafka, influxdb, grafana) are referenced by their full upstream
   # repository path and are not affected by this value.
-  imageRegistry: ghcr.io/unlabs-dev
+  imageRegistry: ghcr.io/chuducanh242002
   imageTag: latest
   imagePullPolicy: IfNotPresent
   # e.g. [{ name: ghcr-creds }] if the registry above is private.
