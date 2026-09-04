@@ -124,6 +124,21 @@ type Property struct {
 	// Members are the properties a derived property aggregates.
 	Members []string `json:"members,omitempty"`
 
+	// Subject names what this property is a property of: "" for the node itself,
+	// "<kind>:<identity>" for anything narrower. It is part of the id and immutable
+	// after admission; it is stored rather than parsed back out so a subjects view is
+	// a group-by, not a regex.
+	Subject string `json:"subject,omitempty"`
+
+	// Labels is informational context stamped by the producer — a pod's QoS class,
+	// its cgroup path, a command name. Merged on later observations so enrichment can
+	// arrive late. Nothing in the map branches on a label.
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// RangeDeclared is true when a producer declared Range. False means [0,1] was
+	// assumed at admission, which an estimate has to say when it normalises by it.
+	RangeDeclared bool `json:"range_declared,omitempty"`
+
 	Status        Status    `json:"status"`
 	FirstObserved time.Time `json:"first_observed,omitzero"`
 	LastObserved  time.Time `json:"last_observed,omitzero"`
@@ -493,6 +508,9 @@ func (m *Map) DeclareProperty(p Property) error {
 	if p.Kind == "" {
 		p.Kind = Observed
 	}
+	if p.Range != ([2]float64{}) {
+		p.RangeDeclared = true
+	}
 	if p.Kind == Derived && len(p.Members) == 0 {
 		return fmt.Errorf("derived property %q has no members: it would have nothing to summarise", p.ID)
 	}
@@ -559,28 +577,38 @@ func (m *Map) DeclareProperty(p Property) error {
 	return nil
 }
 
-// Observe records a measurement of a property.
-//
-// An unknown property is admitted when Config.AdmitUnknown is set, which is the
-// mechanism by which the map follows a system that changes rather than a schema
-// someone wrote down. The admission is journalled, so a property that appears in
-// production is discoverable afterwards.
-func (m *Map) Observe(id string, value float64, at time.Time) error {
-	return m.ObserveEvent(id, value, at, "")
+// Observation is one reading of a property, with everything the producer declared
+// about it. Record is the one path into the map for telemetry; Observe and
+// ObserveEvent are conveniences over it.
+type Observation struct {
+	ID      string
+	Value   float64
+	At      time.Time
+	EventID string
+	Subject string
+	Unit    string
+	Range   *[2]float64
+	Source  string
+	Labels  map[string]string
 }
 
-// ObserveEvent is Observe with the observation's event identity.
-//
-// The identity does two jobs. The paired estimator uses it to recognise a pair it has
-// already folded in, and this method uses it to recognise the observation itself: an
-// event already seen is a no-op. Both matter for the same reason — a caller replaying an
-// archive, or a collector that re-sends after a timeout, would otherwise inflate
-// confidence, which is a claim about how much observation stands behind a value. The
-// value would barely move (the same number re-averaged is the same number) while the
-// count behind it doubled, so the map would report certainty it had not earned.
-//
-// An observation with no event identity cannot be recognised and is always applied.
+func (m *Map) Observe(id string, value float64, at time.Time) error {
+	return m.Record(Observation{ID: id, Value: value, At: at})
+}
+
 func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID string) error {
+	return m.Record(Observation{ID: id, Value: value, At: at, EventID: eventID})
+}
+
+// Record applies one observation. An unknown property is admitted when
+// Config.AdmitUnknown is set and stamped with the observation's subject, unit, range,
+// source and labels — the mechanism by which the map follows a system that changes
+// rather than a schema someone wrote down. A later observation merges labels and
+// never moves subject, unit or range: a disagreement there is journaled as a
+// conflict, because two producers describing one id differently is a fault worth
+// seeing rather than a value worth averaging.
+func (m *Map) Record(o Observation) error {
+	id, value, at, eventID := o.ID, o.Value, o.At, o.EventID
 	if id == "" {
 		return fmt.Errorf("observation needs a property id")
 	}
@@ -594,9 +622,6 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Keyed by property as well as event, because an event identity is only unique
-	// within the reading it names: one collector tick can carry several metrics, and
-	// some collectors number them from a shared counter.
 	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
 		return nil
 	}
@@ -609,11 +634,26 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 		p = &Property{
 			ID: id, Kind: Observed, Status: Active,
 			Range: [2]float64{0, 1}, Source: "admitted-on-observation",
+			Subject: o.Subject, Unit: o.Unit,
+		}
+		if o.Range != nil {
+			p.Range = *o.Range
+			p.RangeDeclared = true
+		}
+		if o.Source != "" {
+			p.Source = o.Source
+		}
+		if len(o.Labels) > 0 {
+			p.Labels = copyLabels(o.Labels)
 		}
 		m.properties[id] = p
 		m.bump(EventPropertyAdmitted, id, "system", map[string]any{
-			"value": value, "reason": "first observation of an undeclared property",
+			"value": value, "subject": o.Subject, "unit": o.Unit,
+			"range_declared": p.RangeDeclared,
+			"reason":         "first observation of an undeclared property",
 		}, at)
+	} else {
+		m.reconcileDeclarationLocked(p, o, at)
 	}
 	if p.Kind == Derived {
 		return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
@@ -638,9 +678,6 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 	m.revision++
 	m.recomputeDerivedLocked(at)
 
-	// Record for pairing, then learn from whatever this can pair with. Derived
-	// properties are recomputed above first, so a relationship between two summaries
-	// pairs two fresh values rather than one fresh and one from the previous tick.
 	obs := observation{value: p.Value, at: at, eventID: eventID}
 	m.latest[id] = obs
 	m.learnFromObservationLocked(id, obs)
@@ -656,6 +693,49 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 		m.learnFromObservationLocked(d.ID, dobs)
 	}
 	return nil
+}
+
+// reconcileDeclarationLocked merges what a later observation says about a property
+// with what the map already holds. Labels merge; subject, unit and range are fixed.
+func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Time) {
+	if len(o.Labels) > 0 {
+		if p.Labels == nil {
+			p.Labels = map[string]string{}
+		}
+		for k, v := range o.Labels {
+			p.Labels[k] = v
+		}
+	}
+	conflict := map[string]any{}
+	if o.Subject != "" && o.Subject != p.Subject {
+		conflict["subject"] = map[string]string{"held": p.Subject, "observed": o.Subject}
+	}
+	if o.Unit != "" && p.Unit != "" && o.Unit != p.Unit {
+		conflict["unit"] = map[string]string{"held": p.Unit, "observed": o.Unit}
+	}
+	if o.Range != nil && p.RangeDeclared && *o.Range != p.Range {
+		conflict["range"] = map[string]any{"held": p.Range, "observed": *o.Range}
+	}
+	if o.Range != nil && !p.RangeDeclared {
+		// A declaration arriving after an assumption is not a conflict; it is the
+		// producer saying what it meant, and the map takes it.
+		p.Range = *o.Range
+		p.RangeDeclared = true
+	}
+	if o.Unit != "" && p.Unit == "" {
+		p.Unit = o.Unit
+	}
+	if len(conflict) > 0 {
+		m.bump(EventPropertyConflict, p.ID, "system", conflict, at)
+	}
+}
+
+func copyLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func containsString(hay []string, needle string) bool {

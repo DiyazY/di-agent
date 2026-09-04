@@ -15,6 +15,7 @@ const (
 	EventPropertyAdmitted   EventKind = "property.admitted"
 	EventPropertyStale      EventKind = "property.stale"
 	EventPropertyRetired    EventKind = "property.retired"
+	EventPropertyConflict   EventKind = "property.conflict"
 
 	EventRelationshipDeclared EventKind = "relationship.declared"
 	EventRelationshipAsserted EventKind = "relationship.asserted"

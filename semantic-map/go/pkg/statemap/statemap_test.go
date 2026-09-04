@@ -1271,3 +1271,78 @@ func TestAlphaSlowDefaultsToTheDerivedConstant(t *testing.T) {
 		t.Errorf("AlphaSlow %v is not slower than Alpha %v", got, fast)
 	}
 }
+
+// ── subjects: a property is observable property × subject ─────────────────────
+
+func TestRecordStampsSubjectUnitRangeAndLabelsAtAdmission(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	rng := [2]float64{0, 100}
+	err := m.Record(Observation{
+		ID: "queue_depth@pod:abc", Value: 7, At: c.now(), EventID: "e1",
+		Subject: "pod:abc", Unit: "items", Range: &rng, Source: "app:ingest",
+		Labels: map[string]string{"kind": "pod"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("queue_depth@pod:abc")
+	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != rng || !p.RangeDeclared ||
+		p.Source != "app:ingest" || p.Labels["kind"] != "pod" {
+		t.Errorf("admitted property %+v; want subject, unit, range, source and labels from the observation", p)
+	}
+}
+
+func TestRecordWithoutRangeAssumesUnitIntervalAndSaysSo(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Record(Observation{ID: "x@disk:sda", Value: 0.2, At: c.now(), Subject: "disk:sda"}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("x@disk:sda")
+	if p.Range != [2]float64{0, 1} || p.RangeDeclared {
+		t.Errorf("got range %v declared=%v; want [0,1] assumed and range_declared=false", p.Range, p.RangeDeclared)
+	}
+}
+
+func TestRecordMergesLabelsAndKeepsSubjectImmutable(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "burstable"}})
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 2, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"name": "redis-0", "qos": "guaranteed"}})
+	p, _ := m.Property("a@pod:1")
+	if p.Labels["name"] != "redis-0" || p.Labels["qos"] != "guaranteed" {
+		t.Errorf("labels %v; want merged with later keys winning", p.Labels)
+	}
+	// A different subject under the same id is a conflict, journaled and not applied.
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 3, At: c.now(), Subject: "pod:2"})
+	p, _ = m.Property("a@pod:1")
+	if p.Subject != "pod:1" {
+		t.Errorf("subject changed to %q; it is part of the identity and must not move", p.Subject)
+	}
+	var conflict bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyConflict && e.Target == "a@pod:1" {
+			conflict = true
+		}
+	}
+	if !conflict {
+		t.Error("subject conflict was not journaled")
+	}
+}
+
+func TestCensusCountsSubjectsAndQueryFiltersBySubject(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .1, At: c.now(), Subject: "pod:1"})
+	_ = m.Record(Observation{ID: "mem@pod:1", Value: .1, At: c.now(), Subject: "pod:1"})
+	_ = m.Record(Observation{ID: "cpu@pod:2", Value: .1, At: c.now(), Subject: "pod:2"})
+	_ = m.Record(Observation{ID: "cpu", Value: .1, At: c.now()})
+	if got := m.Census().Subjects; got != 2 {
+		t.Errorf("census subjects=%d, want 2 (node scope is not a subject)", got)
+	}
+	v := m.State(Query{Subject: "pod:1"})
+	if len(v.Properties) != 2 {
+		t.Errorf("Query{Subject: pod:1} returned %d properties, want 2", len(v.Properties))
+	}
+}

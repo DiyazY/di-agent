@@ -27,6 +27,10 @@ type Query struct {
 	// RelatedTo restricts to properties reachable from this one in one hop, in
 	// either direction, which is the neighbourhood a decision about it consults.
 	RelatedTo string
+
+	// Subject restricts to properties of one subject ("" means no restriction, not
+	// "node scope"; use IDs for that).
+	Subject string
 }
 
 // StateView is the answer to a Query: properties, the relationships among them,
@@ -64,6 +68,10 @@ type StateCounts struct {
 	Learned            int `json:"learned"`
 	Asserted           int `json:"asserted"`
 	Unobserved         int `json:"properties_unobserved"`
+
+	// Subjects is the number of distinct non-empty subjects across non-retired
+	// properties: how many things narrower than the node the map currently models.
+	Subjects int `json:"subjects"`
 
 	// RelationshipsSignSuspect counts relationships that every paired observation has
 	// contradicted (see Relationship.SignSuspect). It belongs in the census and not
@@ -123,6 +131,9 @@ func (m *Map) State(q Query) StateView {
 			continue
 		}
 		if q.RelatedTo != "" && !neighbourhood[p.ID] {
+			continue
+		}
+		if q.Subject != "" && p.Subject != q.Subject {
 			continue
 		}
 		if p.Confidence < q.MinConfidence {
@@ -198,6 +209,7 @@ func (m *Map) Census() StateCounts {
 
 func (m *Map) censusLocked() StateCounts {
 	var c StateCounts
+	subjects := map[string]struct{}{}
 	for _, p := range m.properties {
 		c.PropertiesTotal++
 		switch p.Status {
@@ -217,7 +229,11 @@ func (m *Map) censusLocked() StateCounts {
 		if p.NObservations == 0 {
 			c.Unobserved++
 		}
+		if p.Subject != "" && p.Status != Retired {
+			subjects[p.Subject] = struct{}{}
+		}
 	}
+	c.Subjects = len(subjects)
 	for _, r := range m.relationships {
 		c.RelationshipsTotal++
 		if r.Status != Retired {
