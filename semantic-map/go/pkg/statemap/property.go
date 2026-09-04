@@ -558,7 +558,9 @@ func (m *Map) DeclareProperty(p Property) error {
 	}
 	if p.Range != ([2]float64{}) && existing.Range != p.Range {
 		changed["range"] = p.Range
+		changed["range_declared"] = true
 		existing.Range = p.Range
+		existing.RangeDeclared = true
 	}
 	if len(p.Members) > 0 && !sameStrings(existing.Members, p.Members) {
 		changed["members"] = p.Members
@@ -622,6 +624,9 @@ func (m *Map) Record(o Observation) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Keyed by property as well as event, because an event identity is only unique
+	// within the reading it names: one collector tick can carry several metrics, and
+	// some collectors number them from a shared counter.
 	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
 		return nil
 	}
@@ -653,11 +658,14 @@ func (m *Map) Record(o Observation) error {
 			"reason":         "first observation of an undeclared property",
 		}, at)
 	} else {
+		// Checked before reconciling: a derived id is rejected outright, and
+		// reconciling first would journal a conflict and advance the revision for an
+		// observation that is about to be refused anyway.
+		if p.Kind == Derived {
+			return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
+				id, p.Members)
+		}
 		m.reconcileDeclarationLocked(p, o, at)
-	}
-	if p.Kind == Derived {
-		return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
-			id, p.Members)
 	}
 
 	if p.Range != ([2]float64{}) && (value < p.Range[0] || value > p.Range[1]) {
@@ -678,6 +686,9 @@ func (m *Map) Record(o Observation) error {
 	m.revision++
 	m.recomputeDerivedLocked(at)
 
+	// Record for pairing, then learn from whatever this can pair with. Derived
+	// properties are recomputed above first, so a relationship between two summaries
+	// pairs two fresh values rather than one fresh and one from the previous tick.
 	obs := observation{value: p.Value, at: at, eventID: eventID}
 	m.latest[id] = obs
 	m.learnFromObservationLocked(id, obs)

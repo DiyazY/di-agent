@@ -1346,3 +1346,112 @@ func TestCensusCountsSubjectsAndQueryFiltersBySubject(t *testing.T) {
 		t.Errorf("Query{Subject: pod:1} returned %d properties, want 2", len(v.Properties))
 	}
 }
+
+// ── review fix round 1: Record must reject a Derived id before mutating state,
+// and a redeclared Range must count as declared ────────────────────────────────
+
+func TestRecordOnDerivedIdIsRejectedWithoutSideEffects(t *testing.T) {
+	m, c := newTestMap(t, Config{ConvergenceObservations: 4})
+	if err := m.DeclareProperty(Property{ID: "cpu", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeclareProperty(Property{
+		ID: "RC", Kind: Derived, Members: []string{"cpu"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("cpu", 0.5, c.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	revBefore := m.Revision()
+	eventsBefore := len(m.Journal().Events(0, 0))
+
+	c.advance(time.Second)
+	err := m.Record(Observation{
+		ID: "RC", Value: 0.5, At: c.now(), Subject: "pod:x",
+		Labels: map[string]string{"k": "v"},
+	})
+	if err == nil {
+		t.Fatal("want an error recording onto a derived id, got nil")
+	}
+	if got := m.Revision(); got != revBefore {
+		t.Errorf("revision advanced from %d to %d on a rejected observation", revBefore, got)
+	}
+	if got := len(m.Journal().Events(0, 0)); got != eventsBefore {
+		t.Errorf("journal grew from %d to %d events on a rejected observation", eventsBefore, got)
+	}
+	rc, _ := m.Property("RC")
+	if len(rc.Labels) != 0 {
+		t.Errorf("RC.Labels = %v; want untouched by the rejected observation", rc.Labels)
+	}
+}
+
+func TestRedeclaringARangeMakesItDeclared(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Observe("q@pod:1", 5, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("q@pod:1")
+	if p.RangeDeclared {
+		t.Fatalf("admitted property already has RangeDeclared=true; want an assumed range")
+	}
+
+	if err := m.DeclareProperty(Property{ID: "q@pod:1", Range: [2]float64{0, 100}}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = m.Property("q@pod:1")
+	if !p.RangeDeclared {
+		t.Fatalf("RangeDeclared = false after DeclareProperty carried a Range; want true")
+	}
+
+	c.advance(time.Second)
+	rng := [2]float64{0, 1}
+	if err := m.Record(Observation{ID: "q@pod:1", Value: 6, At: c.now(), Range: &rng}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = m.Property("q@pod:1")
+	if p.Range != ([2]float64{0, 100}) {
+		t.Errorf("Range = %v after a conflicting observation; want the declared [0,100] to hold", p.Range)
+	}
+	var conflict bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyConflict && e.Target == "q@pod:1" {
+			conflict = true
+		}
+	}
+	if !conflict {
+		t.Error("range conflict was not journaled")
+	}
+}
+
+func TestRecordAdoptsRangeAndUnitDeclaredLate(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Observe("x@pod:1", 0.5, c.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	eventsBefore := len(m.Journal().Events(0, 0))
+	c.advance(time.Second)
+	rng := [2]float64{0, 10}
+	if err := m.Record(Observation{
+		ID: "x@pod:1", Value: 0.6, At: c.now(), Unit: "items", Range: &rng,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("x@pod:1")
+	if p.Unit != "items" {
+		t.Errorf("Unit = %q, want %q", p.Unit, "items")
+	}
+	if p.Range != ([2]float64{0, 10}) {
+		t.Errorf("Range = %v, want [0,10]", p.Range)
+	}
+	if !p.RangeDeclared {
+		t.Error("RangeDeclared = false after a late Range declaration; want true")
+	}
+	for _, e := range m.Journal().Events(0, 0)[eventsBefore:] {
+		if e.Kind == EventPropertyConflict && e.Target == "x@pod:1" {
+			t.Errorf("unexpected property.conflict journaled for a late range/unit declaration: %+v", e)
+		}
+	}
+}
