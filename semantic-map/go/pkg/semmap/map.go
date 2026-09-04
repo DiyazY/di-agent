@@ -345,6 +345,10 @@ func (m *SemanticMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 	return m.proposer.GetCandidates()
 }
 
+// ConfirmCandidate applies an operator's confirmation. A candidate with a scoped
+// endpoint becomes a state-map relationship with Discovered provenance — never a
+// Di-Select proposition, whose vocabulary is constructs. A candidate whose endpoints
+// are both unscoped (the explicit construct path) goes through the ontology as before.
 func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
 	prop, err := m.proposer.Confirm(candidateID)
 	if err != nil {
@@ -353,10 +357,26 @@ func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
 	if prop == nil {
 		return nil // nothing to add: a disabled proposer, or already confirmed
 	}
+	if m.state != nil && (m.isScoped(prop.FromConstruct) || m.isScoped(prop.ToConstruct)) {
+		sign := 1
+		if prop.Direction == types.Negative {
+			sign = -1
+		}
+		return m.state.DeclareRelationship(statemap.Relationship{
+			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,
+			Provenance: statemap.Discovered,
+			Note:       "[discovered: " + prop.Description + "; confirmed by operator]",
+		})
+	}
 	// The facade applies it, because this is the only path that reaches both the
 	// declaration and the state model. A confirmed candidate that landed only in the
 	// declaration would appear in Propositions() and take part in no answer.
 	return m.AddValidatedProposition(prop)
+}
+
+func (m *SemanticMap) isScoped(id string) bool {
+	p, ok := m.state.Property(id)
+	return ok && p.Subject != ""
 }
 
 func (m *SemanticMap) RejectCandidate(candidateID string) error {

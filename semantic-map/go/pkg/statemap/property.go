@@ -164,6 +164,11 @@ const (
 
 	// Asserted by an operator, overriding what was seeded or learned.
 	Asserted Provenance = "asserted"
+
+	// Discovered from this system's observations by the proposer and confirmed by an
+	// operator. It stays Discovered as strength is learned: provenance answers why the
+	// edge exists, the strength layers answer what it is worth.
+	Discovered Provenance = "discovered"
 )
 
 // Relationship is a directed association between two properties.

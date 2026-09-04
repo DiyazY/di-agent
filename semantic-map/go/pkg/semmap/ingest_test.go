@@ -305,3 +305,48 @@ func TestIngestSample_ScopedSampleBecomesMetricAtSubject(t *testing.T) {
 		t.Errorf("scoped cpu value %.3f; want 0.4 untouched by construct polarity normalisation", p.Value)
 	}
 }
+
+// TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship pins Task 13's branch:
+// a candidate naming a scoped property (a pod↔pressure pair, not two Di-Select
+// constructs) must not become a proposition when confirmed. It becomes a state-map
+// relationship with Discovered provenance instead — a fact about this machine, not a
+// claim in Di-Select's vocabulary.
+func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) == 0 {
+		t.Fatal("setup: no candidate")
+	}
+	before, _ := sm.Propositions()
+	if err := sm.ConfirmCandidate(cs[0].CandidateID); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := sm.Propositions()
+	if len(after) != len(before) {
+		t.Errorf("a scoped candidate must not become a proposition (%d -> %d)", len(before), len(after))
+	}
+	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_pressure_ratio", "discovered"))
+	if !ok || r.Provenance != statemap.Discovered || r.Sign != 1 {
+		t.Fatalf("relationship %+v ok=%v; want Discovered, sign +1, label discovered", r, ok)
+	}
+	if state.Census().Discovered != 1 {
+		t.Errorf("census discovered=%d, want 1", state.Census().Discovered)
+	}
+}

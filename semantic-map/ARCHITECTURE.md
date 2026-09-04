@@ -1089,6 +1089,12 @@ The Proposer **never modifies the backbone directly**. `Confirm` delegates to `O
 
 The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It ring-buffers construct-level observations fed by `IngestSample` via `ObserveConstruct`, pairs values across constructs lexicographically, and emits `CandidateEdge`s when `|Pearson r|` exceeds the threshold (default 0.85). P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). `Confirm` delegates to `OntologyContract.AddValidatedProposition` with evidence source tag `proposer-mi`. The coverage check is direction-aware so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
 
+### The scope rule and Discovered provenance
+
+The proposer is fed every observed property. It pairs a **scoped** property (one with a subject) only with **unscoped** node-level properties — never two subjects, never two node-level properties (the backbone's business) — in the direction scoped → unscoped: a subject is a component of the node, so the stated assumption is component influences whole. Readings further apart than the pair window do not form a pair; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+
+Confirming such a candidate declares a state-map relationship with provenance **Discovered** and label `discovered`. It never becomes a proposition: Di-Select's vocabulary is constructs, and a pod↔pressure edge is a fact about this machine. Provenance answers why an edge exists (seeded, discovered, asserted); the two strength layers answer what it is worth. `ObserveConstruct` remains as the explicit construct-pairing path for callers that drive it directly; ingestion does not use it.
+
 ---
 
 ## 7. Adding a New Profile
