@@ -369,7 +369,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/relationships`              | `Relationship`                                           | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
-| GET  | `/state/estimate`                   | `?target=&assume=&without=` — answer from the map, optionally under hypotheses; returns a decision id | State model |
+| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses; `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
 | GET  | `/state/decisions`                  | `?limit=`                                                | State model |
 | GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
