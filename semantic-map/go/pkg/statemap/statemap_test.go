@@ -116,6 +116,10 @@ func TestDerivedPropertySummarisesLiveMembersOnly(t *testing.T) {
 	if mem.Status != Stale {
 		t.Errorf("mem status %s after a minute of silence; want stale", mem.Status)
 	}
+	d, _ = m.Property("resource_use")
+	if d.Status != Active {
+		t.Errorf("derived is %s while cpu is still active; want active", d.Status)
+	}
 }
 
 // ── create / update / remove, at runtime ──────────────────────────────────────
@@ -1514,5 +1518,30 @@ func TestObservationRevivesARetiredProperty(t *testing.T) {
 	}
 	if !revived {
 		t.Error("revival was not journaled")
+	}
+}
+
+func TestDerivedGoesStaleWhenNoMemberIsActiveAndReturnsWithThem(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, ConvergenceObservations: 2})
+	_ = m.DeclareProperty(Property{ID: "cpu", Range: [2]float64{0, 1}})
+	_ = m.DeclareProperty(Property{ID: "RC", Kind: Derived, Members: []string{"cpu"}})
+	_ = m.Observe("cpu", .6, c.now())
+	if d, _ := m.Property("RC"); d.Status != Active || d.Value != .6 {
+		t.Fatalf("setup: %+v", d)
+	}
+	// A quiet node: nothing observes, only the sweep runs.
+	c.advance(time.Minute)
+	m.Sweep()
+	d, _ := m.Property("RC")
+	if d.Status != Stale || d.Confidence != 0 {
+		t.Errorf("derived after all members went stale: status=%s confidence=%.2f; want stale, 0", d.Status, d.Confidence)
+	}
+	if d.NObservations == 0 {
+		t.Error("going stale must not erase how much the summary had rested on")
+	}
+	c.advance(time.Second)
+	_ = m.Observe("cpu", .7, c.now())
+	if d, _ = m.Property("RC"); d.Status != Active {
+		t.Errorf("derived did not return to active with its member: %+v", d)
 	}
 }

@@ -856,6 +856,7 @@ func (m *Map) Sweep() (stale, retired []string) {
 	}
 	sort.Strings(stale)
 	sort.Strings(retired)
+	m.recomputeDerivedLocked(now)
 	m.mu.Unlock()
 	m.fireRetireHook(retired)
 	return stale, retired
@@ -887,8 +888,17 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 			n++
 		}
 		if n == 0 {
+			// A summary of nothing is stale, not current. The last value is kept so a
+			// decision made from it stays reconstructible; the count is kept so "how
+			// much did this rest on" is still answerable; confidence says none of it
+			// is supported now.
 			d.Confidence = 0
-			d.NObservations = 0
+			if d.Status == Active && d.NObservations > 0 {
+				d.Status = Stale
+				m.bump(EventPropertyStale, d.ID, "sweep", map[string]any{
+					"reason": "no active member with observations",
+				}, at)
+			}
 			continue
 		}
 		d.Value = sum / float64(n)
@@ -897,6 +907,12 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 		d.LastObserved = at
 		if d.FirstObserved.IsZero() {
 			d.FirstObserved = at
+		}
+		if d.Status == Stale {
+			d.Status = Active
+			m.bump(EventPropertyRedeclared, d.ID, "system", map[string]any{
+				"revived": true, "reason": "a member is active again", "members_active": n,
+			}, at)
 		}
 	}
 }
