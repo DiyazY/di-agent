@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,22 +22,63 @@ import (
 // production), requiring no external monitoring daemon. Designed for RPi4
 // and similarly constrained nodes.
 //
+// Beyond the node-level aggregate at the root, the collector can walk the tree
+// and read the same three files per subject: a pod cgroup (systemd or cgroupfs
+// driver, recognised by recogniseKubepods) and, when allowlisted by glob, a
+// direct child of system.slice (recognised by recogniseUnits). A container
+// scope below a pod is never a subject — the pod is the unit of workload and
+// its cgroup survives container restarts, so the walk collects the pod's
+// directory and does not descend into it. The walk is depth-limited and
+// capped at CgroupOptions.MaxSubjects; beyond the cap the collector logs once
+// and skips the rest.
+//
+// Every sample this collector produces — root or subject — is declared as
+// "share-of-node-capacity" with Range [0,1]: CPU and memory readings are
+// always a fraction of what the whole node has, never a fraction of a
+// subject-local limit. A subject that has vanished between one Collect() and
+// the next simply produces no samples this tick; its cgroup snapshot is
+// dropped so a later reappearance (a reused pod UID, say) starts clean. There
+// is no "gone" event — absence is silence, not a signal.
+//
 // CPU metrics (cpu_utilization, cpu_throttle_ratio) require two consecutive
-// Collect() calls to establish a measurement window. The first call stores a
-// snapshot and returns only memory_utilization (which is instantaneous). All
-// three metrics are available from the second call onward.
+// Collect() calls per subject to establish a measurement window. The first
+// call a subject is seen, it contributes only memory_utilization (which is
+// instantaneous); CPU samples follow from the second call onward.
 //
 // Cgroups v1 is not supported — Ubuntu 22.04 on RPi4 uses v2 by default.
-// If cgroupRoot does not exist or files are unreadable, Collect() returns an
-// empty slice rather than an error (transient unavailability per contract).
+// If a directory's files are unreadable, that read is skipped rather than
+// treated as an error (transient unavailability per contract).
 type CgroupCollector struct {
 	nodeID     string
 	cgroupRoot string
 	sid        string  // stable source identifier
 	numCPU     float64 // logical CPUs on this node
+	memTotal   uint64  // node memory capacity in bytes; 0 if unknown
+	opts       CgroupOptions
+	recognise  []recogniser
 
-	mu   sync.Mutex
-	prev *cpuSnapshot // nil until first successful read
+	mu        sync.Mutex
+	prev      map[string]*cpuSnapshot // key: subject ("" = root)
+	capWarned bool
+}
+
+// CgroupOptions configures subject detection. The zero value walks nothing; the
+// daemon's defaults are Subjects on with MaxSubjects 256.
+type CgroupOptions struct {
+	// Subjects enables the walk over pod cgroups (and allowlisted units).
+	Subjects bool
+	// UnitGlobs allowlists direct children of system.slice as unit:<name> subjects.
+	UnitGlobs []string
+	// MaxSubjects bounds the walk; beyond it the collector logs once and skips.
+	MaxSubjects int
+	// CmdLabel stamps cmd=<argv0> from the subject's first process. Needs /proc
+	// visibility (hostPID or privileged), hence off by default.
+	CmdLabel bool
+	// MemTotalBytes is the node's memory capacity. 0 reads /proc/meminfo; when that
+	// is unreadable the collector falls back to memory.max (skipped when "max").
+	MemTotalBytes uint64
+	// ProcRoot is where /proc is mounted (tests point it at a fake tree).
+	ProcRoot string
 }
 
 type cpuSnapshot struct {
@@ -51,104 +94,191 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.CPUThrottleRatio,
 }
 
-// NewCgroupCollector creates a collector reading from cgroupRoot.
-//
-//	Production:  NewCgroupCollector("node_1", "/sys/fs/cgroup")
-//	Testing:     NewCgroupCollector("test-node", t.TempDir()) — populate with fake files
+// NewCgroupCollector creates a collector with the daemon defaults: subjects on,
+// 256 at most, no units, no cmd label.
 func NewCgroupCollector(nodeID, cgroupRoot string) *CgroupCollector {
-	return &CgroupCollector{
-		nodeID:     nodeID,
-		cgroupRoot: cgroupRoot,
-		sid:        "cgroup:" + nodeID,
-		numCPU:     float64(runtime.NumCPU()),
+	return NewCgroupCollectorWithOptions(nodeID, cgroupRoot, CgroupOptions{Subjects: true, MaxSubjects: 256})
+}
+
+// NewCgroupCollectorWithOptions creates a collector reading from cgroupRoot.
+//
+//	Production:  NewCgroupCollectorWithOptions("node_1", "/sys/fs/cgroup", opts)
+//	Testing:     NewCgroupCollectorWithOptions("test-node", t.TempDir(), opts) — fake files
+func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions) *CgroupCollector {
+	if opts.MaxSubjects <= 0 {
+		opts.MaxSubjects = 256
 	}
+	if opts.ProcRoot == "" {
+		opts.ProcRoot = "/proc"
+	}
+	c := &CgroupCollector{
+		nodeID: nodeID, cgroupRoot: cgroupRoot, sid: "cgroup:" + nodeID,
+		numCPU: float64(runtime.NumCPU()), opts: opts,
+		prev: make(map[string]*cpuSnapshot),
+	}
+	c.memTotal = opts.MemTotalBytes
+	if c.memTotal == 0 {
+		c.memTotal = readMemTotal(filepath.Join(opts.ProcRoot, "meminfo"))
+	}
+	c.recognise = []recogniser{recogniseKubepods}
+	if len(opts.UnitGlobs) > 0 {
+		c.recognise = append(c.recognise, recogniseUnits(opts.UnitGlobs))
+	}
+	return c
 }
 
 func (c *CgroupCollector) SourceID() string                     { return c.sid }
 func (c *CgroupCollector) AvailableMetrics() []types.MetricType { return cgroupAvailMetrics }
 
-// Collect reads one batch of normalized metric samples from cgroups v2.
-// Returns an empty slice (not an error) if cgroup files are unreadable or
-// if this is the first call and no delta can yet be computed.
+// Collect reads the root and, when enabled, every recognised subject, at one instant.
+// A subject exists iff its directory does this tick; nothing is emitted for one that
+// has gone, and its snapshot is dropped. Unreadable files are transient: skipped, not
+// errors.
 func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	now := time.Now()
-
-	cpu, err := readCPUStat(filepath.Join(c.cgroupRoot, "cpu.stat"))
-	if err != nil {
-		return nil, nil // transient — cgroup not yet mounted or permission denied
-	}
-	memCurrent, memMax, err := readMemoryStat(c.cgroupRoot)
-	if err != nil {
-		return nil, nil
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	prev := c.prev
-	c.prev = &cpuSnapshot{
-		ts:          now,
-		usageUsec:   cpu.usageUsec,
-		nrPeriods:   cpu.nrPeriods,
-		nrThrottled: cpu.nrThrottled,
+	out := c.collectOneLocked("", c.cgroupRoot, nil, now)
+	if !c.opts.Subjects {
+		return out, nil
 	}
-
-	// Always include instantaneous memory utilization.
-	var samples []*types.MetricSample
-	if memMax > 0 {
-		ratio := clamp(float64(memCurrent)/float64(memMax), 0, 1)
-		samples = append(samples, c.sample(types.MemoryUtilization, ratio, now, now))
+	seen := map[string]bool{}
+	root := filepath.Clean(c.cgroupRoot)
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || p == root {
+			return nil
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(p, root+string(filepath.Separator)))
+		first, _, _ := strings.Cut(rel, "/")
+		if !strings.HasPrefix(first, "kubepods") && first != "system.slice" {
+			return filepath.SkipDir
+		}
+		if strings.Count(rel, "/") > 3 {
+			return filepath.SkipDir
+		}
+		for _, r := range c.recognise {
+			info, ok := r(rel)
+			if !ok {
+				continue
+			}
+			if len(seen) >= c.opts.MaxSubjects {
+				if !c.capWarned {
+					log.Printf("cgroup collector: more than %d subjects; the rest are skipped (raise -cgroup-max-subjects)", c.opts.MaxSubjects)
+					c.capWarned = true
+				}
+				return filepath.SkipDir
+			}
+			seen[info.subject] = true
+			labels := info.labels
+			if c.opts.CmdLabel {
+				if cmd := c.cmdLabel(p); cmd != "" {
+					labels["cmd"] = cmd
+				}
+			}
+			out = append(out, c.collectOneLocked(info.subject, p, labels, now)...)
+			return filepath.SkipDir // a subject's children are not subjects
+		}
+		return nil
+	})
+	for subject := range c.prev {
+		if subject != "" && !seen[subject] {
+			delete(c.prev, subject)
+		}
 	}
-
-	if prev == nil {
-		// First call — no delta yet; return only memory.
-		return samples, nil
-	}
-
-	elapsedUs := now.Sub(prev.ts).Microseconds()
-	if elapsedUs < 1000 {
-		// Delta window < 1 ms — too small for meaningful CPU rates.
-		return samples, nil
-	}
-
-	// CPU utilization: fraction of available CPU time consumed.
-	//   delta_usage_usec / (elapsed_us * num_cpus)
-	if cpu.usageUsec >= prev.usageUsec {
-		cpuUtil := clamp(
-			float64(cpu.usageUsec-prev.usageUsec)/(float64(elapsedUs)*c.numCPU),
-			0, 1,
-		)
-		samples = append(samples, c.sample(types.CPUUtilization, cpuUtil, now, prev.ts))
-	}
-
-	// CPU throttle ratio: fraction of scheduling periods that were throttled.
-	//   delta_nr_throttled / delta_nr_periods
-	if cpu.nrPeriods > prev.nrPeriods {
-		throttle := clamp(
-			float64(cpu.nrThrottled-prev.nrThrottled)/float64(cpu.nrPeriods-prev.nrPeriods),
-			0, 1,
-		)
-		samples = append(samples, c.sample(types.CPUThrottleRatio, throttle, now, prev.ts))
-	}
-
-	return samples, nil
+	return out, nil
 }
 
-// sample builds a MetricSample with a deterministic event_id.
-// anchorTs identifies the start of the measurement window (prev.ts for delta
-// metrics; now for instantaneous). Two observations with the same anchor →
-// same event_id, enabling Updater idempotency across replayed telemetry.
-func (c *CgroupCollector) sample(mt types.MetricType, value float64, ts, anchorTs time.Time) *types.MetricSample {
-	key := fmt.Sprintf("%s:%s:%s:%d", c.sid, c.nodeID, string(mt), anchorTs.Unix())
-	h := sha256.Sum256([]byte(key))
-	eid := fmt.Sprintf("%x", h[:8])
+// collectOneLocked reads one cgroup directory as one subject ("" = the node).
+func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[string]string, now time.Time) []*types.MetricSample {
+	cpu, err := readCPUStat(filepath.Join(dir, "cpu.stat"))
+	if err != nil {
+		return nil
+	}
+	memCurrent, memMax, err := readMemoryStat(dir)
+	if err != nil {
+		return nil
+	}
+	prev := c.prev[subject]
+	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
 
+	var samples []*types.MetricSample
+	switch {
+	case c.memTotal > 0:
+		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
+	case memMax > 0:
+		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(memMax), 0, 1), now, now, subject, labels))
+	}
+	if prev == nil {
+		return samples
+	}
+	elapsedUs := now.Sub(prev.ts).Microseconds()
+	if elapsedUs < 1000 {
+		return samples
+	}
+	if cpu.usageUsec >= prev.usageUsec {
+		util := clamp(float64(cpu.usageUsec-prev.usageUsec)/(float64(elapsedUs)*c.numCPU), 0, 1)
+		samples = append(samples, c.sample(types.CPUUtilization, util, now, prev.ts, subject, labels))
+	}
+	if cpu.nrPeriods > prev.nrPeriods {
+		throttle := clamp(float64(cpu.nrThrottled-prev.nrThrottled)/float64(cpu.nrPeriods-prev.nrPeriods), 0, 1)
+		samples = append(samples, c.sample(types.CPUThrottleRatio, throttle, now, prev.ts, subject, labels))
+	}
+	return samples
+}
+
+// cmdLabel returns the basename of argv0 of the first process in the cgroup, or "".
+func (c *CgroupCollector) cmdLabel(dir string) string {
+	procs, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	if err != nil {
+		return ""
+	}
+	pid, _, _ := strings.Cut(strings.TrimSpace(string(procs)), "\n")
+	if pid == "" {
+		return ""
+	}
+	cmdline, err := os.ReadFile(filepath.Join(c.opts.ProcRoot, pid, "cmdline"))
+	if err != nil {
+		return ""
+	}
+	argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+	return filepath.Base(argv0)
+}
+
+// readMemTotal parses MemTotal from /proc/meminfo (kB). 0 when unavailable.
+func readMemTotal(path string) uint64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) >= 2 && fields[0] == "MemTotal:" {
+			kb, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return 0
+			}
+			return kb * 1024
+		}
+	}
+	return 0
+}
+
+var shareRange = [2]float64{0, 1}
+
+// sample builds a MetricSample with a deterministic event_id over
+// (source, node, subject, metric, anchor). Every reading is declared as a share of
+// the node's capacity in [0,1] — this collector's meaning, not the map's rule.
+func (c *CgroupCollector) sample(mt types.MetricType, value float64, ts, anchorTs time.Time, subject string, labels map[string]string) *types.MetricSample {
+	key := fmt.Sprintf("%s:%s:%s:%s:%d", c.sid, c.nodeID, subject, string(mt), anchorTs.Unix())
+	h := sha256.Sum256([]byte(key))
+	rng := shareRange
 	return &types.MetricSample{
-		NodeID:        c.nodeID,
-		MetricType:    mt,
-		Value:         value,
-		TimestampUnix: ts.Unix(),
-		EventID:       eid,
+		NodeID: c.nodeID, MetricType: mt, Value: value, TimestampUnix: ts.Unix(),
+		EventID: fmt.Sprintf("%x", h[:8]),
+		Subject: subject, Unit: "share-of-node-capacity", Range: &rng, Source: c.sid, Labels: labels,
 	}
 }
 

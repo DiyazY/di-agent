@@ -29,6 +29,23 @@ func TestCgroupCollectorCompliance(t *testing.T) {
 	})
 }
 
+func TestCgroupCollectorSubjectsCompliance(t *testing.T) {
+	compliance.RunCollectorCompliance(t, func(t *testing.T) contracts.CollectorContract {
+		root := newFakeCgroupRoot(t)
+		pod := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+		if err := os.MkdirAll(pod, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(pod, "cpu.stat"), "usage_usec 500000\nnr_periods 10\nnr_throttled 1\n")
+		mustWrite(t, filepath.Join(pod, "memory.current"), "268435456\n")
+		mustWrite(t, filepath.Join(pod, "memory.max"), "max\n")
+		c := minimal.NewCgroupCollectorWithOptions("test-node", root, minimal.CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 8 << 30})
+		c.Collect() //nolint:errcheck
+		time.Sleep(2 * time.Millisecond)
+		return c
+	})
+}
+
 func TestNetdataCollectorCompliance(t *testing.T) {
 	// Fake Netdata server responding to all three charts.
 	srv := httptest.NewServer(netdataFakeHandler(t))
