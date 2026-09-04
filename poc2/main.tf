@@ -79,7 +79,7 @@ resource "libvirt_volume" "vm_cloudinit" {
 resource "libvirt_domain" "vm1" {
   count  = var.vm_count
   name   = "${var.vm_hostname}${count.index + 1}"
-  memory = 3
+  memory = 2
   memory_unit = "GiB"
   vcpu   = count.index == 0 ? 2 : 1 # First Control plane node gets 2 vCPUs, worker nodes get 1 vCPU
   type = "kvm"

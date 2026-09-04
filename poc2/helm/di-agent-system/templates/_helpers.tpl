@@ -7,7 +7,11 @@ pin its own tag. Called as:
 */}}
 {{- define "diagent.customImage" -}}
 {{- $tag := .image.tag | default .global.imageTag -}}
+{{- if .global.imageRegistry -}}
 {{ .global.imageRegistry }}/{{ .image.repository }}:{{ $tag }}
+{{- else -}}
+{{ .image.repository }}:{{ $tag }}
+{{- end -}}
 {{- end -}}
 
 {{/*
