@@ -258,111 +258,43 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 		writeJSON(w, d)
 	})
 
-	// GET /state/estimate?target=<property>&id=<decision id> — answer a question
-	// FROM the map, and record the answer with the state that produced it.
+	// GET /state/estimate?target=<property>[&id=…][&assume=<property>=<value>]*[&without=<subject|property>]*
 	//
-	// This is the surface that makes the map load-bearing rather than descriptive.
-	// The answer is assembled by reading the target property and the relationships
-	// into it through a DecisionBuilder, so the record of what was read is produced
-	// by the reading itself and cannot drift from it. The response carries the
-	// decision id, and GET /state/decisions/{id} returns the same inputs afterwards
-	// — including after the system has moved on, which is the point.
+	// Answers FROM the map and records the answer with the state that produced it —
+	// and, when the question is a counterfactual, with what was supposed. See
+	// statemap.Map.Estimate for the arithmetic and the standing caveats.
 	mux.HandleFunc("GET /state/estimate", func(w http.ResponseWriter, r *http.Request) {
-		target := r.URL.Query().Get("target")
+		q := r.URL.Query()
+		target := q.Get("target")
 		if target == "" {
 			writeError(w, http.StatusBadRequest, "target is required: name the property to estimate")
 			return
 		}
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			id = "est-" + strconv.FormatUint(sm.Revision(), 10) + "-" + target
+		req := statemap.EstimateRequest{ID: q.Get("id"), Target: target, Without: q["without"]}
+		for _, a := range q["assume"] {
+			key, val, ok := strings.Cut(a, "=")
+			if !ok || key == "" {
+				writeError(w, http.StatusBadRequest, "assume must be <property>=<value>: "+a)
+				return
+			}
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "assume value must be a number: "+a)
+				return
+			}
+			if req.Assume == nil {
+				req.Assume = map[string]float64{}
+			}
+			req.Assume[key] = f
 		}
-
-		b := sm.Decide(id, "estimate "+target)
-		p, ok := b.Property(target)
-		if !ok {
-			// Still commit: a decision that could not be made is itself a fact worth
-			// recording, and its caveats say why.
-			d := b.Commit(map[string]any{"error": "unknown property"})
+		res := sm.Estimate(req)
+		if res.Err != "" {
 			writeErrorWithBody(w, http.StatusNotFound, map[string]any{
-				"error": "no property " + target, "decision_id": d.ID, "caveats": d.Caveats,
+				"error": res.Err, "decision_id": res.DecisionID, "caveats": res.Caveats,
 			})
 			return
 		}
-
-		// The influences: each incoming relationship's effective strength applied to
-		// its source property's current level. Reading the sources through the builder
-		// records them as inputs too, so the trace holds everything the answer used.
-		type influence struct {
-			Relationship string  `json:"relationship"`
-			Source       string  `json:"source"`
-			SourceValue  float64 `json:"source_value"`
-			Strength     float64 `json:"effective_strength"`
-			Sign         int     `json:"sign"`
-			Contribution float64 `json:"contribution"`
-			Provenance   string  `json:"provenance"`
-			// Basis names which layer the strength came from, or "unknown" when the
-			// relationship has none — in which case Strength and Contribution are
-			// absent rather than zero.
-			Basis string `json:"basis"`
-		}
-		var influences []influence
-		var sensitivity, contributions float64
-		for _, rel := range b.RelationshipsInto(target) {
-			src, ok := b.Property(rel.From)
-			if !ok {
-				continue
-			}
-			// Two different quantities, reported separately because conflating them is
-			// how the cost path briefly reported a sensitivity that was really a
-			// contribution: a sensitivity is per unit change in the source, a
-			// contribution is that times the source's current value.
-			// A relationship with nothing measured behind it is absent from both sums
-			// rather than contributing zero, and it is still listed, so a reader can see
-			// that an influence exists and has not been quantified yet.
-			eff, known := rel.Effective()
-			if !known {
-				influences = append(influences, influence{
-					Relationship: rel.ID, Source: rel.From, SourceValue: src.Value,
-					Sign: rel.Sign, Provenance: string(rel.Provenance), Basis: rel.Basis(),
-				})
-				continue
-			}
-			sensitivity += eff * float64(rel.Sign)
-			contribution := eff * float64(rel.Sign) * src.Value
-			contributions += contribution
-			influences = append(influences, influence{
-				Relationship: rel.ID, Source: rel.From, SourceValue: src.Value,
-				Strength: eff, Sign: rel.Sign, Basis: rel.Basis(),
-				Contribution: contribution, Provenance: string(rel.Provenance),
-			})
-		}
-
-		b.Note("level of %s is %.4f at confidence %.3f from %d observations",
-			target, p.Value, p.Confidence, p.NObservations)
-		b.Note("%d influences: sensitivity %+.4f per unit, contributing %+.4f at current values",
-			len(influences), sensitivity, contributions)
-		if len(influences) == 0 {
-			b.Caveat("nothing relates to %s, so the level is all the map can offer about it", target)
-		}
-
-		answer := map[string]any{
-			"target":        target,
-			"level":         p.Value,
-			"confidence":    p.Confidence,
-			"status":        string(p.Status),
-			"sensitivity":   sensitivity,
-			"contributions": contributions,
-		}
-		d := b.Commit(answer)
-		writeJSON(w, map[string]any{
-			"decision_id": d.ID,
-			"revision":    d.Revision,
-			"answer":      answer,
-			"influences":  influences,
-			"rationale":   d.Rationale,
-			"caveats":     d.Caveats,
-		})
+		writeJSON(w, res)
 	})
 
 	// POST /state/sweep — apply lifecycle transitions now.
