@@ -109,7 +109,7 @@ export default function SystemPanel({ system, id }: Props) {
       )}
       {(system === "genset" || system === "propulsion") && (
         <div className="metric-row">
-          <span>Shaft speed</span>
+          <span>sSpeed</span>
           <strong>
             {status?.speed_rpm !== undefined
               ? `${status.speed_rpm.toFixed(1)} rpm`
