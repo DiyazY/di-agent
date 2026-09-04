@@ -71,6 +71,12 @@ type Decision struct {
 	PropertiesRead    []Property     `json:"properties_read"`
 	RelationshipsRead []Relationship `json:"relationships_read"`
 
+	// Assumptions are the hypothetical source values an estimate substituted, and
+	// Excluded the subjects or properties taken to their floor. Recorded so a
+	// counterfactual is re-derivable: what was observed AND what was supposed.
+	Assumptions map[string]float64 `json:"assumptions,omitempty"`
+	Excluded    []string           `json:"excluded,omitempty"`
+
 	// Rationale is the human-readable form of the same content.
 	Rationale string `json:"rationale"`
 
@@ -213,17 +219,19 @@ func (j *Journal) Stats() (held int, dropped uint64, oldest uint64) {
 // recording cannot drift apart. A caller that reads a property through the builder
 // has, by construction, recorded that it read it.
 type DecisionBuilder struct {
-	m         *Map
-	id        string
-	question  string
-	at        time.Time
-	revision  uint64
-	props     []Property
-	rels      []Relationship
-	caveats   []string
-	seenProp  map[string]bool
-	seenRel   map[string]bool
-	rationale []string
+	m           *Map
+	id          string
+	question    string
+	at          time.Time
+	revision    uint64
+	props       []Property
+	rels        []Relationship
+	caveats     []string
+	seenProp    map[string]bool
+	seenRel     map[string]bool
+	rationale   []string
+	assumptions map[string]float64
+	excluded    []string
 }
 
 // Decide starts a decision record pinned to the map's current revision.
@@ -235,6 +243,7 @@ func (m *Map) Decide(id, question string) *DecisionBuilder {
 	return &DecisionBuilder{
 		m: m, id: id, question: question, at: now, revision: rev,
 		seenProp: map[string]bool{}, seenRel: map[string]bool{},
+		assumptions: map[string]float64{},
 	}
 }
 
@@ -321,6 +330,15 @@ func (b *DecisionBuilder) Caveat(format string, args ...any) {
 	b.caveats = append(b.caveats, fmt.Sprintf(format, args...))
 }
 
+// Assume records a hypothetical value for a property, as an input to the decision.
+func (b *DecisionBuilder) Assume(id string, v float64) {
+	b.assumptions[id] = v
+	b.rationale = append(b.rationale, fmt.Sprintf("assumed %s = %.4f", id, v))
+}
+
+// Exclude records a subject or property taken to its floor.
+func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
+
 // Commit records the decision in the journal and returns it.
 func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 	parts := make([]string, 0, len(b.rationale)+2)
@@ -339,6 +357,10 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		}
 		parts = append(parts, "relationships: "+describeIDs(ids))
 	}
+	var assumptions map[string]float64
+	if len(b.assumptions) > 0 {
+		assumptions = b.assumptions
+	}
 	d := &Decision{
 		ID:                b.id,
 		At:                b.at,
@@ -347,6 +369,8 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		Answer:            answer,
 		PropertiesRead:    b.props,
 		RelationshipsRead: b.rels,
+		Assumptions:       assumptions,
+		Excluded:          b.excluded,
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}
