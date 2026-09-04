@@ -311,7 +311,8 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		if bufSize == 0 {
 			bufSize = 120
 		}
-		proposer = minimal.NewMICorrelationProposer(ontology, thresh, minPairs, bufSize)
+		proposer = minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
+			time.Duration(cfg.PairWindowSeconds)*time.Second)
 	} else {
 		proposer = minimal.NewDisabledProposer()
 	}

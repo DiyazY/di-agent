@@ -84,7 +84,7 @@ func TestDisabledProposerCompliance(t *testing.T) {
 func TestMICorrelationProposerCompliance(t *testing.T) {
 	compliance.RunProposerCompliance(t, func(t *testing.T) contracts.ProposerContract {
 		o := minimal.NewOntologyFromSpec(mustSpec())
-		return minimal.NewMICorrelationProposer(o, 0.8, 10, 50)
+		return minimal.NewMICorrelationProposer(minimal.LookupOntology(o), 0.8, 10, 50, 0)
 	})
 }
 

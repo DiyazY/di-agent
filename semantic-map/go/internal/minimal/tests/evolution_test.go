@@ -713,7 +713,7 @@ func relFor(t *testing.T, state *statemap.Map, propID string) statemap.Relations
 func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	col := scripted.New("node_1") // collector unused — the proposer is driven directly
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	proposer := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+	proposer := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 
 	// Verify MU→PS is a free pair (no proposition in the bootstrap).
 	props, _ := ontology.Propositions()
@@ -761,7 +761,7 @@ func TestEvolution_NewEdgeProposeConfirm(t *testing.T) {
 	cand := cands[0]
 	t.Logf("  candidate detected: %s %s→%s(%s)  |r|=%.3f  n=%d",
 		cand.CandidateID, cand.FromID, cand.ToID, directionString(cand.Direction), cand.MIScore, cand.NObservations)
-	if cand.CandidateID != "P-prop-MU-PS" {
+	if cand.CandidateID != "MU->PS" {
 		t.Errorf("unexpected candidate id: %s", cand.CandidateID)
 	}
 	if cand.Direction != types.Positive {

@@ -4,10 +4,12 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/compliance"
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -21,7 +23,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 		// suite's data has positive correlation, so the proposer emits a
 		// positive PS→RC candidate (conflict-pair sibling — multigraph-legal).
 		ontology := minimal.NewOntologyFromSpec(mustSpec())
-		return minimal.NewMICorrelationProposer(ontology, 0.8, 30, 100)
+		return minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 100, 0)
 	})
 }
 
@@ -30,7 +32,7 @@ func TestMICorrelationProposerCompliance(t *testing.T) {
 func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
 	// Use a free pair (MU↛PS), threshold 0.8, minPairs 30, bufSize 200.
-	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+	p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 
 	for i := 0; i < 100; i++ {
 		x := float64(i) / 100.0
@@ -48,7 +50,7 @@ func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
 		t.Fatalf("expected exactly 1 candidate after strong correlation; got %d", len(cs))
 	}
 	c := cs[0]
-	if c.CandidateID != "P-prop-MU-PS" {
+	if c.CandidateID != "MU->PS" {
 		t.Errorf("unexpected candidate id: %s", c.CandidateID)
 	}
 	if c.Direction != types.Positive {
@@ -63,7 +65,7 @@ func TestMICorrelationProposer_StronglyCorrelatedEmits(t *testing.T) {
 
 func TestMICorrelationProposer_UncorrelatedQuiet(t *testing.T) {
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+	p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 	rng := rand.New(rand.NewSource(7))
 
 	for i := 0; i < 200; i++ {
@@ -84,7 +86,7 @@ func TestMICorrelationProposer_UncorrelatedQuiet(t *testing.T) {
 
 func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+	p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 
 	for i := 0; i < 60; i++ {
 		x := float64(i) / 100.0
@@ -155,7 +157,7 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 
 func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+	p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 
 	feed := func() {
 		for i := 0; i < 60; i++ {
@@ -189,7 +191,7 @@ func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
 
 func TestMICorrelationProposer_NoDuplicateCandidate(t *testing.T) {
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+	p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 
 	for i := 0; i < 500; i++ {
 		x := float64(i%100) / 100.0
@@ -224,7 +226,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 	}
 	{
 		ontology := minimal.NewOntologyFromSpec(mustSpec())
-		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+		p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
 			y := sameDirectionSeries(sign, x)
@@ -237,7 +239,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 	}
 	{
 		ontology := minimal.NewOntologyFromSpec(mustSpec())
-		p := minimal.NewMICorrelationProposer(ontology, 0.8, 30, 200)
+		p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.8, 30, 200, 0)
 		for i := 0; i < 100; i++ {
 			x := float64(i) / 100.0
 			y := sameDirectionSeries(flipDir(sign), x)
@@ -257,7 +259,7 @@ func TestMICorrelationProposer_RespectsExistingDirection(t *testing.T) {
 
 func TestMICorrelationProposer_PerfectCorrelation(t *testing.T) {
 	ontology := minimal.NewOntologyFromSpec(mustSpec())
-	p := minimal.NewMICorrelationProposer(ontology, 0.5, 10, 50)
+	p := minimal.NewMICorrelationProposer(minimal.LookupOntology(ontology), 0.5, 10, 50, 0)
 	// y = x exactly → r should be ≈ 1.0.
 	for i := 0; i < 20; i++ {
 		x := float64(i)
@@ -287,5 +289,118 @@ func TestLookupOntologyCoversDeclaredPropositions(t *testing.T) {
 	}
 	if l.Covered(first.FromConstruct, first.ToConstruct, -sign) {
 		t.Error("the opposite sign is not covered by the same proposition")
+	}
+}
+
+// ── Property-level pairing with the scope rule ────────────────────────────────
+
+// coveredNone is a lookup that covers nothing, for tests about pairing alone.
+type coveredNone struct{}
+
+func (coveredNone) Covered(_, _ string, _ int) bool { return false }
+
+func feedScoped(p *minimal.MICorrelationProposer, n int, gap time.Duration) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < n; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%20) / 20
+		_ = p.ObserveProperty("cpu_utilization@pod:a", "pod:a", x, at)
+		_ = p.ObserveProperty("cpu_utilization@pod:b", "pod:b", 1-x, at)
+		_ = p.ObserveProperty("cpu_pressure_ratio", "", 0.9*x+0.05, at.Add(gap))
+	}
+}
+
+func mustCandidates(t *testing.T, p *minimal.MICorrelationProposer) []*types.CandidateEdge {
+	t.Helper()
+	cs, err := p.GetCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cs
+}
+
+func TestObserveProperty_PairsScopedWithUnscopedOnly(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 40, 2*time.Second)
+	ids := map[string]bool{}
+	for _, c := range mustCandidates(t, p) {
+		ids[c.CandidateID] = true
+		if c.FromID == "cpu_pressure_ratio" {
+			t.Errorf("direction must be scoped -> unscoped; got %s -> %s", c.FromID, c.ToID)
+		}
+	}
+	if !ids["cpu_utilization@pod:a->cpu_pressure_ratio"] || !ids["cpu_utilization@pod:b->cpu_pressure_ratio"] {
+		t.Errorf("expected both pods to be proposed against node pressure; got %v", ids)
+	}
+	if ids["cpu_utilization@pod:a->cpu_utilization@pod:b"] || ids["cpu_utilization@pod:b->cpu_utilization@pod:a"] {
+		t.Error("two scoped properties must never be paired, however correlated")
+	}
+}
+
+func TestObserveProperty_RespectsTimeTolerance(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 40, 10*time.Minute) // every node reading is minutes away from every pod reading, so no pair can ever fall inside the 15s window
+	if cs := mustCandidates(t, p); len(cs) != 0 {
+		t.Errorf("readings outside the pair window formed %d candidates; want none", len(cs))
+	}
+}
+
+func TestObserveProperty_SkipsCoveredPairs(t *testing.T) {
+	m := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_ = m.Observe("cpu_utilization@pod:a", .1, time.Now())
+	_ = m.Observe("cpu_pressure_ratio", .1, time.Now())
+	_ = m.DeclareRelationship(statemap.Relationship{From: "cpu_utilization@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
+	p := minimal.NewMICorrelationProposer(m, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 40, 2*time.Second)
+	for _, c := range mustCandidates(t, p) {
+		if c.FromID == "cpu_utilization@pod:a" {
+			t.Error("a pair the state map already holds must not be re-proposed")
+		}
+	}
+}
+
+func TestForgetDropsEverythingAboutAProperty(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 40, 2*time.Second)
+	if err := p.Forget("cpu_utilization@pod:a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range mustCandidates(t, p) {
+		if c.FromID == "cpu_utilization@pod:a" {
+			t.Error("candidate for a forgotten property survived")
+		}
+	}
+	h, _ := p.GetHistory()
+	for _, c := range h {
+		if c.FromID == "cpu_utilization@pod:a" {
+			t.Error("history for a forgotten property survived")
+		}
+	}
+}
+
+func TestPendingCapDefersTheWeakest(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 10, 60, 15*time.Second)
+	p.SetMaxPending(2)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 30; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		_ = p.ObserveProperty("m@pod:1", "pod:1", x, at)
+		_ = p.ObserveProperty("m@pod:2", "pod:2", x*0.9, at)
+		_ = p.ObserveProperty("m@pod:3", "pod:3", x*0.7+0.1, at)
+		_ = p.ObserveProperty("node", "", x, at)
+	}
+	if cs := mustCandidates(t, p); len(cs) > 2 {
+		t.Errorf("pending=%d exceeds the cap of 2", len(cs))
+	}
+	var deferred int
+	h, _ := p.GetHistory()
+	for _, c := range h {
+		if c.Status == types.Deferred {
+			deferred++
+		}
+	}
+	if deferred == 0 {
+		t.Error("the excess candidate should be visible in history as deferred, not silently dropped")
 	}
 }

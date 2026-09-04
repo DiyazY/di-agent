@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,10 +19,10 @@ import (
 // MICorrelationProposer is a production-grade ProposerContract implementation.
 //
 // It maintains a fixed-size ring buffer of (valueA, valueB) observations per
-// construct pair. Once `minPairs` samples accumulate, it computes the Pearson
+// pair. Once `minPairs` samples accumulate, it computes the Pearson
 // correlation coefficient over the window. If |r| > threshold AND no existing
-// proposition between the pair exists AND the candidate was not previously
-// rejected, it emits a CandidateEdge.
+// relationship between the pair exists (per lookup) AND the candidate was not
+// previously rejected or deferred, it emits a CandidateEdge.
 //
 // Pearson correlation stands in for mutual information here — it captures
 // linear dependence cheaply and deterministically. The name "MI" is kept for
@@ -29,79 +30,179 @@ import (
 // edge-standard or cloud-full profile may swap in true mutual-information
 // estimation without changing the interface.
 //
-// p-values are computed via the Fisher z-transform (two-tailed). The natural
-// entry point from IngestSample is ObserveConstruct, which pairs a new
-// construct value against every other construct seen so far.
+// p-values are computed via the Fisher z-transform (two-tailed).
+//
+// ObserveProperty, the property path with the scope rule, is the entry point
+// from ingestion: a scoped property (non-empty subject) pairs only with
+// unscoped ones, direction scoped -> unscoped, inside a time tolerance.
+// ObserveConstruct is the explicit construct-pairing path kept for callers
+// that already know the pair and supply no timestamps; Observe is the
+// lowest-level explicit path either builds on.
 type MICorrelationProposer struct {
-	ontology contracts.OntologyContract
+	lookup contracts.RelationshipLookup
 
-	mu           sync.Mutex
-	buffers      map[string]*stats.PairWindow    // key: fromID + "→" + toID
-	candidates   map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
-	order        []string                        // insertion order of CandidateIDs, for stable history iteration
-	latestValues map[string]float64              // construct → most recent observed value
-	seq          uint64                          // monotonically increasing identity for pairs
+	mu         sync.Mutex
+	buffers    map[string]*stats.PairWindow    // key: fromID + "→" + toID
+	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
+	order      []string                        // insertion order of CandidateIDs
 
-	threshold float64 // |Pearson r| trigger to emit a candidate
-	minPairs  int     // minimum buffered samples before evaluating
-	bufSize   int     // ring buffer capacity
+	latestConstructs map[string]float64     // explicit construct path: id → last value
+	latestProps      map[string]latestValue // property path: id → last value, time, scope
+
+	threshold  float64
+	minPairs   int
+	bufSize    int
+	pairWindow time.Duration
+	maxPending int
+	seq        uint64 // identity for pairs that carry no timestamps
 }
 
-// NewMICorrelationProposer builds an MICorrelationProposer.
-//
-//	threshold: |Pearson r| above which a candidate is emitted (e.g. 0.8)
-//	minPairs:  observations required before correlation is computed
-//	bufSize:   ring buffer capacity per pair; larger windows are more stable
-//	            but slower to react
-func NewMICorrelationProposer(
-	ontology contracts.OntologyContract,
-	threshold float64,
-	minPairs, bufSize int,
-) *MICorrelationProposer {
+type latestValue struct {
+	value  float64
+	at     time.Time
+	scoped bool
+}
+
+// NewMICorrelationProposer builds the proposer. lookup answers "already known";
+// pairWindow is the time tolerance for the property path (0 = 15s).
+func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold float64,
+	minPairs, bufSize int, pairWindow time.Duration) *MICorrelationProposer {
 	if minPairs < 3 {
-		minPairs = 3 // Pearson is undefined for n < 2; require ≥3 for stability
+		minPairs = 3
 	}
 	if bufSize < minPairs {
 		bufSize = minPairs
 	}
+	if pairWindow <= 0 {
+		pairWindow = 15 * time.Second
+	}
 	return &MICorrelationProposer{
-		ontology:     ontology,
-		buffers:      make(map[string]*stats.PairWindow),
-		candidates:   make(map[string]*types.CandidateEdge),
-		latestValues: make(map[string]float64),
-		threshold:    threshold,
-		minPairs:     minPairs,
-		bufSize:      bufSize,
+		lookup:           lookup,
+		buffers:          make(map[string]*stats.PairWindow),
+		candidates:       make(map[string]*types.CandidateEdge),
+		latestConstructs: make(map[string]float64),
+		latestProps:      make(map[string]latestValue),
+		threshold:        threshold,
+		minPairs:         minPairs,
+		bufSize:          bufSize,
+		pairWindow:       pairWindow,
+		maxPending:       64,
 	}
 }
 
-// Observe appends a (valueA, valueB) pair to the ring buffer for
-// (fromID, toID), then re-evaluates correlation if the buffer has enough
-// samples. Emission rules:
-//
-//   - If a non-deprecated proposition already exists between (fromID, toID)
-//     in either direction (regardless of sign), no candidate is emitted —
-//     the backbone already covers this pair.
-//   - If a previously rejected candidate exists for this pair, it is not
-//     re-emitted within the session (permanent suppression per the contract).
-//   - Otherwise, if |r| > threshold, a CandidateEdge is created or updated
-//     in-place (idempotent on the deterministic CandidateID).
+// SetMaxPending bounds the number of Pending candidates; the excess is deferred,
+// weakest (|r|·n) first, and stays visible in history.
+func (p *MICorrelationProposer) SetMaxPending(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n > 0 {
+		p.maxPending = n
+	}
+}
+
 func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.observeLocked(fromID, toID, valueA, valueB)
+	p.seq++
+	return p.observeLocked(fromID, toID, valueA, valueB, strconv.FormatUint(p.seq, 10))
 }
 
-// observeLocked is the lock-free inner body of Observe. Callers must hold p.mu.
-func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64) error {
+// ObserveConstruct is the explicit construct-pairing path: it pairs the value with
+// the latest value of every other construct fed this way, in lexicographic order and
+// without a time tolerance, because its callers supply no timestamps.
+func (p *MICorrelationProposer) ObserveConstruct(constructID string, value float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.latestConstructs[constructID] = value
+	var firstErr error
+	for otherID, otherVal := range p.latestConstructs {
+		if otherID == constructID {
+			continue
+		}
+		fromID, toID, valA, valB := constructID, otherID, value, otherVal
+		if otherID < constructID {
+			fromID, toID, valA, valB = otherID, constructID, otherVal, value
+		}
+		p.seq++
+		if err := p.observeLocked(fromID, toID, valA, valB, strconv.FormatUint(p.seq, 10)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// ObserveProperty is the entry point from ingestion. The scope rule: a scoped
+// property (non-empty subject) pairs only with unscoped ones, never with another
+// scoped one, and the direction is scoped -> unscoped — a subject is a component of
+// the node, so the modelling assumption is component influences whole. Readings
+// further apart than pairWindow do not form a pair.
+func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float64, at time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	me := latestValue{value: value, at: at, scoped: subject != ""}
+	p.latestProps[id] = me
+	var firstErr error
+	for otherID, other := range p.latestProps {
+		if otherID == id || other.scoped == me.scoped {
+			continue
+		}
+		gap := at.Sub(other.at)
+		if gap < 0 {
+			gap = -gap
+		}
+		if gap > p.pairWindow {
+			continue
+		}
+		from, to, x, y := id, otherID, value, other.value
+		if !me.scoped {
+			from, to, x, y = otherID, id, other.value, value
+		}
+		identity := from + "|" + to + "|" + strconv.FormatInt(at.Unix(), 10) + "|" + strconv.FormatInt(other.at.Unix(), 10)
+		if err := p.observeLocked(from, to, x, y, identity); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// Forget drops the buffers, latest values and candidates involving a property.
+func (p *MICorrelationProposer) Forget(propertyID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.latestProps, propertyID)
+	delete(p.latestConstructs, propertyID)
+	for key := range p.buffers {
+		from, to, _ := strings.Cut(key, "→")
+		if from == propertyID || to == propertyID {
+			delete(p.buffers, key)
+		}
+	}
+	kept := p.order[:0]
+	for _, cid := range p.order {
+		c := p.candidates[cid]
+		if c != nil && (c.FromID == propertyID || c.ToID == propertyID) {
+			delete(p.candidates, cid)
+			continue
+		}
+		kept = append(kept, cid)
+	}
+	p.order = kept
+	return nil
+}
+
+func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string) error {
 	key := fromID + "→" + toID
 	buf, ok := p.buffers[key]
 	if !ok {
 		buf = stats.NewPairWindow()
 		p.buffers[key] = buf
 	}
-	p.seq++
-	buf.Fold(strconv.FormatUint(p.seq, 10), valueA, valueB, p.bufSize)
+	if !buf.Fold(identity, valueA, valueB, p.bufSize) {
+		return nil
+	}
 	if buf.Len() < p.minPairs {
 		return nil
 	}
@@ -109,88 +210,55 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	if !ok || math.Abs(r) < p.threshold {
 		return nil
 	}
-
-	direction := types.Positive
+	direction, sign := types.Positive, 1
 	if r < 0 {
-		direction = types.Negative
+		direction, sign = types.Negative, -1
 	}
-
-	// Backbone coverage check: skip if a non-deprecated proposition with the
-	// same (from, to, direction) already exists. The multigraph permits a
-	// conflict-pair sibling (opposite direction) to be proposed separately —
-	// this is how the Di-Select P2/P3, P5/P6, P7/P9 conflict pairs would be
-	// discovered if they were not part of the bootstrap.
-	covered, err := p.pairAlreadyCovered(fromID, toID, direction)
-	if err != nil {
-		return err
-	}
-	if covered {
+	if p.lookup != nil && p.lookup.Covered(fromID, toID, sign) {
 		return nil
 	}
-
-	candID := "P-prop-" + fromID + "-" + toID
-
-	// Suppression check: never re-emit a rejected candidate.
-	if existing, ok := p.candidates[candID]; ok && existing.Status == types.Rejected {
-		return nil
+	candID := fromID + "->" + toID
+	if existing, ok := p.candidates[candID]; ok {
+		switch existing.Status {
+		case types.Rejected, types.Deferred:
+			return nil // permanent suppression within the session; deferred stays out
+		case types.Pending:
+			existing.MIScore = math.Abs(r)
+			existing.PValue = stats.FisherPValue(r, buf.Len())
+			existing.NObservations = buf.Len()
+			return nil
+		}
 	}
-
-	if existing, ok := p.candidates[candID]; ok && existing.Status == types.Pending {
-		// Idempotent refresh of an already-pending candidate — update score
-		// and observation count without flipping direction (a previously
-		// emitted positive candidate that now sees negative correlation
-		// keeps its original direction; operators see the up-to-date score).
-		existing.MIScore = math.Abs(r)
-		existing.PValue = stats.FisherPValue(r, buf.Len())
-		existing.NObservations = buf.Len()
-		return nil
+	p.candidates[candID] = &types.CandidateEdge{
+		CandidateID: candID, FromID: fromID, ToID: toID, Direction: direction,
+		MIScore: math.Abs(r), PValue: stats.FisherPValue(r, buf.Len()),
+		NObservations: buf.Len(), Status: types.Pending,
 	}
-
-	cand := &types.CandidateEdge{
-		CandidateID:   candID,
-		FromID:        fromID,
-		ToID:          toID,
-		Direction:     direction,
-		MIScore:       math.Abs(r),
-		PValue:        stats.FisherPValue(r, buf.Len()),
-		NObservations: buf.Len(),
-		Status:        types.Pending,
-	}
-	p.candidates[candID] = cand
 	p.order = append(p.order, candID)
+	p.enforceCapLocked()
 	return nil
 }
 
-// ObserveConstruct records the latest value observed for a single construct.
-// It internally pairs the new value against every other construct for which a
-// value has been seen, feeding consistent (lexicographic) pair ordering into
-// observeLocked so buffer keys are deterministic regardless of call order.
-func (p *MICorrelationProposer) ObserveConstruct(constructID string, value float64) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Update latest value before pairing so the current observation is
-	// available when other constructs call ObserveConstruct later.
-	p.latestValues[constructID] = value
-
-	// Pair with every other construct for which we have a value.
-	var firstErr error
-	for otherID, otherVal := range p.latestValues {
-		if otherID == constructID {
-			continue
-		}
-		// Feed with consistent ordering: lexicographically smaller ID is "from".
-		fromID, toID := constructID, otherID
-		valA, valB := value, otherVal
-		if otherID < constructID {
-			fromID, toID = otherID, constructID
-			valA, valB = otherVal, value
-		}
-		if err := p.observeLocked(fromID, toID, valA, valB); err != nil && firstErr == nil {
-			firstErr = err
+// enforceCapLocked defers the weakest pending candidates until at most maxPending
+// remain. Deferred rather than deleted: an operator can see in history that the
+// proposer had more to say than the cap allowed.
+func (p *MICorrelationProposer) enforceCapLocked() {
+	var pending []*types.CandidateEdge
+	for _, c := range p.candidates {
+		if c.Status == types.Pending {
+			pending = append(pending, c)
 		}
 	}
-	return firstErr
+	for len(pending) > p.maxPending {
+		weakest := 0
+		for i, c := range pending {
+			if c.MIScore*float64(c.NObservations) < pending[weakest].MIScore*float64(pending[weakest].NObservations) {
+				weakest = i
+			}
+		}
+		pending[weakest].Status = types.Deferred
+		pending = append(pending[:weakest], pending[weakest+1:]...)
+	}
 }
 
 // GetCandidates returns Pending candidates sorted by CandidateID for stable
@@ -297,26 +365,6 @@ func (p *MICorrelationProposer) GetHistory() ([]*types.CandidateEdge, error) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-// pairAlreadyCovered reports whether the ontology backbone already has a
-// non-deprecated proposition connecting (fromID, toID) with the same
-// direction. Conflict-pair siblings (opposite direction on the same pair)
-// are intentionally NOT considered covered — the multigraph allows them.
-func (p *MICorrelationProposer) pairAlreadyCovered(fromID, toID string, dir types.Direction) (bool, error) {
-	props, err := p.ontology.Propositions()
-	if err != nil {
-		return false, err
-	}
-	for _, prop := range props {
-		if prop.Deprecated {
-			continue
-		}
-		if prop.FromConstruct == fromID && prop.ToConstruct == toID && prop.Direction == dir {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func synthesizePropSuffix(candidateID string) string {
 	h := sha256.Sum256([]byte(candidateID))
 	return hex.EncodeToString(h[:4]) // 8 hex chars
@@ -352,10 +400,3 @@ func (l ontologyLookup) Covered(from, to string, sign int) bool {
 	}
 	return false
 }
-
-// Temporary until Task 11 replaces them: keep the package compiling against the
-// extended contract.
-func (p *MICorrelationProposer) ObserveProperty(_, _ string, _ float64, _ time.Time) error {
-	return nil
-}
-func (p *MICorrelationProposer) Forget(_ string) error { return nil }
