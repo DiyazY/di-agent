@@ -1140,6 +1140,10 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 	r.NObservations = 0
 	r.FirstObserved = time.Time{}
 	r.LastObserved = time.Time{}
+	r.Established = nil
+	r.SignAgreements = 0
+	r.SignConflicts = 0
+	r.SignSuspectFlag = false
 	if r.Provenance == Learned {
 		// Back to seeded: the strength in force is the prior again, and provenance has to
 		// say so or the next reader will treat an unobserved edge as a measured one.

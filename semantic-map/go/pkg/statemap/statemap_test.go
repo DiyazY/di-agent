@@ -3,6 +3,7 @@ package statemap
 import (
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1543,5 +1544,29 @@ func TestDerivedGoesStaleWhenNoMemberIsActiveAndReturnsWithThem(t *testing.T) {
 	_ = m.Observe("cpu", .7, c.now())
 	if d, _ = m.Property("RC"); d.Status != Active {
 		t.Errorf("derived did not return to active with its member: %+v", d)
+	}
+}
+
+func TestResetRelationshipReturnsTheClaimToUnknown(t *testing.T) {
+	m, c := newTestMap(t, Config{Learn: true, LearnConfig: LearnConfig{PairWindowSeconds: 5, MinSupport: 3, Window: 10}})
+	_ = m.DeclareProperty(Property{ID: "a"})
+	_ = m.DeclareProperty(Property{ID: "b"})
+	_ = m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Label: "L"})
+	for i := 0; i < 6; i++ {
+		x := float64(i) / 10
+		_ = m.ObserveEvent("a", x, c.now(), "a"+strconv.Itoa(i))
+		_ = m.ObserveEvent("b", x*0.9, c.now(), "b"+strconv.Itoa(i))
+		c.advance(time.Second)
+	}
+	id := RelationshipID("a", "b", "L")
+	if r, _ := m.Relationship(id); r.Established == nil {
+		t.Fatal("setup: established layer never formed")
+	}
+	if err := m.ResetRelationship(id, "operator", "test"); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship(id)
+	if _, known := r.Effective(); known || r.Established != nil || r.SignAgreements != 0 || r.SignConflicts != 0 {
+		t.Errorf("after reset: %+v; want no effective strength, no established layer, no sign tally", r)
 	}
 }
