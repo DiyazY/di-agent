@@ -222,3 +222,50 @@ type TuneResponse struct {
 	Applied []TuneAdjustmentDTO `json:"applied"`
 	Intent  string              `json:"intent"`
 }
+
+// ── Estimate DTOs ─────────────────────────────────────────────────────────────
+
+// EstimateInfluence mirrors statemap.Influence on the wire.
+type EstimateInfluence struct {
+	Relationship             string   `json:"relationship"`
+	Source                   string   `json:"source"`
+	SourceValue              float64  `json:"source_value"`
+	Strength                 float64  `json:"effective_strength"`
+	Sign                     int      `json:"sign"`
+	Contribution             float64  `json:"contribution"`
+	Provenance               string   `json:"provenance"`
+	Basis                    string   `json:"basis"`
+	Known                    bool     `json:"known"`
+	HypotheticalSourceValue  *float64 `json:"hypothetical_source_value,omitempty"`
+	HypotheticalContribution *float64 `json:"hypothetical_contribution,omitempty"`
+}
+
+// EstimateAnswer mirrors statemap.EstimateAnswer.
+type EstimateAnswer struct {
+	Target        string  `json:"target"`
+	Level         float64 `json:"level"`
+	Confidence    float64 `json:"confidence"`
+	Status        string  `json:"status"`
+	Sensitivity   float64 `json:"sensitivity"`
+	Contributions float64 `json:"contributions"`
+}
+
+// EstimateHypothetical mirrors statemap.Hypothetical.
+type EstimateHypothetical struct {
+	Contributions  float64 `json:"contributions"`
+	Delta          float64 `json:"delta"`
+	ProjectedLevel float64 `json:"projected_level"`
+}
+
+// EstimateResponse is GET /state/estimate.
+type EstimateResponse struct {
+	DecisionID   string                `json:"decision_id"`
+	Revision     uint64                `json:"revision"`
+	Answer       EstimateAnswer        `json:"answer"`
+	Influences   []EstimateInfluence   `json:"influences"`
+	Assumptions  map[string]float64    `json:"assumptions,omitempty"`
+	Excluded     []string              `json:"excluded,omitempty"`
+	Hypothetical *EstimateHypothetical `json:"hypothetical,omitempty"`
+	Rationale    string                `json:"rationale"`
+	Caveats      []string              `json:"caveats,omitempty"`
+}

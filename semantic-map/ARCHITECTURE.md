@@ -972,6 +972,8 @@ the agent has seen enough to say so.
 Which construct plays which role comes from `domain_spec.json`'s `cost_model` block.
 The cost function was the last place in the daemon that knew a construct by name.
 
+**Counterfactuals.** `assume=<property>=<value>` substitutes a source's value in the contribution sum; `without=<subject>` takes every property of that subject to its range floor. Contributions are normalised by each source's declared range (`(v − lo)/(hi − lo)`), so a kW reading and a ratio can share a sum, and the projection is `level + Δ·(hi_t − lo_t)`, clamped to the target's range. Strength is a correlation magnitude used as a unit sensitivity, not a fitted slope, and every counterfactual says so. The decision records the assumptions and exclusions beside the properties and relationships read, so the answer is re-derivable after the system has moved on.
+
 ### What ingestion does
 
 `IngestSample` records the sample against the metric's own property, and everything else
@@ -1258,6 +1260,7 @@ There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` 
 | `proposition add <id> <f> <t> ±<s>` | `POST /ontology/proposition`                |                                                             |
 | `reset <from> <to>`                 | `POST /agent/reset`                         | Discard the evidence, keep the claim                        |
 | `candidates [list|confirm|reject|defer]` | `GET/POST /candidates*`                 |                                                             |
+| `estimate <target> [--assume p=v]... [--without x]...` | `GET /state/estimate` | Answer from the map, optionally under hypotheses; prints the decision id |
 | `recommend` / `simulate`            | the corresponding POST                      | Existing endpoints                                          |
 | `watch graph|edges`                 | polled GET                                  | 2s ticker; clear-screen unless `--no-color`                 |
 | `dot`                               | `GET /graph` → Graphviz                     | Direct paste into `dot -Tpdf`                               |
