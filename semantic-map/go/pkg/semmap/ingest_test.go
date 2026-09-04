@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/domain"
@@ -225,6 +226,57 @@ func TestIngestSampleNormalizesToConstructPolarity(t *testing.T) {
 		t.Errorf("stored value %.4f, want 0.75 — a metric opposed to its construct must "+
 			"be reflected on the way in, or the construct summarises two quantities that "+
 			"cancel", p.Value)
+	}
+}
+
+// TestIngestSample_FeedsProposerAndForgetsOnRetirement pins the join Task 12 makes:
+// every observed property reaches the proposer through ObserveProperty (not just
+// routed constructs), and a property's retirement — through the map's retire hook —
+// makes the proposer forget it, so a candidate cannot outlive the endpoint it names.
+func TestIngestSample_FeedsProposerAndForgetsOnRetirement(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true, Learn: true}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		ts := t0 + int64(i)*10
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: ts,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a", Unit: "share-of-node-capacity", Range: &[2]float64{0, 1}})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: ts + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, err := sm.PendingCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range cs {
+		if c.FromID == "cpu_utilization@pod:a" && c.ToID == "cpu_pressure_ratio" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ingestion did not reach the proposer; candidates=%v", cs)
+	}
+
+	if err := state.RetireProperty("cpu_utilization@pod:a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ = sm.PendingCandidates()
+	for _, c := range cs {
+		if c.FromID == "cpu_utilization@pod:a" {
+			t.Error("candidate survived its endpoint's retirement")
+		}
 	}
 }
 

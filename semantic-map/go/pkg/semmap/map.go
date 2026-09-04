@@ -136,8 +136,15 @@ func NewWithPeers(
 }
 
 // AttachState gives this map a state model to feed. Samples ingested afterwards
-// create and update its properties.
-func (m *SemanticMap) AttachState(s *statemap.Map) { m.state = s }
+// create and update its properties, and a property that retires — by silence or by
+// an operator — is forgotten by the proposer through the map's retire hook, which
+// neither path can bypass.
+func (m *SemanticMap) AttachState(s *statemap.Map) {
+	m.state = s
+	if s != nil && m.proposer != nil {
+		s.SetRetireHook(func(id string) { _ = m.proposer.Forget(id) })
+	}
+}
 
 // State returns the attached state model, or nil.
 func (m *SemanticMap) State() *statemap.Map { return m.state }
@@ -179,7 +186,7 @@ func (m *SemanticMap) SimulateOutcome(ctx *types.OffloadContext, targetNodeID st
 // ── Telemetry ingestion ───────────────────────────────────────────────────────
 
 // IngestSample records one MetricSample in the state model, and notifies the proposer
-// about the construct that summarises it.
+// of the property it observed.
 //
 // The whole path is now: observe the property, let the map recompute whatever derives
 // from it, and let the map's own estimator fold the observation into the relationships
@@ -208,14 +215,15 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		return ErrNoStateModel
 	}
 
-	// Express the reading in its construct's polarity before anything stores or
-	// learns from it. A metric that runs opposite to the construct it informs would
-	// otherwise pull that construct's summary the wrong way, and every relationship
-	// learned from it would be asked to agree with a sign the reading contradicts.
-	// Unrouted and same-polarity metrics pass through untouched.
-	// A scoped sample is a property of something narrower than the node, so its id
-	// carries the subject and it is never routed: polarity normalisation and construct
-	// membership are node-level concerns.
+	// A scoped sample is a property of something narrower than the node — its id
+	// carries the subject — and it is never routed or normalised: polarity and
+	// construct membership are node-level concerns, so a scoped reading of a routed
+	// metric type still passes through untouched. An unscoped sample is expressed in
+	// its construct's polarity before anything stores or learns from it, because a
+	// metric that runs opposite to the construct it informs would otherwise pull that
+	// construct's summary the wrong way, and every relationship learned from it would
+	// be asked to agree with a sign the reading contradicts; an unrouted or
+	// same-polarity metric passes through untouched either way.
 	id := string(sample.MetricType)
 	value := sample.Value
 	router := m.router()
@@ -233,13 +241,10 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		return err
 	}
 
-	// The proposer looks for relations the backbone does not declare, and it pairs
-	// construct values, so it needs the routed construct rather than the raw metric.
-	// An unrouted metric is simply not something it can propose about yet.
-	if m.proposer != nil && router != nil {
-		if construct, routed := router.ConstructForMetric(string(sample.MetricType)); routed {
-			_ = m.proposer.ObserveConstruct(construct, value)
-		}
+	// Every observed property reaches the proposer; it applies the scope rule itself.
+	// Advisory: its errors must not block telemetry.
+	if m.proposer != nil {
+		_ = m.proposer.ObserveProperty(id, sample.Subject, value, time.Unix(sample.TimestampUnix, 0))
 	}
 	return nil
 }
