@@ -1070,3 +1070,17 @@ func newTestState(t *testing.T) *statemap.Map {
 		AdmitUnknown:            true,
 	}, statemap.NewJournal(0))
 }
+
+func TestIngestSample_RejectsMalformedSubject(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"cpu_utilization","value":0.1,"timestamp_unix":1,"event_id":"e","subject":"pod/x"}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 for a subject containing '/'", resp.StatusCode)
+	}
+}

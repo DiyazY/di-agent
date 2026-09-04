@@ -2,7 +2,7 @@
 //
 // It loads the configured profile, seeds the graph from Di-Select priors,
 // and serves the agent queries plus the graph control surface over
-// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest. The graph
+// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest-sample. The graph
 // introspection (/graph, /edges, /history, /constructs, /propositions,
 // /neighbors), ontology mutation (/ontology/*), candidate review
 // (/candidates/{id}/{confirm,reject,defer}), edge reset (/agent/reset),
@@ -22,8 +22,8 @@
 //
 // The autonomous collection loop ticks at -collect-interval, calls
 // CollectorContract.Collect on the profile's collector, and runs each sample
-// through the Bridge → Updater pipe. Setting -collect-interval=0 or
-// -cgroup-root="" disables it (the manual POST /ingest path still works).
+// through the facade's IngestSample. Setting -collect-interval=0 or
+// -cgroup-root="" disables it (the manual POST /ingest-sample path still works).
 //
 // -regime (stable|default|bursty|volatile) sets alpha and convergence to a
 // pre-characterised bundle matching the deployment's dynamics. Overrides any

@@ -515,15 +515,11 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, TuneResponse{Applied: dtos, Intent: req.Intent})
 	})
 
-	// POST /ingest-sample — Bridge-routed telemetry from external collectors.
-	//
-	// Where POST /ingest takes a fully pre-routed (from, to, value, event_id)
-	// tuple and bypasses the Bridge, /ingest-sample carries a typed MetricSample
-	// and runs the Bridge server-side. This is the public-API entry point for
-	// out-of-tree collectors (e.g. the parquet replay tool) that cannot
-	// import internal Go packages. Bridge silently ignores unmapped metric
-	// types; this handler additionally rejects values outside the closed
-	// catalogue with 400 so misconfigured callers fail loudly.
+	// POST /ingest-sample — the wire face of the sample boundary. In-process collectors
+	// hand the facade the same MetricSample; an out-of-tree producer (the parquet replay
+	// tool, an application pushing its own metrics) posts it here. An unrouted metric
+	// type is recorded as a property and answered 202; a scoped sample (non-empty
+	// subject) is always unrouted, because routing is a node-level concern.
 	mux.HandleFunc("POST /ingest-sample", func(w http.ResponseWriter, r *http.Request) {
 		if err := requireJSON(r); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())

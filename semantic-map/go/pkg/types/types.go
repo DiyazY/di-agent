@@ -2,7 +2,10 @@
 // No contract implementation may define its own wire types — all must use these.
 package types
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Direction encodes the sign of a proposition edge.
 type Direction int
@@ -224,23 +227,42 @@ const (
 	EnergyJoules        MetricType = "energy_joules"
 )
 
-// MetricSample is one normalized observation emitted by a CollectorContract.
+// MetricSample is one observation crossing the sample boundary. In-process collectors
+// and external producers on POST /ingest-sample both hand the facade this; the map
+// cannot tell them apart and must not try.
 //
-// EventID must be deterministic: the same physical observation (same SourceID,
-// NodeID, ContainerID, MetricType, and TimestampUnix) must produce the same
-// EventID across calls and restarts, so that the Updater's idempotency
-// guarantee holds end-to-end.
+// EventID must be deterministic: the same physical observation (same source, node,
+// subject, metric and timestamp) must produce the same EventID across calls and
+// restarts, so idempotency holds end-to-end.
 //
-// ContainerID is empty for node-level aggregates.
-// Labels carries source-specific metadata and is informational only.
+// Subject is "" for the node itself and "<kind>:<identity>" for anything narrower —
+// a pod, a disk, a systemd unit, an application component. Kind is whatever the
+// producer says; the map never interprets it. Unit and Range are the producer's
+// declaration of what the value means; the map stamps them at admission.
+// Labels is informational; nothing branches on it.
 type MetricSample struct {
 	NodeID        string
 	MetricType    MetricType
 	Value         float64
 	TimestampUnix int64
 	EventID       string
-	ContainerID   string            // empty = node-level aggregate
-	Labels        map[string]string // informational; bridge must not branch on these
+	Subject       string
+	Unit          string
+	Range         *[2]float64
+	Source        string
+	Labels        map[string]string
+}
+
+var subjectRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._:-]+$`)
+
+// ValidSubject reports whether s is empty (node scope) or has the form
+// <kind>:<identity> over [A-Za-z0-9._:-]. A '/' is never allowed: property ids are
+// single path segments in the HTTP surface.
+func ValidSubject(s string) bool {
+	if s == "" {
+		return true
+	}
+	return subjectRe.MatchString(s)
 }
 
 // ── Tuner types ───────────────────────────────────────────────────────────────
