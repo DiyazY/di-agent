@@ -18,6 +18,21 @@ type recogniser func(relPath string) (subjectInfo, bool)
 
 var podUIDRe = regexp.MustCompile(`^(?:kubepods-(?:besteffort|burstable)-|kubepods-)?pod([0-9a-fA-F]{8})[-_]([0-9a-fA-F]{4})[-_]([0-9a-fA-F]{4})[-_]([0-9a-fA-F]{4})[-_]([0-9a-fA-F]{12})(\.slice)?$`)
 
+// sanitiseIdentity converts a name to a valid subject identity by replacing every byte
+// outside [A-Za-z0-9._-] with '_'. The subject charset is [A-Za-z0-9._:-] after the colon,
+// and types.ValidSubject enforces it at the wire; the label keeps the true name so tracing
+// back to the original cgroup is always possible.
+func sanitiseIdentity(name string) string {
+	b := []byte(name)
+	for i, ch := range b {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+			ch == '.' || ch == '_' || ch == '-') {
+			b[i] = '_'
+		}
+	}
+	return string(b)
+}
+
 // recogniseKubepods recognises a pod-level cgroup under the kubelet's tree, for both
 // the systemd driver (…/kubepods-<qos>-pod<uid_with_underscores>.slice) and the
 // cgroupfs driver (kubepods/<qos>/pod<uid>). Container scopes below a pod are not
@@ -64,7 +79,7 @@ func recogniseUnits(globs []string) recogniser {
 		for _, g := range globs {
 			if ok, _ := path.Match(g, name); ok {
 				return subjectInfo{
-					subject: "unit:" + name,
+					subject: "unit:" + sanitiseIdentity(name),
 					labels:  map[string]string{"kind": "unit", "unit": name, "cgroup": relPath},
 				}, true
 			}

@@ -1,6 +1,10 @@
 package minimal
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/DiyazY/di-agent/pkg/types"
+)
 
 func TestRecogniseKubepodsShapes(t *testing.T) {
 	uid := "8f3c1234-aaaa-bbbb-cccc-1234567890ab"
@@ -52,5 +56,61 @@ func TestRecogniseUnitsHonoursGlobs(t *testing.T) {
 	}
 	if _, ok := recogniseUnits(nil)("system.slice/k0sworker.service"); ok {
 		t.Error("an empty allowlist recognises nothing")
+	}
+
+	// Systemd instantiated units containing @ must have the subject sanitised
+	r2 := recogniseUnits([]string{"getty@*"})
+	info, ok := r2("system.slice/getty@tty1.service")
+	if !ok {
+		t.Errorf("getty@tty1.service: ok=false, expected true")
+	} else if info.subject != "unit:getty_tty1.service" {
+		t.Errorf("getty@tty1.service: subject=%q want unit:getty_tty1.service", info.subject)
+	} else if info.labels["unit"] != "getty@tty1.service" {
+		t.Errorf("getty@tty1.service: labels[unit]=%q want getty@tty1.service", info.labels["unit"])
+	}
+}
+
+func TestRecognisedSubjectsAreValidOnTheWire(t *testing.T) {
+	// Test kubepods subjects
+	uid := "8f3c1234-aaaa-bbbb-cccc-1234567890ab"
+	kubepodsTestCases := []string{
+		"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice",
+		"kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice",
+		"kubepods.slice/kubepods-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice",
+		"kubepods/burstable/pod" + uid,
+		"kubepods/pod" + uid,
+	}
+
+	for _, path := range kubepodsTestCases {
+		info, ok := recogniseKubepods(path)
+		if !ok {
+			t.Errorf("recogniseKubepods(%q) returned ok=false", path)
+			continue
+		}
+		if !types.ValidSubject(info.subject) {
+			t.Errorf("recogniseKubepods(%q): subject %q is not valid on the wire", path, info.subject)
+		}
+	}
+
+	// Test unit subjects with various special characters
+	unitTestCases := []string{
+		"k0sworker.service",
+		"containerd.service",
+		"getty@tty1.service",
+		"serial-getty@ttyS0.service",
+		"foo@instance.service",
+	}
+	r := recogniseUnits([]string{"*"}) // allowlist everything for this test
+
+	for _, unitName := range unitTestCases {
+		path := "system.slice/" + unitName
+		info, ok := r(path)
+		if !ok {
+			t.Errorf("recogniseUnits(*) did not recognise %q", path)
+			continue
+		}
+		if !types.ValidSubject(info.subject) {
+			t.Errorf("recogniseUnits(*) for %q: subject %q is not valid on the wire", path, info.subject)
+		}
 	}
 }
