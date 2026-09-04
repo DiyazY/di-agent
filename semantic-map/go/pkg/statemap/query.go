@@ -200,6 +200,21 @@ func (m *Map) Relationships(from, to string) []Relationship {
 	return out
 }
 
+// Covered reports whether a non-retired relationship already runs from -> to with
+// this sign. It is the map's answer to the proposer's "is this already known", and
+// a retired relationship is not: a subject that left and returned has to earn its
+// edges again.
+func (m *Map) Covered(from, to string, sign int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.relationships {
+		if r.From == from && r.To == to && r.Sign == sign && r.Status != Retired {
+			return true
+		}
+	}
+	return false
+}
+
 // Census summarises the map.
 func (m *Map) Census() StateCounts {
 	m.mu.RLock()

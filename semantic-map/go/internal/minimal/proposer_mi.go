@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/stats"
@@ -35,7 +36,7 @@ type MICorrelationProposer struct {
 	ontology contracts.OntologyContract
 
 	mu           sync.Mutex
-	buffers      map[string]*stats.PairWindow     // key: fromID + "→" + toID
+	buffers      map[string]*stats.PairWindow    // key: fromID + "→" + toID
 	candidates   map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order        []string                        // insertion order of CandidateIDs, for stable history iteration
 	latestValues map[string]float64              // construct → most recent observed value
@@ -325,3 +326,36 @@ func copyCandidate(c *types.CandidateEdge) *types.CandidateEdge {
 	cp := *c
 	return &cp
 }
+
+// LookupOntology adapts the declaration layer to RelationshipLookup: a pair is covered
+// when a non-deprecated proposition runs from -> to with the same direction. Used by
+// callers that pair constructs explicitly; the daemon passes the state map instead.
+func LookupOntology(o contracts.OntologyContract) contracts.RelationshipLookup {
+	return ontologyLookup{o: o}
+}
+
+type ontologyLookup struct{ o contracts.OntologyContract }
+
+func (l ontologyLookup) Covered(from, to string, sign int) bool {
+	props, err := l.o.Propositions()
+	if err != nil {
+		return false
+	}
+	dir := types.Positive
+	if sign < 0 {
+		dir = types.Negative
+	}
+	for _, prop := range props {
+		if !prop.Deprecated && prop.FromConstruct == from && prop.ToConstruct == to && prop.Direction == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// Temporary until Task 11 replaces them: keep the package compiling against the
+// extended contract.
+func (p *MICorrelationProposer) ObserveProperty(_, _ string, _ float64, _ time.Time) error {
+	return nil
+}
+func (p *MICorrelationProposer) Forget(_ string) error { return nil }

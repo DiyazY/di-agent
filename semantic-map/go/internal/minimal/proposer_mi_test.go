@@ -271,3 +271,21 @@ func TestMICorrelationProposer_PerfectCorrelation(t *testing.T) {
 		t.Errorf("expected MIScore=1.0 for perfect correlation; got %v", cs[0].MIScore)
 	}
 }
+
+// ── LookupOntology ─────────────────────────────────────────────────────────────
+
+func TestLookupOntologyCoversDeclaredPropositions(t *testing.T) {
+	ontology := minimal.NewOntologyFromSpec(mustSpec())
+	first := mustSpec().Propositions[0]
+	sign := 1
+	if first.Direction == "negative" {
+		sign = -1
+	}
+	l := minimal.LookupOntology(ontology)
+	if !l.Covered(first.FromConstruct, first.ToConstruct, sign) {
+		t.Errorf("proposition %s should cover (%s,%s,%+d)", first.PropositionID, first.FromConstruct, first.ToConstruct, sign)
+	}
+	if l.Covered(first.FromConstruct, first.ToConstruct, -sign) {
+		t.Error("the opposite sign is not covered by the same proposition")
+	}
+}

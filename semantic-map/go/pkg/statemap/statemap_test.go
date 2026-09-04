@@ -1592,3 +1592,20 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 		t.Errorf("caveats %v; want one naming the stale endpoint", d.Caveats)
 	}
 }
+
+func TestCoveredIgnoresRetiredAndOppositeSign(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	_ = m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Label: "L"})
+	if !m.Covered("a", "b", 1) {
+		t.Error("a declared active relationship must count as covered")
+	}
+	if m.Covered("a", "b", -1) || m.Covered("b", "a", 1) {
+		t.Error("the opposite sign and the reverse direction are different claims")
+	}
+	_ = m.RetireRelationship(RelationshipID("a", "b", "L"), "test", "operator")
+	if m.Covered("a", "b", 1) {
+		t.Error("a retired relationship does not cover the pair: structure must be able to re-earn its place")
+	}
+}
