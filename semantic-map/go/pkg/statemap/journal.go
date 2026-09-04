@@ -279,18 +279,22 @@ func (b *DecisionBuilder) Property(id string) (Property, bool) {
 }
 
 // RelationshipsInto reads the active relationships terminating at a property and
-// records them as inputs.
+// records them as inputs. A relationship has no stored staleness; it is as fresh as
+// its endpoints, so the caveat is derived from them here.
 func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 	b.m.mu.RLock()
 	var out []Relationship
+	staleEnd := map[string]string{}
 	for _, r := range b.m.relationships {
-		if r.To != propertyID {
-			continue
-		}
-		if r.Status == Retired {
+		if r.To != propertyID || r.Status == Retired {
 			continue
 		}
 		out = append(out, *r)
+		for _, end := range []string{r.From, r.To} {
+			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
+				staleEnd[r.ID] = end
+			}
+		}
 	}
 	b.m.mu.RUnlock()
 
@@ -300,8 +304,8 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 			b.seenRel[r.ID] = true
 			b.rels = append(b.rels, r)
 		}
-		if r.Status == Stale {
-			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s is stale", r.ID))
+		if end, ok := staleEnd[r.ID]; ok {
+			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
 		}
 	}
 	return out

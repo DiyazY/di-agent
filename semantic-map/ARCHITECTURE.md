@@ -811,6 +811,18 @@ in either is refused rather than guessed at — a version 1 file half-loads unde
 2's field names, and a snapshot copied from another host would install that machine's
 observations as this one's history at full confidence.
 
+#### The three paces
+
+The map changes at three rates, and each is a setting rather than an accident.
+
+| Pace | Appears | Disappears |
+|---|---|---|
+| **Property** | one observation, at confidence 0 | stale after `-stale-after` (2 m) → retired after `-retire-after` (10 m), cascading to incident relationships |
+| **Magnitude** | `-alpha` (0.2) for the recent layer, `-alpha-slow` (0.001) for the established layer | — |
+| **Structure** | `-proposer-min-pairs` (30) co-observations inside `-pair-window-seconds` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
+
+Admission is immediate and *trust* grows at the magnitude pace: confidence is the pace signal, so there is no probation gate. A derived property never retires — it is declared structure — but it goes stale when no member is active and returns with them.
+
 ### Peer state: knowledge crossing a node boundary
 
 A node-local map means every question wider than one machine is a question for another

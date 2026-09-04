@@ -93,10 +93,11 @@ func main() {
 		"silence after which a property is marked stale. A model that keeps reporting "+
 			"a departed metric's last value asserts something it cannot support, so the "+
 			"map says 'stale' instead of holding the number quietly.")
-	retireAfter := flag.Duration("retire-after", 0,
-		"silence after which a property is retired automatically. 0 leaves retirement "+
-			"to an operator, which is the safer default for a system whose collectors "+
-			"restart.")
+	retireAfter := flag.Duration("retire-after", 10*time.Minute,
+		"silence after which a property is retired automatically, cascading to the "+
+			"relationships that reference it. 0 leaves retirement to an operator. The "+
+			"default is five stale windows: long enough that a restarting collector is "+
+			"not mistaken for a departed subject.")
 	noLearn := flag.Bool("no-learn", false,
 		"stop relationships learning their strength from paired observations of both "+
 			"endpoints. They then stay at their seeded priors with confidence 0, which is "+

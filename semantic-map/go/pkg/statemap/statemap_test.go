@@ -1570,3 +1570,25 @@ func TestResetRelationshipReturnsTheClaimToUnknown(t *testing.T) {
 		t.Errorf("after reset: %+v; want no effective strength, no established layer, no sign tally", r)
 	}
 }
+
+func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("src", .5, c.now())
+	_ = m.Observe("dst", .5, c.now())
+	_ = m.DeclareRelationship(Relationship{From: "src", To: "dst", Sign: 1})
+	c.advance(time.Minute)
+	_ = m.Observe("dst", .5, c.now())
+	m.Sweep()
+	b := m.Decide("d1", "test")
+	b.RelationshipsInto("dst")
+	d := b.Commit(nil)
+	var found bool
+	for _, cv := range d.Caveats {
+		if strings.Contains(cv, "stale endpoint src") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("caveats %v; want one naming the stale endpoint", d.Caveats)
+	}
+}
