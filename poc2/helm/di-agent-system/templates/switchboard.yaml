@@ -1,0 +1,57 @@
+# Single switchboard instance: aggregates genset/battery supply and
+# consumer (propulsion/auxload) requests, and publishes each consumer's
+# power allocation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switchboard
+  labels:
+    app: switchboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: switchboard
+  template:
+    metadata:
+      labels:
+        app: switchboard
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.switchboard.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: switchboard
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.switchboard.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.switchboard.kafkaTopic | quote }}
+            - name: GENSET_KAFKA_TOPIC
+              value: {{ .Values.switchboard.gensetKafkaTopic | quote }}
+            - name: BATTERY_KAFKA_TOPIC
+              value: {{ .Values.switchboard.batteryKafkaTopic | quote }}
+            - name: REQUEST_KAFKA_TOPIC
+              value: {{ .Values.switchboard.requestKafkaTopic | quote }}
+          resources:
+            {{- toYaml .Values.switchboard.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: switchboard
+  labels:
+    app: switchboard
+spec:
+  selector:
+    app: switchboard
+  ports:
+    - port: 8000
+      targetPort: 8000

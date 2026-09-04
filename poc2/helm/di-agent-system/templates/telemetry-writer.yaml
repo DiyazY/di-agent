@@ -1,0 +1,56 @@
+# Kafka consumer that writes system telemetry into InfluxDB. No externally-
+# exposed port (consumer only).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-writer
+  labels:
+    app: telemetry-writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-writer
+  template:
+    metadata:
+      labels:
+        app: telemetry-writer
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryWriter.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telemetry-writer
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.telemetryWriter.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: GENSET_KAFKA_TOPIC
+              value: {{ .Values.genset.kafkaTopic | quote }}
+            - name: PROPULSION_KAFKA_TOPIC
+              value: {{ .Values.propulsion.kafkaTopic | quote }}
+            - name: BATTERY_KAFKA_TOPIC
+              value: {{ .Values.battery.kafkaTopic | quote }}
+            - name: AUXLOAD_KAFKA_TOPIC
+              value: {{ .Values.auxload.kafkaTopic | quote }}
+            - name: SWITCHBOARD_KAFKA_TOPIC
+              value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.telemetryWriter.kafkaGroupId | quote }}
+            - name: INFLUXDB_URL
+              value: "http://influxdb:{{ .Values.influxdb.port }}"
+            - name: INFLUXDB_ORG
+              value: {{ .Values.influxdb.org | quote }}
+            - name: INFLUXDB_BUCKET
+              value: {{ .Values.influxdb.bucket | quote }}
+            - name: INFLUXDB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.influxdb.existingSecret }}
+                  key: admin-token
+          resources:
+            {{- toYaml .Values.telemetryWriter.resources | nindent 12 }}

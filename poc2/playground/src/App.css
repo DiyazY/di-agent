@@ -1,0 +1,134 @@
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+.app h1 {
+  font-size: 1.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.app .subtitle {
+  color: #94a3b8;
+  margin-top: 0;
+  margin-bottom: 2rem;
+}
+
+.panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.25rem;
+}
+
+.panel {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+}
+
+.panel h2 {
+  margin: 0 0 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-transform: capitalize;
+}
+
+.status-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: #64748b;
+  display: inline-block;
+}
+
+.status-dot.ok {
+  background: #22c55e;
+}
+
+.status-dot.error {
+  background: #ef4444;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  margin: 0.35rem 0;
+  color: #cbd5e1;
+}
+
+.metric-row strong {
+  color: #f8fafc;
+}
+
+.load-control {
+  margin-top: 1.25rem;
+}
+
+.load-control label {
+  display: block;
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin-bottom: 0.4rem;
+}
+
+.load-control .slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.load-control input[type="range"] {
+  flex: 1;
+}
+
+.load-control .value {
+  width: 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.load-control button {
+  margin-top: 0.75rem;
+  width: 100%;
+  padding: 0.5rem;
+  border-radius: 8px;
+  border: none;
+  background: #3b82f6;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.load-control button:disabled {
+  background: #475569;
+  cursor: not-allowed;
+}
+
+.error-text {
+  color: #f87171;
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+}
+
+.hint-text {
+  color: #fbbf24;
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+}
+
+.entry-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  font-size: 0.85rem;
+  color: #cbd5e1;
+}
+
+.entry-list li {
+  padding: 0.25rem 0;
+  border-top: 1px solid #334155;
+}
