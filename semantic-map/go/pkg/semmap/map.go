@@ -213,14 +213,23 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 	// otherwise pull that construct's summary the wrong way, and every relationship
 	// learned from it would be asked to agree with a sign the reading contradicts.
 	// Unrouted and same-polarity metrics pass through untouched.
-	router := m.router()
+	// A scoped sample is a property of something narrower than the node, so its id
+	// carries the subject and it is never routed: polarity normalisation and construct
+	// membership are node-level concerns.
+	id := string(sample.MetricType)
 	value := sample.Value
-	if router != nil {
+	router := m.router()
+	if sample.Subject != "" {
+		id = id + "@" + sample.Subject
+	} else if router != nil {
 		value = router.NormalizeForConstruct(string(sample.MetricType), value)
 	}
 
-	if err := m.state.ObserveEvent(string(sample.MetricType), value,
-		time.Unix(sample.TimestampUnix, 0), sample.EventID); err != nil {
+	if err := m.state.Record(statemap.Observation{
+		ID: id, Value: value, At: time.Unix(sample.TimestampUnix, 0), EventID: sample.EventID,
+		Subject: sample.Subject, Unit: sample.Unit, Range: sample.Range,
+		Source: sample.Source, Labels: sample.Labels,
+	}); err != nil {
 		return err
 	}
 

@@ -545,7 +545,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			writeError(w, status, err.Error())
 			return
 		}
-		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed {
+		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed || sample.Subject != "" {
 			// Recorded as a property of the system, but no construct summarises it.
 			// Saying so keeps a typo visible without discarding a reading the system
 			// actually produced — a model that can only hold what someone declared in
@@ -556,6 +556,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 				"recorded":    true,
 				"routed":      false,
 				"metric_type": string(sample.MetricType),
+				"subject":     sample.Subject,
 				"note": "not in the domain specification's routing table: recorded as a " +
 					"property, not summarised by any construct",
 			})

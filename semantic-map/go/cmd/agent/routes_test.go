@@ -1084,3 +1084,26 @@ func TestIngestSample_RejectsMalformedSubject(t *testing.T) {
 		t.Fatalf("status %d, want 400 for a subject containing '/'", resp.StatusCode)
 	}
 }
+
+func TestIngestSample_CarriesSubjectUnitRangeSource(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	body := `{"node_id":"","metric_type":"queue_depth","value":7,"timestamp_unix":1000,
+	          "event_id":"e1","subject":"pod:abc","unit":"items","range":[0,100],"source":"app:ingest"}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (scoped samples are never routed)", resp.StatusCode)
+	}
+	p, ok := sm.State().Property("queue_depth@pod:abc")
+	if !ok {
+		t.Fatal("scoped property was not admitted under metric_type@subject")
+	}
+	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != [2]float64{0, 100} || p.Source != "app:ingest" {
+		t.Errorf("admitted property %+v; want subject/unit/range/source stamped from the sample", p)
+	}
+}

@@ -227,3 +227,29 @@ func TestIngestSampleNormalizesToConstructPolarity(t *testing.T) {
 			"cancel", p.Value)
 	}
 }
+
+func TestIngestSample_ScopedSampleBecomesMetricAtSubject(t *testing.T) {
+	sm, state := newMap(t)
+	rng := [2]float64{0, 50}
+	s := &types.MetricSample{MetricType: "queue_depth", Value: 3, TimestampUnix: 1000, EventID: "q1",
+		Subject: "pod:abc", Unit: "items", Range: &rng, Source: "app"}
+	if err := sm.IngestSample(s); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Property("queue_depth"); ok {
+		t.Error("a scoped sample must not land on the node-level id")
+	}
+	p, ok := state.Property("queue_depth@pod:abc")
+	if !ok || p.Subject != "pod:abc" || p.Unit != "items" || p.Range != rng {
+		t.Fatalf("scoped property %+v ok=%v; want metric_type@subject with the declared unit and range", p, ok)
+	}
+	// A scoped reading of a routed metric type is still unrouted: polarity and
+	// construct membership are node-level concerns.
+	c := &types.MetricSample{MetricType: types.CPUUtilization, Value: 0.4, TimestampUnix: 1001, EventID: "c1", Subject: "pod:abc"}
+	if err := sm.IngestSample(c); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := state.Property("cpu_utilization@pod:abc"); p.Value != 0.4 {
+		t.Errorf("scoped cpu value %.3f; want 0.4 untouched by construct polarity normalisation", p.Value)
+	}
+}
