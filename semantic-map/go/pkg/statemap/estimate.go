@@ -112,13 +112,19 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		excluded = append(excluded, w)
 	}
 
+	// keys is the sorted assumption-key order, built once and reused wherever
+	// assume is iterated (the question text here, and the unmatched-assumption
+	// loop below) so two identical estimates against an unchanged map produce
+	// byte-identical rationale and caveats instead of drifting with Go's
+	// randomised map iteration order.
+	keys := make([]string, 0, len(assume))
+	for k := range assume {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	question := "estimate " + target
 	if len(assume) > 0 {
-		keys := make([]string, 0, len(assume))
-		for k := range assume {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
 		parts := make([]string, 0, len(keys))
 		for _, k := range keys {
 			parts = append(parts, k+"="+strconv.FormatFloat(assume[k], 'g', -1, 64))
@@ -146,6 +152,13 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	var sensitivity, contributions, hypContributions, delta float64
 	var unknown int
 	assumedSeen := map[string]bool{}
+	// seenSource tracks which source properties have already had their
+	// source-scoped caveats (range-not-declared, out-of-range assumption,
+	// derived-assumed) and their b.Assume rationale line emitted. A source with
+	// two incoming relationships must still contribute per-edge arithmetic for
+	// each edge, but those caveats and the assumption line describe the source,
+	// not the edge, so they must fire only once.
+	seenSource := map[string]bool{}
 	for _, rel := range b.RelationshipsInto(target) {
 		src, ok := b.Property(rel.From)
 		if !ok {
@@ -159,7 +172,9 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			influences = append(influences, inf)
 			continue
 		}
-		if !src.RangeDeclared {
+		firstForSource := !seenSource[rel.From]
+		seenSource[rel.From] = true
+		if firstForSource && !src.RangeDeclared {
 			b.Caveat("range for %s was assumed, not declared; its contribution is normalised by [%g, %g]",
 				src.ID, src.Range[0], src.Range[1])
 		}
@@ -171,12 +186,14 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		hyp := contribution
 		if a, assumed := assume[rel.From]; assumed {
 			assumedSeen[rel.From] = true
-			b.Assume(rel.From, a)
-			if a < src.Range[0] || a > src.Range[1] {
-				b.Caveat("assumed value %g for %s is outside its declared range [%g, %g]", a, src.ID, src.Range[0], src.Range[1])
-			}
-			if src.Kind == Derived {
-				b.Caveat("%s is derived and was assumed directly; its members are unchanged", src.ID)
+			if firstForSource {
+				b.Assume(rel.From, a)
+				if a < src.Range[0] || a > src.Range[1] {
+					b.Caveat("assumed value %g for %s is outside its declared range [%g, %g]", a, src.ID, src.Range[0], src.Range[1])
+				}
+				if src.Kind == Derived {
+					b.Caveat("%s is derived and was assumed directly; its members are unchanged", src.ID)
+				}
 			}
 			ahat := normalise(src, a)
 			hyp = eff * float64(rel.Sign) * ahat
@@ -188,9 +205,9 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		delta += hyp - contribution
 		influences = append(influences, inf)
 	}
-	for k, v := range assume {
+	for _, k := range keys {
 		if !assumedSeen[k] {
-			b.Assume(k, v)
+			b.Assume(k, assume[k])
 			b.Caveat("assumption on %s does not influence %s through any relationship", k, target)
 		}
 	}
@@ -232,11 +249,19 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	d := b.Commit(commit)
 	res := EstimateResult{DecisionID: d.ID, Revision: d.Revision, Answer: answer, Influences: influences,
 		Hypothetical: hypothetical, Rationale: d.Rationale, Caveats: d.Caveats}
+	// Assumptions and Excluded are copied out of the Decision, not referenced: the
+	// Decision is the journal's audit record (journal.go's Commit hands it the
+	// builder's own map and slice without copying), so a caller mutating the
+	// result must not be able to corrupt what the journal remembers.
 	if len(assume) > 0 {
-		res.Assumptions = d.Assumptions
+		res.Assumptions = make(map[string]float64, len(d.Assumptions))
+		for k, v := range d.Assumptions {
+			res.Assumptions[k] = v
+		}
 	}
 	if len(excluded) > 0 {
-		res.Excluded = d.Excluded
+		res.Excluded = make([]string, len(d.Excluded))
+		copy(res.Excluded, d.Excluded)
 	}
 	return res
 }

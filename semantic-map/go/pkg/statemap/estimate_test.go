@@ -112,3 +112,95 @@ func TestEstimateCaveatsAssumedRangeAndOutOfRange(t *testing.T) {
 		t.Errorf("caveats %v; want both the assumed-range and out-of-range caveats", res.Caveats)
 	}
 }
+
+// TestEstimateIsReproducible: two identical estimates against an unchanged map must
+// produce byte-identical rationale and caveats. The unmatched-assumption loop used to
+// range over a Go map, so ordering was not guaranteed across calls.
+func TestEstimateIsReproducible(t *testing.T) {
+	m, c := estimateFixture(t)
+	unit := [2]float64{0, 1}
+	// Two more pod:a-scoped properties that do NOT relate to pressure, so `without
+	// pod:a` produces several unmatched assumptions whose order is at stake.
+	_ = m.Record(Observation{ID: "mem@pod:a", Value: 0.4, At: c.now(), Subject: "pod:a", Range: &unit})
+	_ = m.Record(Observation{ID: "io@pod:a", Value: 0.6, At: c.now(), Subject: "pod:a", Range: &unit})
+
+	res1 := m.Estimate(EstimateRequest{ID: "r1", Target: "pressure", Without: []string{"pod:a"}})
+	res2 := m.Estimate(EstimateRequest{ID: "r2", Target: "pressure", Without: []string{"pod:a"}})
+
+	if res1.Rationale != res2.Rationale {
+		t.Errorf("rationale differs across identical estimates:\n%s\nvs\n%s", res1.Rationale, res2.Rationale)
+	}
+	if len(res1.Caveats) != len(res2.Caveats) {
+		t.Fatalf("caveats length differs: %v vs %v", res1.Caveats, res2.Caveats)
+	}
+	for i := range res1.Caveats {
+		if res1.Caveats[i] != res2.Caveats[i] {
+			t.Errorf("caveat %d differs: %q vs %q", i, res1.Caveats[i], res2.Caveats[i])
+		}
+	}
+	if len(res1.Assumptions) != 3 {
+		t.Errorf("assumptions %v; want three entries (queue@pod:a, mem@pod:a, io@pod:a)", res1.Assumptions)
+	}
+}
+
+// TestEstimateDoesNotDuplicateSourceCaveats: a source with two incoming relationships
+// into the target must contribute its arithmetic per edge, but its source-scoped
+// caveats and its assumption rationale line only once.
+func TestEstimateDoesNotDuplicateSourceCaveats(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Observe("x@pod:1", 0.5, c.now()) // no declared range
+	_ = m.Observe("y", 0.5, c.now())
+	_ = m.DeclareRelationship(Relationship{From: "x@pod:1", To: "y", Sign: 1, Label: "a"})
+	_ = m.DeclareRelationship(Relationship{From: "x@pod:1", To: "y", Sign: 1, Label: "b"})
+	_ = m.AssertRelationshipStrength(RelationshipID("x@pod:1", "y", "a"), 0.5, "op", "t")
+	_ = m.AssertRelationshipStrength(RelationshipID("x@pod:1", "y", "b"), 0.3, "op", "t")
+
+	res := m.Estimate(EstimateRequest{Target: "y", Assume: map[string]float64{"x@pod:1": 0.9}})
+
+	var rangeCaveats int
+	for _, cv := range res.Caveats {
+		if strings.Contains(cv, "was assumed, not declared") {
+			rangeCaveats++
+		}
+	}
+	if rangeCaveats != 1 {
+		t.Errorf("caveats %v; want exactly one \"was assumed, not declared\" caveat, got %d", res.Caveats, rangeCaveats)
+	}
+	if n := strings.Count(res.Rationale, "assumed x@pod:1 = "); n != 1 {
+		t.Errorf("rationale %q; want exactly one \"assumed x@pod:1 = \" occurrence, got %d", res.Rationale, n)
+	}
+	if len(res.Influences) != 2 {
+		t.Errorf("influences %v; want two, one per relationship", res.Influences)
+	}
+}
+
+// TestEstimateResultDoesNotAliasTheDecision: EstimateResult.Assumptions/Excluded must
+// be independent copies. A caller mutating the result must not corrupt the journaled
+// Decision, which is the audit record.
+func TestEstimateResultDoesNotAliasTheDecision(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{ID: "d-alias", Target: "pressure",
+		Assume: map[string]float64{"cpu@pod:b": 0.9}, Without: []string{"pod:a"}})
+
+	res.Assumptions["injected"] = 999
+	if len(res.Excluded) > 0 {
+		res.Excluded[0] = "tampered"
+	}
+	res.Excluded = append(res.Excluded, "extra")
+
+	var d *Decision
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Decision != nil && e.Decision.ID == "d-alias" {
+			d = e.Decision
+		}
+	}
+	if d == nil {
+		t.Fatal("decision d-alias not found in the journal")
+	}
+	if _, ok := d.Assumptions["injected"]; ok {
+		t.Errorf("decision assumptions mutated via the result: %v", d.Assumptions)
+	}
+	if len(d.Excluded) != 1 || d.Excluded[0] != "pod:a" {
+		t.Errorf("decision excluded mutated via the result: %v", d.Excluded)
+	}
+}
