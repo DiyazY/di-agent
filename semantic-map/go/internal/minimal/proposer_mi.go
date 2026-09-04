@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/stats"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -33,20 +35,15 @@ type MICorrelationProposer struct {
 	ontology contracts.OntologyContract
 
 	mu           sync.Mutex
-	buffers      map[string]*pairBuffer          // key: fromID + "→" + toID
+	buffers      map[string]*stats.PairWindow     // key: fromID + "→" + toID
 	candidates   map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order        []string                        // insertion order of CandidateIDs, for stable history iteration
 	latestValues map[string]float64              // construct → most recent observed value
+	seq          uint64                          // monotonically increasing identity for pairs
 
 	threshold float64 // |Pearson r| trigger to emit a candidate
 	minPairs  int     // minimum buffered samples before evaluating
 	bufSize   int     // ring buffer capacity
-}
-
-type pairBuffer struct {
-	a, b  []float64
-	pos   int
-	count int // total samples ever buffered (capped at bufSize)
 }
 
 // NewMICorrelationProposer builds an MICorrelationProposer.
@@ -68,7 +65,7 @@ func NewMICorrelationProposer(
 	}
 	return &MICorrelationProposer{
 		ontology:     ontology,
-		buffers:      make(map[string]*pairBuffer),
+		buffers:      make(map[string]*stats.PairWindow),
 		candidates:   make(map[string]*types.CandidateEdge),
 		latestValues: make(map[string]float64),
 		threshold:    threshold,
@@ -99,22 +96,16 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	key := fromID + "→" + toID
 	buf, ok := p.buffers[key]
 	if !ok {
-		buf = &pairBuffer{a: make([]float64, p.bufSize), b: make([]float64, p.bufSize)}
+		buf = stats.NewPairWindow()
 		p.buffers[key] = buf
 	}
-	buf.a[buf.pos] = valueA
-	buf.b[buf.pos] = valueB
-	buf.pos = (buf.pos + 1) % p.bufSize
-	if buf.count < p.bufSize {
-		buf.count++
-	}
-
-	if buf.count < p.minPairs {
+	p.seq++
+	buf.Fold(strconv.FormatUint(p.seq, 10), valueA, valueB, p.bufSize)
+	if buf.Len() < p.minPairs {
 		return nil
 	}
-
-	r := pearson(buf.a[:buf.count], buf.b[:buf.count])
-	if math.IsNaN(r) || math.Abs(r) < p.threshold {
+	r, ok := buf.Pearson()
+	if !ok || math.Abs(r) < p.threshold {
 		return nil
 	}
 
@@ -149,8 +140,8 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		// emitted positive candidate that now sees negative correlation
 		// keeps its original direction; operators see the up-to-date score).
 		existing.MIScore = math.Abs(r)
-		existing.PValue = fisherPValue(r, buf.count)
-		existing.NObservations = buf.count
+		existing.PValue = stats.FisherPValue(r, buf.Len())
+		existing.NObservations = buf.Len()
 		return nil
 	}
 
@@ -160,8 +151,8 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		ToID:          toID,
 		Direction:     direction,
 		MIScore:       math.Abs(r),
-		PValue:        fisherPValue(r, buf.count),
-		NObservations: buf.count,
+		PValue:        stats.FisherPValue(r, buf.Len()),
+		NObservations: buf.Len(),
 		Status:        types.Pending,
 	}
 	p.candidates[candID] = cand
@@ -323,47 +314,6 @@ func (p *MICorrelationProposer) pairAlreadyCovered(fromID, toID string, dir type
 		}
 	}
 	return false, nil
-}
-
-// pearson computes the Pearson correlation coefficient over equal-length
-// slices. Returns NaN if either input has zero variance.
-func pearson(xs, ys []float64) float64 {
-	n := len(xs)
-	if n < 2 || n != len(ys) {
-		return math.NaN()
-	}
-	var sumX, sumY float64
-	for i := 0; i < n; i++ {
-		sumX += xs[i]
-		sumY += ys[i]
-	}
-	meanX := sumX / float64(n)
-	meanY := sumY / float64(n)
-
-	var num, denX, denY float64
-	for i := 0; i < n; i++ {
-		dx := xs[i] - meanX
-		dy := ys[i] - meanY
-		num += dx * dy
-		denX += dx * dx
-		denY += dy * dy
-	}
-	if denX == 0 || denY == 0 {
-		return math.NaN()
-	}
-	return num / math.Sqrt(denX*denY)
-}
-
-// fisherPValue returns the two-tailed p-value for Pearson r using the
-// Fisher z-transform: z = atanh(r) * sqrt(n-3), then N(0,1) tail probability.
-// Returns 1.0 when n < 4 (not enough data for a valid z-transform).
-func fisherPValue(r float64, n int) float64 {
-	if n < 4 {
-		return 1.0
-	}
-	z := math.Atanh(r) * math.Sqrt(float64(n-3))
-	// Two-tailed: P = 2 * (1 - Φ(|z|)) = erfc(|z|/sqrt(2))
-	return math.Erfc(math.Abs(z) / math.Sqrt2)
 }
 
 func synthesizePropSuffix(candidateID string) string {

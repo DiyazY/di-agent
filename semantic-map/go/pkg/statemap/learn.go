@@ -3,6 +3,8 @@ package statemap
 import (
 	"math"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/stats"
 )
 
 // This file gives the map its own estimator, so a relationship's strength is learned
@@ -50,57 +52,6 @@ func (c LearnConfig) withDefaults() LearnConfig {
 		c.Window = 60
 	}
 	return c
-}
-
-// pairWindow is a fixed-capacity ring of paired observations for one relationship.
-type pairWindow struct {
-	xs, ys []float64
-	next   int
-	seen   map[string]struct{} // pair identities already folded in
-}
-
-func newPairWindow() *pairWindow {
-	return &pairWindow{seen: make(map[string]struct{})}
-}
-
-func (w *pairWindow) add(x, y float64, capacity int) {
-	if len(w.xs) < capacity {
-		w.xs = append(w.xs, x)
-		w.ys = append(w.ys, y)
-		return
-	}
-	w.xs[w.next] = x
-	w.ys[w.next] = y
-	w.next = (w.next + 1) % capacity
-}
-
-// pearson returns the correlation over the window, and false when it is undefined:
-// fewer than three points, or a constant series on either side. A constant series is
-// the common case on a quiet system, where a property sits at zero for long
-// stretches. Reporting r = 0 there would be a claim; "undefined" is the honest
-// answer, and it leaves the strength where it was.
-func (w *pairWindow) pearson() (float64, bool) {
-	n := len(w.xs)
-	if n < 3 {
-		return 0, false
-	}
-	var sx, sy float64
-	for i := 0; i < n; i++ {
-		sx += w.xs[i]
-		sy += w.ys[i]
-	}
-	mx, my := sx/float64(n), sy/float64(n)
-	var sxy, sxx, syy float64
-	for i := 0; i < n; i++ {
-		dx, dy := w.xs[i]-mx, w.ys[i]-my
-		sxy += dx * dy
-		sxx += dx * dx
-		syy += dy * dy
-	}
-	if sxx <= 1e-12 || syy <= 1e-12 {
-		return 0, false
-	}
-	return sxy / math.Sqrt(sxx*syy), true
 }
 
 // observation is the last value seen for one property, used to form pairs.
@@ -167,26 +118,18 @@ func (m *Map) learnFromObservationLocked(propertyID string, obs observation) {
 func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at time.Time) {
 	w, ok := m.windows[r.ID]
 	if !ok {
-		w = newPairWindow()
+		w = stats.NewPairWindow()
 		m.windows[r.ID] = w
 	}
 	// Idempotency: the same physical pair must not be folded twice, or replaying a
 	// batch of telemetry would inflate the estimate by re-adding its own points.
-	if _, dup := w.seen[identity]; dup {
+	if !w.Fold(identity, x, y, m.learn.Window) {
 		return
 	}
-	w.seen[identity] = struct{}{}
-	// Bound the dedup set with the window: an identity that can no longer be in the
-	// window cannot be a duplicate of anything still in it.
-	if len(w.seen) > 4*m.learn.Window {
-		w.seen = map[string]struct{}{identity: {}}
-	}
-
-	w.add(x, y, m.learn.Window)
-	if len(w.xs) < m.learn.MinSupport {
+	if w.Len() < m.learn.MinSupport {
 		return
 	}
-	rr, ok := w.pearson()
+	rr, ok := w.Pearson()
 	if !ok {
 		return
 	}
@@ -250,7 +193,7 @@ func (m *Map) PairSupport(relationshipID string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if w, ok := m.windows[relationshipID]; ok {
-		return len(w.xs)
+		return w.Len()
 	}
 	return 0
 }

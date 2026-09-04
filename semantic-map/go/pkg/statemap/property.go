@@ -42,6 +42,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/stats"
 )
 
 // Kind distinguishes a property fed by telemetry from one computed from others.
@@ -420,7 +422,7 @@ type Map struct {
 	// learns strengths itself rather than recording an estimate computed elsewhere, so
 	// there is one model of the system rather than two kept in step.
 	latest   map[string]observation
-	windows  map[string]*pairWindow
+	windows  map[string]*stats.PairWindow
 	learning bool
 	learn    LearnConfig
 
@@ -452,7 +454,7 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		latest:        make(map[string]observation),
-		windows:       make(map[string]*pairWindow),
+		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
 		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
