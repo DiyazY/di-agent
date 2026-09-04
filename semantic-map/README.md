@@ -315,6 +315,30 @@ values return `400`. This is the public-API entry point for out-of-tree
 collectors — the parquet replay tool in particular speaks only this
 endpoint.
 
+### Pushing application metrics
+
+A workload on the node can be an instrument of its own state. It pushes samples to
+the agent under its own subject with a declared unit and range; the map admits them
+beside the resource properties the cgroup collector observes for the same subject.
+
+```go
+c := client.New("http://127.0.0.1:8080", os.Getenv("NODE_NAME"), "pod:"+os.Getenv("POD_UID"), "app:transcoder")
+_ = c.Push(ctx, client.Metric{Type: "queue_depth", Unit: "items", Range: [2]float64{0, 100}}, float64(len(queue)), time.Now(), nil)
+```
+
+`NODE_NAME` and `POD_UID` come from the downward API (`spec.nodeName`, `metadata.uid`). In Python:
+
+```python
+import hashlib, json, time, urllib.request
+def push(base, node, subject, source, metric, unit, rng, value):
+    at = int(time.time())
+    eid = hashlib.sha256(f"{source}|{node}|{subject}|{metric}|{at}".encode()).hexdigest()[:16]
+    body = json.dumps({"node_id": node, "metric_type": metric, "value": value, "timestamp_unix": at,
+                       "event_id": eid, "subject": subject, "unit": unit, "range": rng, "source": source}).encode()
+    req = urllib.request.Request(base + "/ingest-sample", body, {"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=5).read()
+```
+
 ### `GET /candidates`
 
 Lists Proposer candidate edges pending review.
