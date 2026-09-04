@@ -195,12 +195,12 @@ func (m *SemanticMap) SimulateOutcome(ctx *types.OffloadContext, targetNodeID st
 // own EMA and its own relational variant. It learned the same relations from the same
 // samples into a different structure, which is one structure too many.
 //
-// The order that survives from that arrangement, because it was the substantive part:
-// the state model records the observation BEFORE the routing table is consulted. The
-// routing table says what this agent knows how to summarise; it does not say what the
-// system is allowed to exhibit. A metric nobody has mapped is still something the
-// system is doing, so it becomes a property — journalled as an admission — where the
-// construct path would have dropped it.
+// Every property, routed or not, scoped or not, is recorded and reaches the proposer.
+// The routing table decides only the polarity in which an unscoped reading is expressed —
+// before it is stored or learned from. A metric nobody routed is still recorded as an
+// unrouted property; the HTTP layer reports such an admission with a 202 status code.
+// What the routing table decides is which construct summarises an unrouted metric; what
+// it does not decide is what the system is allowed to exhibit.
 //
 // Errors from the proposer are swallowed: it is advisory, and must not block telemetry.
 func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
