@@ -352,10 +352,15 @@ func TestObserveProperty_SkipsCoveredPairs(t *testing.T) {
 	_ = m.DeclareRelationship(statemap.Relationship{From: "cpu_utilization@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
 	p := minimal.NewMICorrelationProposer(m, 0.8, 10, 60, 15*time.Second)
 	feedScoped(p, 40, 2*time.Second)
+	ids := map[string]bool{}
 	for _, c := range mustCandidates(t, p) {
+		ids[c.CandidateID] = true
 		if c.FromID == "cpu_utilization@pod:a" {
 			t.Error("a pair the state map already holds must not be re-proposed")
 		}
+	}
+	if !ids["cpu_utilization@pod:b->cpu_pressure_ratio"] {
+		t.Error("expected the uncovered pod:b candidate to still be proposed")
 	}
 }
 
@@ -365,10 +370,17 @@ func TestForgetDropsEverythingAboutAProperty(t *testing.T) {
 	if err := p.Forget("cpu_utilization@pod:a"); err != nil {
 		t.Fatal(err)
 	}
+	var sawB bool
 	for _, c := range mustCandidates(t, p) {
 		if c.FromID == "cpu_utilization@pod:a" {
 			t.Error("candidate for a forgotten property survived")
 		}
+		if c.FromID == "cpu_utilization@pod:b" {
+			sawB = true
+		}
+	}
+	if !sawB {
+		t.Error("expected pod:b's candidate to survive the forget of pod:a")
 	}
 	h, _ := p.GetHistory()
 	for _, c := range h {
@@ -378,7 +390,63 @@ func TestForgetDropsEverythingAboutAProperty(t *testing.T) {
 	}
 }
 
+// feedPendingCap feeds three pod series against a shared "node" series. pod:1
+// and pod:2 are exact affine transforms of node (r = 1.0); pod:3 carries a
+// periodic deviation so its |r| is clearly below the other two while staying
+// above the 0.5 threshold — it is the genuinely weakest of the three.
+func feedPendingCap(p *minimal.MICorrelationProposer) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 30; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		_ = p.ObserveProperty("m@pod:1", "pod:1", x, at)
+		_ = p.ObserveProperty("m@pod:2", "pod:2", x*0.9, at)
+		_ = p.ObserveProperty("m@pod:3", "pod:3", x*0.7+0.1+0.35*math.Sin(float64(i)), at)
+		_ = p.ObserveProperty("node", "", x, at)
+	}
+}
+
 func TestPendingCapDefersTheWeakest(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 10, 60, 15*time.Second)
+	p.SetMaxPending(2)
+	feedPendingCap(p)
+
+	cs := mustCandidates(t, p)
+	if len(cs) > 2 {
+		t.Errorf("pending=%d exceeds the cap of 2", len(cs))
+	}
+	pendingFrom := map[string]bool{}
+	for _, c := range cs {
+		pendingFrom[c.FromID] = true
+	}
+	if !pendingFrom["m@pod:1"] || !pendingFrom["m@pod:2"] {
+		t.Errorf("expected the two strong candidates (m@pod:1, m@pod:2) to remain pending; got %v", pendingFrom)
+	}
+
+	h, _ := p.GetHistory()
+	var deferredCount int
+	var deferredFrom string
+	for _, c := range h {
+		if c.Status == types.Deferred {
+			deferredCount++
+			deferredFrom = c.FromID
+		}
+	}
+	if deferredCount != 1 {
+		t.Fatalf("expected exactly 1 deferred candidate; got %d", deferredCount)
+	}
+	if deferredFrom != "m@pod:3" {
+		t.Errorf("expected the weaker m@pod:3 candidate to be deferred; got FromID=%q", deferredFrom)
+	}
+}
+
+// TestPendingCapIsDeterministic rebuilds the cap scenario twice with tied
+// inputs (pod:1, pod:2, pod:3 are all exact affine transforms of node, so
+// their |r|·n scores are identical — the normal case for affine pod series)
+// and checks that the same candidate is deferred both times, via the
+// documented tie-break: among equal scores, the lexicographically larger
+// CandidateID is treated as weaker.
+func buildTiedCapScenario() *minimal.MICorrelationProposer {
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 10, 60, 15*time.Second)
 	p.SetMaxPending(2)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -390,17 +458,93 @@ func TestPendingCapDefersTheWeakest(t *testing.T) {
 		_ = p.ObserveProperty("m@pod:3", "pod:3", x*0.7+0.1, at)
 		_ = p.ObserveProperty("node", "", x, at)
 	}
-	if cs := mustCandidates(t, p); len(cs) > 2 {
-		t.Errorf("pending=%d exceeds the cap of 2", len(cs))
+	return p
+}
+
+func TestPendingCapIsDeterministic(t *testing.T) {
+	deferredID := func(p *minimal.MICorrelationProposer) string {
+		h, _ := p.GetHistory()
+		var ids []string
+		for _, c := range h {
+			if c.Status == types.Deferred {
+				ids = append(ids, c.CandidateID)
+			}
+		}
+		if len(ids) != 1 {
+			t.Fatalf("expected exactly 1 deferred candidate; got %d (%v)", len(ids), ids)
+		}
+		return ids[0]
 	}
-	var deferred int
-	h, _ := p.GetHistory()
-	for _, c := range h {
-		if c.Status == types.Deferred {
-			deferred++
+
+	p1 := buildTiedCapScenario()
+	p2 := buildTiedCapScenario()
+	d1 := deferredID(p1)
+	d2 := deferredID(p2)
+	if d1 != d2 {
+		t.Errorf("two identical runs deferred different candidates: %q vs %q", d1, d2)
+	}
+	if d1 != "m@pod:3->node" {
+		t.Errorf("expected the tie-break to defer %q; got %q", "m@pod:3->node", d1)
+	}
+}
+
+// TestConfirmedCandidateIsNeverReemitted covers finding 1: a Confirmed candidate
+// must never be overwritten by a fresh Pending entry, however the correlation
+// evolves afterward (including a sign flip — coverage is sign-specific, so a
+// flipped correlation is exactly the case that reaches the switch again).
+func TestConfirmedCandidateIsNeverReemitted(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 40, 2*time.Second)
+
+	var cid string
+	for _, c := range mustCandidates(t, p) {
+		if c.FromID == "cpu_utilization@pod:a" {
+			cid = c.CandidateID
 		}
 	}
-	if deferred == 0 {
-		t.Error("the excess candidate should be visible in history as deferred, not silently dropped")
+	if cid == "" {
+		t.Fatal("expected a candidate for cpu_utilization@pod:a before confirming")
+	}
+	if _, err := p.Confirm(cid); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+
+	// Keep feeding a strongly correlated stream for the confirmed pair, using
+	// fresh timestamps so the folds are not deduped away.
+	t1 := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 40; i++ {
+		at := t1.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%20) / 20
+		_ = p.ObserveProperty("cpu_utilization@pod:a", "pod:a", x, at)
+		_ = p.ObserveProperty("cpu_pressure_ratio", "", 0.9*x+0.05, at.Add(2*time.Second))
+	}
+	// Then a sign-flipped stream for the same pair.
+	t2 := time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 40; i++ {
+		at := t2.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%20) / 20
+		_ = p.ObserveProperty("cpu_utilization@pod:a", "pod:a", x, at)
+		_ = p.ObserveProperty("cpu_pressure_ratio", "", -(0.9*x + 0.05), at.Add(2*time.Second))
+	}
+
+	hist, _ := p.GetHistory()
+	var occurrences int
+	var status types.CandidateStatus
+	for _, c := range hist {
+		if c.CandidateID == cid {
+			occurrences++
+			status = c.Status
+		}
+	}
+	if occurrences != 1 {
+		t.Errorf("expected exactly 1 history entry for %q; got %d", cid, occurrences)
+	}
+	if status != types.Confirmed {
+		t.Errorf("expected status Confirmed; got %v", status)
+	}
+	for _, c := range mustCandidates(t, p) {
+		if c.CandidateID == cid {
+			t.Errorf("confirmed candidate %q reappeared among pending candidates", cid)
+		}
 	}
 }

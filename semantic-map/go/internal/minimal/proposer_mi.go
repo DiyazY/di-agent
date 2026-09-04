@@ -44,7 +44,7 @@ type MICorrelationProposer struct {
 	mu         sync.Mutex
 	buffers    map[string]*stats.PairWindow    // key: fromID + "→" + toID
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
-	order      []string                        // insertion order of CandidateIDs
+	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
 
 	latestConstructs map[string]float64     // explicit construct path: id → last value
 	latestProps      map[string]latestValue // property path: id → last value, time, scope
@@ -100,6 +100,9 @@ func (p *MICorrelationProposer) SetMaxPending(n int) {
 	}
 }
 
+// Observe is the explicit path: the caller supplies the pair directly. There is no
+// scope rule and no time tolerance; identity for deduplication comes from the
+// sequence counter, not from timestamps.
 func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -220,6 +223,8 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	candID := fromID + "->" + toID
 	if existing, ok := p.candidates[candID]; ok {
 		switch existing.Status {
+		case types.Confirmed:
+			return nil // a confirmed pair is settled; never re-emitted
 		case types.Rejected, types.Deferred:
 			return nil // permanent suppression within the session; deferred stays out
 		case types.Pending:
@@ -242,17 +247,29 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 // enforceCapLocked defers the weakest pending candidates until at most maxPending
 // remain. Deferred rather than deleted: an operator can see in history that the
 // proposer had more to say than the cap allowed.
+//
+// Candidates are collected by walking p.order (insertion order), not by ranging
+// over the p.candidates map — Go's map iteration order is randomized, and ranging
+// over it would make the choice of "weakest" nondeterministic across runs. The
+// comparison itself is made total by tie-breaking on CandidateID: among equal
+// |r|·n scores (the normal case for affine-related series, since Pearson is
+// affine-invariant and shared cadence gives equal n), the lexicographically larger
+// id is treated as weaker. A deferral is session-permanent, so an arbitrary choice
+// here would be a silent, unreproducible loss.
 func (p *MICorrelationProposer) enforceCapLocked() {
 	var pending []*types.CandidateEdge
-	for _, c := range p.candidates {
-		if c.Status == types.Pending {
+	for _, cid := range p.order {
+		c := p.candidates[cid]
+		if c != nil && c.Status == types.Pending {
 			pending = append(pending, c)
 		}
 	}
 	for len(pending) > p.maxPending {
 		weakest := 0
 		for i, c := range pending {
-			if c.MIScore*float64(c.NObservations) < pending[weakest].MIScore*float64(pending[weakest].NObservations) {
+			wc := pending[weakest]
+			score, weakestScore := c.MIScore*float64(c.NObservations), wc.MIScore*float64(wc.NObservations)
+			if score < weakestScore || (score == weakestScore && c.CandidateID > wc.CandidateID) {
 				weakest = i
 			}
 		}
