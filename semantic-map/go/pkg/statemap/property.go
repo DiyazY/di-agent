@@ -455,6 +455,10 @@ type Map struct {
 
 	// now is injectable so lifecycle transitions can be tested without sleeping.
 	now func() time.Time
+
+	// onRetire is called, outside the lock, with the id of every property that
+	// retires — by an operator or by silence. See SetRetireHook.
+	onRetire func(propertyID string)
 }
 
 // New builds an empty map.
@@ -758,38 +762,63 @@ func containsString(hay []string, needle string) bool {
 	return false
 }
 
-// RetireProperty withdraws a property from reasoning, keeping its record.
-func (m *Map) RetireProperty(id, reason, actor string) error {
+// SetRetireHook registers a function called, outside the lock, with the id of every
+// property that retires — by an operator or by silence. The facade uses it to let the
+// proposer forget a subject that is gone.
+func (m *Map) SetRetireHook(fn func(propertyID string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.onRetire = fn
+}
 
-	p, ok := m.properties[id]
-	if !ok {
-		return fmt.Errorf("property %q not found", id)
-	}
-	if p.Status == Retired {
-		return nil
-	}
+// retireLocked withdraws a property and every relationship incident to it. Caller
+// holds the write lock. Both retirement paths use it, so an edge cannot be left
+// active with a retired endpoint whichever way the endpoint went.
+func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 	p.Status = Retired
 	p.RetiredReason = reason
-	now := m.now()
-
-	// A relationship whose endpoint is gone cannot be evaluated. Retiring it with a
-	// reason that points at the cause keeps the graph consistent and the audit
-	// trail readable, rather than leaving edges that silently never fire.
 	for _, r := range m.relationships {
 		if r.Status == Retired {
 			continue
 		}
-		if r.From == id || r.To == id {
+		if r.From == p.ID || r.To == p.ID {
 			r.Status = Retired
-			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", id, reason)
+			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", p.ID, reason)
 			m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{
-				"reason": r.RetiredReason, "cascade_from": id,
+				"reason": r.RetiredReason, "cascade_from": p.ID,
 			}, now)
 		}
 	}
-	m.bump(EventPropertyRetired, id, actor, map[string]any{"reason": reason}, now)
+	m.bump(EventPropertyRetired, p.ID, actor, map[string]any{"reason": reason}, now)
+}
+
+func (m *Map) fireRetireHook(ids []string) {
+	m.mu.RLock()
+	fn := m.onRetire
+	m.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	for _, id := range ids {
+		fn(id)
+	}
+}
+
+// RetireProperty withdraws a property from reasoning, keeping its record.
+func (m *Map) RetireProperty(id, reason, actor string) error {
+	m.mu.Lock()
+	p, ok := m.properties[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("property %q not found", id)
+	}
+	if p.Status == Retired {
+		m.mu.Unlock()
+		return nil
+	}
+	m.retireLocked(p, reason, actor, m.now())
+	m.mu.Unlock()
+	m.fireRetireHook([]string{id})
 	return nil
 }
 
@@ -798,7 +827,6 @@ func (m *Map) RetireProperty(id, reason, actor string) error {
 // producing duplicate journal entries for the same transition.
 func (m *Map) Sweep() (stale, retired []string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	now := m.now()
 	for _, p := range m.properties {
@@ -808,11 +836,8 @@ func (m *Map) Sweep() (stale, retired []string) {
 		silence := now.Sub(p.LastObserved)
 		switch {
 		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter:
-			p.Status = Retired
-			p.RetiredReason = fmt.Sprintf("no observation for %s", silence.Round(time.Second))
+			m.retireLocked(p, fmt.Sprintf("no observation for %s", silence.Round(time.Second)), "sweep", now)
 			retired = append(retired, p.ID)
-			m.bump(EventPropertyRetired, p.ID, "sweep",
-				map[string]any{"reason": p.RetiredReason, "silence_s": silence.Seconds()}, now)
 		case silence > m.cfg.StaleAfter && p.Status != Stale:
 			p.Status = Stale
 			stale = append(stale, p.ID)
@@ -822,6 +847,8 @@ func (m *Map) Sweep() (stale, retired []string) {
 	}
 	sort.Strings(stale)
 	sort.Strings(retired)
+	m.mu.Unlock()
+	m.fireRetireHook(retired)
 	return stale, retired
 }
 

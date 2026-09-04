@@ -1455,3 +1455,39 @@ func TestRecordAdoptsRangeAndUnitDeclaredLate(t *testing.T) {
 		}
 	}
 }
+
+func TestSweepRetirementCascadesToRelationships(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: time.Minute, AdmitUnknown: true})
+	_ = m.DeclareProperty(Property{ID: "pressure"})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .5, At: c.now(), Subject: "pod:1"})
+	_ = m.Observe("pressure", .2, c.now())
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:1", To: "pressure", Sign: 1, Label: "discovered"}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(2 * time.Minute)
+	_ = m.Observe("pressure", .2, c.now()) // the node-level property stays alive
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "cpu@pod:1" {
+		t.Fatalf("retired=%v; want cpu@pod:1", retired)
+	}
+	r, _ := m.Relationship(RelationshipID("cpu@pod:1", "pressure", "discovered"))
+	if r.Status != Retired || !strings.Contains(r.RetiredReason, "cpu@pod:1") {
+		t.Errorf("relationship %+v; want retired by cascade from its endpoint", r)
+	}
+}
+
+func TestRetireHookFiresOnBothPaths(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	var got []string
+	m.SetRetireHook(func(id string) { got = append(got, id) })
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	if err := m.RetireProperty("a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	m.Sweep()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("hook saw %v; want [a b] (operator path then sweep path)", got)
+	}
+}
