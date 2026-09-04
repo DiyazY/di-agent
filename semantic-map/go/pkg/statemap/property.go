@@ -684,7 +684,16 @@ func (m *Map) Record(o Observation) error {
 	p.NObservations++
 	p.LastObserved = at
 	p.Confidence = clamp01(float64(p.NObservations) / float64(m.cfg.ConvergenceObservations))
-	if p.Status != Retired {
+	if p.Status == Retired {
+		// The system is exhibiting it again, which is exactly the event retirement
+		// was recording the absence of. Its retired relationships stay retired:
+		// structure re-earns its place through the proposer.
+		p.Status = Active
+		p.RetiredReason = ""
+		m.bump(EventPropertyRedeclared, id, "system", map[string]any{
+			"revived": true, "reason": "observed after retirement",
+		}, at)
+	} else {
 		p.Status = Active
 	}
 	m.revision++

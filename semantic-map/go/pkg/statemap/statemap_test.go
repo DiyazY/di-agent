@@ -1491,3 +1491,28 @@ func TestRetireHookFiresOnBothPaths(t *testing.T) {
 		t.Errorf("hook saw %v; want [a b] (operator path then sweep path)", got)
 	}
 }
+
+func TestObservationRevivesARetiredProperty(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("cpu@pod:1", .3, c.now())
+	c.advance(time.Minute)
+	m.Sweep()
+	if p, _ := m.Property("cpu@pod:1"); p.Status != Retired {
+		t.Fatalf("setup: status %s, want retired", p.Status)
+	}
+	c.advance(time.Second)
+	_ = m.Observe("cpu@pod:1", .4, c.now())
+	p, _ := m.Property("cpu@pod:1")
+	if p.Status != Active || p.RetiredReason != "" {
+		t.Errorf("after re-observation: %+v; want active with the retirement reason cleared", p)
+	}
+	var revived bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyRedeclared && e.Target == "cpu@pod:1" && e.Detail["revived"] == true {
+			revived = true
+		}
+	}
+	if !revived {
+		t.Error("revival was not journaled")
+	}
+}
