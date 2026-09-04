@@ -34,6 +34,7 @@ MESSAGE_SCHEMAS = {
         "fields": (
             "load_ratio",
             "power_kw",
+            "speed_rpm",
             "fuel_flow_kg_per_s",
             "bsfc_g_per_kwh",
             "co2_kg_per_s",
@@ -42,7 +43,13 @@ MESSAGE_SCHEMAS = {
     },
     "propulsion_id": {
         "measurement": "propulsion_telemetry",
-        "fields": ("load_ratio", "power_output_kw", "power_input_kw", "allocated_power_kw"),
+        "fields": (
+            "load_ratio",
+            "power_output_kw",
+            "power_input_kw",
+            "allocated_power_kw",
+            "speed_rpm",
+        ),
     },
     "battery_id": {
         "measurement": "battery_telemetry",

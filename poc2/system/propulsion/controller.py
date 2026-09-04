@@ -126,8 +126,15 @@ class PropulsionController:
                 "target_load_ratio": self._target_load_ratio,
                 "current_load_ratio": self._achieved_load_ratio,
                 "allocated_power_kw": self._get_allocated_power_kw(),
+                "speed_rpm": self._speed_rpm(self._achieved_load_ratio),
                 "last_message": self._last_message,
             }
+
+    def _speed_rpm(self, load_ratio: float) -> float:
+        """Propeller-law estimate of shaft speed: for a fixed-pitch propeller
+        power varies with the cube of rpm, so speed varies with the cube root
+        of the load ratio."""
+        return self.propulsion_drive.rated_speed * load_ratio
 
     def get_health(self) -> dict:
         threads = {
@@ -251,6 +258,7 @@ class PropulsionController:
                 "power_output_kw": float(power_output_kw),
                 "power_input_kw": float(power_input_kw),
                 "allocated_power_kw": float(allocated_power_kw),
+                "speed_rpm": self._speed_rpm(float(load_ratio)),
             }
 
             with self._lock:
@@ -266,7 +274,8 @@ class PropulsionController:
                 f"load={message['load_ratio'] * 100:.1f}% "
                 f"power_output={message['power_output_kw']:.1f}kW "
                 f"power_input={message['power_input_kw']:.1f}kW "
-                f"allocated={message['allocated_power_kw']:.1f}kW"
+                f"allocated={message['allocated_power_kw']:.1f}kW "
+                f"speed_rpm={message['speed_rpm']:.1f}rpm"
             )
 
             self._stop_event.wait(STEP_INTERVAL_S)

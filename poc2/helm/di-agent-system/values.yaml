@@ -9,7 +9,9 @@ global:
   # repository path and are not affected by this value.
   imageRegistry: ghcr.io/chuducanh242002
   imageTag: latest
-  imagePullPolicy: IfNotPresent
+  # Always is required so pods actually re-pull ":latest" on restart instead
+  # of reusing a node's cached image.
+  imagePullPolicy: Always
   # e.g. [{ name: ghcr-creds }] if the registry above is private.
   imagePullSecrets: []
   # Applied to every pod in this chart unless overridden per-service below.

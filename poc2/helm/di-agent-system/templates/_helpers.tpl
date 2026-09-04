@@ -33,3 +33,21 @@ nodeSelector:
 {{ toYaml $merged | indent 2 }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Pod template annotation that changes on every "helm upgrade" invocation, so
+Deployments always roll a new pod even when the rendered spec is otherwise
+unchanged (e.g. rebuilding an image under a floating ":latest" tag doesn't
+change the manifest text, so Kubernetes wouldn't otherwise notice). Set
+global.forceRollout=false to disable. Include as a sibling of the template's
+"labels:" key, e.g.:
+      labels:
+        app: genset
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
+*/}}
+{{- define "diagent.podAnnotations" -}}
+{{- if ne .Values.global.forceRollout false }}
+annotations:
+  diagent.io/restartedAt: {{ now | date "2006-01-02T15:04:05Z07:00" | quote }}
+{{- end -}}
+{{- end -}}

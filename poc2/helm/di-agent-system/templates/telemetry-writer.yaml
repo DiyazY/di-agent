@@ -15,6 +15,7 @@ spec:
     metadata:
       labels:
         app: telemetry-writer
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryWriter.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}

@@ -76,6 +76,7 @@ class GensetController:
                 "genset_id": self.genset_id,
                 "target_load_ratio": self._target_load_ratio,
                 "current_load_ratio": self._current_load_ratio,
+                "speed_rpm": self.genset.rated_speed * self._current_load_ratio,
                 "last_message": self._last_message,
             }
 
@@ -131,11 +132,14 @@ class GensetController:
             nox_kg_per_s = float(
                 np.atleast_1d(engine_run_point.emissions_g_per_s.get(EmissionType.NOX, 0.0))[0] / 1000
             )
+            load_ratio = float(run_point.genset_load_ratio[0])
+            speed_rpm = self.genset.rated_speed * load_ratio
             message = {
                 "genset_id": self.genset_id,
                 "timestamp": time.time(),
-                "load_ratio": float(run_point.genset_load_ratio[0]),
+                "load_ratio": load_ratio,
                 "power_kw": float(power_kw),
+                "speed_rpm": speed_rpm,
                 "fuel_flow_kg_per_s": fuel_flow_kg_per_s,
                 "bsfc_g_per_kwh": float(engine_run_point.bsfc_g_per_kWh[0]),
                 "co2_kg_per_s": co2_kg_per_s,
@@ -150,6 +154,7 @@ class GensetController:
             print(
                 f"load={message['load_ratio'] * 100:.1f}% "
                 f"power={message['power_kw']:.1f}kW "
+                f"speed_rpm={message['speed_rpm']:.1f}rpm "
                 f"fuel_flow={message['fuel_flow_kg_per_s']:.5f}kg/s "
                 f"bsfc={message['bsfc_g_per_kwh']:.1f}g/kWh "
                 f"co2={message['co2_kg_per_s']:.5f}kg/s "

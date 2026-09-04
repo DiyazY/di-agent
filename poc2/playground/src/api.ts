@@ -11,6 +11,7 @@ export interface SystemStatus {
   target_load_ratio: number;
   current_load_ratio: number;
   allocated_power_kw?: number;
+  speed_rpm?: number;
   soc?: number;
   [key: string]: unknown;
 }
