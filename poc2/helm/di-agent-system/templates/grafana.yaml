@@ -21,7 +21,7 @@ data:
           defaultBucket: {{ .Values.influxdb.bucket }}
           httpHeaderName1: Authorization
         secureJsonData:
-          httpHeaderValue1: Token {{ .Values.influxdb.adminToken }}
+          httpHeaderValue1: Token $INFLUXDB_ADMIN_TOKEN
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -56,13 +56,18 @@ spec:
             - name: GF_SECURITY_ADMIN_USER
               valueFrom:
                 secretKeyRef:
-                  name: grafana-credentials
+                  name: {{ .Values.grafana.existingSecret }}
                   key: admin-user
             - name: GF_SECURITY_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: grafana-credentials
+                  name: {{ .Values.grafana.existingSecret }}
                   key: admin-password
+            - name: INFLUXDB_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.influxdb.existingSecret }}
+                  key: admin-token
           resources:
             {{- toYaml .Values.grafana.resources | nindent 12 }}
           volumeMounts:

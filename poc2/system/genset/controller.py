@@ -109,30 +109,35 @@ class GensetController:
 
             delta = max(-max_step, min(max_step, target - current))
             current += delta
-            power_kw = self.genset.aux_engine.rated_power * current
+            # Genset.rated_power is the generator's rated power (electric output side), so the
+            # load ratio is relative to the electric output and the generator stays in the loop.
+            power_kw = self.genset.rated_power * current
 
-            run_point = self.genset.aux_engine.get_engine_run_point_from_power_out_kw(
-                power_kw=np.asarray([power_kw])
+            # Run the full genset chain: electric power -> generator efficiency curve ->
+            # engine shaft power -> engine run point (fuel, bsfc, emissions).
+            run_point = self.genset.get_fuel_cons_load_bsfc_from_power_out_generator_kw(
+                power=np.asarray([power_kw])
             )
+            engine_run_point = run_point.engine
             fuel_flow_kg_per_s = float(
-                np.atleast_1d(run_point.fuel_flow_rate_kg_per_s.total_fuel_consumption)[0]
+                np.atleast_1d(engine_run_point.fuel_flow_rate_kg_per_s.total_fuel_consumption)[0]
             )
             # Tank-to-wake CO2 from combustion, derived from the fuel's GHG factor table.
             # get_total_co2_emissions() returns an ndarray of GHGEmissions (one per power_kw entry).
-            co2_emissions = run_point.fuel_flow_rate_kg_per_s.get_total_co2_emissions()[0]
+            co2_emissions = engine_run_point.fuel_flow_rate_kg_per_s.get_total_co2_emissions()[0]
             co2_kg_per_s = float(
                 np.atleast_1d(co2_emissions.tank_to_wake_kg_or_gco2eq_per_gfuel)[0]
             )
             nox_kg_per_s = float(
-                np.atleast_1d(run_point.emissions_g_per_s.get(EmissionType.NOX, 0.0))[0] / 1000
+                np.atleast_1d(engine_run_point.emissions_g_per_s.get(EmissionType.NOX, 0.0))[0] / 1000
             )
             message = {
                 "genset_id": self.genset_id,
                 "timestamp": time.time(),
-                "load_ratio": float(run_point.load_ratio[0]),
+                "load_ratio": float(run_point.genset_load_ratio[0]),
                 "power_kw": float(power_kw),
                 "fuel_flow_kg_per_s": fuel_flow_kg_per_s,
-                "bsfc_g_per_kwh": float(run_point.bsfc_g_per_kWh[0]),
+                "bsfc_g_per_kwh": float(engine_run_point.bsfc_g_per_kWh[0]),
                 "co2_kg_per_s": co2_kg_per_s,
                 "nox_kg_per_s": nox_kg_per_s,
             }

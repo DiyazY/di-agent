@@ -49,7 +49,7 @@ spec:
             - name: INFLUXDB_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: influxdb-credentials
+                  name: {{ .Values.influxdb.existingSecret }}
                   key: admin-token
           resources:
             {{- toYaml .Values.telemetryWriter.resources | nindent 12 }}
