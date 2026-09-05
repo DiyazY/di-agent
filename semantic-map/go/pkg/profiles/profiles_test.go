@@ -70,3 +70,43 @@ func findPriorWeightsFile(t *testing.T) string {
 func almostEqual(a, b, eps float64) bool {
 	return math.Abs(a-b) <= eps
 }
+
+// TestBuildWiresCgroupSubjectOptions checks that Config's CgroupSubjects/CgroupMaxSubjects
+// fields actually reach the collector Build constructs, rather than only being accepted
+// and silently dropped: a synthetic pod cgroup under CgroupRoot must show up as a
+// pod:<uid> subject in the samples the built collector produces.
+func TestBuildWiresCgroupSubjectOptions(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{root, filepath.Join(root, "kubepods.slice", "kubepods-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// memory.max carries a concrete limit rather than "max" (no limit) so the
+		// subject's memory sample resolves from the cgroup files alone on the very
+		// first Collect() call; falling back to "max" would make this test depend on
+		// the host's /proc/meminfo (MemTotalBytes isn't wired through Config), which
+		// is unset on non-Linux dev machines and would leave the ratio undefined.
+		for name, content := range map[string]string{"cpu.stat": "usage_usec 1\nnr_periods 0\nnr_throttled 0\n", "memory.current": "1024\n", "memory.max": "1073741824\n"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_, coll, err := Build("edge-minimal", Config{
+		DomainSpec: mustSpec(), NodeID: "n1", CgroupRoot: root,
+		CgroupSubjects: true, CgroupMaxSubjects: 4, EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples, _ := coll.Collect()
+	var scoped bool
+	for _, s := range samples {
+		if s.Subject == "pod:8f3c1234-aaaa-bbbb-cccc-1234567890ab" {
+			scoped = true
+		}
+	}
+	if !scoped {
+		t.Error("Build did not pass the subject options to the cgroup collector")
+	}
+}

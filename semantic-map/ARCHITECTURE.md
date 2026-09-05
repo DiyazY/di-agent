@@ -997,11 +997,20 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go` | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares `share-of-node-capacity` `[0,1]`; memory against `MemTotal`; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
 | `NetdataCollector`  | Netdata HTTP streaming API       | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go` | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps |
+
+The memory share the `CgroupCollector` reports — the root's own included — now divides
+by `MemTotal` read from `/proc/meminfo`, falling back to `memory.max` only when
+`/proc/meminfo` is unreadable. In a containerised deployment where the daemon itself
+runs under a memory limit, this means the node-level memory ratio is computed against
+the machine's total memory, not the container's limit; the declared unit
+`share-of-node-capacity` names exactly that quantity, not a fraction of any per-process
+or per-container ceiling.
 
 Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The map ingests all their outputs — event identities make overlapping reports of the same physical observation harmless.
 

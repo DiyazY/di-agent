@@ -107,6 +107,14 @@ semantic-map/
     │   ├── types/types.go      Go equivalents of all Python types
     │   ├── contracts/          The contract surface — five interfaces
     │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
+    │   ├── stats/              Shared estimator primitives (concrete, NOT a contract)
+    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + FisherPValue —
+    │   │   │                   the one estimator statemap and the MI proposer both use
+    │   │   └── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   ├── ingest/client/      Wire face of the sample boundary for applications
+    │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
+    │   │   │                   subject, same MetricSample an in-process collector produces
+    │   │   └── client_test.go  Push wire-format + EventID determinism coverage
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
@@ -140,6 +148,8 @@ semantic-map/
     ├── internal/               Implementation packages — not importable externally
     │   └── minimal/            edge-minimal profile implementations
     │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
+    │       ├── cgroup_recognise.go   Subject recognisers: pod cgroups (systemd + cgroupfs
+    │       │                         drivers) and allowlisted system.slice units
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
     │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
@@ -705,9 +715,15 @@ the shape of the real thing.
 | `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `-kd` answer identically until telemetry arrives. |
 | `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
+| `-cgroup-subjects`  | `true`           | Walk pod cgroups (and `-cgroup-units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
+| `-cgroup-units`     | `""`             | Comma-separated globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `k0s*.service,containerd.service`); empty models none. |
+| `-cgroup-max-subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
+| `-cgroup-cmd-label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
+| `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |

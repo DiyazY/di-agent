@@ -63,6 +63,14 @@ type Config struct {
 	// CollectorContract handle).
 	CgroupRoot string
 
+	// CgroupSubjects walks pod cgroups (and CgroupUnitGlobs-allowlisted units) as
+	// subjects. CgroupMaxSubjects bounds the walk (0 = 256). CgroupCmdLabel stamps a
+	// cmd= label from /proc (needs hostPID). See minimal.CgroupOptions.
+	CgroupSubjects    bool
+	CgroupUnitGlobs   []string
+	CgroupMaxSubjects int
+	CgroupCmdLabel    bool
+
 	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
 	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
 	// When set together with CgroupRoot, both collectors run as a MultiCollector.
@@ -342,15 +350,20 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	hasCgroup := cfg.CgroupRoot != "" && cfg.NodeID != ""
 	hasNetdata := cfg.NetdataURL != ""
 
+	cgOpts := minimal.CgroupOptions{
+		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
+		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
+	}
+
 	switch {
 	case hasCgroup && hasNetdata:
-		cgroupC := minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+		cgroupC := minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
 		netdataC := minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
 		collector = minimal.NewMultiCollector(cgroupC, netdataC)
 	case hasNetdata:
 		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
 	case hasCgroup:
-		collector = minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+		collector = minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
 		// else: collector stays nil — collection loop disabled
 	}
 

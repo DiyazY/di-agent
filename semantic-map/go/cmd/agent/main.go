@@ -84,6 +84,22 @@ func main() {
 		"how often the collection loop ticks the Collector; 0 disables the loop")
 	cgroupRoot := flag.String("cgroup-root", "/sys/fs/cgroup",
 		"filesystem root the cgroup collector reads from; empty string disables the loop")
+	cgroupSubjects := flag.Bool("cgroup-subjects", true,
+		"walk pod cgroups (and -cgroup-units) as subjects: each becomes its own set of "+
+			"properties, admitted on first observation and retired on silence")
+	cgroupUnits := flag.String("cgroup-units", "",
+		"comma-separated globs of systemd units under system.slice to model as unit:<name> "+
+			"subjects (e.g. 'k0s*.service,containerd.service'); empty models none")
+	cgroupMaxSubjects := flag.Int("cgroup-max-subjects", 256,
+		"upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped")
+	cgroupCmdLabel := flag.Bool("cgroup-cmd-label", false,
+		"stamp cmd=<argv0> from each subject's first process (label only; needs /proc "+
+			"visibility, i.e. hostPID or privileged)")
+	proposerThreshold := flag.Float64("proposer-threshold", 0.85,
+		"|Pearson r| above which the proposer emits a candidate")
+	proposerMinPairs := flag.Int("proposer-min-pairs", 30,
+		"co-observations a pair needs inside the pair window before it can become a "+
+			"candidate — the pace at which structure appears")
 	nodeID := flag.String("node-id", "",
 		"the machine this agent models. Used both to stamp its own MetricSamples and "+
 			"as its identity: the map is node-local, so samples labelled with another "+
@@ -238,6 +254,9 @@ func main() {
 	}
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
 		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
+	log.Printf("proposer: threshold=%.2f min-pairs=%d", *proposerThreshold, *proposerMinPairs)
+	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
+		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
 
 	peerURLs := parsePeerURLs(*peersFlag)
 
@@ -250,10 +269,16 @@ func main() {
 		KD:                   *kd,
 		NodeID:               *nodeID,
 		CgroupRoot:           *cgroupRoot,
+		CgroupSubjects:       *cgroupSubjects,
+		CgroupUnitGlobs:      splitCSV(*cgroupUnits),
+		CgroupMaxSubjects:    *cgroupMaxSubjects,
+		CgroupCmdLabel:       *cgroupCmdLabel,
 		NetdataURL:           *netdataURL,
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
 		UseProposer:          useProposer,
+		ProposerThreshold:    *proposerThreshold,
+		ProposerMinPairs:     *proposerMinPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
 		// silently wired DisabledTuner into every daemon. POST /agent/tune then
@@ -459,6 +484,17 @@ func parsePeerURLs(raw string) []string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// splitCSV splits a comma-separated flag, trimming blanks; "" yields nil.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
 	}
 	return out
 }
