@@ -331,3 +331,11 @@ func TestEstimate_AssumeAndWithoutParams(t *testing.T) {
 		t.Errorf("malformed assume returned %d, want 400", code)
 	}
 }
+
+func TestEstimate_EmptyWithoutIsRejected(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&without=", nil); code != 400 {
+		t.Errorf("empty without returned %d, want 400", code)
+	}
+}

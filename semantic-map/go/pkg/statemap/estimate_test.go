@@ -259,3 +259,18 @@ func TestEstimateDefaultIdDistinguishesCounterfactuals(t *testing.T) {
 		}
 	}
 }
+
+// TestEstimateRefusesAnEmptyWithout: Query.Subject "" means no restriction, so an
+// empty exclusion passed through would take every property in the map — the target
+// included — to its floor and report a confident projection of nothing.
+func TestEstimateRefusesAnEmptyWithout(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure", Without: []string{""}})
+	if res.Err == "" {
+		t.Fatalf("empty without was accepted: assumptions=%v excluded=%v hypothetical=%+v",
+			res.Assumptions, res.Excluded, res.Hypothetical)
+	}
+	if len(res.Assumptions) != 0 || res.Hypothetical != nil {
+		t.Errorf("empty without floored properties anyway: %v", res.Assumptions)
+	}
+}

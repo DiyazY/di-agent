@@ -270,6 +270,12 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 			writeError(w, http.StatusBadRequest, "target is required: name the property to estimate")
 			return
 		}
+		for _, x := range q["without"] {
+			if x == "" {
+				writeError(w, http.StatusBadRequest, "without must name a subject or a property")
+				return
+			}
+		}
 		req := statemap.EstimateRequest{ID: q.Get("id"), Target: target, Without: q["without"]}
 		for _, a := range q["assume"] {
 			key, val, ok := strings.Cut(a, "=")

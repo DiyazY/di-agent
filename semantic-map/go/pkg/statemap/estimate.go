@@ -106,6 +106,15 @@ func normalise(p Property, v float64) float64 {
 // the reading itself and cannot drift from it.
 func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	target := req.Target
+	for _, w := range req.Without {
+		if w == "" {
+			// Query.Subject "" means no restriction, so an empty exclusion would take
+			// every property in the map, the target included, to its floor and
+			// answer with a confident projection of nothing. Refused before the
+			// question is even named.
+			return EstimateResult{Err: "without must name a subject or a property"}
+		}
+	}
 	id := req.ID
 	if id == "" {
 		id = "est-" + strconv.FormatUint(m.Revision(), 10) + "-" + target
