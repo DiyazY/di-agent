@@ -84,11 +84,10 @@ func TestBuildWiresCgroupSubjectOptions(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		// memory.max carries a concrete limit rather than "max" (no limit) so the
-		// subject's memory sample resolves from the cgroup files alone on the very
-		// first Collect() call; falling back to "max" would make this test depend on
-		// the host's /proc/meminfo (MemTotalBytes isn't wired through Config), which
-		// is unset on non-Linux dev machines and would leave the ratio undefined.
+		// The subject is proven through its CPU sample, which needs two Collect()
+		// calls and no node memory capacity: MemTotalBytes is not wired through
+		// Config, /proc/meminfo is absent on non-Linux dev machines, and without a
+		// known capacity the collector deliberately emits no memory sample at all.
 		for name, content := range map[string]string{"cpu.stat": "usage_usec 1\nnr_periods 0\nnr_throttled 0\n", "memory.current": "1024\n", "memory.max": "1073741824\n"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 				t.Fatal(err)
@@ -100,6 +99,14 @@ func TestBuildWiresCgroupSubjectOptions(t *testing.T) {
 		CgroupSubjects: true, CgroupMaxSubjects: 4, EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coll.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	pod := filepath.Join(root, "kubepods.slice", "kubepods-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+	if err := os.WriteFile(filepath.Join(pod, "cpu.stat"), []byte("usage_usec 5001\nnr_periods 0\nnr_throttled 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	samples, _ := coll.Collect()

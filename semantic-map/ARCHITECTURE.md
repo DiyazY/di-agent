@@ -1008,7 +1008,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares `share-of-node-capacity` `[0,1]`; subject memory against `MemTotal`, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares `share-of-node-capacity` `[0,1]` (`cpu_throttle_ratio` as `share-of-periods`); subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1020,12 +1020,16 @@ The `CgroupCollector` reports memory from two different places, because a cgroup
 root carries no memory files at all. The **root's** share comes from `/proc/meminfo`,
 as `(MemTotal − MemAvailable) / MemTotal`; when meminfo is unreadable the node simply
 has no memory property, which is the honest answer. A **subject's** share is its own
-`memory.current` over `MemTotal`, and only when meminfo is unreadable does it fall back
-to that subject's `memory.max`. A root that *does* carry memory files — the daemon
+`memory.current` over `MemTotal`; when `MemTotal` is unknown the subject has no memory
+property at all, because `memory.current` over the subject's own `memory.max` is a
+share of its limit, a different quantity, and the estimator normalises by what a sample
+declares. A root that *does* carry memory files — the daemon
 itself running inside a container, whose cgroup is its root — keeps the subject rule
 and is measured against `MemTotal`, so the ratio is still against the machine and not
 the container's limit. The declared unit `share-of-node-capacity` names exactly that
-quantity, not a fraction of any per-process or per-container ceiling. The two sources
+quantity, not a fraction of any per-process or per-container ceiling; the one reading
+that is not a share of the node, `cpu_throttle_ratio` (throttled CFS periods over
+elapsed periods), is declared as `share-of-periods` instead. The two sources
 account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
 cache, `memory.current` includes a cgroup's own — so the node figure and the sum of its
 subjects' figures are not the same quantity and are not expected to add up.

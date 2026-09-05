@@ -346,3 +346,58 @@ func keys[V any](m map[string]V) []string {
 	}
 	return out
 }
+
+// TestSubjectMemoryIsSilentWhenNodeCapacityIsUnknown: without MemTotal there is no
+// share of node capacity to report. memory.current / memory.max is a share of the
+// subject's own limit — a different quantity — and stamping it with this collector's
+// unit would hand the estimator a number that is not what it says it is.
+func TestSubjectMemoryIsSilentWhenNodeCapacityIsUnknown(t *testing.T) {
+	root := t.TempDir()
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	pod := filepath.Join(root, "kubepods", "besteffort", "pod11111111-2222-3333-4444-555555555555")
+	writeCgroup(t, pod, 500_000, 0, 0, "67108864")
+	if err := os.WriteFile(filepath.Join(pod, "memory.max"), []byte("134217728\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No meminfo under ProcRoot and no MemTotalBytes: node capacity is unknown.
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, ProcRoot: t.TempDir()})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range samples {
+		if s.Subject != "" && s.MetricType == types.MemoryUtilization {
+			t.Errorf("subject %s emitted memory %v as %q with node capacity unknown; want no sample rather than a share of the pod's own limit",
+				s.Subject, s.Value, s.Unit)
+		}
+	}
+}
+
+// TestThrottleRatioDeclaresItsOwnUnit: throttled periods over elapsed periods is a
+// share of the subject's CFS periods, not a share of node capacity, and the estimator
+// normalises by what the sample declares.
+func TestThrottleRatioDeclaresItsOwnUnit(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	advance(t, podA, 1_040_000, 110, 15)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var throttle *types.MetricSample
+	for _, s := range samples {
+		if s.Subject != "" && s.MetricType == types.CPUThrottleRatio {
+			throttle = s
+		}
+	}
+	if throttle == nil {
+		t.Fatal("no throttle sample for the pod after two collects")
+	}
+	if throttle.Unit != "share-of-periods" || throttle.Range == nil || *throttle.Range != [2]float64{0, 1} {
+		t.Errorf("throttle sample unit %q range %v; want share-of-periods on [0,1]", throttle.Unit, throttle.Range)
+	}
+}

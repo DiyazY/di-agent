@@ -32,10 +32,13 @@ import (
 // capped at CgroupOptions.MaxSubjects; beyond the cap the collector logs once
 // and skips the rest.
 //
-// Every sample this collector produces — root or subject — is declared as
-// "share-of-node-capacity" with Range [0,1]: CPU and memory readings are
-// always a fraction of what the whole node has, never a fraction of a
-// subject-local limit. The node's memory share is the one reading that does not
+// CPU and memory samples — root or subject — are declared as
+// "share-of-node-capacity" with Range [0,1]: a fraction of what the whole node
+// has, never a fraction of a subject-local limit. When the node's capacity is
+// unknown (no MemTotal), memory is not reported at all rather than as a share of
+// the subject's own memory.max, which is a different quantity. cpu_throttle_ratio
+// is throttled periods over elapsed periods and is declared as "share-of-periods"
+// on [0,1]. The node's memory share is the one reading that does not
 // come from a cgroup file: a cgroup v2 root has no memory.current / memory.max, so
 // it is (MemTotal − MemAvailable) / MemTotal from /proc/meminfo. A subject that has vanished between one Collect() and
 // the next simply produces no samples this tick; its cgroup snapshot is
@@ -77,7 +80,7 @@ type CgroupOptions struct {
 	// visibility (hostPID or privileged), hence off by default.
 	CmdLabel bool
 	// MemTotalBytes is the node's memory capacity. 0 reads /proc/meminfo; when that
-	// is unreadable the collector falls back to memory.max (skipped when "max").
+	// is unreadable too, no memory sample is emitted for any subject.
 	MemTotalBytes uint64
 	// ProcRoot is where /proc is mounted (tests point it at a fake tree).
 	ProcRoot string
@@ -198,16 +201,14 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	if err != nil {
 		return nil
 	}
-	memCurrent, memMax, memErr := readMemoryStat(dir)
+	memCurrent, memErr := readMemoryCurrent(dir)
 	prev := c.prev[subject]
 	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
 
 	var samples []*types.MetricSample
 	switch {
 	case memErr == nil && c.memTotal > 0:
-		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
-	case memErr == nil && memMax > 0:
-		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(memMax), 0, 1), now, now, subject, labels))
+		samples = append(samples, c.sample(types.MemoryUtilization, unitNodeShare, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
 	case memErr != nil && subject == "":
 		// The root of a cgroup v2 hierarchy carries no memory.current / memory.max —
 		// the kernel does not create them there — so the node's memory share has to
@@ -216,7 +217,7 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		// A subject keeps using its own cgroup files; only the node falls back here,
 		// and only when its cgroup cannot answer (a container as root can).
 		if share, ok := readMemInUseShare(filepath.Join(c.opts.ProcRoot, "meminfo")); ok {
-			samples = append(samples, c.sample(types.MemoryUtilization, clamp(share, 0, 1), now, now, subject, labels))
+			samples = append(samples, c.sample(types.MemoryUtilization, unitNodeShare, clamp(share, 0, 1), now, now, subject, labels))
 		}
 	}
 	if prev == nil {
@@ -228,11 +229,11 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	}
 	if cpu.usageUsec >= prev.usageUsec {
 		util := clamp(float64(cpu.usageUsec-prev.usageUsec)/(float64(elapsedUs)*c.numCPU), 0, 1)
-		samples = append(samples, c.sample(types.CPUUtilization, util, now, prev.ts, subject, labels))
+		samples = append(samples, c.sample(types.CPUUtilization, unitNodeShare, util, now, prev.ts, subject, labels))
 	}
 	if cpu.nrPeriods > prev.nrPeriods {
 		throttle := clamp(float64(cpu.nrThrottled-prev.nrThrottled)/float64(cpu.nrPeriods-prev.nrPeriods), 0, 1)
-		samples = append(samples, c.sample(types.CPUThrottleRatio, throttle, now, prev.ts, subject, labels))
+		samples = append(samples, c.sample(types.CPUThrottleRatio, unitPeriodShare, throttle, now, prev.ts, subject, labels))
 	}
 	return samples
 }
@@ -322,17 +323,25 @@ func readMemTotal(path string) uint64 {
 
 var shareRange = [2]float64{0, 1}
 
+const (
+	// unitNodeShare: a fraction of what the whole node has (CPU, memory).
+	unitNodeShare = "share-of-node-capacity"
+	// unitPeriodShare: throttled CFS periods over elapsed periods, a fraction of
+	// the subject's own scheduling periods rather than of the node.
+	unitPeriodShare = "share-of-periods"
+)
+
 // sample builds a MetricSample with a deterministic event_id over
-// (source, node, subject, metric, anchor). Every reading is declared as a share of
-// the node's capacity in [0,1] — this collector's meaning, not the map's rule.
-func (c *CgroupCollector) sample(mt types.MetricType, value float64, ts, anchorTs time.Time, subject string, labels map[string]string) *types.MetricSample {
+// (source, node, subject, metric, anchor), declared in the unit the caller names
+// on [0,1] — this collector's meaning, not the map's rule.
+func (c *CgroupCollector) sample(mt types.MetricType, unit string, value float64, ts, anchorTs time.Time, subject string, labels map[string]string) *types.MetricSample {
 	key := fmt.Sprintf("%s:%s:%s:%s:%d", c.sid, c.nodeID, subject, string(mt), anchorTs.Unix())
 	h := sha256.Sum256([]byte(key))
 	rng := shareRange
 	return &types.MetricSample{
 		NodeID: c.nodeID, MetricType: mt, Value: value, TimestampUnix: ts.Unix(),
 		EventID: fmt.Sprintf("%x", h[:8]),
-		Subject: subject, Unit: "share-of-node-capacity", Range: &rng, Source: c.sid, Labels: labels,
+		Subject: subject, Unit: unit, Range: &rng, Source: c.sid, Labels: labels,
 	}
 }
 
@@ -377,29 +386,14 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 	return stat, scanner.Err()
 }
 
-// readMemoryStat returns (current bytes, max bytes, error).
-// If memory.max contains "max" (no limit), max is returned as 0 — callers
-// should skip the utilization ratio rather than divide by zero.
-func readMemoryStat(cgroupRoot string) (current, max uint64, err error) {
+// readMemoryCurrent returns the cgroup's memory.current in bytes. memory.max is not
+// read: a share of a subject's own limit is not a quantity this collector reports.
+func readMemoryCurrent(cgroupRoot string) (uint64, error) {
 	cur, err := os.ReadFile(filepath.Join(cgroupRoot, "memory.current"))
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	current, err = strconv.ParseUint(strings.TrimSpace(string(cur)), 10, 64)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	lim, err := os.ReadFile(filepath.Join(cgroupRoot, "memory.max"))
-	if err != nil {
-		return 0, 0, err
-	}
-	limStr := strings.TrimSpace(string(lim))
-	if limStr == "max" {
-		return current, 0, nil // no limit configured
-	}
-	max, err = strconv.ParseUint(limStr, 10, 64)
-	return current, max, err
+	return strconv.ParseUint(strings.TrimSpace(string(cur)), 10, 64)
 }
 
 func clamp(v, lo, hi float64) float64 {
