@@ -110,8 +110,10 @@ semantic-map/
 │   │                           saturating (nonlinear) ground truth
 │   ├── churn.json              Subjects arrive, depart and return — admission,
 │   │                           staleness and retirement timing
-│   ├── confounded.json         Two subjects drive the same node property — the
-│   │                           proposer must not conflate them
+│   ├── confounded.json         One subject drives a node property; a second
+│   │                           co-varies with it without driving anything —
+│   │                           both are proposed, and the map cannot tell
+│   │                           which is the cause
 │   └── decoupled.json          A subject the node model never reads — asserts no
 │                               discovery candidate is proposed from it
 │
@@ -771,7 +773,7 @@ the shape of the real thing.
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
 
-See `scenarios/` for five seed scenario files to drive `-script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (two independent subjects both driving the same property), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
+See `scenarios/` for five seed scenario files to drive `-script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
 

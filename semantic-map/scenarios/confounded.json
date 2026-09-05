@@ -12,13 +12,13 @@
     {"id": "pod:a", "arrive": 0,
      "properties": {"cpu_utilization": {"pattern": "sine", "min": 0.10, "max": 0.40, "period": 600}}},
     {"id": "pod:b", "arrive": 0,
-     "properties": {"cpu_utilization": {"pattern": "sine", "min": 0.05, "max": 0.30, "period": 600}}}
+     "properties": {"io_wait": {"pattern": "sine", "min": 0.05, "max": 0.30, "period": 600}}}
   ],
   "expect": {
     "admitted_within_ticks": 1,
     "candidates": [
       {"from": "cpu_utilization@pod:a", "to": "pressure", "sign": 1, "within_seconds": 1200},
-      {"from": "cpu_utilization@pod:b", "to": "pressure", "sign": 1, "within_seconds": 1200}
+      {"from": "io_wait@pod:b", "to": "pressure", "sign": 1, "within_seconds": 1200}
     ]
   }
 }
