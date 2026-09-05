@@ -369,11 +369,23 @@ func (m *SemanticMap) ConfirmCandidate(candidateID string) error {
 		if prop.Direction == types.Negative {
 			sign = -1
 		}
-		return m.state.DeclareRelationship(statemap.Relationship{
+		err := m.state.DeclareRelationship(statemap.Relationship{
 			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,
 			Provenance: statemap.Discovered,
 			Note:       "[discovered: " + prop.Description + "; confirmed by operator]",
 		})
+		if err != nil {
+			// The proposer marked the candidate Confirmed on the way out; with no
+			// relationship behind it that would be a phantom nobody can retry or
+			// reject. Put it back.
+			if r, ok := m.proposer.(interface{ Reopen(string) error }); ok {
+				if rerr := r.Reopen(candidateID); rerr != nil {
+					return fmt.Errorf("%w (and the candidate could not be reopened: %v)", err, rerr)
+				}
+			}
+			return fmt.Errorf("%w; candidate %s is pending again", err, candidateID)
+		}
+		return nil
 	}
 	// The facade applies it, because this is the only path that reaches both the
 	// declaration and the state model. A confirmed candidate that landed only in the

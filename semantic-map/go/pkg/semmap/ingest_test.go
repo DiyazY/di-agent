@@ -350,3 +350,51 @@ func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) 
 		t.Errorf("census discovered=%d, want 1", state.Census().Discovered)
 	}
 }
+
+// TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending: the proposer marks
+// a candidate Confirmed before the facade declares the relationship. When the
+// declaration is refused — here an opposite-sign edge already exists — the error must
+// not leave a candidate that history calls Confirmed, that no relationship backs, and
+// that can never be retried or rejected.
+func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) == 0 {
+		t.Fatal("setup: no candidate")
+	}
+	// An earlier claim in the opposite direction makes the declaration fail.
+	if err := state.DeclareRelationship(statemap.Relationship{From: "cpu_utilization@pod:a", To: "cpu_pressure_ratio",
+		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID); err == nil {
+		t.Fatal("confirming against an opposite-sign edge succeeded")
+	}
+	after, _ := sm.PendingCandidates()
+	if len(after) != 1 || after[0].CandidateID != cs[0].CandidateID {
+		t.Errorf("after the failed declaration the candidate is gone from pending: %v; want it back, retryable", after)
+	}
+	h, _ := proposer.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == cs[0].CandidateID && c.Status == types.Confirmed {
+			t.Error("history calls the candidate Confirmed although no relationship was declared")
+		}
+	}
+}
