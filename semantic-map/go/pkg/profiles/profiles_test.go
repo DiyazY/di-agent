@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,35 @@ func TestBuildWiresCgroupSubjectOptions(t *testing.T) {
 	}
 	if !scoped {
 		t.Error("Build did not pass the subject options to the cgroup collector")
+	}
+}
+
+// TestBuildWithScriptPathUsesTheSyntheticSystem checks that Config.ScriptPath makes
+// Build wire the synthetic system in place of any real collector: the returned
+// CollectorContract must be the scripted.SystemScript for the given scenario, and its
+// first Collect() must emit a sample scoped to the scenario's subject.
+func TestBuildWithScriptPathUsesTheSyntheticSystem(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(p, []byte(`{"name":"t","seed":1,"tick_seconds":10,"duration_seconds":600,
+	  "node":{"node_cpu":{"coupling":"sum","base":0.1,"of":"cpu_utilization"}},
+	  "subjects":[{"id":"pod:a","arrive":0,"properties":{"cpu_utilization":{"pattern":"constant","value":0.3}}}],
+	  "expect":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, coll, err := Build("edge-minimal", Config{DomainSpec: mustSpec(), NodeID: "sim", ScriptPath: p,
+		CgroupRoot: t.TempDir(), EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coll == nil || !strings.HasPrefix(coll.SourceID(), "system-script:") {
+		t.Fatalf("collector %v; want the synthetic system to replace the others when -script is set", coll)
+	}
+	samples, _ := coll.Collect()
+	var scoped bool
+	for _, s := range samples {
+		scoped = scoped || s.Subject == "pod:a"
+	}
+	if !scoped {
+		t.Error("the synthetic system emitted no scoped sample")
 	}
 }

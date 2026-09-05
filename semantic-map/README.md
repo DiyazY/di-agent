@@ -721,12 +721,15 @@ the shape of the real thing.
 | `-cgroup-cmd-label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
+| `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
 | `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
 | `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
+
+See `scenarios/` for five seed scenario files to drive `-script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (two independent subjects both driving the same property), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
 

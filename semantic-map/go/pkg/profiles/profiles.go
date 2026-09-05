@@ -5,10 +5,12 @@ package profiles
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/internal/scripted"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
@@ -70,6 +72,10 @@ type Config struct {
 	CgroupUnitGlobs   []string
 	CgroupMaxSubjects int
 	CgroupCmdLabel    bool
+
+	// ScriptPath runs the synthetic system from a scenario file instead of any real
+	// collector — for driving a live daemon through a known story.
+	ScriptPath string
 
 	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
 	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
@@ -353,6 +359,15 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	cgOpts := minimal.CgroupOptions{
 		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
 		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
+	}
+
+	if cfg.ScriptPath != "" {
+		sc, err := scripted.LoadScenario(cfg.ScriptPath)
+		if err != nil {
+			log.Printf("script: %v; no collector", err)
+			return sm, nil
+		}
+		return sm, scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
 	}
 
 	switch {
