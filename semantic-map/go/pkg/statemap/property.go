@@ -565,11 +565,22 @@ func (m *Map) DeclareProperty(p Property) error {
 		changed["source"] = p.Source
 		existing.Source = p.Source
 	}
-	if p.Range != ([2]float64{}) && existing.Range != p.Range {
-		changed["range"] = p.Range
-		changed["range_declared"] = true
-		existing.Range = p.Range
-		existing.RangeDeclared = true
+	if p.Range != ([2]float64{}) {
+		// A declaration that carries a range declares it, whether or not the numbers
+		// differ from what the map had assumed. Comparing only the numbers left a
+		// property whose producer declares exactly the assumed [0,1] flagged as
+		// assumed forever: every estimate reading it would caveat a range that was in
+		// fact declared, and reconcileDeclarationLocked would let a later producer
+		// overwrite it. The journal still only hears about an actual change, so a
+		// collector restart re-declaring the same thing stays silent.
+		if existing.Range != p.Range {
+			changed["range"] = p.Range
+			existing.Range = p.Range
+		}
+		if !existing.RangeDeclared {
+			changed["range_declared"] = true
+			existing.RangeDeclared = true
+		}
 	}
 	if len(p.Members) > 0 && !sameStrings(existing.Members, p.Members) {
 		changed["members"] = p.Members

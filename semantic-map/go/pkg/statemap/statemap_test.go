@@ -3,6 +3,7 @@ package statemap
 import (
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1389,6 +1390,89 @@ func TestRecordOnDerivedIdIsRejectedWithoutSideEffects(t *testing.T) {
 	rc, _ := m.Property("RC")
 	if len(rc.Labels) != 0 {
 		t.Errorf("RC.Labels = %v; want untouched by the rejected observation", rc.Labels)
+	}
+}
+
+// TestRedeclaringTheSameRangeMarksItDeclared covers the range a producer declares that
+// happens to equal the range the map had already assumed. Only comparing the numbers
+// would leave such a property flagged as assumed forever — and an assumed range is not
+// a cosmetic flag: every estimate that reads the property carries a caveat saying its
+// contribution was normalised by a range nobody declared, and reconcileDeclarationLocked
+// lets a later producer overwrite a range the operator declared while the flag is false.
+func TestRedeclaringTheSameRangeMarksItDeclared(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Observe("q", 0.5, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("q")
+	if p.Range != ([2]float64{0, 1}) || p.RangeDeclared {
+		t.Fatalf("admitted q is %v declared=%v; want the assumed [0,1]", p.Range, p.RangeDeclared)
+	}
+
+	eventsBefore := len(m.Journal().Events(0, 0))
+	if err := m.DeclareProperty(Property{ID: "q", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = m.Property("q")
+	if !p.RangeDeclared {
+		t.Error("RangeDeclared = false after a declaration carrying [0,1], the same numbers the map had assumed; want true")
+	}
+	redeclared := 0
+	for _, e := range m.Journal().Events(0, 0)[eventsBefore:] {
+		if e.Kind == EventPropertyRedeclared && e.Target == "q" {
+			redeclared++
+			if e.Detail["range_declared"] != true {
+				t.Errorf("redeclaration journaled %v; want range_declared recorded on the flip", e.Detail)
+			}
+		}
+	}
+	if redeclared != 1 {
+		t.Errorf("%d redeclaration events for the flip; want exactly 1", redeclared)
+	}
+
+	// Idempotent: declaring it again changes nothing, so the journal stays silent.
+	eventsBefore = len(m.Journal().Events(0, 0))
+	if err := m.DeclareProperty(Property{ID: "q", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range m.Journal().Events(0, 0)[eventsBefore:] {
+		if e.Target == "q" {
+			t.Errorf("re-declaring an unchanged property journaled %+v; want silence", e)
+		}
+	}
+}
+
+// TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration is the upgrade case: a
+// snapshot written before range_declared existed restores every property with the flag
+// false, and the collectors that re-declare on start mostly declare the same numbers
+// the map already holds. Without the fix every seeded property on an upgraded agent
+// answers estimates with a false "range was assumed, not declared" caveat.
+func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, id := range []string{"a", "b@pod:1"} {
+		if err := m.Observe(id, 0.4, c.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
+	if ok, err := restored.Load(path); err != nil || !ok {
+		t.Fatalf("Load = %v, %v; want a restored snapshot", ok, err)
+	}
+	for _, id := range []string{"a", "b@pod:1"} {
+		if p, _ := restored.Property(id); p.RangeDeclared {
+			t.Fatalf("%s restored with RangeDeclared=true; this test needs the pre-branch shape it models", id)
+		}
+		if err := restored.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := restored.Property(id); !p.RangeDeclared {
+			t.Errorf("%s: RangeDeclared = false after the producer re-declared its range; want true", id)
+		}
 	}
 }
 
