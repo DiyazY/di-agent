@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -276,6 +277,12 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 				return
 			}
 		}
+		if id := q.Get("id"); id != "" {
+			if _, used := sm.Journal().Decision(id); used {
+				writeError(w, http.StatusConflict, "decision id "+id+" is already used; choose another or omit id")
+				return
+			}
+		}
 		req := statemap.EstimateRequest{ID: q.Get("id"), Target: target, Without: q["without"]}
 		for _, a := range q["assume"] {
 			key, val, ok := strings.Cut(a, "=")
@@ -284,8 +291,8 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map) {
 				return
 			}
 			f, err := strconv.ParseFloat(val, 64)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "assume value must be a number: "+a)
+			if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+				writeError(w, http.StatusBadRequest, "assume value must be a finite number: "+a)
 				return
 			}
 			if req.Assume == nil {

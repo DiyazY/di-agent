@@ -42,3 +42,37 @@ func TestEstimateCommandRendersProjection(t *testing.T) {
 		}
 	}
 }
+
+// TestEstimateCommandRendersAnUnmeasuredStrengthAsAbsent: an influence with no
+// strength yet and a learned zero are different facts; printing both as 0 hides the
+// one the caveats are about.
+func TestEstimateCommandRendersAnUnmeasuredStrengthAsAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"decision_id":"est-2","revision":9,
+		  "answer":{"target":"pressure","level":0.3,"confidence":0.5,"status":"active","sensitivity":0,"contributions":0},
+		  "influences":[{"relationship":"io@pod:c->pressure:d","source":"io@pod:c","source_value":0.4,"sign":1,"provenance":"discovered","basis":"unknown","known":false}],
+		  "rationale":"r","caveats":["1 influences have no strength yet"]}`))
+	}))
+	defer srv.Close()
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--addr", srv.URL, "estimate", "pressure"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\n%s", err, out.String())
+	}
+	var row string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "io@pod:c") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no influence row for io@pod:c in:\n%s", out.String())
+	}
+	if !strings.Contains(row, "—") {
+		t.Errorf("unmeasured strength rendered as a number: %q", row)
+	}
+}

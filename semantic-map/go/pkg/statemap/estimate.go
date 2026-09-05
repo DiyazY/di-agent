@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,6 +116,21 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			return EstimateResult{Err: "without must name a subject or a property"}
 		}
 	}
+	for k, v := range req.Assume {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			// Record refuses a non-finite reading; an assumption is a reading the
+			// caller supposes, held to the same rule.
+			return EstimateResult{Err: "assumption on " + k + " is not a finite number"}
+		}
+	}
+	if req.ID != "" {
+		if _, used := m.journal.Decision(req.ID); used {
+			// The journal keeps one record per id; a second estimate under the same
+			// id would silently replace the first, which is the trace of an answer
+			// already given.
+			return EstimateResult{Err: "decision id " + req.ID + " is already used"}
+		}
+	}
 	id := req.ID
 	if id == "" {
 		id = "est-" + strconv.FormatUint(m.Revision(), 10) + "-" + target
@@ -190,6 +206,9 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	var sensitivity, contributions, hypContributions, delta float64
 	var unknown int
 	assumedSeen := map[string]bool{}
+	// unknownAssumed tracks sources whose assumption reached the target only through
+	// edges with no strength yet, so the caveat that names them fires once per source.
+	unknownAssumed := map[string]bool{}
 	// seenSource tracks which source properties have already had their
 	// source-scoped caveats (range-not-declared, out-of-range assumption,
 	// derived-assumed) and their b.Assume rationale line emitted. A source with
@@ -207,6 +226,17 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			Sign: rel.Sign, Provenance: string(rel.Provenance), Basis: rel.Basis(), Known: known}
 		if !known {
 			unknown++
+			if a, assumed := assume[rel.From]; assumed {
+				// The source does relate to the target; what is missing is the
+				// strength. "Does not influence" would be the wrong claim.
+				assumedSeen[rel.From] = true
+				if !unknownAssumed[rel.From] {
+					unknownAssumed[rel.From] = true
+					b.Assume(rel.From, a)
+					b.Caveat("assumption on %s reaches %s through %s, which has no strength yet; it is not in the projection",
+						rel.From, target, rel.ID)
+				}
+			}
 			influences = append(influences, inf)
 			continue
 		}
@@ -250,6 +280,11 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		}
 	}
 
+	if unknown > 0 {
+		// Omitted from the sensitivity and the contributions above, so the answer
+		// must say so whether or not anything was assumed.
+		b.Caveat("%d influences have no strength yet and are omitted from the sensitivity and the projection", unknown)
+	}
 	b.Note("level of %s is %.4f at confidence %.3f from %d observations", target, p.Value, p.Confidence, p.NObservations)
 	b.Note("%d influences: sensitivity %+.4f per normalised unit, contributing %+.4f at current values",
 		len(influences), sensitivity, contributions)
@@ -265,9 +300,6 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	var hypothetical *Hypothetical
 	if len(assume) > 0 {
 		b.Caveat("%s", slopeCaveat)
-		if unknown > 0 {
-			b.Caveat("%d influences have no strength yet and are omitted from the projection", unknown)
-		}
 		lo, hi := p.Range[0], p.Range[1]
 		projected := p.Value + delta
 		if hi > lo {

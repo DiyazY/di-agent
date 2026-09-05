@@ -52,8 +52,12 @@ func newEstimateCmd(deps *Deps) *cobra.Command {
 				if in.HypotheticalSourceValue != nil {
 					hyp = strconv.FormatFloat(*in.HypotheticalSourceValue, 'g', -1, 64)
 				}
+				strength := "—" // no strength yet is not a strength of zero
+				if in.Known {
+					strength = strconv.FormatFloat(in.Strength, 'g', 3, 64)
+				}
 				rows = append(rows, []string{in.Source, strconv.FormatFloat(in.SourceValue, 'g', 4, 64),
-					fmt.Sprintf("%+d", in.Sign), strconv.FormatFloat(in.Strength, 'g', 3, 64), in.Basis, hyp})
+					fmt.Sprintf("%+d", in.Sign), strength, in.Basis, hyp})
 			}
 			render.Table(out, []string{"SOURCE", "VALUE", "SIGN", "STRENGTH", "BASIS", "ASSUMED"}, rows)
 			for _, cv := range res.Caveats {

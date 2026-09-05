@@ -339,3 +339,17 @@ func TestEstimate_EmptyWithoutIsRejected(t *testing.T) {
 		t.Errorf("empty without returned %d, want 400", code)
 	}
 }
+
+func TestEstimate_ReusedIdAndNonFiniteAssumeAreRejected(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-1", nil); code != 200 {
+		t.Fatalf("first estimate under ask-1: %d", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-1", nil); code != 409 {
+		t.Errorf("reused decision id returned %d, want 409", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=cpu_pressure_ratio=NaN", nil); code != 400 {
+		t.Errorf("NaN assume returned %d, want 400", code)
+	}
+}

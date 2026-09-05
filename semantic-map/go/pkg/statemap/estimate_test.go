@@ -99,7 +99,7 @@ func TestEstimateRecordsAssumptionsInTheDecision(t *testing.T) {
 
 func TestEstimateCaveatsAssumedRangeAndOutOfRange(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
-	_ = m.Observe("x@pod:1", 0.5, c.now()) // no declared range
+	_ = m.Record(Observation{ID: "x@pod:1", Value: 0.5, At: c.now(), Subject: "pod:1"}) // no declared range
 	_ = m.Observe("y", 0.5, c.now())
 	_ = m.DeclareRelationship(Relationship{From: "x@pod:1", To: "y", Sign: 1})
 	_ = m.AssertRelationshipStrength(RelationshipID("x@pod:1", "y", ""), 0.5, "op", "t")
@@ -149,7 +149,7 @@ func TestEstimateIsReproducible(t *testing.T) {
 // caveats and its assumption rationale line only once.
 func TestEstimateDoesNotDuplicateSourceCaveats(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
-	_ = m.Observe("x@pod:1", 0.5, c.now()) // no declared range
+	_ = m.Record(Observation{ID: "x@pod:1", Value: 0.5, At: c.now(), Subject: "pod:1"}) // no declared range
 	_ = m.Observe("y", 0.5, c.now())
 	_ = m.DeclareRelationship(Relationship{From: "x@pod:1", To: "y", Sign: 1, Label: "a"})
 	_ = m.DeclareRelationship(Relationship{From: "x@pod:1", To: "y", Sign: 1, Label: "b"})
@@ -272,5 +272,81 @@ func TestEstimateRefusesAnEmptyWithout(t *testing.T) {
 	}
 	if len(res.Assumptions) != 0 || res.Hypothetical != nil {
 		t.Errorf("empty without floored properties anyway: %v", res.Assumptions)
+	}
+}
+
+func anyCaveat(caveats []string, substr string) bool {
+	for _, c := range caveats {
+		if strings.Contains(c, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// withUnmeasuredEdge adds a third source whose relationship to pressure is declared
+// but has no strength yet.
+func withUnmeasuredEdge(t *testing.T) *Map {
+	t.Helper()
+	m, c := estimateFixture(t)
+	unit := [2]float64{0, 1}
+	_ = m.Record(Observation{ID: "io@pod:c", Value: 0.4, At: c.now(), Subject: "pod:c", Range: &unit})
+	if err := m.DeclareRelationship(Relationship{From: "io@pod:c", To: "pressure", Sign: 1, Label: "d"}); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// TestEstimateCaveatsUnmeasuredInfluencesEvenWithoutAssumptions: an influence with no
+// strength is left out of the sensitivity and the contributions. Leaving it out of the
+// caveats too, whenever no assumption was made, reported "3 influences" computed from
+// two with nothing to say so.
+func TestEstimateCaveatsUnmeasuredInfluencesEvenWithoutAssumptions(t *testing.T) {
+	m := withUnmeasuredEdge(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure"})
+	if !anyCaveat(res.Caveats, "no strength yet") {
+		t.Errorf("baseline estimate omitted an unmeasured influence from the arithmetic without saying so: %v", res.Caveats)
+	}
+}
+
+// TestEstimateAssumptionOnAnUnmeasuredEdgeIsNotCalledUnrelated: the source relates to
+// the target; what is missing is the strength. Saying it "does not influence" the
+// target is the wrong claim.
+func TestEstimateAssumptionOnAnUnmeasuredEdgeIsNotCalledUnrelated(t *testing.T) {
+	m := withUnmeasuredEdge(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"io@pod:c": 0.9}})
+	if anyCaveat(res.Caveats, "does not influence") {
+		t.Errorf("an assumption on a source with an unmeasured edge was reported as unrelated: %v", res.Caveats)
+	}
+	if !anyCaveat(res.Caveats, "io@pod:c") || !anyCaveat(res.Caveats, "no strength yet") {
+		t.Errorf("the caveat must name the source and say the edge has no strength yet: %v", res.Caveats)
+	}
+}
+
+// TestEstimateRefusesAReusedDecisionID: the journal keeps one record per id, so a
+// second estimate under an id already used would silently replace the first.
+func TestEstimateRefusesAReusedDecisionID(t *testing.T) {
+	m, _ := estimateFixture(t)
+	if first := m.Estimate(EstimateRequest{ID: "ask-1", Target: "pressure"}); first.Err != "" {
+		t.Fatal(first.Err)
+	}
+	second := m.Estimate(EstimateRequest{ID: "ask-1", Target: "pressure", Assume: map[string]float64{"cpu@pod:b": 0.9}})
+	if second.Err == "" {
+		t.Fatal("a reused decision id was accepted")
+	}
+	d, ok := m.Journal().Decision("ask-1")
+	if !ok || len(d.Assumptions) != 0 {
+		t.Errorf("the first decision was replaced: ok=%v assumptions=%v", ok, d.Assumptions)
+	}
+}
+
+// TestEstimateRefusesNonFiniteAssumptions: Record refuses NaN and Inf readings; an
+// assumption is a reading the caller supposes, held to the same rule.
+func TestEstimateRefusesNonFiniteAssumptions(t *testing.T) {
+	m, _ := estimateFixture(t)
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if res := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"cpu@pod:b": v}}); res.Err == "" {
+			t.Errorf("assumption %v accepted; delta=%v", v, res.Hypothetical)
+		}
 	}
 }
