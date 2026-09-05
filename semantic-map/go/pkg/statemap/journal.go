@@ -255,7 +255,7 @@ func (b *DecisionBuilder) Property(id string) (Property, bool) {
 	p, ok := b.m.properties[id]
 	var copied Property
 	if ok {
-		copied = *p
+		copied = p.clone()
 	}
 	b.m.mu.RUnlock()
 

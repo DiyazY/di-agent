@@ -140,7 +140,7 @@ func (m *Map) State(q Query) StateView {
 		if p.Confidence < q.MinConfidence {
 			continue
 		}
-		view.Properties = append(view.Properties, *p)
+		view.Properties = append(view.Properties, p.clone())
 		selected[p.ID] = true
 	}
 
@@ -169,7 +169,7 @@ func (m *Map) Property(id string) (Property, bool) {
 	if !ok {
 		return Property{}, false
 	}
-	return *p, true
+	return p.clone(), true
 }
 
 // Relationship returns one relationship.

@@ -1793,3 +1793,67 @@ func TestCoveredIgnoresRetiredAndOppositeSign(t *testing.T) {
 		t.Error("a retired relationship does not cover the pair: structure must be able to re-earn its place")
 	}
 }
+
+// TestDeclareRelationshipCarriesNoEvidence: a declaration asserts that a relationship
+// exists and which way it runs. What it is worth is for the machine to say, so any
+// strength, support or established value the caller supplies is dropped, and a
+// provenance the map does not define is refused — otherwise POST /state/relationships
+// can fabricate a learned edge.
+func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a", Value: 1, At: c.now()})
+	_ = m.Record(Observation{ID: "b", Value: 1, At: c.now()})
+	est, asserted := 0.95, 0.7
+	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Strength: 0.9, Confidence: 1,
+		NObservations: 500, Established: &est, Assertion: &asserted, SignAgreements: 400, SignConflicts: 3,
+		Provenance: Discovered})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship("a->b")
+	if _, known := r.Effective(); known {
+		t.Errorf("a freshly declared relationship has an effective strength (%+v); a declaration carries no evidence", r)
+	}
+	if r.NObservations != 0 || r.Established != nil || r.Assertion != nil || r.SignAgreements != 0 ||
+		r.SignConflicts != 0 || r.Strength != 0 || r.Confidence != 0 {
+		t.Errorf("caller-supplied evidence survived the declaration: %+v", r)
+	}
+	if err := m.DeclareRelationship(Relationship{From: "b", To: "a", Sign: 1, Provenance: "learned"}); err == nil {
+		t.Error("provenance \"learned\" was accepted at declaration; the map decides what is learned")
+	}
+}
+
+// TestReadPathsCopyLabelsAndMembers: a view, a Property and a committed decision are
+// copies. Labels merge in place on a later observation, so a shallow copy would let a
+// journaled decision change after the fact and let a caller write into the map.
+func TestReadPathsCopyLabelsAndMembers(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "burstable"}})
+	b := m.Decide("d1", "what was qos when I decided")
+	_, _ = b.Property("a@pod:1")
+	d := b.Commit(nil)
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 2, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "guaranteed"}})
+	if got := d.PropertiesRead[0].Labels["qos"]; got != "burstable" {
+		t.Errorf("the decision's recorded labels read %q after a later observation; the record aliases the live map", got)
+	}
+	v := m.State(Query{})
+	v.Properties[0].Labels["qos"] = "hacked"
+	p, _ := m.Property("a@pod:1")
+	p.Labels["extra"] = "x"
+	live, _ := m.Property("a@pod:1")
+	if live.Labels["qos"] == "hacked" || live.Labels["extra"] != "" {
+		t.Errorf("writing into a view or a returned Property reached the map: %v", live.Labels)
+	}
+	members := []string{"a@pod:1"}
+	if err := m.DeclareProperty(Property{ID: "d", Kind: Derived, Members: members}); err != nil {
+		t.Fatal(err)
+	}
+	members[0] = "zzz"
+	dp, _ := m.Property("d")
+	if dp.Members[0] != "a@pod:1" {
+		t.Errorf("members alias the caller's slice: %v", dp.Members)
+	}
+}

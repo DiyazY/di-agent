@@ -536,7 +536,7 @@ func (m *Map) DeclareProperty(p Property) error {
 	now := m.now()
 	existing, ok := m.properties[p.ID]
 	if !ok {
-		np := p
+		np := p.clone()
 		if np.Status == "" {
 			np.Status = Active
 		}
@@ -770,6 +770,20 @@ func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Tim
 	}
 }
 
+// clone is a deep copy of a property: Labels and Members are the two fields that
+// are mutated in place (label merges, member updates), so a shallow copy handed to
+// a reader would let a committed decision change after the fact and let a caller
+// write into the map.
+func (p Property) clone() Property {
+	if p.Labels != nil {
+		p.Labels = copyLabels(p.Labels)
+	}
+	if p.Members != nil {
+		p.Members = append([]string(nil), p.Members...)
+	}
+	return p
+}
+
 func copyLabels(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
@@ -975,9 +989,23 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	if r.Sign != 1 && r.Sign != -1 {
 		return fmt.Errorf("relationship %s->%s has sign %d, want +1 or -1", r.From, r.To, r.Sign)
 	}
-	if r.Provenance == "" {
+	switch r.Provenance {
+	case "":
 		r.Provenance = Seeded
+	case Seeded, Asserted, Discovered:
+	default:
+		// Learned is what the map writes when it folds evidence; a declaration
+		// cannot claim it, or a caller could fabricate a learned edge.
+		return fmt.Errorf("relationship %s->%s declares provenance %q; only seeded, asserted or discovered can be declared",
+			r.From, r.To, r.Provenance)
 	}
+	// A declaration asserts that a relationship exists and which way it runs. What
+	// it is worth is for the machine to say, so every evidence field the caller may
+	// have filled — including through POST /state/relationships — is dropped here.
+	r.Strength, r.Confidence, r.NObservations = 0, 0, 0
+	r.Established, r.Assertion = nil, nil
+	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
+	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
 	r.ID = RelationshipID(r.From, r.To, r.Label)
 
 	m.mu.Lock()
