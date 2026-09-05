@@ -572,3 +572,34 @@ func TestConfirmedCandidateIsNeverReemitted(t *testing.T) {
 		}
 	}
 }
+
+// TestPendingCandidateDirectionFollowsTheEvidence: a Pending candidate is refreshed on
+// every fold. Its direction is evidence like its |r| and n, so once the window has
+// turned over to the opposite sign the candidate must say so — otherwise Confirm hands
+// the map a sign the machine contradicts, and the map refuses to reverse it later.
+func TestPendingCandidateDirectionFollowsTheEvidence(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 6, 8, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	feed := func(start time.Time, n int, slope float64) {
+		for i := 0; i < n; i++ {
+			at := start.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%10) / 10
+			_ = p.ObserveProperty("cpu@pod:a", "pod:a", x, at)
+			_ = p.ObserveProperty("pressure", "", 0.5+slope*x, at)
+		}
+	}
+	feed(t0, 12, 0.4)
+	cs := mustCandidates(t, p)
+	if len(cs) != 1 || cs[0].Direction != types.Positive {
+		t.Fatalf("after a positive stream: %d candidates, first %+v; want one Positive", len(cs), cs)
+	}
+	feed(t0.Add(time.Hour), 24, -0.4)
+	cs = mustCandidates(t, p)
+	if len(cs) != 1 {
+		t.Fatalf("after the sign flipped: %d candidates; want the same one", len(cs))
+	}
+	if cs[0].Direction != types.Negative {
+		t.Errorf("direction %v with |r|=%.3f over n=%d after the window turned negative; the pending candidate froze its first direction",
+			cs[0].Direction, cs[0].MIScore, cs[0].NObservations)
+	}
+}

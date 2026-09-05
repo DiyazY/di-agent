@@ -228,6 +228,7 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		case types.Rejected, types.Deferred:
 			return nil // permanent suppression within the session; deferred stays out
 		case types.Pending:
+			existing.Direction = direction
 			existing.MIScore = math.Abs(r)
 			existing.PValue = stats.FisherPValue(r, buf.Len())
 			existing.NObservations = buf.Len()
