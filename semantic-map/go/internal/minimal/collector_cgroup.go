@@ -131,9 +131,9 @@ func (c *CgroupCollector) SourceID() string                     { return c.sid }
 func (c *CgroupCollector) AvailableMetrics() []types.MetricType { return cgroupAvailMetrics }
 
 // Collect reads the root and, when enabled, every recognised subject, at one instant.
-// A subject exists iff its directory does this tick; nothing is emitted for one that
-// has gone, and its snapshot is dropped. Unreadable files are transient: skipped, not
-// errors.
+// A subject exists iff its directory is present, recognised, within the depth bound and
+// the subject cap, and readable this tick; nothing is emitted for one that has gone, and
+// its snapshot is dropped. Unreadable files are transient: skipped, not errors.
 func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	now := time.Now()
 	c.mu.Lock()
@@ -151,7 +151,8 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		}
 		rel := filepath.ToSlash(strings.TrimPrefix(p, root+string(filepath.Separator)))
 		first, _, _ := strings.Cut(rel, "/")
-		if !strings.HasPrefix(first, "kubepods") && first != "system.slice" {
+		unitsEnabled := len(c.opts.UnitGlobs) > 0
+		if !strings.HasPrefix(first, "kubepods") && !(first == "system.slice" && unitsEnabled) {
 			return filepath.SkipDir
 		}
 		if strings.Count(rel, "/") > 3 {
@@ -195,19 +196,18 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	if err != nil {
 		return nil
 	}
-	memCurrent, memMax, err := readMemoryStat(dir)
-	if err != nil {
-		return nil
-	}
+	memCurrent, memMax, memErr := readMemoryStat(dir)
 	prev := c.prev[subject]
 	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
 
 	var samples []*types.MetricSample
-	switch {
-	case c.memTotal > 0:
-		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
-	case memMax > 0:
-		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(memMax), 0, 1), now, now, subject, labels))
+	if memErr == nil {
+		switch {
+		case c.memTotal > 0:
+			samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
+		case memMax > 0:
+			samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(memMax), 0, 1), now, now, subject, labels))
+		}
 	}
 	if prev == nil {
 		return samples
@@ -242,6 +242,9 @@ func (c *CgroupCollector) cmdLabel(dir string) string {
 		return ""
 	}
 	argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+	if argv0 == "" {
+		return ""
+	}
 	return filepath.Base(argv0)
 }
 
