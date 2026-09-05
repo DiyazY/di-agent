@@ -2,7 +2,6 @@ package profiles
 
 import (
 	"encoding/json"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -151,10 +150,24 @@ func TestBuildWithScriptPathUsesTheSyntheticSystem(t *testing.T) {
 	}
 }
 
-// TestBuildWithScriptPathWarnsOnTickMismatch verifies that a warning is logged when
-// -collect-interval differs from the scenario's tick_seconds (which causes simulated
-// time to drift from wall-clock time), and that no warning appears when they match.
-func TestBuildWithScriptPathWarnsOnTickMismatch(t *testing.T) {
+// TestBuildRefusesAMissingScript: a bad -script path used to log and hand back a
+// daemon with no collector, which then reported "collection loop disabled" — the
+// message for a deliberately disabled loop — and served an empty map indefinitely.
+func TestBuildRefusesAMissingScript(t *testing.T) {
+	_, _, err := Build("edge-minimal", Config{DomainSpec: mustSpec(), NodeID: "sim",
+		ScriptPath: filepath.Join(t.TempDir(), "missing.json"), CgroupRoot: t.TempDir(),
+		EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5})
+	if err == nil {
+		t.Fatal("a missing -script produced a daemon with no collector instead of an error")
+	}
+}
+
+// TestBuildRefusesACollectIntervalThatDisagreesWithTheTick: the script stamps
+// simulated time one tick per Collect while the map sweeps on the wall clock. With
+// -collect-interval above the tick every property goes stale and then retires while
+// the script is still emitting; below it nothing ever goes stale. That is not a drift
+// to warn about; it is a configuration the daemon must not start with.
+func TestBuildRefusesACollectIntervalThatDisagreesWithTheTick(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.json")
 	if err := os.WriteFile(p, []byte(`{"name":"t","seed":1,"tick_seconds":10,"duration_seconds":600,
 	  "node":{"node_cpu":{"coupling":"sum","base":0.1,"of":"cpu_utilization"}},
@@ -162,45 +175,16 @@ func TestBuildWithScriptPathWarnsOnTickMismatch(t *testing.T) {
 	  "expect":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Capture log output
-	buf := &strings.Builder{}
-	oldOutput := log.Writer()
-	log.SetOutput(buf)
-	defer log.SetOutput(oldOutput)
-
-	// Build with mismatched CollectInterval (1s) and tick_seconds (10s)
-	_, coll, err := Build("edge-minimal", Config{
-		DomainSpec: mustSpec(), NodeID: "sim", ScriptPath: p,
-		CgroupRoot: t.TempDir(), EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5,
-		CollectInterval: 1 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
+	base := Config{DomainSpec: mustSpec(), NodeID: "sim", ScriptPath: p, CgroupRoot: t.TempDir(),
+		EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5}
+	mismatch := base
+	mismatch.CollectInterval = 1 * time.Second
+	if _, _, err := Build("edge-minimal", mismatch); err == nil || !strings.Contains(err.Error(), "collect-interval") {
+		t.Fatalf("mismatched -collect-interval was accepted (err=%v); want a refusal that names the flag", err)
 	}
-	if coll == nil {
-		t.Fatal("expected a collector from script path")
-	}
-	output := buf.String()
-	if !strings.Contains(output, "simulated time will drift") {
-		t.Errorf("expected warning about simulated time drift; got: %s", output)
-	}
-
-	// Clear buffer and build with matching CollectInterval (10s) and tick_seconds (10s)
-	buf.Reset()
-	_, coll2, err := Build("edge-minimal", Config{
-		DomainSpec: mustSpec(), NodeID: "sim", ScriptPath: p,
-		CgroupRoot: t.TempDir(), EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5,
-		CollectInterval: 10 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if coll2 == nil {
-		t.Fatal("expected a collector from script path")
-	}
-	output2 := buf.String()
-	if strings.Contains(output2, "simulated time will drift") {
-		t.Errorf("unexpected warning when intervals match; got: %s", output2)
+	match := base
+	match.CollectInterval = 10 * time.Second
+	if _, coll, err := Build("edge-minimal", match); err != nil || coll == nil {
+		t.Fatalf("matching interval: err=%v coll=%v; want the synthetic system", err, coll)
 	}
 }

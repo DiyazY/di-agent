@@ -5,7 +5,6 @@ package profiles
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -266,7 +265,10 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 		if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
 			return nil, nil, err
 		}
-		sm, coll := buildEdgeMinimal(cfg, pw)
+		sm, coll, err := buildEdgeMinimal(cfg, pw)
+		if err != nil {
+			return nil, nil, err
+		}
 		return sm, coll, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown profile %q", profileName)
@@ -288,7 +290,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 	return fmt.Errorf("KD %q not found in prior_weights.json distributions %v", kd, pw.Distributions)
 }
 
-func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
+func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract, error) {
 	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
@@ -362,21 +364,24 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	}
 
 	if cfg.ScriptPath != "" {
+		// Refused rather than logged: a daemon with no collector looks exactly like
+		// one whose telemetry has not arrived yet, and the follow-up line it used to
+		// print ("collection loop disabled") is the message for a deliberate choice.
 		sc, err := scripted.LoadScenario(cfg.ScriptPath)
 		if err != nil {
-			log.Printf("script: %v; no collector", err)
-			return sm, nil
+			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
 		}
-		// Warn if -collect-interval differs from the scenario's tick_seconds, as this
-		// causes simulated time to drift from wall-clock time and the scenario's
-		// stale/retire windows will not play out on schedule.
-		if cfg.CollectInterval > 0 && cfg.CollectInterval != time.Duration(sc.TickSeconds)*time.Second {
-			log.Printf("script: scenario %s ticks every %ds but -collect-interval is %s; "+
-				"simulated time will drift from the wall clock and the scripted stale/retire "+
-				"windows will not play out on schedule — set -collect-interval=%ds",
-				sc.Name, sc.TickSeconds, cfg.CollectInterval, sc.TickSeconds)
+		// The script stamps simulated time one tick per Collect while the map sweeps
+		// on the wall clock. An interval above the tick makes every property go stale
+		// and then retire while the script is still emitting; one below it means
+		// nothing ever goes stale. Not a drift to warn about: a configuration the
+		// daemon must not start with.
+		if tick := time.Duration(sc.TickSeconds) * time.Second; cfg.CollectInterval > 0 && cfg.CollectInterval != tick {
+			return nil, nil, fmt.Errorf("-script %s ticks every %s but -collect-interval is %s: simulated time would run "+
+				"off the wall clock the map sweeps on, retiring or immortalising every property; set -collect-interval=%s",
+				sc.Name, tick, cfg.CollectInterval, tick)
 		}
-		return sm, scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
+		return sm, scripted.NewSystemScript(cfg.NodeID, sc, time.Now()), nil
 	}
 
 	switch {
@@ -391,7 +396,7 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		// else: collector stays nil — collection loop disabled
 	}
 
-	return sm, collector
+	return sm, collector, nil
 }
 
 // The calibration is applied in one place — seedStateMap, which puts each per-cluster
