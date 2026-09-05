@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -202,5 +203,59 @@ func TestEstimateResultDoesNotAliasTheDecision(t *testing.T) {
 	}
 	if len(d.Excluded) != 1 || d.Excluded[0] != "pod:a" {
 		t.Errorf("decision excluded mutated via the result: %v", d.Excluded)
+	}
+}
+
+// TestEstimateDefaultIdDistinguishesCounterfactuals pins the default decision id apart
+// for a baseline and for the counterfactuals asked at the same revision. Neither Decide
+// nor Commit advances the revision, so "est-<rev>-<target>" alone would be the same
+// string for all three and the journal's last writer would silently replace the others'
+// record — a replay would then answer with assumptions the caller never made.
+func TestEstimateDefaultIdDistinguishesCounterfactuals(t *testing.T) {
+	m, _ := estimateFixture(t)
+	rev := m.Revision()
+
+	plain := m.Estimate(EstimateRequest{Target: "pressure"})
+	assumed := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"queue@pod:a": 100}})
+	without := m.Estimate(EstimateRequest{Target: "pressure", Without: []string{"pod:b"}})
+
+	if m.Revision() != rev {
+		t.Fatalf("revision moved from %d to %d; the collision this test guards needs all three at one revision", rev, m.Revision())
+	}
+	ids := map[string]string{"plain": plain.DecisionID, "assume": assumed.DecisionID, "without": without.DecisionID}
+	seen := map[string]string{}
+	for name, id := range ids {
+		if id == "" {
+			t.Fatalf("%s estimate produced no decision id", name)
+		}
+		if other, dup := seen[id]; dup {
+			t.Errorf("%s and %s share decision id %q; each answer needs its own record", other, name, id)
+		}
+		seen[id] = name
+	}
+	if want := "est-" + strconv.FormatUint(rev, 10) + "-pressure"; plain.DecisionID != want {
+		t.Errorf("plain estimate id %q; want the unchanged shape %q", plain.DecisionID, want)
+	}
+
+	// Each id must replay as its own answer, not as whichever was recorded last.
+	for name, want := range map[string]map[string]float64{
+		"plain":   {},
+		"assume":  {"queue@pod:a": 100},
+		"without": {"cpu@pod:b": 0},
+	} {
+		d, ok := m.Journal().Decision(ids[name])
+		if !ok {
+			t.Errorf("%s decision %q is not in the journal", name, ids[name])
+			continue
+		}
+		if len(d.Assumptions) != len(want) {
+			t.Errorf("%s decision %q replays with assumptions %v; want %v", name, ids[name], d.Assumptions, want)
+			continue
+		}
+		for k, v := range want {
+			if got, ok := d.Assumptions[k]; !ok || got != v {
+				t.Errorf("%s decision %q replays with assumptions %v; want %v", name, ids[name], d.Assumptions, want)
+			}
+		}
 	}
 }

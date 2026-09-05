@@ -1,6 +1,8 @@
 package statemap
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -66,6 +68,26 @@ type EstimateResult struct {
 	Err string `json:"error,omitempty"`
 }
 
+// hypothesisDigest fingerprints a request's hypothesis — its assumptions and its
+// exclusions — so two questions that differ only in what they suppose cannot share a
+// decision id. It reads the request, not the resolved substitution, so the digest is
+// what the caller asked rather than what the map made of it.
+func hypothesisDigest(req EstimateRequest) string {
+	keys := make([]string, 0, len(req.Assume))
+	for k := range req.Assume {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, k+"="+strconv.FormatFloat(req.Assume[k], 'g', -1, 64))
+	}
+	without := append([]string(nil), req.Without...)
+	sort.Strings(without)
+	h := sha256.Sum256([]byte(strings.Join(pairs, ",") + "|" + strings.Join(without, ",")))
+	return hex.EncodeToString(h[:])[:8]
+}
+
 const slopeCaveat = "strength is a correlation magnitude used as a unit sensitivity, not a fitted slope; " +
 	"the projection is linear in normalised units"
 
@@ -87,6 +109,13 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	id := req.ID
 	if id == "" {
 		id = "est-" + strconv.FormatUint(m.Revision(), 10) + "-" + target
+		// Neither Decide nor Commit advances the revision, so a baseline and a
+		// counterfactual asked at the same revision would claim the same id and
+		// the journal would keep only the last of them. The hypothesis is part of
+		// the question, so it is part of the name of the answer.
+		if len(req.Assume) > 0 || len(req.Without) > 0 {
+			id += "-" + hypothesisDigest(req)
+		}
 	}
 
 	// Resolve `without` into assumptions at the floor before the question is named.
