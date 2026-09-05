@@ -2,11 +2,13 @@ package profiles
 
 import (
 	"encoding/json"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The two seeding tests that used to open this file inspected a storage graph that no
@@ -139,5 +141,59 @@ func TestBuildWithScriptPathUsesTheSyntheticSystem(t *testing.T) {
 	}
 	if !scoped {
 		t.Error("the synthetic system emitted no scoped sample")
+	}
+}
+
+// TestBuildWithScriptPathWarnsOnTickMismatch verifies that a warning is logged when
+// -collect-interval differs from the scenario's tick_seconds (which causes simulated
+// time to drift from wall-clock time), and that no warning appears when they match.
+func TestBuildWithScriptPathWarnsOnTickMismatch(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(p, []byte(`{"name":"t","seed":1,"tick_seconds":10,"duration_seconds":600,
+	  "node":{"node_cpu":{"coupling":"sum","base":0.1,"of":"cpu_utilization"}},
+	  "subjects":[{"id":"pod:a","arrive":0,"properties":{"cpu_utilization":{"pattern":"constant","value":0.3}}}],
+	  "expect":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture log output
+	buf := &strings.Builder{}
+	oldOutput := log.Writer()
+	log.SetOutput(buf)
+	defer log.SetOutput(oldOutput)
+
+	// Build with mismatched CollectInterval (1s) and tick_seconds (10s)
+	_, coll, err := Build("edge-minimal", Config{
+		DomainSpec: mustSpec(), NodeID: "sim", ScriptPath: p,
+		CgroupRoot: t.TempDir(), EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5,
+		CollectInterval: 1 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coll == nil {
+		t.Fatal("expected a collector from script path")
+	}
+	output := buf.String()
+	if !strings.Contains(output, "simulated time will drift") {
+		t.Errorf("expected warning about simulated time drift; got: %s", output)
+	}
+
+	// Clear buffer and build with matching CollectInterval (10s) and tick_seconds (10s)
+	buf.Reset()
+	_, coll2, err := Build("edge-minimal", Config{
+		DomainSpec: mustSpec(), NodeID: "sim", ScriptPath: p,
+		CgroupRoot: t.TempDir(), EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5,
+		CollectInterval: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coll2 == nil {
+		t.Fatal("expected a collector from script path")
+	}
+	output2 := buf.String()
+	if strings.Contains(output2, "simulated time will drift") {
+		t.Errorf("unexpected warning when intervals match; got: %s", output2)
 	}
 }

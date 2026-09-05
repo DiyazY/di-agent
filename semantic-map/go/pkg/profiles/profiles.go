@@ -367,6 +367,15 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 			log.Printf("script: %v; no collector", err)
 			return sm, nil
 		}
+		// Warn if -collect-interval differs from the scenario's tick_seconds, as this
+		// causes simulated time to drift from wall-clock time and the scenario's
+		// stale/retire windows will not play out on schedule.
+		if cfg.CollectInterval > 0 && cfg.CollectInterval != time.Duration(sc.TickSeconds)*time.Second {
+			log.Printf("script: scenario %s ticks every %ds but -collect-interval is %s; "+
+				"simulated time will drift from the wall clock and the scripted stale/retire "+
+				"windows will not play out on schedule — set -collect-interval=%ds",
+				sc.Name, sc.TickSeconds, cfg.CollectInterval, sc.TickSeconds)
+		}
 		return sm, scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
 	}
 

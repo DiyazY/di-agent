@@ -151,7 +151,8 @@ func main() {
 	netdataURL := flag.String("netdata-url", "",
 		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
 	script := flag.String("script", "",
-		"run the synthetic system from this scenario file instead of real collectors")
+		"run the synthetic system from this scenario file instead of real collectors; "+
+			"set -collect-interval to the scenario's tick_seconds so simulated time tracks the wall clock")
 	peersFlag := flag.String("peers", "",
 		"comma-separated peer agent URLs to register at startup "+
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
