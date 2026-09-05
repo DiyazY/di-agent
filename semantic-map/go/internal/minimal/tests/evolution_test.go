@@ -831,3 +831,75 @@ func established(r statemap.Relationship) float64 {
 	}
 	return *r.Established
 }
+
+// ── Scenario: a subject's whole life ──────────────────────────────────────────
+//
+// A subject arrives, is admitted, correlates with node pressure, is proposed,
+// confirmed, asked about counterfactually, leaves, goes stale, retires — taking its
+// relationship with it — and returns. Printed as checkpoints so `go test -v -run
+// TestEvolution_SubjectLifecycle` reads like the demonstration it is.
+func TestEvolution_SubjectLifecycle(t *testing.T) {
+	depart, ret := 2400, 4200
+	sc := &scripted.Scenario{
+		Name: "lifecycle", Seed: 11, TickSeconds: 10, DurationSeconds: 5400, Noise: 0.01,
+		Node: map[string]scripted.Coupling{
+			"node_cpu": {Coupling: "sum", Base: 0.10, Of: "cpu_utilization"},
+			"pressure": {Coupling: "sum", Base: 0.05, Of: "cpu_utilization"},
+		},
+		Subjects: []scripted.SubjectSpec{{
+			ID: "pod:a", Arrive: 0, Depart: &depart, Return: &ret,
+			Properties: map[string]scripted.PropertySpec{"cpu_utilization": {Pattern: "sine", Min: 0.1, Max: 0.6, Period: 600}},
+		}},
+		Expect: scripted.Expectations{
+			AdmittedWithinTicks: 1, StaleWithinSeconds: 120, RetiredWithinSeconds: 600,
+			Candidates: []scripted.ExpectedCandidate{{From: "cpu_utilization@pod:a", To: "pressure", Sign: 1, WithinSeconds: 1200}},
+		},
+	}
+	if err := sc.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpoints := map[int64]string{60: "learning", 120: "discovered", 200: "asked", 250: "departed", 300: "retired", 430: "returned"}
+	var decisionID string
+	r := driveScenario(t, sc, func(tick int64, r *scenarioRun) {
+		label, ok := checkpoints[tick]
+		if !ok {
+			return
+		}
+		c := r.state.Census()
+		p, _ := r.state.Property("cpu_utilization@pod:a")
+		rel, _ := r.state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "pressure", "discovered"))
+		eff, _ := rel.Effective()
+		t.Logf("T=%4d %-10s subjects=%d props(active/stale/retired)=%d/%d/%d discovered=%d | pod:a cpu=%.3f %s | edge %s eff=%.3f",
+			tick, label, c.Subjects, c.PropertiesActive, c.PropertiesStale, c.PropertiesRetired, c.Discovered,
+			p.Value, p.Status, rel.Status, eff)
+		if label == "asked" {
+			res := r.state.Estimate(statemap.EstimateRequest{Target: "pressure", Assume: map[string]float64{"cpu_utilization@pod:a": 0.6}})
+			decisionID = res.DecisionID
+			if res.Hypothetical == nil {
+				t.Fatalf("T=%d: no hypothetical — the candidate was not confirmed by the time the question was asked; caveats=%v", tick, res.Caveats)
+			}
+			t.Logf("      estimate pressure if pod:a cpu=0.6 → projected %.3f (level %.3f, delta %+.3f); caveats=%d; decision %s",
+				res.Hypothetical.ProjectedLevel, res.Answer.Level, res.Hypothetical.Delta, len(res.Caveats), res.DecisionID)
+		}
+	})
+	assertScenario(t, r)
+
+	// The decision made while the subject was alive replays after it retired and returned.
+	var replayed bool
+	for _, e := range r.state.Journal().Events(0, 0) {
+		if e.Decision != nil && e.Decision.ID == decisionID {
+			replayed = true
+			if e.Decision.Assumptions["cpu_utilization@pod:a"] != 0.6 {
+				t.Errorf("replayed decision lost its assumption: %v", e.Decision.Assumptions)
+			}
+		}
+	}
+	if !replayed {
+		t.Errorf("decision %s did not survive the subject's retirement and return", decisionID)
+	}
+	rel, _ := r.state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "pressure", "discovered"))
+	t.Logf("EVOLUTION SUMMARY: admitted@%d stale@%d retired@%d revived@%d candidate@%d; edge now %s (%s)",
+		r.firstSeen["cpu_utilization@pod:a"], r.stale["cpu_utilization@pod:a"], r.retired["cpu_utilization@pod:a"],
+		r.revived["cpu_utilization@pod:a"], r.candidate["cpu_utilization@pod:a->pressure"], rel.Status, rel.Provenance)
+}
