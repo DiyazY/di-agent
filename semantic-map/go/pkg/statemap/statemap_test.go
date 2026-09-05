@@ -563,7 +563,7 @@ func seed(t *testing.T, m *Map, c *clock) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"cpu", "mem", "pressure"} {
-		if err := m.Observe(id, 0.4, c.now()); err != nil {
+		if err := m.Record(Observation{ID: id, Value: 0.4, At: c.now(), Subject: subjectOf(id)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1450,7 +1450,7 @@ func TestRedeclaringTheSameRangeMarksItDeclared(t *testing.T) {
 func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
 	for _, id := range []string{"a", "b@pod:1"} {
-		if err := m.Observe(id, 0.4, c.now()); err != nil {
+		if err := m.Record(Observation{ID: id, Value: 0.4, At: c.now(), Subject: subjectOf(id)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1467,7 +1467,7 @@ func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
 		if p, _ := restored.Property(id); p.RangeDeclared {
 			t.Fatalf("%s restored with RangeDeclared=true; this test needs the pre-branch shape it models", id)
 		}
-		if err := restored.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+		if err := restored.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}, Subject: subjectOf(id)}); err != nil {
 			t.Fatal(err)
 		}
 		if p, _ := restored.Property(id); !p.RangeDeclared {
@@ -1478,7 +1478,7 @@ func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
 
 func TestRedeclaringARangeMakesItDeclared(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
-	if err := m.Observe("q@pod:1", 5, c.now()); err != nil {
+	if err := m.Record(Observation{ID: "q@pod:1", Value: 5, At: c.now(), Subject: "pod:1"}); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := m.Property("q@pod:1")
@@ -1486,7 +1486,7 @@ func TestRedeclaringARangeMakesItDeclared(t *testing.T) {
 		t.Fatalf("admitted property already has RangeDeclared=true; want an assumed range")
 	}
 
-	if err := m.DeclareProperty(Property{ID: "q@pod:1", Range: [2]float64{0, 100}}); err != nil {
+	if err := m.DeclareProperty(Property{ID: "q@pod:1", Subject: "pod:1", Range: [2]float64{0, 100}}); err != nil {
 		t.Fatal(err)
 	}
 	p, _ = m.Property("q@pod:1")
@@ -1496,8 +1496,8 @@ func TestRedeclaringARangeMakesItDeclared(t *testing.T) {
 
 	c.advance(time.Second)
 	rng := [2]float64{0, 1}
-	if err := m.Record(Observation{ID: "q@pod:1", Value: 6, At: c.now(), Range: &rng}); err != nil {
-		t.Fatal(err)
+	if err := m.Record(Observation{ID: "q@pod:1", Value: 6, At: c.now(), Subject: "pod:1", Range: &rng}); err == nil {
+		t.Error("an observation contradicting the declared range was applied")
 	}
 	p, _ = m.Property("q@pod:1")
 	if p.Range != ([2]float64{0, 100}) {
@@ -1516,7 +1516,7 @@ func TestRedeclaringARangeMakesItDeclared(t *testing.T) {
 
 func TestRecordAdoptsRangeAndUnitDeclaredLate(t *testing.T) {
 	m, c := newTestMap(t, Config{AdmitUnknown: true})
-	if err := m.Observe("x@pod:1", 0.5, c.now()); err != nil {
+	if err := m.Record(Observation{ID: "x@pod:1", Value: 0.5, At: c.now(), Subject: "pod:1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1524,7 +1524,7 @@ func TestRecordAdoptsRangeAndUnitDeclaredLate(t *testing.T) {
 	c.advance(time.Second)
 	rng := [2]float64{0, 10}
 	if err := m.Record(Observation{
-		ID: "x@pod:1", Value: 0.6, At: c.now(), Unit: "items", Range: &rng,
+		ID: "x@pod:1", Value: 0.6, At: c.now(), Subject: "pod:1", Unit: "items", Range: &rng,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1655,14 +1655,14 @@ func TestRetireHookFiresOnBothPaths(t *testing.T) {
 
 func TestObservationRevivesARetiredProperty(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
-	_ = m.Observe("cpu@pod:1", .3, c.now())
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .3, At: c.now(), Subject: "pod:1"})
 	c.advance(time.Minute)
 	m.Sweep()
 	if p, _ := m.Property("cpu@pod:1"); p.Status != Retired {
 		t.Fatalf("setup: status %s, want retired", p.Status)
 	}
 	c.advance(time.Second)
-	_ = m.Observe("cpu@pod:1", .4, c.now())
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .4, At: c.now(), Subject: "pod:1"})
 	p, _ := m.Property("cpu@pod:1")
 	if p.Status != Active || p.RetiredReason != "" {
 		t.Errorf("after re-observation: %+v; want active with the retirement reason cleared", p)
@@ -1856,4 +1856,92 @@ func TestReadPathsCopyLabelsAndMembers(t *testing.T) {
 	if dp.Members[0] != "a@pod:1" {
 		t.Errorf("members alias the caller's slice: %v", dp.Members)
 	}
+}
+
+// TestRecordRefusesAnInvalidRange: a declared range is what the estimator normalises
+// by, so an inverted, empty or non-finite one is refused at the door, as the wire does.
+func TestRecordRefusesAnInvalidRange(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, rng := range [][2]float64{{1, 0}, {5, 5}, {math.NaN(), 1}, {0, math.Inf(1)}} {
+		r := rng
+		if err := m.Record(Observation{ID: "x", Value: 0.5, At: c.now(), Range: &r}); err == nil {
+			t.Errorf("range %v was accepted", rng)
+		}
+	}
+	if _, ok := m.Property("x"); ok {
+		t.Error("a refused observation admitted the property anyway")
+	}
+}
+
+// TestDeclarePropertyRefusesAnEmptyOrUndeclaredRange: [5,5] cannot normalise anything,
+// and RangeDeclared without a range bypasses normalisation with no "assumed" caveat.
+func TestDeclarePropertyRefusesAnEmptyOrUndeclaredRange(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	if err := m.DeclareProperty(Property{ID: "a", Range: [2]float64{5, 5}}); err == nil {
+		t.Error("empty range [5,5] was accepted")
+	}
+	if err := m.DeclareProperty(Property{ID: "b", RangeDeclared: true}); err == nil {
+		t.Error("RangeDeclared without a range was accepted")
+	}
+}
+
+// TestRecordRefusesASubjectThatDoesNotMatchTheId: the subject is part of the id
+// (metric@subject), and its charset is what the HTTP surface can address.
+func TestRecordRefusesASubjectThatDoesNotMatchTheId(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, o := range []Observation{
+		{ID: "cpu@pod:a", Subject: "pod:b"},
+		{ID: "cpu", Subject: "pod:a"},
+		{ID: "cpu@pod/evil", Subject: "pod/evil"},
+	} {
+		o.Value, o.At = 0.5, c.now()
+		if err := m.Record(o); err == nil {
+			t.Errorf("observation id=%q subject=%q was accepted", o.ID, o.Subject)
+		}
+	}
+	if err := m.DeclareProperty(Property{ID: "x@pod/evil", Subject: "pod/evil"}); err == nil {
+		t.Error("a declaration with an invalid subject was accepted")
+	}
+	if err := m.DeclareProperty(Property{ID: "x", Subject: "pod:a"}); err == nil {
+		t.Error("a declaration whose subject is not in its id was accepted")
+	}
+}
+
+// TestConflictingDeclarationIsRefusedNotAveraged: Record's own doc calls a differing
+// subject, unit or range "a fault worth seeing rather than a value worth averaging";
+// the value was being averaged. An app pushing percent against a share-of-node
+// property would have moved the EMA by ~45×.
+func TestConflictingDeclarationIsRefusedNotAveraged(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	share, percent := [2]float64{0, 1}, [2]float64{0, 100}
+	_ = m.Record(Observation{ID: "cpu@pod:a", Value: 0.1, At: c.now(), Subject: "pod:a", Unit: "share", Range: &share})
+	c.advance(time.Second)
+	if err := m.Record(Observation{ID: "cpu@pod:a", Value: 50, At: c.now(), Subject: "pod:a", Unit: "percent", Range: &percent}); err == nil {
+		t.Error("an observation whose unit and range contradict the property's was accepted")
+	}
+	p, _ := m.Property("cpu@pod:a")
+	if p.NObservations != 1 || p.Value != 0.1 {
+		t.Errorf("the contradicting value was averaged in: n=%d value=%v", p.NObservations, p.Value)
+	}
+	var conflict bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyConflict && e.Target == "cpu@pod:a" {
+			conflict = true
+		}
+	}
+	if !conflict {
+		t.Error("the conflict was not journaled")
+	}
+	// An observation of a scoped id that carries no subject is the same fault: it is
+	// how an unscoped push named "cpu@pod:a" would land on the pod's property.
+	c.advance(time.Second)
+	if err := m.Observe("cpu@pod:a", 0.2, c.now()); err == nil {
+		t.Error("an unscoped observation of a scoped property was accepted")
+	}
+}
+
+// subjectOf returns the subject an id of the form <metric>@<subject> names.
+func subjectOf(id string) string {
+	_, subject, _ := strings.Cut(id, "@")
+	return subject
 }

@@ -1107,3 +1107,22 @@ func TestIngestSample_CarriesSubjectUnitRangeSource(t *testing.T) {
 		t.Errorf("admitted property %+v; want subject/unit/range/source stamped from the sample", p)
 	}
 }
+
+// TestIngestSample_RejectsAMetricTypeThatIsNotASegment: a property id is
+// metric_type@subject, so an unscoped sample named "cpu_utilization@pod:a" would land
+// on the scoped property's id with no conflict recorded.
+func TestIngestSample_RejectsAMetricTypeThatIsNotASegment(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	for _, mt := range []string{"cpu_utilization@pod:a", "a/b", "a b"} {
+		body := `{"metric_type":"` + mt + `","value":0.5,"timestamp_unix":1000,"event_id":"e1","unit":"fraction","range":[0,1]}`
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("metric_type %q: status %d, want 400", mt, resp.StatusCode)
+		}
+	}
+}

@@ -325,6 +325,11 @@ func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*typ
 	if req.MetricType == "" {
 		return nil, fmt.Errorf("metric_type is required")
 	}
+	if !types.ValidMetricType(req.MetricType) {
+		// A property id is metric_type@subject: an unscoped sample named
+		// "cpu_utilization@pod:a" would land on the scoped property's id.
+		return nil, fmt.Errorf("metric_type %q is not a single segment over [A-Za-z0-9._-]", req.MetricType)
+	}
 	if !types.ValidSubject(req.Subject) {
 		return nil, fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", req.Subject)
 	}

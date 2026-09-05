@@ -37,6 +37,7 @@ package statemap
 
 import (
 	"fmt"
+	"github.com/DiyazY/di-agent/pkg/types"
 	"math"
 	"sort"
 	"strings"
@@ -517,7 +518,16 @@ func (m *Map) DeclareProperty(p Property) error {
 	if p.Kind == "" {
 		p.Kind = Observed
 	}
+	if err := validScope(p.ID, p.Subject); err != nil {
+		return err
+	}
+	if p.RangeDeclared && p.Range == ([2]float64{}) {
+		return fmt.Errorf("property %q declares a range it does not give", p.ID)
+	}
 	if p.Range != ([2]float64{}) {
+		if err := validRange(p.Range); err != nil {
+			return fmt.Errorf("property %q: %w", p.ID, err)
+		}
 		p.RangeDeclared = true
 	}
 	if p.Kind == Derived && len(p.Members) == 0 {
@@ -525,9 +535,6 @@ func (m *Map) DeclareProperty(p Property) error {
 	}
 	if p.Kind == Observed && len(p.Members) > 0 {
 		return fmt.Errorf("observed property %q lists members: a property is fed by telemetry or computed from others, not both", p.ID)
-	}
-	if p.Range[1] < p.Range[0] {
-		return fmt.Errorf("property %q has inverted range [%v, %v]", p.ID, p.Range[0], p.Range[1])
 	}
 
 	m.mu.Lock()
@@ -637,6 +644,11 @@ func (m *Map) Record(o Observation) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("property %q observed with non-finite value", id)
 	}
+	if o.Range != nil {
+		if err := validRange(*o.Range); err != nil {
+			return fmt.Errorf("property %q: %w", id, err)
+		}
+	}
 	if at.IsZero() {
 		at = m.now()
 	}
@@ -655,6 +667,9 @@ func (m *Map) Record(o Observation) error {
 	if !ok {
 		if !m.cfg.AdmitUnknown {
 			return fmt.Errorf("property %q is not declared and admission is disabled", id)
+		}
+		if err := validScope(id, o.Subject); err != nil {
+			return err
 		}
 		p = &Property{
 			ID: id, Kind: Observed, Status: Active,
@@ -685,7 +700,9 @@ func (m *Map) Record(o Observation) error {
 			return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
 				id, p.Members)
 		}
-		m.reconcileDeclarationLocked(p, o, at)
+		if err := m.reconcileDeclarationLocked(p, o, at); err != nil {
+			return err
+		}
 	}
 
 	if p.Range != ([2]float64{}) && (value < p.Range[0] || value > p.Range[1]) {
@@ -736,18 +753,15 @@ func (m *Map) Record(o Observation) error {
 }
 
 // reconcileDeclarationLocked merges what a later observation says about a property
-// with what the map already holds. Labels merge; subject, unit and range are fixed.
-func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Time) {
-	if len(o.Labels) > 0 {
-		if p.Labels == nil {
-			p.Labels = map[string]string{}
-		}
-		for k, v := range o.Labels {
-			p.Labels[k] = v
-		}
-	}
+// with what the map already holds. Labels merge; subject, unit and range are fixed once
+// declared, and an observation that contradicts them is journaled as a conflict and
+// refused: two producers describing one id differently is a fault worth seeing, not a
+// value worth averaging. Nothing else about the property changes on a refusal.
+func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Time) error {
 	conflict := map[string]any{}
-	if o.Subject != "" && o.Subject != p.Subject {
+	if o.Subject != p.Subject {
+		// Including an observation with no subject at all: that is how an unscoped
+		// reading named "cpu@pod:a" would land on the pod's property.
 		conflict["subject"] = map[string]string{"held": p.Subject, "observed": o.Subject}
 	}
 	if o.Unit != "" && p.Unit != "" && o.Unit != p.Unit {
@@ -755,6 +769,16 @@ func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Tim
 	}
 	if o.Range != nil && p.RangeDeclared && *o.Range != p.Range {
 		conflict["range"] = map[string]any{"held": p.Range, "observed": *o.Range}
+	}
+	if len(conflict) > 0 {
+		m.bump(EventPropertyConflict, p.ID, "system", conflict, at)
+		fields := make([]string, 0, len(conflict))
+		for k := range conflict {
+			fields = append(fields, k)
+		}
+		sort.Strings(fields)
+		return fmt.Errorf("observation of %q contradicts its declaration (%s); journaled as a conflict and not applied",
+			p.ID, strings.Join(fields, ", "))
 	}
 	if o.Range != nil && !p.RangeDeclared {
 		// A declaration arriving after an assumption is not a conflict; it is the
@@ -765,9 +789,47 @@ func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Tim
 	if o.Unit != "" && p.Unit == "" {
 		p.Unit = o.Unit
 	}
-	if len(conflict) > 0 {
-		m.bump(EventPropertyConflict, p.ID, "system", conflict, at)
+	if len(o.Labels) > 0 {
+		if p.Labels == nil {
+			p.Labels = map[string]string{}
+		}
+		for k, v := range o.Labels {
+			p.Labels[k] = v
+		}
 	}
+	return nil
+}
+
+// validRange refuses a range the estimator could not normalise by: non-finite
+// bounds, or hi not above lo.
+func validRange(r [2]float64) error {
+	if math.IsNaN(r[0]) || math.IsNaN(r[1]) || math.IsInf(r[0], 0) || math.IsInf(r[1], 0) {
+		return fmt.Errorf("range [%v, %v] is not finite", r[0], r[1])
+	}
+	if r[1] <= r[0] {
+		return fmt.Errorf("range [%v, %v] is empty: hi must exceed lo", r[0], r[1])
+	}
+	return nil
+}
+
+// validScope checks that a subject, when present, is well-formed and is the suffix
+// of the id (<metric>@<subject>), and that an id without a subject does not look
+// scoped. The subject is part of the identity; the two must not disagree.
+func validScope(id, subject string) error {
+	if subject == "" {
+		if strings.Contains(id, "@") {
+			return fmt.Errorf("property %q looks scoped (metric@subject) but carries no subject", id)
+		}
+		return nil
+	}
+	if !types.ValidSubject(subject) {
+		return fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", subject)
+	}
+	metric, ok := strings.CutSuffix(id, "@"+subject)
+	if !ok || !types.ValidMetricType(metric) {
+		return fmt.Errorf("property %q does not have the form <metric>@%s", id, subject)
+	}
+	return nil
 }
 
 // clone is a deep copy of a property: Labels and Members are the two fields that

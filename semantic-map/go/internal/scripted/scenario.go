@@ -122,6 +122,9 @@ func (s *Scenario) Validate() error {
 		return fmt.Errorf("tick_seconds and duration_seconds must be positive")
 	}
 	for name, c := range s.Node {
+		if !types.ValidMetricType(name) {
+			return fmt.Errorf("node property %q is not a metric type over [A-Za-z0-9._-]", name)
+		}
 		if !couplings[c.Coupling] {
 			return fmt.Errorf("node %s: unknown coupling %q", name, c.Coupling)
 		}
@@ -140,6 +143,9 @@ func (s *Scenario) Validate() error {
 			return fmt.Errorf("subject %s has no properties", sub.ID)
 		}
 		for name, p := range sub.Properties {
+			if !types.ValidMetricType(name) {
+				return fmt.Errorf("subject %s property %q is not a metric type over [A-Za-z0-9._-]", sub.ID, name)
+			}
 			if !patterns[p.Pattern] {
 				return fmt.Errorf("subject %s property %s: unknown pattern %q", sub.ID, name, p.Pattern)
 			}
