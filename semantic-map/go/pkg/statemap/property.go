@@ -820,27 +820,50 @@ func (m *Map) fireRetireHook(ids []string) {
 
 // RetireProperty withdraws a property from reasoning, keeping its record.
 func (m *Map) RetireProperty(id, reason, actor string) error {
-	m.mu.Lock()
-	p, ok := m.properties[id]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("property %q not found", id)
+	retired, err := m.retirePropertyLocked(id, reason, actor)
+	if err != nil || !retired {
+		return err
 	}
-	if p.Status == Retired {
-		m.mu.Unlock()
-		return nil
-	}
-	m.retireLocked(p, reason, actor, m.now())
-	m.mu.Unlock()
 	m.fireRetireHook([]string{id})
 	return nil
+}
+
+// retirePropertyLocked is the part of RetireProperty that runs under the write lock,
+// split out so the unlock can be deferred. A panic anywhere in here — the clock, the
+// journal, a hook a future revision adds — would otherwise leave the map's write lock
+// held forever, and net/http recovers a handler panic, so the daemon would go on
+// accepting connections while every map operation blocked on it. It reports whether
+// anything was actually retired, so the caller knows to fire the hook.
+func (m *Map) retirePropertyLocked(id, reason, actor string) (retired bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.properties[id]
+	if !ok {
+		return false, fmt.Errorf("property %q not found", id)
+	}
+	if p.Status == Retired {
+		return false, nil
+	}
+	m.retireLocked(p, reason, actor, m.now())
+	return true, nil
 }
 
 // Sweep applies time-based lifecycle transitions and returns what changed. It is
 // idempotent, so a caller may run it on a timer or before a query without
 // producing duplicate journal entries for the same transition.
 func (m *Map) Sweep() (stale, retired []string) {
+	stale, retired = m.sweepLocked()
+	m.fireRetireHook(retired)
+	return stale, retired
+}
+
+// sweepLocked is the part of Sweep that runs under the write lock, split out for the
+// same reason as retirePropertyLocked: the unlock is deferred, so a panic raised in
+// here cannot wedge the map. The retire hook runs afterwards, outside the lock, so a
+// hook that reads the map cannot deadlock against the sweep that called it.
+func (m *Map) sweepLocked() (stale, retired []string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	now := m.now()
 	for _, p := range m.properties {
@@ -862,8 +885,6 @@ func (m *Map) Sweep() (stale, retired []string) {
 	sort.Strings(stale)
 	sort.Strings(retired)
 	m.recomputeDerivedLocked(now)
-	m.mu.Unlock()
-	m.fireRetireHook(retired)
 	return stale, retired
 }
 

@@ -1481,6 +1481,78 @@ func TestSweepRetirementCascadesToRelationships(t *testing.T) {
 	}
 }
 
+// TestSweepReleasesTheLockWhenItPanics guards the write lock against a panic raised
+// inside Sweep's locked body. net/http recovers a panic raised in a handler and keeps
+// serving, so a Sweep that took the lock without `defer Unlock` would leave the daemon
+// answering connections while every map operation blocks forever — a wedge with no
+// crash to point at. The clock is the injectable thing inside the locked body, so it
+// stands in for any panic reachable from there.
+func TestSweepReleasesTheLockWhenItPanics(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("x", 1, c.now())
+
+	var calls int
+	at := c.t.Add(time.Minute)
+	m.SetClock(func() time.Time {
+		calls++
+		if calls == 2 {
+			panic("clock failed under the write lock")
+		}
+		return at
+	})
+
+	m.Sweep() // first call: x falls silent past RetireAfter, so this runs retireLocked
+	if p, ok := m.Property("x"); !ok || p.Status != Retired {
+		t.Fatalf("x is %+v; the first sweep was meant to retire it through retireLocked", p)
+	}
+
+	var panicked bool
+	func() {
+		defer func() { panicked = recover() != nil }()
+		m.Sweep() // second clock call: panics with the write lock held
+	}()
+	if !panicked {
+		t.Fatal("the second sweep did not panic; this test cannot observe a leaked lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Property("x")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Property blocked for a second after a panic inside Sweep: the write lock was never released")
+	}
+}
+
+func TestRetirePropertyReleasesTheLockWhenItPanics(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("x", 1, c.now())
+	m.SetClock(func() time.Time { panic("clock failed under the write lock") })
+
+	var panicked bool
+	func() {
+		defer func() { panicked = recover() != nil }()
+		_ = m.RetireProperty("x", "test", "operator")
+	}()
+	if !panicked {
+		t.Fatal("RetireProperty did not panic; this test cannot observe a leaked lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Property("x")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Property blocked for a second after a panic inside RetireProperty: the write lock was never released")
+	}
+}
+
 func TestRetireHookFiresOnBothPaths(t *testing.T) {
 	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
 	var got []string
