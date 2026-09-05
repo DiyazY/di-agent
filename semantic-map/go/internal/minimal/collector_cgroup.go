@@ -35,7 +35,9 @@ import (
 // Every sample this collector produces — root or subject — is declared as
 // "share-of-node-capacity" with Range [0,1]: CPU and memory readings are
 // always a fraction of what the whole node has, never a fraction of a
-// subject-local limit. A subject that has vanished between one Collect() and
+// subject-local limit. The node's memory share is the one reading that does not
+// come from a cgroup file: a cgroup v2 root has no memory.current / memory.max, so
+// it is (MemTotal − MemAvailable) / MemTotal from /proc/meminfo. A subject that has vanished between one Collect() and
 // the next simply produces no samples this tick; its cgroup snapshot is
 // dropped so a later reappearance (a reused pod UID, say) starts clean. There
 // is no "gone" event — absence is silence, not a signal.
@@ -201,12 +203,20 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	c.prev[subject] = &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled}
 
 	var samples []*types.MetricSample
-	if memErr == nil {
-		switch {
-		case c.memTotal > 0:
-			samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
-		case memMax > 0:
-			samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(memMax), 0, 1), now, now, subject, labels))
+	switch {
+	case memErr == nil && c.memTotal > 0:
+		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(c.memTotal), 0, 1), now, now, subject, labels))
+	case memErr == nil && memMax > 0:
+		samples = append(samples, c.sample(types.MemoryUtilization, clamp(float64(memCurrent)/float64(memMax), 0, 1), now, now, subject, labels))
+	case memErr != nil && subject == "":
+		// The root of a cgroup v2 hierarchy carries no memory.current / memory.max —
+		// the kernel does not create them there — so the node's memory share has to
+		// come from /proc/meminfo. Without this the one number an operator asking
+		// "how much memory is this machine using" expects was never emitted at all.
+		// A subject keeps using its own cgroup files; only the node falls back here,
+		// and only when its cgroup cannot answer (a container as root can).
+		if share, ok := readMemInUseShare(filepath.Join(c.opts.ProcRoot, "meminfo")); ok {
+			samples = append(samples, c.sample(types.MemoryUtilization, clamp(share, 0, 1), now, now, subject, labels))
 		}
 	}
 	if prev == nil {
@@ -246,6 +256,47 @@ func (c *CgroupCollector) cmdLabel(dir string) string {
 		return ""
 	}
 	return filepath.Base(argv0)
+}
+
+// readMemInUseShare parses MemTotal and MemAvailable from /proc/meminfo and returns
+// (MemTotal − MemAvailable) / MemTotal — memory the node cannot hand to a new
+// workload without reclaiming, as a share of what it has. Reports false when either
+// key is missing, malformed or zero: a node memory share nobody can compute is better
+// left unsaid than guessed at.
+//
+// This counts page cache differently from cgroup accounting — reclaimable cache is
+// excluded here, whereas memory.current includes a cgroup's own page cache — so the
+// node figure and the sum of its subjects' figures are not the same quantity and
+// should not be expected to add up.
+func readMemInUseShare(path string) (float64, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	var total, available uint64
+	var haveTotal, haveAvailable bool
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		kb, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			total, haveTotal = kb, true
+		case "MemAvailable:":
+			available, haveAvailable = kb, true
+		}
+	}
+	if !haveTotal || !haveAvailable || total == 0 || available > total {
+		return 0, false
+	}
+	return float64(total-available) / float64(total), true
 }
 
 // readMemTotal parses MemTotal from /proc/meminfo (kB). 0 when unavailable.

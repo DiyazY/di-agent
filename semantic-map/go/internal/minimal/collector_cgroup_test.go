@@ -31,12 +31,52 @@ func writeCgroup(t *testing.T, dir string, usageUsec, periods, throttled uint64,
 // subject. It must never appear as a subject.
 const nestedPodUID = "22222222-3333-4444-5555-666666666666"
 
+// Fake /proc/meminfo values for the tree below: a node with 8 GiB of which 6 GiB is
+// available, so the node memory share is (8192000 − 6144000) / 8192000 = 0.25.
+const (
+	fakeMemTotalKB     = 8192000
+	fakeMemAvailableKB = 6144000
+	fakeMemShare       = float64(fakeMemTotalKB-fakeMemAvailableKB) / float64(fakeMemTotalKB)
+)
+
+// writeRootCgroup writes a cgroup v2 hierarchy ROOT: cpu.stat, and deliberately no
+// memory.current / memory.max. The kernel does not create memory files at the root of
+// a v2 hierarchy, so a fixture that writes them there certifies a filesystem shape no
+// real host can present.
+func writeRootCgroup(t *testing.T, dir string, usageUsec, periods, throttled uint64) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cpu := "usage_usec " + strconv.FormatUint(usageUsec, 10) + "\nnr_periods " + strconv.FormatUint(periods, 10) +
+		"\nnr_throttled " + strconv.FormatUint(throttled, 10) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(cpu), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFakeProc writes a /proc tree holding just the meminfo the root's memory share
+// is computed from.
+func writeFakeProc(t *testing.T) string {
+	t.Helper()
+	procRoot := t.TempDir()
+	meminfo := "MemTotal:       " + strconv.Itoa(fakeMemTotalKB) + " kB\n" +
+		"MemFree:          123456 kB\n" +
+		"MemAvailable:   " + strconv.Itoa(fakeMemAvailableKB) + " kB\n"
+	if err := os.WriteFile(filepath.Join(procRoot, "meminfo"), []byte(meminfo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return procRoot
+}
+
 // fakeTree builds a root with one systemd pod (plus a container scope AND a nested
-// pod-shaped cgroup under it), one cgroupfs pod, and one systemd unit.
-func fakeTree(t *testing.T) (root, podA, podB, unit string) {
+// pod-shaped cgroup under it), one cgroupfs pod, and one systemd unit, alongside a
+// fake /proc the root's memory share comes from.
+func fakeTree(t *testing.T) (root, podA, podB, unit, procRoot string) {
 	t.Helper()
 	root = t.TempDir()
-	writeCgroup(t, root, 10_000_000, 0, 0, "2147483648")
+	procRoot = writeFakeProc(t)
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
 	podA = filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
 	writeCgroup(t, podA, 1_000_000, 100, 10, "268435456")
 	writeCgroup(t, filepath.Join(podA, "cri-containerd-abc.scope"), 900_000, 100, 10, "200000000")
@@ -71,8 +111,8 @@ func bySubject(samples []*types.MetricSample) map[string]map[types.MetricType]*t
 }
 
 func TestCollectWalksPodsAsSubjects(t *testing.T) {
-	root, podA, podB, _ := fakeTree(t)
-	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30})
+	root, podA, podB, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
 	c.numCPU = 4
 	if _, err := c.Collect(); err != nil {
 		t.Fatal(err)
@@ -115,15 +155,15 @@ func TestCollectWalksPodsAsSubjects(t *testing.T) {
 }
 
 func TestCollectUnitsAllowlistAndCap(t *testing.T) {
-	root, _, _, _ := fakeTree(t)
-	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 1, MemTotalBytes: 4 << 30})
+	root, _, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 1, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
 	samples, _ := c.Collect()
 	got := bySubject(samples)
 	delete(got, "")
 	if len(got) != 1 {
 		t.Errorf("cap of 1 subject not enforced: %v", keys(got))
 	}
-	c2 := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 256, MemTotalBytes: 4 << 30})
+	c2 := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
 	samples, _ = c2.Collect()
 	if bySubject(samples)["unit:k0sworker.service"] == nil {
 		t.Error("allowlisted unit was not a subject")
@@ -131,8 +171,8 @@ func TestCollectUnitsAllowlistAndCap(t *testing.T) {
 }
 
 func TestVanishedSubjectDropsItsSnapshotAndEmitsNothing(t *testing.T) {
-	root, podA, _, _ := fakeTree(t)
-	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30})
+	root, podA, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
 	c.Collect()
 	if err := os.RemoveAll(podA); err != nil {
 		t.Fatal(err)
@@ -149,12 +189,36 @@ func TestVanishedSubjectDropsItsSnapshotAndEmitsNothing(t *testing.T) {
 	}
 }
 
-func TestRootMemoryUsesMemTotalWhenKnown(t *testing.T) {
-	root, _, _, _ := fakeTree(t)
-	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{MemTotalBytes: 4 << 30})
+// TestRootMemoryComesFromMeminfoOnCgroupV2 pins where the node-level memory share
+// comes from. The root of a cgroup v2 hierarchy has no memory.current / memory.max, so
+// reading them there fails and the node would have no memory property at all — the one
+// number an operator asking "how much memory is this machine using" expects. /proc
+// answers it instead: (MemTotal − MemAvailable) / MemTotal.
+func TestRootMemoryComesFromMeminfoOnCgroupV2(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{MemTotalBytes: 4 << 30, ProcRoot: procRoot})
 	samples, _ := c.Collect()
-	if s := bySubject(samples)[""][types.MemoryUtilization]; s == nil || s.Value != float64(2147483648)/float64(4<<30) {
-		t.Errorf("root memory %v; want memory.current / MemTotal even though memory.max is 'max'", s)
+	s := bySubject(samples)[""][types.MemoryUtilization]
+	if s == nil {
+		t.Fatal("the root emitted no memory sample; a cgroup v2 root has no memory files, so /proc/meminfo must answer")
+	}
+	if s.Value != fakeMemShare {
+		t.Errorf("root memory share %v; want (MemTotal − MemAvailable) / MemTotal = %v", s.Value, fakeMemShare)
+	}
+	if s.Unit != "share-of-node-capacity" || s.Range == nil {
+		t.Errorf("root memory sample %+v; want the declared unit and range", s)
+	}
+}
+
+// TestRootMemoryIsSilentWhenMeminfoIsUnreadable: no memory files at the root and no
+// readable meminfo means the collector has no basis for a node memory share, and
+// inventing one would be worse than not answering.
+func TestRootMemoryIsSilentWhenMeminfoIsUnreadable(t *testing.T) {
+	root, _, _, _, _ := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{MemTotalBytes: 4 << 30, ProcRoot: t.TempDir()})
+	samples, _ := c.Collect()
+	if s := bySubject(samples)[""][types.MemoryUtilization]; s != nil {
+		t.Errorf("root memory sample %+v; want none when neither the cgroup nor meminfo can say", s)
 	}
 }
 
