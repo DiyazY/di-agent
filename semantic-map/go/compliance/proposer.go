@@ -1,7 +1,9 @@
 package compliance
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -171,6 +173,66 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 	})
 
 	// ── GetHistory ───────────────────────────────────────────────────────────
+
+	// feedProperties drives ObserveProperty with two subjects that report identical
+	// series and two node-level properties that follow them, so every pairing the
+	// scope rule forbids would correlate perfectly if it were formed.
+	feedProperties := func(p contracts.ProposerContract, subjects []string) {
+		t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 120; i++ {
+			at := t0.Add(time.Duration(i) * 10 * time.Second)
+			x := float64(i%20) / 20
+			for _, sub := range subjects {
+				_ = p.ObserveProperty("cpu@"+sub, sub, x, at)
+			}
+			_ = p.ObserveProperty("pressure", "", 0.9*x+0.05, at)
+			_ = p.ObserveProperty("load", "", 0.8*x+0.1, at)
+		}
+	}
+
+	t.Run("ObservePropertyPairsScopedWithUnscopedOnly", func(t *testing.T) {
+		p := factory(t)
+		feedProperties(p, []string{"pod:a", "pod:b"})
+		history, err := p.GetHistory()
+		if err != nil {
+			t.Fatalf("GetHistory: %v", err)
+		}
+		for _, c := range history {
+			fromScoped, toScoped := strings.Contains(c.FromID, "@"), strings.Contains(c.ToID, "@")
+			switch {
+			case fromScoped && toScoped:
+				t.Errorf("two subjects were paired: %s", c.CandidateID)
+			case !fromScoped && !toScoped:
+				t.Errorf("two node-level properties were paired through ObserveProperty: %s", c.CandidateID)
+			case !fromScoped && toScoped:
+				t.Errorf("direction must be scoped -> unscoped: %s", c.CandidateID)
+			}
+		}
+	})
+
+	t.Run("ForgetDropsBuffersAndCandidates", func(t *testing.T) {
+		p := factory(t)
+		feedProperties(p, []string{"pod:a"})
+		if err := p.Forget("cpu@pod:a"); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		history, _ := p.GetHistory()
+		for _, c := range history {
+			if c.FromID == "cpu@pod:a" || c.ToID == "cpu@pod:a" {
+				t.Errorf("candidate %s survived Forget", c.CandidateID)
+			}
+		}
+		// The buffers are gone too: one more tick cannot re-emit from the old pairs.
+		at := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+		_ = p.ObserveProperty("cpu@pod:a", "pod:a", 0.5, at)
+		_ = p.ObserveProperty("pressure", "", 0.5, at)
+		pending, _ := p.GetCandidates()
+		for _, c := range pending {
+			if c.FromID == "cpu@pod:a" {
+				t.Errorf("candidate %s re-emitted from buffers Forget should have dropped", c.CandidateID)
+			}
+		}
+	})
 
 	t.Run("HistoryIsSupersetOfPending", func(t *testing.T) {
 		p := factory(t)

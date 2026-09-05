@@ -9,8 +9,8 @@
 //
 // EventID is deterministic per (source, node, metric, tick) so two collectors
 // with identical patterns produce byte-identical sample streams — matching the
-// CollectorContract guarantee and letting the Updater idempotency carry through
-// to scenario replay.
+// CollectorContract guarantee and letting the state model's idempotency carry
+// through to scenario replay.
 package scripted
 
 import (

@@ -19,11 +19,10 @@
 //	EventID = sha256("replay:" + filename + ":" + hostname + ":" +
 //	                 chart_context + ":" + metric_id + ":" + relative_time)[:16]
 //
-//	This makes the replay idempotent through the Updater: replaying the
-//	same parquet twice cannot inflate edge n_observations on the second
-//	pass — the dedupe set inside UpdateEdge will skip every EventID it
-//	has seen. End-to-end idempotency proof is in the acceptance section
-//	of the README.
+//	This makes the replay idempotent through the state model: replaying the
+//	same parquet twice cannot inflate n_observations on the second pass,
+//	because the map recognises an event id it has already applied.
+//	End-to-end idempotency proof is in the acceptance section of the README.
 package playback
 
 import (
@@ -94,7 +93,7 @@ func (s Summary) String() string {
 
 // EventID returns the deterministic 16-character event identifier for one
 // (filename, hostname, chart_context, metric_id, relative_time) tuple. It
-// is the contract that makes re-replays idempotent through the Updater.
+// is the contract that makes re-replays idempotent through the state model.
 // Exported so unit tests can assert determinism without reaching into
 // internals.
 func EventID(parquetFilename, hostname, chartContext, metricID string, relativeTime int64) string {

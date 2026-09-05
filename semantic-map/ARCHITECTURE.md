@@ -649,10 +649,13 @@ Each `MetricSample` carries:
 | ---------------- | ------------ | -------------------------------------------------------- |
 | `node_id`        | `str`        | Cluster node (`"master"`, `"node_1"`, …)                |
 | `metric_type`    | `MetricType` | Semantic type — see catalogue below                      |
-| `value`          | `float`      | Normalized value in the fixed unit for the metric type   |
+| `value`          | `float`      | The reading, in the declared `unit`; routed types are fractions on [0,1] |
 | `timestamp_unix` | `int`        | Unix timestamp of the observation                        |
 | `event_id`       | `str`        | Deterministic ID — same observation always → same ID     |
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
+| `unit`           | `str`        | What the value means (`share-of-node-capacity`, `items`, …); stamped on the property at admission |
+| `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Required with `unit` on every sample (a contract MUST) |
+| `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
 **`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + subject + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
@@ -661,13 +664,15 @@ Each `MetricSample` carries:
 
 ### MetricType catalogue
 
-Routing is declared in `domain_spec.json`, not in code, and every route fixes its
-unit as a fraction on [0,1]. Collectors must normalize before emitting: edge
-weights are Bernoulli parameters and the divergence measure is defined on that
-interval, so an out-of-range observation is clipped and the affected edge stops
+Routing is declared in `domain_spec.json`, not in code, and every *routed* type is a
+fraction on [0,1]: construct polarity and the divergence measure are defined on that
+interval, so an out-of-range observation there is clipped and the affected edge stops
 responding to evidence while aggregates keep tracing a smooth curve. A replay
 harness that passed network throughput in raw bytes per second produced exactly
-that failure, silently.
+that failure, silently. The set of types is open by union (below): an unrouted type —
+any name a producer sends, most often scoped to a subject — carries whatever `unit` and
+`range` it declares, and the map normalises by the declared range wherever it needs a
+fraction.
 
 | `MetricType`            | Construct | Polarity | Note                                                       |
 | ----------------------- | --------- | -------- | ---------------------------------------------------------- |
@@ -832,7 +837,7 @@ The map changes at three rates, and each is a setting rather than an accident.
 | **Magnitude** | `-alpha` (0.2) for the recent layer, `-alpha-slow` (0.001) for the established layer | — |
 | **Structure** | `-proposer-min-pairs` (30) co-observations inside `-pair-window-seconds` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
 
-Admission is immediate and *trust* grows at the magnitude pace: confidence is the pace signal, so there is no probation gate. A derived property never retires — it is declared structure — but it goes stale when no member is active and returns with them.
+Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
 
 ### Peer state: knowledge crossing a node boundary
 
@@ -989,9 +994,10 @@ The cost function was the last place in the daemon that knew a construct by name
 
 `IngestSample` records the sample against the metric's own property, and everything else
 follows from the model: derived properties recompute from their members, and the estimator
-folds the observation into the relationships incident to whatever moved. The routed
-construct is passed to the Proposer, which needs construct-level values to look for
-relations the backbone does not declare.
+folds the observation into the relationships incident to whatever moved. Every observed
+property, routed or not, is then fed to the Proposer through `ObserveProperty`, which
+looks for relations between subjects and node-level properties that nothing declared
+(§6).
 
 The order matters and is the substantive part: the state model records the observation
 **before** the routing table is consulted. The routing table says what this agent knows how
@@ -1095,7 +1101,7 @@ dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 
-Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and passes the routed construct to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
+Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
 
 ---
 
@@ -1106,21 +1112,27 @@ The Proposer contract supports discovering relationships the loaded specificatio
 ```
 Telemetry accumulates in the evidence layer
         ↓
-Proposer computes mutual information between construct time series
+Proposer pairs each scoped property with the node-level properties it co-occurs
+with — one pair per reading (the scope rule below)
         ↓
-If MI > threshold AND p < 0.05 AND n_observations > min_support:
+If |r| ≥ -proposer-threshold AND n ≥ -proposer-min-pairs AND the map does not
+already hold the pair:
     → Emit CandidateEdge (visible via GET /candidates)
         ↓
 Operator reviews: confirm / reject / defer
         ↓
-Confirm → OntologyContract.AddValidatedProposition()
-          (structural validation runs first — contradictions are rejected)
+Confirm → a Discovered relationship in the state map (scoped pair), declared by
+          the facade; a sign that contradicts an existing edge is refused and the
+          candidate reopened. A construct pair goes through
+          OntologyContract.AddValidatedProposition() instead.
 Reject  → Suppressed for this deployment session
+Defer   → out of the pending list; an operator's deferral stands, the cap's
+          re-enters when it outranks a pending candidate
 ```
 
-The Proposer **never modifies the backbone directly**. `Confirm` delegates to `OntologyContract.AddValidatedProposition`, which validates the new edge against existing propositions before accepting. A proposed edge that contradicts a validated proposition (e.g., a positive direction where a negative is already established) is rejected.
+The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a scoped pair becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
 
-The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It ring-buffers construct-level observations fed by `IngestSample` via `ObserveConstruct`, pairs values across constructs lexicographically, and emits `CandidateEdge`s when `|Pearson r|` exceeds the threshold (default 0.85). P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). `Confirm` delegates to `OntologyContract.AddValidatedProposition` with evidence source tag `proposer-mi`. The coverage check is direction-aware so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
+The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `-proposer-min-pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, rejected, or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
 
 ### The scope rule and Discovered provenance
 

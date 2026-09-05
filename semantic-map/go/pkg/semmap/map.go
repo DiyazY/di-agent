@@ -329,8 +329,9 @@ type SpecCarrier interface {
 
 // router returns the metric routing table for this map, which is the loaded
 // domain specification. Nil when the ontology carries no specification, in which
-// case the proposer simply hears nothing: a metric routed to a construct the
-// deployment never declared would put evidence under a name nobody asked for.
+// case no sample is routed into a construct: a metric routed to a construct the
+// deployment never declared would put evidence under a name nobody asked for. The
+// proposer is fed the property either way.
 func (m *SemanticMap) router() MetricRouter {
 	if c, ok := m.ontology.(SpecCarrier); ok {
 		if s := c.Spec(); s != nil {

@@ -97,6 +97,20 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 	// map normalises a contribution by the property's range, so an undeclared range
 	// means the map assumes [0,1] and every answer that reads the property carries a
 	// caveat saying so. The contract makes declaring them a MUST; this asserts it.
+	// Every sample-level subtest in this suite ranges over one Collect() batch and
+	// passes on an empty one. A factory whose collector emits nothing therefore
+	// certifies nothing; this makes that visible instead of vacuous.
+	t.Run("CollectProducesSamples", func(t *testing.T) {
+		c := factory(t)
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		if len(samples) == 0 {
+			t.Fatal("Collect returned no samples: the sample-level guarantees are asserted over this batch, so the factory must build a collector with data behind it")
+		}
+	})
+
 	t.Run("SamplesDeclareUnitAndRange", func(t *testing.T) {
 		c := factory(t)
 		samples, _ := c.Collect()
@@ -110,6 +124,33 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 			}
 			if s.Range[1] <= s.Range[0] {
 				t.Errorf("MetricSample.Range %v is empty; hi must exceed lo", *s.Range)
+			}
+		}
+	})
+
+	// "keep them stable per type": the map stamps unit and range on the property at
+	// admission and treats a later disagreement as a conflict, so a collector whose
+	// declaration moves between calls, or between subjects of one type, poisons its
+	// own properties.
+	t.Run("UnitAndRangeStablePerType", func(t *testing.T) {
+		c := factory(t)
+		type decl struct {
+			unit string
+			rng  [2]float64
+		}
+		seen := map[types.MetricType]decl{}
+		for call := 0; call < 2; call++ {
+			samples, _ := c.Collect()
+			for _, s := range samples {
+				if s.Range == nil {
+					continue // reported by SamplesDeclareUnitAndRange
+				}
+				d := decl{s.Unit, *s.Range}
+				if prev, ok := seen[s.MetricType]; ok && prev != d {
+					t.Errorf("%s declared %q %v and then %q %v; unit and range must be stable per type",
+						s.MetricType, prev.unit, prev.rng, d.unit, d.rng)
+				}
+				seen[s.MetricType] = d
 			}
 		}
 	})

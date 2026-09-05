@@ -112,8 +112,8 @@ func main() {
 	retireAfter := flag.Duration("retire-after", 10*time.Minute,
 		"silence after which a property is retired automatically, cascading to the "+
 			"relationships that reference it. 0 leaves retirement to an operator. The "+
-			"default is five stale windows: long enough that a restarting collector is "+
-			"not mistaken for a departed subject.")
+			"default, 10m, is five default stale windows — long enough that a restarting "+
+			"collector is not mistaken for a departed subject — and does not follow -stale-after.")
 	noLearn := flag.Bool("no-learn", false,
 		"stop relationships learning their strength from paired observations of both "+
 			"endpoints. They then stay at their seeded priors with confidence 0, which is "+

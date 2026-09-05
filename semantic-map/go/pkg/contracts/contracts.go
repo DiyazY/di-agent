@@ -82,7 +82,7 @@ var ErrNotImplemented = contractError("operation not implemented by this ontolog
 //   - Traceable rationale: every returned value includes a non-empty Rationale
 //     string referencing specific node/edge IDs. Implementations that cannot
 //     produce a rationale must return ErrNoRationale.
-//   - Pure simulation: SimulateOutcome never writes to Storage or any contract.
+//   - Pure simulation: SimulateOutcome never writes to the state model or any contract.
 //   - Trust filtering: RecommendPeer never returns a peer below the minimum
 //     trust threshold; returns ErrInsufficientTrust if no peer qualifies.
 type ReasonerContract interface {
@@ -119,8 +119,11 @@ type RelationshipLookup interface {
 //   - Read-only observation: no Observe* method modifies the model.
 //   - Confirm never writes: it returns the proposition and the facade applies it,
 //     which is what makes "never modifies the backbone directly" true.
-//   - Permanent suppression: after Reject, the same (from, to, sign) is not
-//     re-proposed within the deployment session.
+//   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
+//     or an operator's Defer, that pair is not re-emitted under either sign within
+//     the session; Forget clears it, so a subject that departs and returns can be
+//     proposed again. A cap deferral is the proposer's own and provisional: it
+//     re-enters when it outranks a pending candidate.
 //   - Candidates: GetCandidates returns only Pending entries.
 //   - Forget drops every buffer and candidate involving a property, so a departed
 //     subject does not accumulate.
@@ -165,9 +168,10 @@ type TunerContract interface {
 // CollectorContract reads raw metrics from a source and emits normalized samples.
 //
 // The collector sits between a metric source (cgroup filesystem, Netdata HTTP API,
-// kubelet /metrics, etc.) and the Updater. It normalizes observations into
-// MetricSamples. It knows nothing about the graph topology — that mapping is
-// the bridge's responsibility.
+// kubelet /metrics, a pushing application) and the facade's ingestion. It turns
+// observations into MetricSamples that declare their subject, unit and range. It
+// knows nothing about the graph — routing a sample into a construct is the domain
+// specification's business, done at ingestion.
 //
 // Guarantees:
 //   - Pure read: Collect never modifies any system state.

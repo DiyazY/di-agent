@@ -184,16 +184,19 @@ type OutcomeSimulation struct {
 
 // MetricType is the semantic kind of an observation emitted by a collector.
 //
-// Collectors must normalize every value to a fraction on [0,1] before emitting,
-// against whatever reference the deployment considers saturation — link capacity
-// for throughput, a latency budget for durations, an energy budget for joules.
-// This is a correctness requirement, not a convention: edge weights are Bernoulli
-// parameters, so an out-of-range value is clipped and the affected edge stops
-// responding to evidence while the aggregates keep looking healthy.
+// A collector declares what each value means: Unit names the quantity and Range its
+// bounds, and the map normalises by the declared range wherever it needs a fraction.
+// Types that a domain specification routes into a construct are still expected as
+// fractions on [0,1], against whatever reference the deployment considers saturation
+// — link capacity for throughput, a latency budget for durations — because construct
+// polarity and the divergence measure are defined on that interval and an
+// out-of-range value there is clipped while the aggregates keep looking healthy. An
+// unrouted type (any name a producer sends, most often scoped to a subject) carries
+// whatever unit and range it declares.
 //
-//	CPUUtilization       CPU quota consumed
-//	MemoryUtilization    memory limit consumed
-//	CPUThrottleRatio     scheduling periods throttled
+//	CPUUtilization       share of the node's CPU (cgroup collector)
+//	MemoryUtilization    share of the node's memory
+//	CPUThrottleRatio     throttled CFS periods over elapsed periods (share-of-periods)
 //	BlockIOUtil          block I/O bandwidth consumed
 //	CPUPressureRatio     PSI cpu.some stall fraction
 //	IOPressureRatio      PSI io.some stall fraction

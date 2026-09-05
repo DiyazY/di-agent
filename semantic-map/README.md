@@ -775,6 +775,18 @@ the shape of the real thing.
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
 
+#### Scenario file format
+
+A scenario is JSON with a name, `seed`, `tick_seconds`, `duration_seconds`, optional `noise`, and three blocks:
+
+| Block | Fields |
+| --- | --- |
+| `node` | one entry per node-level property, `{"coupling": "sum" \| "logistic" \| "none", "base", "of", "theta", "k"}`. `sum` is `base + Σ` over active subjects of their property `of`; `logistic` is `σ((x − theta)/k)` where `x` is the node property `of` (or, if `of` names a subject property, `base +` its sum); `none` is `base`, a property nothing drives. |
+| `subjects` | `{"id": "<kind>:<identity>", "arrive", "depart", "return", "properties": {...}}`, times in seconds from the start; `depart` absent means never, `return` revives the same subject. Each property is `{"pattern": "constant" \| "ramp" \| "sine" \| "burst", "value", "min", "max", "period", "burst_start", "burst_duration", "unit", "range"}` — `constant` holds `value`; `ramp` goes `min → max` over `period` seconds then holds; `sine` oscillates between `min` and `max` with `period`; `burst` is `min` except `max` during `[burst_start, burst_start + burst_duration)`, repeating every `period` when it is positive. Schedules are relative to the subject's arrival or return. |
+| `expect` | what the runner asserts: `admitted_within_ticks`, `stale_within_seconds`, `retired_within_seconds`; `candidates` (`{"from", "to", "sign", "within_seconds", "reproposed_after_return"}`), `no_candidates_from` (subject ids that must never be proposed), and `counterfactuals` (`{"target", "assume": {"<property>@<subject>": value}, "regime": "linear" \| "saturated", "tolerance", "min_error"}` — `linear` asserts the projection is within `tolerance` of the model's truth, `saturated` asserts it is at least `min_error` off and that the standing slope caveat is present). |
+
+Property names are metric types (`[A-Za-z0-9._-]`); the runner addresses a subject's property as `<property>@<subject>`. The loader validates all of this and refuses a file it cannot run.
+
 See `scenarios/` for five seed scenario files to drive `-script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
@@ -782,7 +794,7 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | Flag                     | Default | Meaning                                                                            |
 | ------------------------ | ------- | ---------------------------------------------------------------------------------- |
 | `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
-| `-retire-after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default is five stale windows — long enough that a restarting collector is not mistaken for a departed subject. `0` leaves retirement to an operator. Retirement is soft. |
+| `-retire-after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default, `10m`, is five default stale windows — long enough that a restarting collector is not mistaken for a departed subject — and does not follow `-stale-after`. `0` leaves retirement to an operator. Retirement is soft. |
 | `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
 | `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
 | `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |
