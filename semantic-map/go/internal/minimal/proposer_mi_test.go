@@ -440,51 +440,75 @@ func TestPendingCapDefersTheWeakest(t *testing.T) {
 	}
 }
 
-// TestPendingCapIsDeterministic rebuilds the cap scenario twice with tied
-// inputs (pod:1, pod:2, pod:3 are all exact affine transforms of node, so
-// their |r|·n scores are identical — the normal case for affine pod series)
-// and checks that the same candidate is deferred both times, via the
-// documented tie-break: among equal scores, the lexicographically larger
-// CandidateID is treated as weaker.
-func buildTiedCapScenario() *minimal.MICorrelationProposer {
+// buildCapScenario feeds three pod series and one node series at a shared
+// cadence with maxPending=2, so the third candidate forces one deferral.
+//
+// With affine=true the pods are distinct affine transforms of node. Pearson is
+// affine-invariant, so their |r| are equal in exact arithmetic — but not in
+// float64: at the moment the cap fires the three values sit one ULP apart, and
+// which one rounds lowest depends on the architecture's arithmetic (arm64 fuses
+// the multiply-add in the covariance sums; amd64 at GOAMD64=v1 does not). On
+// arm64 pod:3 rounds lowest, on amd64 pod:2 does. The CandidateID tie-break
+// never engages for such series, so no test may assert which of them is
+// deferred.
+//
+// With affine=false the three pods report the bit-identical series, which is
+// the only way to reach the tie-break: equal bits on every platform, broken by
+// the lexicographically larger CandidateID.
+func buildCapScenario(affine bool) *minimal.MICorrelationProposer {
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 10, 60, 15*time.Second)
 	p.SetMaxPending(2)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 30; i++ {
 		at := t0.Add(time.Duration(i) * 10 * time.Second)
 		x := float64(i%10) / 10
+		x2, x3 := x, x
+		if affine {
+			x2, x3 = x*0.9, x*0.7+0.1
+		}
 		_ = p.ObserveProperty("m@pod:1", "pod:1", x, at)
-		_ = p.ObserveProperty("m@pod:2", "pod:2", x*0.9, at)
-		_ = p.ObserveProperty("m@pod:3", "pod:3", x*0.7+0.1, at)
+		_ = p.ObserveProperty("m@pod:2", "pod:2", x2, at)
+		_ = p.ObserveProperty("m@pod:3", "pod:3", x3, at)
 		_ = p.ObserveProperty("node", "", x, at)
 	}
 	return p
 }
 
-func TestPendingCapIsDeterministic(t *testing.T) {
-	deferredID := func(p *minimal.MICorrelationProposer) string {
-		h, _ := p.GetHistory()
-		var ids []string
-		for _, c := range h {
-			if c.Status == types.Deferred {
-				ids = append(ids, c.CandidateID)
-			}
+func singleDeferredID(t *testing.T, p *minimal.MICorrelationProposer) string {
+	t.Helper()
+	h, _ := p.GetHistory()
+	var ids []string
+	for _, c := range h {
+		if c.Status == types.Deferred {
+			ids = append(ids, c.CandidateID)
 		}
-		if len(ids) != 1 {
-			t.Fatalf("expected exactly 1 deferred candidate; got %d (%v)", len(ids), ids)
-		}
-		return ids[0]
 	}
+	if len(ids) != 1 {
+		t.Fatalf("expected exactly 1 deferred candidate; got %d (%v)", len(ids), ids)
+	}
+	return ids[0]
+}
 
-	p1 := buildTiedCapScenario()
-	p2 := buildTiedCapScenario()
-	d1 := deferredID(p1)
-	d2 := deferredID(p2)
+// TestPendingCapIsDeterministic rebuilds the affine cap scenario twice and
+// checks that the same candidate is deferred both times. It deliberately does
+// not say which: that is decided by one ULP of rounding and differs between
+// architectures (see buildCapScenario). What it guards is the original defect
+// — the weakest candidate chosen by ranging over a map, which varied run to run.
+func TestPendingCapIsDeterministic(t *testing.T) {
+	d1 := singleDeferredID(t, buildCapScenario(true))
+	d2 := singleDeferredID(t, buildCapScenario(true))
 	if d1 != d2 {
 		t.Errorf("two identical runs deferred different candidates: %q vs %q", d1, d2)
 	}
-	if d1 != "m@pod:3->node" {
-		t.Errorf("expected the tie-break to defer %q; got %q", "m@pod:3->node", d1)
+}
+
+// TestPendingCapTieBreaksOnCandidateID reaches the tie-break with bit-identical
+// pod series, so the |r|·n scores are equal on every platform and the
+// lexicographically larger CandidateID must be the one deferred.
+func TestPendingCapTieBreaksOnCandidateID(t *testing.T) {
+	d := singleDeferredID(t, buildCapScenario(false))
+	if d != "m@pod:3->node" {
+		t.Errorf("expected the tie-break to defer %q; got %q", "m@pod:3->node", d)
 	}
 }
 

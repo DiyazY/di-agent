@@ -252,10 +252,14 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 // over the p.candidates map — Go's map iteration order is randomized, and ranging
 // over it would make the choice of "weakest" nondeterministic across runs. The
 // comparison itself is made total by tie-breaking on CandidateID: among equal
-// |r|·n scores (the normal case for affine-related series, since Pearson is
-// affine-invariant and shared cadence gives equal n), the lexicographically larger
-// id is treated as weaker. A deferral is session-permanent, so an arbitrary choice
-// here would be a silent, unreproducible loss.
+// |r|·n scores the lexicographically larger id is treated as weaker. Equal means
+// bit-equal, which series with identical readings produce; affine-related series
+// do not — Pearson is affine-invariant in exact arithmetic, but in float64 their
+// |r| land one ULP apart and which rounds lowest depends on the platform's
+// arithmetic (fused multiply-add on arm64, not on amd64 v1). The choice is
+// therefore reproducible run to run on one machine, not across architectures. A
+// deferral is session-permanent, so an arbitrary choice here would be a silent,
+// unreproducible loss.
 func (p *MICorrelationProposer) enforceCapLocked() {
 	var pending []*types.CandidateEdge
 	for _, cid := range p.order {
