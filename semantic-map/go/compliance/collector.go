@@ -93,6 +93,27 @@ func RunCollectorCompliance(t *testing.T, factory CollectorFactory) {
 		}
 	})
 
+	// A sample whose unit and range are not declared cannot be reasoned about: the
+	// map normalises a contribution by the property's range, so an undeclared range
+	// means the map assumes [0,1] and every answer that reads the property carries a
+	// caveat saying so. The contract makes declaring them a MUST; this asserts it.
+	t.Run("SamplesDeclareUnitAndRange", func(t *testing.T) {
+		c := factory(t)
+		samples, _ := c.Collect()
+		for _, s := range samples {
+			if s.Unit == "" {
+				t.Errorf("MetricSample.Unit must be non-empty; got %+v", s)
+			}
+			if s.Range == nil {
+				t.Errorf("MetricSample.Range must be declared; got %+v", s)
+				continue
+			}
+			if s.Range[1] <= s.Range[0] {
+				t.Errorf("MetricSample.Range %v is empty; hi must exceed lo", *s.Range)
+			}
+		}
+	})
+
 	t.Run("SamplesMetricTypeInAvailable", func(t *testing.T) {
 		c := factory(t)
 		available := metricSet(c.AvailableMetrics())

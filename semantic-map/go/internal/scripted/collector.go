@@ -306,16 +306,24 @@ func (c *ScriptedCollector) Collect() ([]*types.MetricSample, error) {
 		if v > 1 {
 			v = 1
 		}
+		rng := scriptedRange
 		out = append(out, &types.MetricSample{
 			NodeID:        p.NodeID(),
 			MetricType:    p.MetricType(),
 			Value:         v,
 			TimestampUnix: now.Unix(),
 			EventID:       eventID(c.sourceID, p.NodeID(), p.MetricType(), c.tick),
+			Unit:          "fraction",
+			Range:         &rng,
+			Source:        c.sourceID,
 		})
 	}
 	return out, nil
 }
+
+// scriptedRange matches the clip above: every value this collector emits is a
+// fraction in [0,1], and the contract requires it to say so on every sample.
+var scriptedRange = [2]float64{0, 1}
 
 func (c *ScriptedCollector) recomputeAvailable() {
 	seen := make(map[types.MetricType]bool, len(c.patterns))

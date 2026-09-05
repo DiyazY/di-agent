@@ -218,3 +218,33 @@ func TestEventID_Deterministic(t *testing.T) {
 		t.Error("EventID collides across distinct relative_time")
 	}
 }
+
+// TestRunner_DeclaresUnitAndRangeOnEverySample covers the Collector contract's MUST at
+// the replay boundary: every sample carries the unit and range its value is expressed
+// in. mapping.FromRow normalises each supported triple to a fraction before it gets
+// here, and a sample that does not say so leaves the map assuming [0,1] and caveating
+// every answer that reads the property for the assumption.
+func TestRunner_DeclaresUnitAndRangeOnEverySample(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.parquet")
+	writeFixture(t, path)
+
+	rec := newRecorder(t)
+	if _, err := Run(context.Background(), rec.sender(), Config{ParquetPath: path, Speed: 0}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(rec.received) == 0 {
+		t.Fatal("no samples were sent; this test cannot see what they declare")
+	}
+	for i, req := range rec.received {
+		if req.Unit != "fraction" {
+			t.Errorf("sample %d Unit = %q; want \"fraction\"", i, req.Unit)
+		}
+		if req.Range == nil || *req.Range != [2]float64{0, 1} {
+			t.Errorf("sample %d Range = %v; want [0 1]", i, req.Range)
+		}
+		if req.Source != SourceID("fixture.parquet") {
+			t.Errorf("sample %d Source = %q; want %q", i, req.Source, SourceID("fixture.parquet"))
+		}
+	}
+}
