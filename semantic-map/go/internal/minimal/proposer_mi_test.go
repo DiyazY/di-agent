@@ -1,8 +1,10 @@
 package minimal_test
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -347,7 +349,7 @@ func TestObserveProperty_RespectsTimeTolerance(t *testing.T) {
 
 func TestObserveProperty_SkipsCoveredPairs(t *testing.T) {
 	m := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
-	_ = m.Observe("cpu_utilization@pod:a", .1, time.Now())
+	_ = m.Record(statemap.Observation{ID: "cpu_utilization@pod:a", Value: .1, At: time.Now(), Subject: "pod:a"})
 	_ = m.Observe("cpu_pressure_ratio", .1, time.Now())
 	_ = m.DeclareRelationship(statemap.Relationship{From: "cpu_utilization@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
 	p := minimal.NewMICorrelationProposer(m, 0.8, 10, 60, 15*time.Second)
@@ -601,5 +603,132 @@ func TestPendingCandidateDirectionFollowsTheEvidence(t *testing.T) {
 	if cs[0].Direction != types.Negative {
 		t.Errorf("direction %v with |r|=%.3f over n=%d after the window turned negative; the pending candidate froze its first direction",
 			cs[0].Direction, cs[0].MIScore, cs[0].NObservations)
+	}
+}
+
+// TestEachObservationPairsOnce: at a shared cadence each tick used to fold two pairs —
+// (pod_i, node_{i-1}) when the pod arrived and (pod_i, node_i) when the node did — so
+// n counted every reading twice, min-pairs was reached in half the advertised ticks
+// and the Fisher p was computed over doubled, autocorrelated support. An observation
+// takes part in at most one pair per counterpart.
+func TestEachObservationPairsOnce(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i) / 10
+		_ = p.ObserveProperty("cpu@pod:a", "pod:a", x, at)
+		_ = p.ObserveProperty("pressure", "", x, at)
+	}
+	cs := mustCandidates(t, p)
+	if len(cs) != 1 {
+		t.Fatalf("%d candidates; want 1", len(cs))
+	}
+	if cs[0].NObservations != 10 {
+		t.Errorf("n=%d after 10 ticks of one pod and one node reading each; want 10, one pair per tick", cs[0].NObservations)
+	}
+}
+
+// TestCapDeferralIsRecordedAndReentersWhenItOutranksThePending: a cap deferral is the
+// proposer's choice, not an operator's, so history says so and a log line names it;
+// and it is not permanent — when the deferred pair later outranks a pending one, the
+// two swap, so the cap bounds what is shown rather than what can ever be seen.
+func TestCapDeferralIsRecordedAndReentersWhenItOutranksThePending(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	p.SetMaxPending(1)
+	var logged []string
+	p.SetLogger(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tick := func(i int, pods ...string) {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		for _, pod := range pods {
+			_ = p.ObserveProperty("m@"+pod, pod, x, at)
+		}
+		_ = p.ObserveProperty("node", "", x, at)
+	}
+	byID := func() map[string]*types.CandidateEdge {
+		h, _ := p.GetHistory()
+		out := map[string]*types.CandidateEdge{}
+		for _, c := range h {
+			out[c.CandidateID] = c
+		}
+		return out
+	}
+	for i := 0; i < 6; i++ {
+		tick(i, "pod:a", "pod:b")
+	}
+	m := byID()
+	a, b := m["m@pod:a->node"], m["m@pod:b->node"]
+	if a == nil || b == nil || a.Status != types.Pending || b.Status != types.Deferred {
+		t.Fatalf("after the cap: a=%+v b=%+v; want a pending and b deferred by the tie-break", a, b)
+	}
+	if b.Reason != "cap" {
+		t.Errorf("deferred candidate carries reason %q; want \"cap\" so history can tell it from an operator's Defer", b.Reason)
+	}
+	if len(logged) == 0 || !strings.Contains(logged[0], "m@pod:b->node") {
+		t.Errorf("the cap deferral was not logged: %v", logged)
+	}
+	for i := 6; i < 20; i++ {
+		tick(i, "pod:b") // pod:a falls silent; pod:b keeps reporting and outgrows it
+	}
+	m = byID()
+	a, b = m["m@pod:a->node"], m["m@pod:b->node"]
+	if b.Status != types.Pending {
+		t.Errorf("pod:b stayed %v with |r|·n=%.1f against pod:a's %.1f; a cap deferral must re-enter when it outranks the pending",
+			b.Status, b.MIScore*float64(b.NObservations), a.MIScore*float64(a.NObservations))
+	}
+	if a.Status != types.Deferred || a.Reason != "cap" {
+		t.Errorf("pod:a is %v/%q; want cap-deferred in pod:b's place", a.Status, a.Reason)
+	}
+}
+
+// TestOperatorDeferralDoesNotReenter: an operator's Defer is a decision the proposer
+// does not overturn, however the evidence grows.
+func TestOperatorDeferralDoesNotReenter(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 20, 2*time.Second)
+	cs := mustCandidates(t, p)
+	if len(cs) == 0 {
+		t.Fatal("no candidate to defer")
+	}
+	id := cs[0].CandidateID
+	if err := p.Defer(id); err != nil {
+		t.Fatal(err)
+	}
+	feedScoped(p, 40, 2*time.Second)
+	h, _ := p.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == id && (c.Status != types.Deferred || c.Reason != "operator") {
+			t.Errorf("operator-deferred candidate is %v/%q after more evidence; want Deferred/operator", c.Status, c.Reason)
+		}
+	}
+}
+
+// TestSettledCandidatesCannotBeRejectedOrDeferred: a Confirmed candidate has become a
+// relationship in the map; letting history later say "rejected" about it would
+// contradict the map.
+func TestSettledCandidatesCannotBeRejectedOrDeferred(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 60, 15*time.Second)
+	feedScoped(p, 40, 2*time.Second)
+	cs := mustCandidates(t, p)
+	if len(cs) == 0 {
+		t.Fatal("no candidate to confirm")
+	}
+	id := cs[0].CandidateID
+	if _, err := p.Confirm(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Reject(id); err == nil {
+		t.Error("a Confirmed candidate was rejected")
+	}
+	if err := p.Defer(id); err == nil {
+		t.Error("a Confirmed candidate was deferred")
+	}
+	h, _ := p.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == id && c.Status != types.Confirmed {
+			t.Errorf("status %v after the refused transitions; want Confirmed", c.Status)
+		}
 	}
 }

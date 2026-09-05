@@ -16,3 +16,18 @@ func TestValidSubject(t *testing.T) {
 		}
 	}
 }
+
+// TestValidMetricType: a metric type is one path segment over [A-Za-z0-9._-]. '@'
+// would let an unscoped sample named "cpu@pod:a" land on the scoped property's id.
+func TestValidMetricType(t *testing.T) {
+	for _, ok := range []string{"cpu_utilization", "io.wait", "queue-depth", "Requests2"} {
+		if !ValidMetricType(ok) {
+			t.Errorf("%q rejected", ok)
+		}
+	}
+	for _, bad := range []string{"", "cpu@pod:a", "a/b", "a b", "a->b", "a:b"} {
+		if ValidMetricType(bad) {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

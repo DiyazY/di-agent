@@ -255,6 +255,14 @@ type MetricSample struct {
 
 var subjectRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._:-]+$`)
 
+var metricTypeRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// ValidMetricType reports whether s is a non-empty single path segment over
+// [A-Za-z0-9._-]. '@' is excluded because a property id is metric_type@subject, so an
+// unscoped sample named "cpu@pod:a" would land on the scoped property's id; '/' is
+// excluded because ids are single path segments in the HTTP surface.
+func ValidMetricType(s string) bool { return metricTypeRe.MatchString(s) }
+
 // ValidSubject reports whether s is empty (node scope) or has the form
 // <kind>:<identity> over [A-Za-z0-9._:-]. A '/' is never allowed: property ids are
 // single path segments in the HTTP surface.
@@ -297,6 +305,11 @@ type CandidateEdge struct {
 	NObservations   int
 	DeploymentsSeen int
 	Status          CandidateStatus
+	// Reason says who deferred a Deferred candidate: "cap" when the proposer's
+	// pending cap chose it as the weakest, "operator" when Defer was called. A
+	// cap deferral is provisional and re-enters when it outranks a pending one; an
+	// operator's is not overturned.
+	Reason string
 }
 
 // ── Ontology event log ────────────────────────────────────────────────────────

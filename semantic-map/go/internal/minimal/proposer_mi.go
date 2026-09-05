@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strconv"
@@ -41,8 +42,13 @@ import (
 type MICorrelationProposer struct {
 	lookup contracts.RelationshipLookup
 
-	mu         sync.Mutex
-	buffers    map[string]*stats.PairWindow    // key: fromID + "→" + toID
+	mu      sync.Mutex
+	buffers map[string]*stats.PairWindow // key: fromID + "→" + toID
+	// lastPair remembers, per buffer key, the timestamps of the last pair folded, so
+	// a reading takes part in at most one pair per counterpart: without it each tick
+	// at a shared cadence folded (x_i, y_{i-1}) on x's arrival and (x_i, y_i) on
+	// y's, counting every reading twice.
+	lastPair   map[string][2]int64
 	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
 	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
 
@@ -54,6 +60,7 @@ type MICorrelationProposer struct {
 	bufSize    int
 	pairWindow time.Duration
 	maxPending int
+	logf       func(format string, args ...any)
 	seq        uint64 // identity for pairs that carry no timestamps
 }
 
@@ -79,6 +86,7 @@ func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold flo
 	return &MICorrelationProposer{
 		lookup:           lookup,
 		buffers:          make(map[string]*stats.PairWindow),
+		lastPair:         make(map[string][2]int64),
 		candidates:       make(map[string]*types.CandidateEdge),
 		latestConstructs: make(map[string]float64),
 		latestProps:      make(map[string]latestValue),
@@ -160,13 +168,20 @@ func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float6
 			continue
 		}
 		from, to, x, y := id, otherID, value, other.value
+		xAt, yAt := at.UnixNano(), other.at.UnixNano()
 		if !me.scoped {
 			from, to, x, y = otherID, id, other.value, value
+			xAt, yAt = other.at.UnixNano(), at.UnixNano()
+		}
+		key := from + "→" + to
+		if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
+			continue // that reading already took part in a pair with this counterpart
 		}
 		identity := from + "|" + to + "|" + strconv.FormatInt(at.Unix(), 10) + "|" + strconv.FormatInt(other.at.Unix(), 10)
 		if err := p.observeLocked(from, to, x, y, identity); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		p.lastPair[key] = [2]int64{xAt, yAt}
 	}
 	return firstErr
 }
@@ -181,6 +196,7 @@ func (p *MICorrelationProposer) Forget(propertyID string) error {
 		from, to, _ := strings.Cut(key, "→")
 		if from == propertyID || to == propertyID {
 			delete(p.buffers, key)
+			delete(p.lastPair, key)
 		}
 	}
 	kept := p.order[:0]
@@ -225,8 +241,20 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		switch existing.Status {
 		case types.Confirmed:
 			return nil // a confirmed pair is settled; never re-emitted
-		case types.Rejected, types.Deferred:
-			return nil // permanent suppression within the session; deferred stays out
+		case types.Rejected:
+			return nil // permanent suppression within the session
+		case types.Deferred:
+			if existing.Reason != deferredByCap {
+				return nil // an operator's deferral is not overturned by evidence
+			}
+			existing.Direction, existing.MIScore = direction, math.Abs(r)
+			existing.PValue, existing.NObservations = stats.FisherPValue(r, buf.Len()), buf.Len()
+			if p.outranksPendingLocked(existing) {
+				existing.Status, existing.Reason = types.Pending, ""
+				p.log("proposer: %s re-enters pending with |r|·n=%.1f; the cap defers the weakest instead", candID, score(existing))
+				p.enforceCapLocked()
+			}
+			return nil
 		case types.Pending:
 			existing.Direction = direction
 			existing.MIScore = math.Abs(r)
@@ -261,7 +289,39 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 // therefore reproducible run to run on one machine, not across architectures. A
 // deferral is session-permanent, so an arbitrary choice here would be a silent,
 // unreproducible loss.
-func (p *MICorrelationProposer) enforceCapLocked() {
+// SetLogger routes the proposer's own log lines (cap deferrals and re-entries)
+// somewhere other than the standard logger; tests capture them.
+func (p *MICorrelationProposer) SetLogger(f func(format string, args ...any)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.logf = f
+}
+
+func (p *MICorrelationProposer) log(format string, args ...any) {
+	if p.logf != nil {
+		p.logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
+// Reasons a Deferred candidate carries, so history can tell the proposer's choice
+// from an operator's.
+const (
+	deferredByCap      = "cap"
+	deferredByOperator = "operator"
+)
+
+func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }
+
+// weaker is the total order the cap uses: lower |r|·n, then the lexicographically
+// larger id among bit-equal scores.
+func weaker(a, b *types.CandidateEdge) bool {
+	sa, sb := score(a), score(b)
+	return sa < sb || (sa == sb && a.CandidateID > b.CandidateID)
+}
+
+func (p *MICorrelationProposer) pendingLocked() []*types.CandidateEdge {
 	var pending []*types.CandidateEdge
 	for _, cid := range p.order {
 		c := p.candidates[cid]
@@ -269,16 +329,38 @@ func (p *MICorrelationProposer) enforceCapLocked() {
 			pending = append(pending, c)
 		}
 	}
+	return pending
+}
+
+// outranksPendingLocked reports whether a cap-deferred candidate would survive the
+// cap now: there is room, or it is stronger than the weakest pending candidate.
+func (p *MICorrelationProposer) outranksPendingLocked(c *types.CandidateEdge) bool {
+	pending := p.pendingLocked()
+	if len(pending) < p.maxPending {
+		return true
+	}
+	weakest := pending[0]
+	for _, w := range pending[1:] {
+		if weaker(w, weakest) {
+			weakest = w
+		}
+	}
+	return weaker(weakest, c)
+}
+
+func (p *MICorrelationProposer) enforceCapLocked() {
+	pending := p.pendingLocked()
 	for len(pending) > p.maxPending {
 		weakest := 0
 		for i, c := range pending {
-			wc := pending[weakest]
-			score, weakestScore := c.MIScore*float64(c.NObservations), wc.MIScore*float64(wc.NObservations)
-			if score < weakestScore || (score == weakestScore && c.CandidateID > wc.CandidateID) {
+			if weaker(c, pending[weakest]) {
 				weakest = i
 			}
 		}
-		pending[weakest].Status = types.Deferred
+		w := pending[weakest]
+		w.Status, w.Reason = types.Deferred, deferredByCap
+		p.log("proposer: %s deferred by the pending cap (%d): |r|·n=%.1f is the weakest; it re-enters if it outranks a pending candidate",
+			w.CandidateID, p.maxPending, score(w))
 		pending = append(pending[:weakest], pending[weakest+1:]...)
 	}
 }
@@ -311,9 +393,9 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 // exact failure propose-then-confirm exists to prevent, one layer over. The facade adds
 // the returned proposition through its own path, which declares both halves.
 //
-// The candidate is only marked Confirmed on the way out, so a caller that fails to apply
-// the proposition can retry: an unapplied confirmation must not leave the candidate in a
-// state where it can never be confirmed again.
+// The candidate is marked Confirmed here, before the facade applies the proposition.
+// If applying fails the facade calls Reopen, so the candidate returns to Pending rather
+// than standing in history as confirmed with nothing behind it.
 func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -338,9 +420,28 @@ func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition,
 	return prop, nil
 }
 
-// Reject marks a candidate as permanently suppressed for this session.
-// The candidate stays in the map so subsequent Observe calls on the same
-// pair are short-circuited; a history entry is appended.
+// Reopen returns a Confirmed candidate to Pending. The facade calls it when the
+// relationship a confirmation stands for could not be declared, so the candidate can
+// be retried or rejected instead of standing in history as confirmed with nothing
+// behind it.
+func (p *MICorrelationProposer) Reopen(candidateID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.candidates[candidateID]
+	if !ok {
+		return fmt.Errorf("candidate %q not found", candidateID)
+	}
+	if c.Status != types.Confirmed {
+		return fmt.Errorf("candidate %q is not Confirmed (status=%v)", candidateID, c.Status)
+	}
+	c.Status, c.Reason = types.Pending, ""
+	return nil
+}
+
+// Reject marks a candidate as permanently suppressed for this session. The candidate
+// stays in the map so subsequent observations of the same pair are short-circuited,
+// and its history entry reads Rejected. A Confirmed candidate cannot be rejected: the
+// relationship it became is in the map, and retiring that is the operator's move.
 func (p *MICorrelationProposer) Reject(candidateID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -348,15 +449,18 @@ func (p *MICorrelationProposer) Reject(candidateID string) error {
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	c.Status = types.Rejected
+	if c.Status == types.Confirmed {
+		return fmt.Errorf("candidate %q is Confirmed: the relationship it became is in the map; retire that instead", candidateID)
+	}
+	c.Status, c.Reason = types.Rejected, ""
 	return nil
 }
 
-// Defer marks a candidate as Deferred — it moves out of GetCandidates but
-// remains in the candidates map. In this v1 implementation Defer behaves
-// like a weaker form of Reject: re-Observe on the same pair will not
-// re-emit while the deferred entry is present. A richer profile may
-// re-promote deferred candidates after a fresh evidence cycle; not yet.
+// Defer marks a candidate as Deferred by an operator — out of GetCandidates, still in
+// history with Reason "operator", and not overturned by later evidence. A cap deferral
+// (Reason "cap") is the proposer's own, provisional choice and re-enters when it
+// outranks a pending candidate; an operator may Defer a cap-deferred candidate to
+// make it stick. Confirmed and Rejected candidates cannot be deferred.
 func (p *MICorrelationProposer) Defer(candidateID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -364,7 +468,10 @@ func (p *MICorrelationProposer) Defer(candidateID string) error {
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	c.Status = types.Deferred
+	if c.Status == types.Confirmed || c.Status == types.Rejected {
+		return fmt.Errorf("candidate %q is %v and cannot be deferred", candidateID, c.Status)
+	}
+	c.Status, c.Reason = types.Deferred, deferredByOperator
 	return nil
 }
 
