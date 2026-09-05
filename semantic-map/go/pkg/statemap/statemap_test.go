@@ -1747,6 +1747,34 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	if !found {
 		t.Errorf("caveats %v; want one naming the stale endpoint", d.Caveats)
 	}
+
+	// Both endpoints stale: the reader is owed both names, not whichever the map
+	// iteration happened to write last.
+	c.advance(time.Minute)
+	m.Sweep()
+	b = m.Decide("d2", "test")
+	b.RelationshipsInto("dst")
+	d = b.Commit(nil)
+	var stale []string
+	for _, cv := range d.Caveats {
+		if strings.Contains(cv, "stale endpoint") {
+			stale = append(stale, cv)
+		}
+	}
+	if len(stale) != 2 {
+		t.Fatalf("caveats %v; want one per stale endpoint (2)", d.Caveats)
+	}
+	var named int
+	for _, end := range []string{"src", "dst"} {
+		for _, cv := range stale {
+			if strings.HasSuffix(cv, "stale endpoint "+end) {
+				named++
+			}
+		}
+	}
+	if named != 2 {
+		t.Errorf("stale caveats %v; want one naming src and one naming dst", stale)
+	}
 }
 
 func TestCoveredIgnoresRetiredAndOppositeSign(t *testing.T) {

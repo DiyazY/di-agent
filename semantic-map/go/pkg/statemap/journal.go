@@ -293,7 +293,9 @@ func (b *DecisionBuilder) Property(id string) (Property, bool) {
 func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 	b.m.mu.RLock()
 	var out []Relationship
-	staleEnd := map[string]string{}
+	// Both endpoints can be stale at once, and both are the reader's business: a
+	// single slot per relationship silently kept whichever was checked last.
+	staleEnds := map[string][]string{}
 	for _, r := range b.m.relationships {
 		if r.To != propertyID || r.Status == Retired {
 			continue
@@ -301,7 +303,7 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 		out = append(out, *r)
 		for _, end := range []string{r.From, r.To} {
 			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
-				staleEnd[r.ID] = end
+				staleEnds[r.ID] = append(staleEnds[r.ID], end)
 			}
 		}
 	}
@@ -313,7 +315,7 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 			b.seenRel[r.ID] = true
 			b.rels = append(b.rels, r)
 		}
-		if end, ok := staleEnd[r.ID]; ok {
+		for _, end := range staleEnds[r.ID] {
 			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
 		}
 	}

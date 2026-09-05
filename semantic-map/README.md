@@ -58,7 +58,9 @@ go run ./cmd/mapctl deprecate P1 "smoke test"   # soft-delete a proposition
 go run ./cmd/mapctl history --since 1h    # audit log entries
 go run ./cmd/mapctl reset RC PS           # discard evidence → back to unknown
 go run ./cmd/mapctl tune "prioritize performance" # natural-language strength assertion
-go run ./cmd/mapctl estimate PS --assume RC=0.9 --without node_2 # answer, optionally under hypotheses
+go run ./cmd/mapctl estimate cpu_pressure_ratio \
+  --assume cpu_utilization@pod:<uid>=0.6 --without pod:<uid>   # answer, optionally under hypotheses
+# <uid> is a pod's UID as it appears in GET /state — properties are named <metric_type>@<subject>
 ```
 
 ```bash

@@ -13,7 +13,6 @@ import (
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/statemap"
-	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // scenarioRun is what driving a scenario through the daemon stack leaves behind.
@@ -269,5 +268,3 @@ func assertScenario(t *testing.T, r *scenarioRun) {
 		}
 	}
 }
-
-var _ = types.Pending

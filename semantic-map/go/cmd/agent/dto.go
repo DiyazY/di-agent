@@ -296,11 +296,10 @@ func eventToDTO(e *types.OntologyEvent) OntologyEventDTO {
 }
 
 // metricTypeValidator answers whether the loaded domain specification routes a
-// metric type. The /ingest-sample boundary rejects unrouted types with 400 so
-// operators and the replay tool get a clear error instead of a silent no-op —
-// ingestion itself ignores them for forward compatibility, which is the right
-// behaviour inside the pipeline but the wrong behaviour at an API boundary a
-// human is typing against.
+// metric type. /ingest-sample does NOT reject an unrouted type: the state map admits
+// it as a property and the handler answers 202, so the caller learns the sample was
+// recorded and that nothing summarises it. What the routing table says is what the
+// agent can summarise, not what the system may exhibit.
 //
 // This asks the specification rather than carrying a list. A hardcoded copy here
 // was a third place routing knowledge lived, and it silently rejected the two PSI
