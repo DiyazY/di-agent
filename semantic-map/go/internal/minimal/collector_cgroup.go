@@ -62,9 +62,22 @@ type CgroupCollector struct {
 	opts       CgroupOptions
 	recognise  []recogniser
 
-	mu        sync.Mutex
-	prev      map[string]*cpuSnapshot // key: subject ("" = root)
-	capWarned bool
+	mu   sync.Mutex
+	prev map[string]*cpuSnapshot // key: subject ("" = root)
+	// Each condition below is said once (or, for the cap, whenever the count
+	// changes): a collector that goes silent is the failure this project treats as
+	// worse than an error, because nothing about an empty map looks wrong.
+	rootWarned   bool
+	noPodsWarned bool
+	lastSkipped  int
+}
+
+func (c *CgroupCollector) log(format string, args ...any) {
+	if c.opts.Logf != nil {
+		c.opts.Logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // CgroupOptions configures subject detection. The zero value walks nothing; the
@@ -84,6 +97,10 @@ type CgroupOptions struct {
 	MemTotalBytes uint64
 	// ProcRoot is where /proc is mounted (tests point it at a fake tree).
 	ProcRoot string
+	// Logf receives the collector's own log lines: an unreadable root, a root with
+	// no pod cgroups while subjects are on, and subjects skipped by the cap. nil
+	// means the standard logger.
+	Logf func(format string, args ...any)
 }
 
 type cpuSnapshot struct {
@@ -144,12 +161,19 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	out := c.collectOneLocked("", c.cgroupRoot, nil, now)
+	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
+	if rootErr != nil && !c.rootWarned {
+		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at -cgroup-root?",
+			c.cgroupRoot, rootErr)
+		c.rootWarned = true
+	}
 	if !c.opts.Subjects {
 		return out, nil
 	}
 	seen := map[string]bool{}
 	root := filepath.Clean(c.cgroupRoot)
+	var sawPods bool
+	var skipped int
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() || p == root {
 			return nil
@@ -157,6 +181,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 		rel := filepath.ToSlash(strings.TrimPrefix(p, root+string(filepath.Separator)))
 		first, _, _ := strings.Cut(rel, "/")
 		unitsEnabled := len(c.opts.UnitGlobs) > 0
+		if strings.HasPrefix(first, "kubepods") {
+			sawPods = true
+		}
 		if !strings.HasPrefix(first, "kubepods") && !(first == "system.slice" && unitsEnabled) {
 			return filepath.SkipDir
 		}
@@ -169,10 +196,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 				continue
 			}
 			if len(seen) >= c.opts.MaxSubjects {
-				if !c.capWarned {
-					log.Printf("cgroup collector: more than %d subjects; the rest are skipped (raise -cgroup-max-subjects)", c.opts.MaxSubjects)
-					c.capWarned = true
-				}
+				skipped++
 				return filepath.SkipDir
 			}
 			seen[info.subject] = true
@@ -182,11 +206,26 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 					labels["cmd"] = cmd
 				}
 			}
-			out = append(out, c.collectOneLocked(info.subject, p, labels, now)...)
+			samples, _ := c.collectOneLocked(info.subject, p, labels, now) // unreadable: transient, skipped
+			out = append(out, samples...)
 			return filepath.SkipDir // a subject's children are not subjects
 		}
 		return nil
 	})
+	if !sawPods && !c.noPodsWarned {
+		c.log("cgroup collector: no kubepods cgroup under %s while -cgroup-subjects is on; if the agent runs in a container this root is its own cgroup, not the node's — mount the host's cgroup root",
+			c.cgroupRoot)
+		c.noPodsWarned = true
+	}
+	if skipped != c.lastSkipped {
+		if skipped > 0 {
+			c.log("cgroup collector: %d subjects beyond -cgroup-max-subjects=%d skipped this tick; the census under-counts by that many",
+				skipped, c.opts.MaxSubjects)
+		} else {
+			c.log("cgroup collector: no subjects skipped by -cgroup-max-subjects=%d any more", c.opts.MaxSubjects)
+		}
+		c.lastSkipped = skipped
+	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {
 			delete(c.prev, subject)
@@ -195,11 +234,13 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	return out, nil
 }
 
-// collectOneLocked reads one cgroup directory as one subject ("" = the node).
-func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[string]string, now time.Time) []*types.MetricSample {
+// collectOneLocked reads one cgroup directory as one subject ("" = the node). The
+// error is the cpu.stat read failing, which means no samples at all for this
+// directory; the caller decides whether that is worth saying.
+func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[string]string, now time.Time) ([]*types.MetricSample, error) {
 	cpu, err := readCPUStat(filepath.Join(dir, "cpu.stat"))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	memCurrent, memErr := readMemoryCurrent(dir)
 	prev := c.prev[subject]
@@ -221,21 +262,24 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		}
 	}
 	if prev == nil {
-		return samples
+		return samples, nil
 	}
 	elapsedUs := now.Sub(prev.ts).Microseconds()
 	if elapsedUs < 1000 {
-		return samples
+		return samples, nil
 	}
 	if cpu.usageUsec >= prev.usageUsec {
 		util := clamp(float64(cpu.usageUsec-prev.usageUsec)/(float64(elapsedUs)*c.numCPU), 0, 1)
 		samples = append(samples, c.sample(types.CPUUtilization, unitNodeShare, util, now, prev.ts, subject, labels))
 	}
-	if cpu.nrPeriods > prev.nrPeriods {
+	// Both counters are guarded: a cgroup recreated under the same subject between
+	// two ticks restarts them, and an unsigned delta across that wraps to a maximal,
+	// plausible-looking ratio.
+	if cpu.nrPeriods > prev.nrPeriods && cpu.nrThrottled >= prev.nrThrottled {
 		throttle := clamp(float64(cpu.nrThrottled-prev.nrThrottled)/float64(cpu.nrPeriods-prev.nrPeriods), 0, 1)
 		samples = append(samples, c.sample(types.CPUThrottleRatio, unitPeriodShare, throttle, now, prev.ts, subject, labels))
 	}
-	return samples
+	return samples, nil
 }
 
 // cmdLabel returns the basename of argv0 of the first process in the cgroup, or "".

@@ -1,9 +1,11 @@
 package minimal
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -399,5 +401,91 @@ func TestThrottleRatioDeclaresItsOwnUnit(t *testing.T) {
 	}
 	if throttle.Unit != "share-of-periods" || throttle.Range == nil || *throttle.Range != [2]float64{0, 1} {
 		t.Errorf("throttle sample unit %q range %v; want share-of-periods on [0,1]", throttle.Unit, throttle.Range)
+	}
+}
+
+// TestThrottleDeltaSurvivesACounterReset: usage is guarded against a counter that
+// went backwards; the throttle delta was not. A cgroup recreated under the same
+// subject between two ticks restarts both counters, and if nr_periods has already
+// passed the old value while nr_throttled has not, the unsigned subtraction wraps to
+// a maximal, plausible-looking cpu_throttle_ratio of 1.0.
+func TestThrottleDeltaSurvivesACounterReset(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	advance(t, podA, 1_000_000, 1000, 900)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	advance(t, podA, 1_040_000, 1200, 10) // recreated: periods ran past, throttled restarted
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range samples {
+		if s.Subject == "pod:"+testUID && s.MetricType == types.CPUThrottleRatio {
+			t.Errorf("throttle ratio %v emitted across a counter reset; want no sample rather than a wrapped delta", s.Value)
+		}
+	}
+}
+
+func captureLogs(opts CgroupOptions) (CgroupOptions, *[]string) {
+	var lines []string
+	opts.Logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	return opts, &lines
+}
+
+// TestUnreadableRootIsLoggedOnce: a cgroup v1 host, or a container whose
+// /sys/fs/cgroup is not the host's, leaves the root's cpu.stat unreadable. The
+// collector then produces no node properties forever, and nothing said so.
+func TestUnreadableRootIsLoggedOnce(t *testing.T) {
+	root := t.TempDir() // no cpu.stat at all
+	opts, lines := captureLogs(CgroupOptions{MemTotalBytes: 4 << 30, ProcRoot: t.TempDir()})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	for i := 0; i < 3; i++ {
+		if _, err := c.Collect(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "cpu.stat") {
+		t.Errorf("unreadable root logged %d times (%v); want exactly one line naming cpu.stat", len(*lines), *lines)
+	}
+}
+
+// TestRootWithoutPodCgroupsIsLoggedOnce: subjects on and no kubepods directory under
+// the root means the agent is probably reading its own container's cgroup as the
+// node — the one deployment mistake that yields plausible numbers about the wrong
+// thing. It must be said once.
+func TestRootWithoutPodCgroupsIsLoggedOnce(t *testing.T) {
+	root := t.TempDir()
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: t.TempDir()})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	for i := 0; i < 3; i++ {
+		if _, err := c.Collect(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "kubepods") {
+		t.Errorf("missing pod cgroups logged %d times (%v); want exactly one line naming kubepods", len(*lines), *lines)
+	}
+}
+
+// TestSubjectCapTruncationIsVisible: the cap used to log once per process and the
+// census then under-counted with no trace. The skipped count is logged whenever it
+// changes, so a growing node keeps saying how much it is not showing.
+func TestSubjectCapTruncationIsVisible(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t) // two pods
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MaxSubjects: 1, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	_, _ = c.Collect()
+	_, _ = c.Collect()
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "1 ") {
+		t.Fatalf("cap truncation logged %d times (%v); want one line while 1 subject is skipped", len(*lines), *lines)
+	}
+	writeCgroup(t, filepath.Join(root, "kubepods", "besteffort", "pod99999999-2222-3333-4444-555555555555"), 500_000, 0, 0, "1024")
+	_, _ = c.Collect()
+	if len(*lines) != 2 || !strings.Contains((*lines)[1], "2 ") {
+		t.Errorf("after a third pod appeared the skipped count changed to 2 and was not logged: %v", *lines)
 	}
 }
