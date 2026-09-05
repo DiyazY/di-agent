@@ -23,12 +23,13 @@ type scenarioRun struct {
 	collector *scripted.SystemScript
 	ticks     int64
 
-	firstSeen map[string]int64 // property id → tick first present in the map
-	stale     map[string]int64 // property id → tick first reported stale
-	retired   map[string]int64 // property id → tick first reported retired
-	revived   map[string]int64 // property id → tick first active again after retirement
-	candidate map[string]int64 // "from->to" → tick first pending
-	confirmed map[string]bool
+	firstSeen  map[string]int64 // property id → tick first present in the map
+	stale      map[string]int64 // property id → tick first reported stale
+	retired    map[string]int64 // property id → tick first reported retired
+	revived    map[string]int64 // property id → tick first active again after retirement
+	candidate  map[string]int64 // "from->to" → tick first pending
+	reproposed map[string]int64 // "from->to" → tick first pending again after a confirmation
+	confirmed  map[string]bool
 }
 
 func (r *scenarioRun) subjectProps() []string {
@@ -78,7 +79,7 @@ func driveScenario(t *testing.T, sc *scripted.Scenario, narrate func(tick int64,
 
 	r := &scenarioRun{sc: sc, state: state, sm: sm, collector: collector,
 		firstSeen: map[string]int64{}, stale: map[string]int64{}, retired: map[string]int64{},
-		revived: map[string]int64{}, candidate: map[string]int64{}, confirmed: map[string]bool{}}
+		revived: map[string]int64{}, candidate: map[string]int64{}, reproposed: map[string]int64{}, confirmed: map[string]bool{}}
 	expected := map[string]scripted.ExpectedCandidate{}
 	for _, c := range sc.Expect.Candidates {
 		expected[c.From+"->"+c.To] = c
@@ -127,8 +128,15 @@ func driveScenario(t *testing.T, sc *scripted.Scenario, narrate func(tick int64,
 			key := c.FromID + "->" + c.ToID
 			if _, seen := r.candidate[key]; !seen {
 				r.candidate[key] = i
+			} else if r.confirmed[key] {
+				if _, done := r.reproposed[key]; !done {
+					r.reproposed[key] = i
+				}
 			}
-			if _, want := expected[key]; want && !r.confirmed[key] {
+			// Confirmed every time it is proposed: after a departure the relationship
+			// retired and the candidate was forgotten, so a return proposes it afresh
+			// and confirming it again is the revival the lifecycle promises.
+			if _, want := expected[key]; want {
 				if err := sm.ConfirmCandidate(c.CandidateID); err != nil {
 					t.Fatalf("tick %d: confirm %s: %v", i, key, err)
 				}
@@ -211,6 +219,21 @@ func assertScenario(t *testing.T, r *scenarioRun) {
 		rel, ok := r.state.Relationship(statemap.RelationshipID(c.From, c.To, "discovered"))
 		if !ok || rel.Sign != c.Sign || rel.Provenance != statemap.Discovered {
 			t.Errorf("candidate %s confirmed as %+v; want a Discovered relationship with sign %+d", key, rel, c.Sign)
+		}
+		if ok && rel.Status != statemap.Active {
+			t.Errorf("candidate %s ends the run %s; a confirmed relationship whose endpoints are present must be active", key, rel.Status)
+		}
+		if c.ReproposedAfterReturn {
+			var returnTick int64
+			for _, sub := range sc.Subjects {
+				if strings.HasSuffix(c.From, "@"+sub.ID) && sub.Return != nil {
+					returnTick = tickOf(*sub.Return)
+				}
+			}
+			if rp, ok := r.reproposed[key]; !ok || rp < returnTick {
+				t.Errorf("candidate %s was not proposed again after its subject returned at tick %d (re-proposed tick %v); the retired edge must be re-earned, not remembered",
+					key, returnTick, r.reproposed[key])
+			}
 		}
 	}
 	history, _ := r.sm.CandidateHistory()

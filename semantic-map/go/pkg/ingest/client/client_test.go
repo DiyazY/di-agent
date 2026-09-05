@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,13 +41,35 @@ func TestPushSendsADeclaredScopedSample(t *testing.T) {
 	}
 }
 
-func TestPushReportsServerErrors(t *testing.T) {
+// TestPushAcceptsARoutedSampleAnswered204: the daemon answers 202 for a sample it
+// admitted but could not route and 204 for one it routed into a construct. Both are
+// success; a client that accepted only 202 would fail every routed push.
+func TestPushAcceptsARoutedSampleAnswered204(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"error":"nope"}`, 409)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "node_1", "", "app")
+	if err := c.Push(context.Background(), Metric{Type: "cpu_utilization", Unit: "fraction", Range: [2]float64{0, 1}}, 0.5, time.Now(), nil); err != nil {
+		t.Fatalf("a 204 must be success: %v", err)
+	}
+}
+
+// TestPushReportsServerErrorsWithTheBody: the body is the only diagnostic an
+// application gets, so the error must carry the status and the server's words.
+func TestPushReportsServerErrorsWithTheBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"foreign sample: node_1 is not this agent"}`, 409)
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "node_1", "pod:x", "app")
-	if err := c.Push(context.Background(), Metric{Type: "m", Unit: "u", Range: [2]float64{0, 1}}, 0.5, time.Now(), nil); err == nil {
+	err := c.Push(context.Background(), Metric{Type: "m", Unit: "u", Range: [2]float64{0, 1}}, 0.5, time.Now(), nil)
+	if err == nil {
 		t.Fatal("a 409 must surface as an error")
+	}
+	for _, want := range []string{"409", "foreign sample"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
 	}
 }

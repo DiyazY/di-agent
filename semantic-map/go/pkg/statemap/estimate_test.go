@@ -350,3 +350,77 @@ func TestEstimateRefusesNonFiniteAssumptions(t *testing.T) {
 		}
 	}
 }
+
+// TestEstimateWithoutASingleProperty: `without` may name one property rather than a
+// whole subject; only that property goes to its floor.
+func TestEstimateWithoutASingleProperty(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure", Without: []string{"queue@pod:a"}})
+	if res.Err != "" || res.Hypothetical == nil || !near(res.Hypothetical.Delta, -0.4) {
+		t.Fatalf("err=%q hypothetical=%+v; want delta -0.4 from queue alone", res.Err, res.Hypothetical)
+	}
+	if len(res.Excluded) != 1 || res.Excluded[0] != "queue@pod:a" {
+		t.Errorf("excluded %v; want [queue@pod:a]", res.Excluded)
+	}
+	if _, floored := res.Assumptions["cpu@pod:b"]; floored {
+		t.Error("excluding one property floored another subject's property")
+	}
+}
+
+// TestEstimateWithoutNothingKnownIsACaveatNotAnExclusion: a name that matches
+// neither a property nor a subject changes nothing and says so.
+func TestEstimateWithoutNothingKnownIsACaveatNotAnExclusion(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure", Without: []string{"pod:zzz"}})
+	if res.Err != "" || res.Hypothetical != nil || len(res.Excluded) != 0 {
+		t.Errorf("err=%q hypothetical=%+v excluded=%v; want a plain baseline", res.Err, res.Hypothetical, res.Excluded)
+	}
+	if !anyCaveat(res.Caveats, "pod:zzz names nothing") {
+		t.Errorf("caveats %v; want one saying pod:zzz names nothing in the map", res.Caveats)
+	}
+}
+
+// TestEstimateAssumingADerivedSourceSaysSo: a derived property assumed directly
+// leaves its members where they are, which the answer must state.
+func TestEstimateAssumingADerivedSourceSaysSo(t *testing.T) {
+	m, _ := estimateFixture(t)
+	if err := m.DeclareProperty(Property{ID: "agg", Kind: Derived, Members: []string{"cpu@pod:b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeclareRelationship(Relationship{From: "agg", To: "pressure", Sign: 1, Label: "d"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.AssertRelationshipStrength(RelationshipID("agg", "pressure", "d"), 0.5, "op", "fixture")
+	res := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"agg": 0.9}})
+	if res.Err != "" || !anyCaveat(res.Caveats, "agg is derived and was assumed directly") {
+		t.Errorf("err=%q caveats %v; want the derived-assumed caveat", res.Err, res.Caveats)
+	}
+}
+
+// TestEstimateProjectionClampsToTheDeclaredRange: a projection past the target's
+// ceiling is reported at the ceiling, not beyond it.
+func TestEstimateProjectionClampsToTheDeclaredRange(t *testing.T) {
+	m, _ := estimateFixture(t)
+	// queue 50→100 adds +0.4, cpu 0.2→1.0 adds +0.4: 0.3 + 0.8 would be 1.1 on [0,1].
+	res := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"queue@pod:a": 100, "cpu@pod:b": 1.0}})
+	if res.Err != "" || res.Hypothetical == nil {
+		t.Fatalf("err=%q hypothetical=%v", res.Err, res.Hypothetical)
+	}
+	if !near(res.Hypothetical.Delta, 0.8) || res.Hypothetical.ProjectedLevel != 1 {
+		t.Errorf("delta %.3f projected %.3f; want delta 0.8 and the projection clamped to 1", res.Hypothetical.Delta, res.Hypothetical.ProjectedLevel)
+	}
+}
+
+// TestEstimateUnmatchedAssumptionIsRecordedAndNamed: an assumption on a property
+// that relates to the target through nothing is still part of the question and is
+// said to be idle, by name.
+func TestEstimateUnmatchedAssumptionIsRecordedAndNamed(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure", Assume: map[string]float64{"idle@pod:z": 0.5}})
+	if !anyCaveat(res.Caveats, "assumption on idle@pod:z does not influence pressure") {
+		t.Errorf("caveats %v; want the unmatched assumption named", res.Caveats)
+	}
+	if v, ok := res.Assumptions["idle@pod:z"]; !ok || v != 0.5 {
+		t.Errorf("assumptions %v; want the unmatched assumption recorded as asked", res.Assumptions)
+	}
+}

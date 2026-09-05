@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -80,6 +81,11 @@ type ExpectedCandidate struct {
 	To            string `json:"to"`
 	Sign          int    `json:"sign"`
 	WithinSeconds int    `json:"within_seconds"`
+	// ReproposedAfterReturn asserts the loop the lifecycle exists for: the subject
+	// departs, the relationship retires with it, and when the subject returns the
+	// pair is proposed again — the map does not remember structure a departed
+	// subject has not re-earned. Requires the From subject to have a return time.
+	ReproposedAfterReturn bool `json:"reproposed_after_return"`
 }
 
 // ExpectedCounterfactual compares the map's projection with the model's truth after
@@ -158,6 +164,20 @@ func (s *Scenario) Validate() error {
 		}
 		if sub.Return != nil && (sub.Depart == nil || *sub.Return <= *sub.Depart) {
 			return fmt.Errorf("subject %s returns without departing first", sub.ID)
+		}
+	}
+	for _, c := range s.Expect.Candidates {
+		if !c.ReproposedAfterReturn {
+			continue
+		}
+		var returns bool
+		for _, sub := range s.Subjects {
+			if strings.HasSuffix(c.From, "@"+sub.ID) && sub.Return != nil {
+				returns = true
+			}
+		}
+		if !returns {
+			return fmt.Errorf("candidate %s->%s expects a re-proposal after return, but its subject never returns", c.From, c.To)
 		}
 	}
 	for _, cf := range s.Expect.Counterfactuals {

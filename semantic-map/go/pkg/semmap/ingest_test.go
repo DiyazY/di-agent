@@ -295,14 +295,50 @@ func TestIngestSample_ScopedSampleBecomesMetricAtSubject(t *testing.T) {
 	if !ok || p.Subject != "pod:abc" || p.Unit != "items" || p.Range != rng {
 		t.Fatalf("scoped property %+v ok=%v; want metric_type@subject with the declared unit and range", p, ok)
 	}
-	// A scoped reading of a routed metric type is still unrouted: polarity and
-	// construct membership are node-level concerns.
-	c := &types.MetricSample{MetricType: types.CPUUtilization, Value: 0.4, TimestampUnix: 1001, EventID: "c1", Subject: "pod:abc"}
-	if err := sm.IngestSample(c); err != nil {
+}
+
+// TestIngestSample_ScopedReadingOfARoutedTypeIsNeitherReflectedNorRouted: a scoped
+// reading of a routed metric type is still unrouted — polarity and construct
+// membership are node-level concerns. The route used here is opposed to its
+// construct, so a reading that went through NormalizeForConstruct would come out
+// reflected (0.25 → 0.75), and one that reached the construct would move its
+// derived value; neither may happen.
+func TestIngestSample_ScopedReadingOfARoutedTypeIsNeitherReflectedNorRouted(t *testing.T) {
+	spec := mustSpec()
+	target := spec.Constructs[0].ConstructID
+	if err := spec.AddMetricRoute(domain.MetricRoute{MetricType: "synthetic_headroom", ConstructID: target,
+		Unit: "fraction", Range: [2]float64{0, 1}, Polarity: domain.HigherIsBetter}); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := state.Property("cpu_utilization@pod:abc"); p.Value != 0.4 {
-		t.Errorf("scoped cpu value %.3f; want 0.4 untouched by construct polarity normalisation", p.Value)
+	if got := spec.NormalizeForConstruct("synthetic_headroom", 0.25); got != 0.75 {
+		t.Fatalf("precondition: the route must be opposed to its construct; normalised 0.25 to %v", got)
+	}
+	state := statemap.New(statemap.Config{Owner: "test-node", ConvergenceObservations: 10, Alpha: 0.5, AdmitUnknown: true}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil),
+		minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	before, _ := state.Property(target)
+
+	rng := [2]float64{0, 1}
+	if err := sm.IngestSample(&types.MetricSample{MetricType: "synthetic_headroom", Value: 0.25, TimestampUnix: 1000,
+		EventID: "h-scoped", Subject: "pod:abc", Unit: "fraction", Range: &rng}); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := state.Property("synthetic_headroom@pod:abc")
+	if !ok || p.Value != 0.25 {
+		t.Errorf("scoped value %.3f ok=%v; want 0.25 untouched by the construct's polarity", p.Value, ok)
+	}
+	// The seed declares a node-level property for every routed type; the scoped
+	// reading must not have been recorded against it.
+	if node, ok := state.Property("synthetic_headroom"); ok && node.NObservations != 0 {
+		t.Errorf("the scoped reading was recorded on the node-level id: %+v", node)
+	}
+	after, _ := state.Property(target)
+	if after.NObservations != before.NObservations || after.Value != before.Value {
+		t.Errorf("construct %s moved from %+v to %+v on a scoped reading; scoped samples are never routed", target, before, after)
 	}
 }
 

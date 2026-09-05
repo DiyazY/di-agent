@@ -1945,3 +1945,33 @@ func subjectOf(id string) string {
 	_, subject, _ := strings.Cut(id, "@")
 	return subject
 }
+
+// TestRetireHookRunsOutsideTheLock: the hook is allowed to read the map — the sweep
+// hands it to the proposer, and a future hook will look at what was retired. A hook
+// that calls back into the map would deadlock if it ran under the write lock, and
+// the hook test that only appends to a slice would never notice.
+func TestRetireHookRunsOutsideTheLock(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	var seen []Status
+	m.SetRetireHook(func(id string) {
+		p, _ := m.Property(id) // takes the read lock: hangs if the hook ran under the write lock
+		seen = append(seen, p.Status)
+	})
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.RetireProperty("a", "test", "operator")
+		c.advance(time.Minute)
+		m.Sweep()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retire hook deadlocked: it ran while the map's write lock was held")
+	}
+	if len(seen) != 2 || seen[0] != Retired || seen[1] != Retired {
+		t.Errorf("hook read %v; want the retired status of both properties", seen)
+	}
+}

@@ -18,6 +18,6 @@
     "admitted_within_ticks": 1,
     "stale_within_seconds": 120,
     "retired_within_seconds": 600,
-    "candidates": [{"from": "cpu_utilization@pod:a", "to": "pressure", "sign": 1, "within_seconds": 1200}]
+    "candidates": [{"from": "cpu_utilization@pod:a", "to": "pressure", "sign": 1, "within_seconds": 1200, "reproposed_after_return": true}]
   }
 }
