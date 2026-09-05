@@ -100,6 +100,21 @@ semantic-map/
 │
 │  ── Go layer (edge daemon) ──────────────────────────────────────
 │
+├── scenarios/                  Scenario files for SystemScript: a synthetic system
+│   │                           with known ground truth (subjects on a schedule + a
+│   │                           coupled node model), loaded by
+│   │                           internal/minimal/tests/scenario_files_test.go
+│   ├── linear.json             One subject, sum coupling — counterfactual estimate
+│   │                           against a linear ground truth
+│   ├── saturation.json         Logistic coupling — counterfactual against a
+│   │                           saturating (nonlinear) ground truth
+│   ├── churn.json              Subjects arrive, depart and return — admission,
+│   │                           staleness and retirement timing
+│   ├── confounded.json         Two subjects drive the same node property — the
+│   │                           proposer must not conflate them
+│   └── decoupled.json          A subject the node model never reads — asserts no
+│                               discovery candidate is proposed from it
+│
 └── go/
     ├── go.mod                  Module: github.com/DiyazY/di-agent
     │
@@ -146,6 +161,16 @@ semantic-map/
     │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties; structure only
     │
     ├── internal/               Implementation packages — not importable externally
+    │   ├── scripted/           Synthetic collectors for demos, scenarios and tests
+    │   │   ├── collector.go    ScriptedCollector — programmable patterns (Constant /
+    │   │   │                   Ramp / Step / Sine / Burst / Noisy)
+    │   │   ├── collector_test.go
+    │   │   ├── scenario.go     Scenario — a synthetic system with known ground
+    │   │   │                   truth loaded from a JSON file in scenarios/
+    │   │   ├── scenario_test.go
+    │   │   ├── system.go       SystemScript — CollectorContract over a Scenario:
+    │   │   │                   subjects on a schedule + a coupled node model
+    │   │   └── system_test.go
     │   └── minimal/            edge-minimal profile implementations
     │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
     │       ├── cgroup_recognise.go   Subject recognisers: pod cgroups (systemd + cgroupfs
@@ -309,21 +334,38 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 ### `POST /ingest-sample`
 
-Feed one typed `MetricSample` through the Bridge. The daemon maps the
-`metric_type` to its primary construct, looks up every relationship that
-touches that construct, and calls `UpdateEdge` on each unique `(from, to)`
-pair — i.e. the same fan-out the in-process collection loop performs.
+Feed one typed `MetricSample` to the facade's `IngestSample`. The daemon records
+the observation as a property, recomputes whatever derives from it, and folds it
+into every relationship incident to that property — the same path an in-process
+collector uses.
 
 ```json
 {"node_id":"master","metric_type":"cpu_utilization","value":0.71,
  "timestamp_unix":1703208286,"event_id":"replay:idle_run1:master:system.cpu:idle:0"}
 ```
 
-`metric_type` must be one of the values in `pkg/types.MetricType` (e.g.
-`cpu_utilization`, `memory_utilization`, `network_rx_bps`, …); unknown
-values return `400`. This is the public-API entry point for out-of-tree
-collectors — the parquet replay tool in particular speaks only this
-endpoint.
+Four more fields are optional and let a producer describe what it is reporting:
+
+| Field     | Type          | Meaning                                                                 |
+| --------- | ------------- | ------------------------------------------------------------------------ |
+| `subject` | `str`         | Empty for a node-level reading; `<kind>:<identity>` (e.g. `pod:1234`) to scope it to something other than the node itself |
+| `unit`    | `str`         | The unit the value is expressed in                                       |
+| `range`   | `[lo, hi]`    | The value's declared bounds                                              |
+| `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
+
+A malformed `subject` (not `<kind>:<identity>` over `[A-Za-z0-9._:-]`) returns `400`.
+`metric_type` need not be one of the values the domain specification routes: an
+unrouted type, or any sample carrying a non-empty `subject`, is still recorded as a
+property and answered `202`, not `400`:
+
+```json
+{"recorded": true, "routed": false, "metric_type": "queue_depth", "subject": "pod:1234",
+ "note": "scoped readings are not routed: recorded as a property of the subject, not summarised by any construct"}
+```
+
+A routed, unscoped sample is acknowledged with `204 No Content`. This is the
+public-API entry point for out-of-tree collectors — the parquet replay tool in
+particular speaks only this endpoint.
 
 ### Pushing application metrics
 
@@ -736,7 +778,7 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | Flag                     | Default | Meaning                                                                            |
 | ------------------------ | ------- | ---------------------------------------------------------------------------------- |
 | `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
-| `-retire-after`          | `0`     | Silence after which a property is retired automatically. `0` leaves retirement to an operator. Retirement is soft and cascades to relationships that reference the property. |
+| `-retire-after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default is five stale windows — long enough that a restarting collector is not mistaken for a departed subject. `0` leaves retirement to an operator. Retirement is soft. |
 | `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
 | `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
 | `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |

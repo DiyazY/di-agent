@@ -190,10 +190,11 @@ func (m *SemanticMap) SimulateOutcome(ctx *types.OffloadContext, targetNodeID st
 //
 // The whole path is now: observe the property, let the map recompute whatever derives
 // from it, and let the map's own estimator fold the observation into the relationships
-// incident to it. There used to be a second path alongside — the Bridge, fanning the
-// sample out to every construct edge in a storage graph, with its own idempotency, its
-// own EMA and its own relational variant. It learned the same relations from the same
-// samples into a different structure, which is one structure too many.
+// incident to it. There used to be a second path alongside, fanning the sample out
+// to every construct edge in a storage graph, with its own idempotency, its own EMA
+// and its own relational variant. It learned the same relations from the same
+// samples into a different structure — one structure too many, and it has since
+// been removed.
 //
 // Every property, routed or not, scoped or not, is recorded and reaches the proposer.
 // The routing table decides only the polarity in which an unscoped reading is expressed —

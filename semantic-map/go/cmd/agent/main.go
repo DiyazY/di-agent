@@ -402,7 +402,7 @@ func main() {
 	// Start the autonomous collection loop if the profile produced a
 	// collector AND the interval is positive. Both must hold — a configured
 	// collector with interval=0 is a deliberately disabled loop (useful for
-	// tests and for nodes that only accept manual POST /ingest).
+	// tests and for nodes that only accept manual POST /ingest-sample).
 	// Lifecycle is time-based, so something has to advance it. Without this loop
 	// -stale-after and -retire-after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.

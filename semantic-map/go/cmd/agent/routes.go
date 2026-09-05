@@ -550,6 +550,15 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			// Saying so keeps a typo visible without discarding a reading the system
 			// actually produced — a model that can only hold what someone declared in
 			// advance is a model of the system as it was when they wrote it down.
+			note := "not in the domain specification's routing table: recorded as a " +
+				"property, not summarised by any construct"
+			if sample.Subject != "" {
+				// A scoped sample is unrouted by definition, even when its metric type
+				// is in the routing table — routing summarises node-level readings into
+				// a construct, and a subject's reading is not one of those.
+				note = "scoped readings are not routed: recorded as a property of the " +
+					"subject, not summarised by any construct"
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -557,8 +566,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 				"routed":      false,
 				"metric_type": string(sample.MetricType),
 				"subject":     sample.Subject,
-				"note": "not in the domain specification's routing table: recorded as a " +
-					"property, not summarised by any construct",
+				"note":        note,
 			})
 			return
 		}

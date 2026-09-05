@@ -96,7 +96,9 @@ type toolCache interface {
 // Failure policy: a step that errors is recorded in both the trace and the
 // evidence bundle (as an {"error": ...} payload) and execution continues. A
 // single bad step must not blind the answering agent to the evidence the
-// other steps gathered — this mirrors the Bridge's log-and-continue stance.
+// other steps gathered — this mirrors the facade's IngestSample log-and-continue
+// stance, where a proposer error is swallowed rather than blocking the rest of
+// the pipeline.
 //
 // Budget: each tool step consumes one unit of remaining. When remaining hits
 // zero the executor stops and notes the truncation in the evidence bundle, so

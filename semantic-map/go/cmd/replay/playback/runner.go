@@ -107,10 +107,10 @@ func EventID(parquetFilename, hostname, chartContext, metricID string, relativeT
 	return hex.EncodeToString(h[:8]) // 16 hex chars
 }
 
-// Run streams the parquet at cfg.ParquetPath through the Bridge of the
-// daemon behind sender. Each row that maps to a known MetricType becomes
-// one POST /ingest-sample call. Rows are grouped by relative_time; the
-// wall clock advances by 1/Speed seconds between consecutive groups.
+// Run streams the parquet at cfg.ParquetPath into the daemon behind sender
+// via the facade's IngestSample. Each row that maps to a known MetricType
+// becomes one POST /ingest-sample call. Rows are grouped by relative_time;
+// the wall clock advances by 1/Speed seconds between consecutive groups.
 //
 // Returns the Summary after the parquet is fully consumed, or the first
 // HTTP error if /ingest-sample fails (subsequent rows are not sent — a

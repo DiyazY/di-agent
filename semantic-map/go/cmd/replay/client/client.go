@@ -28,7 +28,10 @@ type MetricSampleRequest struct {
 	Value         float64           `json:"value"`
 	TimestampUnix int64             `json:"timestamp_unix"`
 	EventID       string            `json:"event_id"`
-	ContainerID   string            `json:"container_id,omitempty"`
+	Subject       string            `json:"subject,omitempty"`
+	Unit          string            `json:"unit,omitempty"`
+	Range         *[2]float64       `json:"range,omitempty"`
+	Source        string            `json:"source,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 

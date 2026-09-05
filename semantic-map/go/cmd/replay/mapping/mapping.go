@@ -8,9 +8,9 @@
 //
 //  1. exist on all five KDs (k0s, k3s, k8s, kubeEdge, openYurt) so the
 //     replay narrative is cross-KD;
-//  2. translate to one of the pkg/types.MetricType constants the Bridge
-//     already routes (CPUUtilization, MemoryUtilization, NetworkRxBps,
-//     NetworkTxBps);
+//  2. translate to one of the pkg/types.MetricType constants the facade's
+//     IngestSample already routes (CPUUtilization, MemoryUtilization,
+//     NetworkRxBps, NetworkTxBps);
 //  3. normalize cleanly to the unit declared in pkg/types/types.go's
 //     MetricType catalogue.
 //
