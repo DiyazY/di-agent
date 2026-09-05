@@ -1,0 +1,23 @@
+{
+  "name": "decoupled",
+  "seed": 3,
+  "tick_seconds": 10,
+  "duration_seconds": 3600,
+  "noise": 0.01,
+  "node": {
+    "node_cpu": {"coupling": "sum", "base": 0.10, "of": "cpu_utilization"},
+    "pressure": {"coupling": "sum", "base": 0.05, "of": "cpu_utilization"}
+  },
+  "subjects": [
+    {"id": "pod:a", "arrive": 0,
+     "properties": {"cpu_utilization": {"pattern": "sine", "min": 0.10, "max": 0.60, "period": 600}}},
+    {"id": "pod:noise", "arrive": 0,
+     "properties": {"requests": {"pattern": "sine", "min": 5, "max": 95, "period": 70,
+                                 "unit": "items", "range": [0, 100]}}}
+  ],
+  "expect": {
+    "admitted_within_ticks": 1,
+    "candidates": [{"from": "cpu_utilization@pod:a", "to": "pressure", "sign": 1, "within_seconds": 1200}],
+    "no_candidates_from": ["pod:noise"]
+  }
+}

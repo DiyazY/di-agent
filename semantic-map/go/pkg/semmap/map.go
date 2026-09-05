@@ -345,6 +345,12 @@ func (m *SemanticMap) PendingCandidates() ([]*types.CandidateEdge, error) {
 	return m.proposer.GetCandidates()
 }
 
+// CandidateHistory returns every candidate the proposer has ever emitted with its
+// current status — the audit surface for discovery, including deferred ones.
+func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
+	return m.proposer.GetHistory()
+}
+
 // ConfirmCandidate applies an operator's confirmation. A candidate with a scoped
 // endpoint becomes a state-map relationship with Discovered provenance — never a
 // Di-Select proposition, whose vocabulary is constructs. A candidate whose endpoints
