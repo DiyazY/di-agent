@@ -47,6 +47,19 @@ def _make_producer() -> KafkaProducer:
             time.sleep(5)
 
 
+def _make_event(source_id: str, source_type: str, payload: dict) -> dict:
+    event = {
+        "event": f"{source_type}.telemetry",
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_type": source_type,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+    event.update(payload)
+    return event
+
+
 def _make_consumer() -> KafkaConsumer:
     while True:
         try:
@@ -251,15 +264,19 @@ class PropulsionController:
                 power_output_kw
             )
 
-            message = {
-                "propulsion_id": self.propulsion_id,
-                "timestamp": time.time(),
-                "load_ratio": float(load_ratio),
-                "power_output_kw": float(power_output_kw),
-                "power_input_kw": float(power_input_kw),
-                "allocated_power_kw": float(allocated_power_kw),
-                "speed_rpm": self._speed_rpm(float(load_ratio)),
-            }
+            message = _make_event(
+                self.propulsion_id,
+                "propulsion",
+                {
+                    "propulsion_id": self.propulsion_id,
+                    "timestamp": time.time(),
+                    "load_ratio": float(load_ratio),
+                    "power_output_kw": float(power_output_kw),
+                    "power_input_kw": float(power_input_kw),
+                    "allocated_power_kw": float(allocated_power_kw),
+                    "speed_rpm": self._speed_rpm(float(load_ratio)),
+                },
+            )
 
             with self._lock:
                 # Keep ramping the internal setpoint regardless of the cap, so the

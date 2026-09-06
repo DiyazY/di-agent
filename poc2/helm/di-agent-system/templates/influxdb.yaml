@@ -1,15 +1,14 @@
 # Single-instance InfluxDB, reachable in-cluster at influxdb:8086 (no
 # hostNetwork — can be scheduled on any node).
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: influxdb
   labels:
     app: influxdb
 spec:
+  serviceName: influxdb
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app: influxdb
@@ -46,6 +45,8 @@ spec:
               value: {{ .Values.influxdb.org | quote }}
             - name: DOCKER_INFLUXDB_INIT_BUCKET
               value: {{ .Values.influxdb.bucket | quote }}
+            - name: DOCKER_INFLUXDB_INIT_RETENTION
+              value: {{ .Values.influxdb.retention | quote }}
             - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -56,9 +57,24 @@ spec:
           volumeMounts:
             - name: influxdb-data
               mountPath: /var/lib/influxdb2
+  {{- if .Values.influxdb.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: influxdb-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.influxdb.persistence.size | quote }}
+        {{- if .Values.influxdb.persistence.storageClass }}
+        storageClassName: {{ .Values.influxdb.persistence.storageClass | quote }}
+        {{- end }}
+  {{- else }}
       volumes:
         - name: influxdb-data
           emptyDir: {}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -42,6 +42,19 @@ def _make_producer() -> KafkaProducer:
             time.sleep(5)
 
 
+def _make_event(source_id: str, source_type: str, payload: dict) -> dict:
+    event = {
+        "event": f"{source_type}.telemetry",
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_type": source_type,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+    event.update(payload)
+    return event
+
+
 class GensetController:
     """Publishes genset telemetry on a background thread and exposes a
     thread-safe API for setting the target load ratio at runtime."""
@@ -153,19 +166,27 @@ class GensetController:
             )
             load_ratio = float(run_point.genset_load_ratio[0])
             speed_rpm = self.genset.rated_speed * load_ratio
-            message = {
-                "genset_id": self.genset_id,
-                "timestamp": time.time(),
-                "load_ratio": load_ratio,
-                "power_kw": float(power_kw),
-                "speed_rpm": speed_rpm,
-                "fuel_flow_kg_per_s": fuel_flow_kg_per_s,
-                "bsfc_g_per_kwh": float(engine_run_point.bsfc_g_per_kWh[0]),
-                "co2_kg_per_s": co2_kg_per_s,
-                "nox_kg_per_s": nox_kg_per_s,
-            }
+            message = _make_event(
+                self.genset_id,
+                "genset",
+                {
+                    "genset_id": self.genset_id,
+                    "timestamp": time.time(),
+                    "load_ratio": load_ratio,
+                    "power_kw": float(power_kw),
+                    "speed_rpm": speed_rpm,
+                    "fuel_flow_kg_per_s": fuel_flow_kg_per_s,
+                    "bsfc_g_per_kwh": float(engine_run_point.bsfc_g_per_kWh[0]),
+                    "co2_kg_per_s": co2_kg_per_s,
+                    "nox_kg_per_s": nox_kg_per_s,
+                },
+            )
             # Gaussian auxiliary sensors (ambient, lube oil, vibration, per-cylinder).
-            message.update(self._sensors.simulate(load_ratio))
+            # Mirrored into the top-level event, matching _make_event's flattening,
+            # so the log line below (and any flat-schema consumer) can read them.
+            sensor_values = self._sensors.simulate(load_ratio)
+            message["payload"].update(sensor_values)
+            message.update(sensor_values)
 
             with self._lock:
                 self._current_load_ratio = current

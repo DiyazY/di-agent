@@ -2,15 +2,14 @@
 # (non-hostNetwork) pod so it can be scheduled on any node; other in-cluster
 # services reach it at kafka.<namespace>.svc.cluster.local:9092.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: kafka
   labels:
     app: kafka
 spec:
+  serviceName: kafka
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app: kafka
@@ -68,14 +67,33 @@ spec:
               value: "1"
             - name: KAFKA_NUM_PARTITIONS
               value: "1"
+            - name: KAFKA_LOG_RETENTION_HOURS
+              value: {{ .Values.kafka.logRetentionHours | quote }}
+            - name: KAFKA_LOG_RETENTION_BYTES
+              value: {{ .Values.kafka.logRetentionBytes | quote }}
           resources:
             {{- toYaml .Values.kafka.resources | nindent 12 }}
           volumeMounts:
             - name: kafka-data
               mountPath: /var/lib/kafka/data
+  {{- if .Values.kafka.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.kafka.persistence.size | quote }}
+        {{- if .Values.kafka.persistence.storageClass }}
+        storageClassName: {{ .Values.kafka.persistence.storageClass | quote }}
+        {{- end }}
+  {{- else }}
       volumes:
         - name: kafka-data
           emptyDir: {}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service

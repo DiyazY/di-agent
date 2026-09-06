@@ -39,6 +39,19 @@ def _make_producer() -> KafkaProducer:
             time.sleep(5)
 
 
+def _make_event(source_id: str, source_type: str, payload: dict) -> dict:
+    event = {
+        "event": f"{source_type}.telemetry",
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_type": source_type,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+    event.update(payload)
+    return event
+
+
 class BatteryController:
     """Publishes battery telemetry on a background thread and exposes a
     thread-safe API for setting the target discharge ratio and charge power at runtime.
@@ -182,21 +195,29 @@ class BatteryController:
             # Bus-side power: positive when the battery supplies the bus (discharging),
             # negative when it draws from the bus (charging).
             supply_power_kw = -terminal_power_kw
-            message = {
-                "battery_id": self.battery_id,
-                "timestamp": time.time(),
-                "load_ratio": float(load[0]),
-                "power_kw": float(supply_power_kw),
-                "charge_power_kw": float(current_charge_kw),
-                "soc": soc,
-            }
+            message = _make_event(
+                self.battery_id,
+                "battery",
+                {
+                    "battery_id": self.battery_id,
+                    "timestamp": time.time(),
+                    "load_ratio": float(load[0]),
+                    "power_kw": float(supply_power_kw),
+                    "charge_power_kw": float(current_charge_kw),
+                    "soc": soc,
+                },
+            )
 
             with self._lock:
                 self._current_load_ratio = current
                 self._current_charge_power_kw = current_charge_kw
                 self._soc = soc
                 self._power_stored_ema_kw = power_stored_ema_kw
-                message.update(self._predict_locked())
+                prediction = self._predict_locked()
+                message["payload"].update(prediction)
+                # Mirrored into the top-level event, matching _make_event's
+                # flattening, so the log line below can read the prediction keys.
+                message.update(prediction)
                 self._last_message = message
 
             self._send(KAFKA_TOPIC, key=self.battery_id, value=message)

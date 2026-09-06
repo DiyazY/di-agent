@@ -25,6 +25,12 @@ kafka:
   port: 9092
   controllerPort: 9093
   clusterId: ZGlhZ2VudC1rYWZrYS0
+  logRetentionHours: "168"
+  logRetentionBytes: "1073741824"
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
   nodeSelector: {}
   resources: {}
 
@@ -102,6 +108,11 @@ influxdb:
   port: 8086
   org: di-agent
   bucket: telemetry
+  retention: 30d
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
   # Pre-create this Secret in the release namespace. Required keys are
   # admin-user, admin-password, and admin-token.
   existingSecret: influxdb-credentials

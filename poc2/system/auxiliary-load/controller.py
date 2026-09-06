@@ -43,6 +43,19 @@ def _make_producer() -> KafkaProducer:
             time.sleep(5)
 
 
+def _make_event(source_id: str, source_type: str, payload: dict) -> dict:
+    event = {
+        "event": f"{source_type}.telemetry",
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_type": source_type,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+    event.update(payload)
+    return event
+
+
 def _make_consumer() -> KafkaConsumer:
     while True:
         try:
@@ -205,14 +218,18 @@ class AuxLoadController:
                 power_input_kw
             )
 
-            message = {
-                "auxload_id": self.auxload_id,
-                "timestamp": time.time(),
-                "load_ratio": float(load_ratio),
-                "power_output_kw": float(power_output_kw),
-                "power_input_kw": float(power_input_kw),
-                "allocated_power_kw": float(allocated_power_kw),
-            }
+            message = _make_event(
+                self.auxload_id,
+                "auxload",
+                {
+                    "auxload_id": self.auxload_id,
+                    "timestamp": time.time(),
+                    "load_ratio": float(load_ratio),
+                    "power_output_kw": float(power_output_kw),
+                    "power_input_kw": float(power_input_kw),
+                    "allocated_power_kw": float(allocated_power_kw),
+                },
+            )
 
             with self._lock:
                 self._ramped_load_ratio = current

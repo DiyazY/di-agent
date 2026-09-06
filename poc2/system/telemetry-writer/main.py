@@ -123,26 +123,44 @@ def _make_consumer() -> KafkaConsumer:
             time.sleep(5)
 
 
+def _normalize_message(message: dict) -> dict:
+    if not isinstance(message, dict):
+        raise TypeError("message must be a dict")
+    if "payload" in message and isinstance(message["payload"], dict):
+        payload = dict(message["payload"])
+        payload.setdefault("source_id", message.get("source_id"))
+        payload.setdefault("source_type", message.get("source_type"))
+        payload.setdefault("event", message.get("event"))
+        payload.setdefault("schema_version", message.get("schema_version"))
+        payload.setdefault("timestamp", message.get("timestamp"))
+        return payload
+    return message
+
+
 def _to_points(message: dict) -> list[Point]:
-    tag_key = next((key for key in MESSAGE_SCHEMAS if key in message), None)
+    normalized = _normalize_message(message)
+    tag_key = next((key for key in MESSAGE_SCHEMAS if key in normalized), None)
     if tag_key is None:
         raise KeyError("message has none of the known id tags: " + ", ".join(MESSAGE_SCHEMAS))
     schema = MESSAGE_SCHEMAS[tag_key]
 
-    point = Point(schema["measurement"]).tag(tag_key, message[tag_key])
+    point = Point(schema["measurement"]).tag(tag_key, normalized[tag_key])
     for field in schema["fields"]:
-        if field in message:
-            point = point.field(field, float(message[field]))
-    timestamp = int(message["timestamp"] * 1e9)
+        if field in normalized:
+            point = point.field(field, float(normalized[field]))
+    timestamp_value = normalized.get("timestamp")
+    if timestamp_value is None:
+        raise KeyError("message does not contain a timestamp")
+    timestamp = int(float(timestamp_value) * 1e9)
     points = [point.time(timestamp, WritePrecision.NS)]
 
     if tag_key == "consumer_id":
         aggregate = Point("switchboard_aggregate").tag(
-            "switchboard_id", message.get("switchboard_id", "unknown")
+            "switchboard_id", normalized.get("switchboard_id", "unknown")
         )
         for field in SWITCHBOARD_AGGREGATE_FIELDS:
-            if field in message:
-                aggregate = aggregate.field(field, float(message[field]))
+            if field in normalized:
+                aggregate = aggregate.field(field, float(normalized[field]))
         points.append(aggregate.time(timestamp, WritePrecision.NS))
 
     return points

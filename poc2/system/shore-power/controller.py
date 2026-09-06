@@ -37,6 +37,19 @@ def _make_producer() -> KafkaProducer:
             time.sleep(5)
 
 
+def _make_event(source_id: str, source_type: str, payload: dict) -> dict:
+    event = {
+        "event": f"{source_type}.telemetry",
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_type": source_type,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+    event.update(payload)
+    return event
+
+
 class ShorePowerController:
     """Publishes shore power telemetry on a background thread and exposes a
     thread-safe API for connecting/disconnecting and setting the target power ratio.
@@ -147,15 +160,19 @@ class ShorePowerController:
 
             self._charge_battery(output_power_kw)
 
-            message = {
-                "shore_power_id": self.shore_power_id,
-                "timestamp": time.time(),
-                "connected": connected,
-                "power_ratio": float(load[0]),
-                "input_power_kw": float(input_power_kw),
-                "power_kw": output_power_kw,
-                "losses_kw": float(losses_kw),
-            }
+            message = _make_event(
+                self.shore_power_id,
+                "shore_power",
+                {
+                    "shore_power_id": self.shore_power_id,
+                    "timestamp": time.time(),
+                    "connected": connected,
+                    "power_ratio": float(load[0]),
+                    "input_power_kw": float(input_power_kw),
+                    "power_kw": output_power_kw,
+                    "losses_kw": float(losses_kw),
+                },
+            )
 
             with self._lock:
                 self._current_power_ratio = current

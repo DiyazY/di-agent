@@ -354,7 +354,7 @@ class SwitchboardController:
                 self._last_allocations = allocations
 
             for request in active_requests:
-                message = {
+                payload = {
                     "switchboard_id": self.switchboard_id,
                     "consumer_id": request.consumer_id,
                     "timestamp": timestamp,
@@ -365,6 +365,15 @@ class SwitchboardController:
                     "total_co2_kg_per_s": total_co2_kg_per_s,
                     "total_nox_kg_per_s": total_nox_kg_per_s,
                 }
+                message = {
+                    "event": "switchboard.telemetry",
+                    "schema_version": 1,
+                    "source_id": self.switchboard_id,
+                    "source_type": "switchboard",
+                    "timestamp": timestamp,
+                    "payload": payload,
+                }
+                message.update(payload)
                 self._send(KAFKA_TOPIC, key=request.consumer_id, value=message)
 
             allocated_str = ", ".join(
