@@ -515,15 +515,11 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, TuneResponse{Applied: dtos, Intent: req.Intent})
 	})
 
-	// POST /ingest-sample — Bridge-routed telemetry from external collectors.
-	//
-	// Where POST /ingest takes a fully pre-routed (from, to, value, event_id)
-	// tuple and bypasses the Bridge, /ingest-sample carries a typed MetricSample
-	// and runs the Bridge server-side. This is the public-API entry point for
-	// out-of-tree collectors (e.g. the parquet replay tool) that cannot
-	// import internal Go packages. Bridge silently ignores unmapped metric
-	// types; this handler additionally rejects values outside the closed
-	// catalogue with 400 so misconfigured callers fail loudly.
+	// POST /ingest-sample — the wire face of the sample boundary. In-process collectors
+	// hand the facade the same MetricSample; an out-of-tree producer (the parquet replay
+	// tool, an application pushing its own metrics) posts it here. An unrouted metric
+	// type is recorded as a property and answered 202; a scoped sample (non-empty
+	// subject) is always unrouted, because routing is a node-level concern.
 	mux.HandleFunc("POST /ingest-sample", func(w http.ResponseWriter, r *http.Request) {
 		if err := requireJSON(r); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -549,19 +545,28 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			writeError(w, status, err.Error())
 			return
 		}
-		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed {
+		if _, routed := sm.RoutedConstruct(string(sample.MetricType)); !routed || sample.Subject != "" {
 			// Recorded as a property of the system, but no construct summarises it.
 			// Saying so keeps a typo visible without discarding a reading the system
 			// actually produced — a model that can only hold what someone declared in
 			// advance is a model of the system as it was when they wrote it down.
+			note := "not in the domain specification's routing table: recorded as a " +
+				"property, not summarised by any construct"
+			if sample.Subject != "" {
+				// A scoped sample is unrouted by definition, even when its metric type
+				// is in the routing table — routing summarises node-level readings into
+				// a construct, and a subject's reading is not one of those.
+				note = "scoped readings are not routed: recorded as a property of the " +
+					"subject, not summarised by any construct"
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"recorded":    true,
 				"routed":      false,
 				"metric_type": string(sample.MetricType),
-				"note": "not in the domain specification's routing table: recorded as a " +
-					"property, not summarised by any construct",
+				"subject":     sample.Subject,
+				"note":        note,
 			})
 			return
 		}

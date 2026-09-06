@@ -2,7 +2,7 @@
 //
 // It loads the configured profile, seeds the graph from Di-Select priors,
 // and serves the agent queries plus the graph control surface over
-// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest. The graph
+// HTTP/JSON on :8080. Telemetry is accepted via POST /ingest-sample. The graph
 // introspection (/graph, /edges, /history, /constructs, /propositions,
 // /neighbors), ontology mutation (/ontology/*), candidate review
 // (/candidates/{id}/{confirm,reject,defer}), edge reset (/agent/reset),
@@ -14,6 +14,7 @@
 //	agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 //	      -priors /path/to/prior_weights.json -kd k0s \
 //	      -collect-interval 10s -cgroup-root /sys/fs/cgroup \
+//	      [-script scenarios/linear.json] \
 //	      -peers http://node_1:8080,http://node_2:8080
 //
 // The -kd flag selects per-distribution edge weights from prior_weights.json
@@ -22,8 +23,10 @@
 //
 // The autonomous collection loop ticks at -collect-interval, calls
 // CollectorContract.Collect on the profile's collector, and runs each sample
-// through the Bridge → Updater pipe. Setting -collect-interval=0 or
-// -cgroup-root="" disables it (the manual POST /ingest path still works).
+// through the facade's IngestSample. The collector is the cgroup one at
+// -cgroup-root, the Netdata one at -netdata-url, both together, or the synthetic
+// system from -script; with none configured, or -collect-interval=0, the loop is
+// disabled and only the manual POST /ingest-sample path updates the model.
 //
 // -regime (stable|default|bursty|volatile) sets alpha and convergence to a
 // pre-characterised bundle matching the deployment's dynamics. Overrides any
@@ -84,6 +87,22 @@ func main() {
 		"how often the collection loop ticks the Collector; 0 disables the loop")
 	cgroupRoot := flag.String("cgroup-root", "/sys/fs/cgroup",
 		"filesystem root the cgroup collector reads from; empty string disables the loop")
+	cgroupSubjects := flag.Bool("cgroup-subjects", true,
+		"walk pod cgroups (and -cgroup-units) as subjects: each becomes its own set of "+
+			"properties, admitted on first observation and retired on silence")
+	cgroupUnits := flag.String("cgroup-units", "",
+		"comma-separated globs of systemd units under system.slice to model as unit:<name> "+
+			"subjects (e.g. 'k0s*.service,containerd.service'); empty models none")
+	cgroupMaxSubjects := flag.Int("cgroup-max-subjects", 256,
+		"upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped")
+	cgroupCmdLabel := flag.Bool("cgroup-cmd-label", false,
+		"stamp cmd=<argv0> from each subject's first process (label only; needs /proc "+
+			"visibility, i.e. hostPID or privileged)")
+	proposerThreshold := flag.Float64("proposer-threshold", 0.85,
+		"|Pearson r| above which the proposer emits a candidate")
+	proposerMinPairs := flag.Int("proposer-min-pairs", 30,
+		"co-observations a pair needs inside the pair window before it can become a "+
+			"candidate — the pace at which structure appears")
 	nodeID := flag.String("node-id", "",
 		"the machine this agent models. Used both to stamp its own MetricSamples and "+
 			"as its identity: the map is node-local, so samples labelled with another "+
@@ -93,10 +112,11 @@ func main() {
 		"silence after which a property is marked stale. A model that keeps reporting "+
 			"a departed metric's last value asserts something it cannot support, so the "+
 			"map says 'stale' instead of holding the number quietly.")
-	retireAfter := flag.Duration("retire-after", 0,
-		"silence after which a property is retired automatically. 0 leaves retirement "+
-			"to an operator, which is the safer default for a system whose collectors "+
-			"restart.")
+	retireAfter := flag.Duration("retire-after", 10*time.Minute,
+		"silence after which a property is retired automatically, cascading to the "+
+			"relationships that reference it. 0 leaves retirement to an operator. The "+
+			"default, 10m, is five default stale windows — long enough that a restarting "+
+			"collector is not mistaken for a departed subject — and does not follow -stale-after.")
 	noLearn := flag.Bool("no-learn", false,
 		"stop relationships learning their strength from paired observations of both "+
 			"endpoints. They then stay at their seeded priors with confidence 0, which is "+
@@ -133,6 +153,10 @@ func main() {
 			"physical systems")
 	netdataURL := flag.String("netdata-url", "",
 		"base URL of Netdata daemon to poll (e.g. http://localhost:19999). Empty disables Netdata collection.")
+	script := flag.String("script", "",
+		"run the synthetic system from this scenario file instead of real collectors; "+
+			"-collect-interval must equal the scenario's tick_seconds (the daemon refuses to start otherwise, "+
+			"because the script stamps simulated time while the map sweeps on the wall clock)")
 	peersFlag := flag.String("peers", "",
 		"comma-separated peer agent URLs to register at startup "+
 			"(e.g. http://node_1:8080,http://node_2:8080). RecommendPeer ranks "+
@@ -237,6 +261,9 @@ func main() {
 	}
 	log.Printf("estimator: paired observations (window %ds, support %d, history %d)",
 		*pairWindowS, orDefault(*pairSupport, 8), orDefault(*pairHistory, 60))
+	log.Printf("proposer: threshold=%.2f min-pairs=%d", *proposerThreshold, *proposerMinPairs)
+	log.Printf("cgroup collector: root=%s subjects=%v units=%q max=%d cmd-label=%v",
+		*cgroupRoot, *cgroupSubjects, *cgroupUnits, *cgroupMaxSubjects, *cgroupCmdLabel)
 
 	peerURLs := parsePeerURLs(*peersFlag)
 
@@ -249,10 +276,17 @@ func main() {
 		KD:                   *kd,
 		NodeID:               *nodeID,
 		CgroupRoot:           *cgroupRoot,
+		CgroupSubjects:       *cgroupSubjects,
+		CgroupUnitGlobs:      splitCSV(*cgroupUnits),
+		CgroupMaxSubjects:    *cgroupMaxSubjects,
+		CgroupCmdLabel:       *cgroupCmdLabel,
+		ScriptPath:           *script,
 		NetdataURL:           *netdataURL,
 		CollectInterval:      *collectInterval,
 		PeerURLs:             peerURLs,
 		UseProposer:          useProposer,
+		ProposerThreshold:    *proposerThreshold,
+		ProposerMinPairs:     *proposerMinPairs,
 		// Must be set explicitly: this literal does not start from
 		// DefaultConfig(), so an omitted field is false, and omitting this one
 		// silently wired DisabledTuner into every daemon. POST /agent/tune then
@@ -372,7 +406,7 @@ func main() {
 	// Start the autonomous collection loop if the profile produced a
 	// collector AND the interval is positive. Both must hold — a configured
 	// collector with interval=0 is a deliberately disabled loop (useful for
-	// tests and for nodes that only accept manual POST /ingest).
+	// tests and for nodes that only accept manual POST /ingest-sample).
 	// Lifecycle is time-based, so something has to advance it. Without this loop
 	// -stale-after and -retire-after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
@@ -458,6 +492,17 @@ func parsePeerURLs(raw string) []string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// splitCSV splits a comma-separated flag, trimming blanks; "" yields nil.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
 	}
 	return out
 }

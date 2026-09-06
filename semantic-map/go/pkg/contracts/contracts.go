@@ -14,6 +14,8 @@
 package contracts
 
 import (
+	"time"
+
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
@@ -80,7 +82,7 @@ var ErrNotImplemented = contractError("operation not implemented by this ontolog
 //   - Traceable rationale: every returned value includes a non-empty Rationale
 //     string referencing specific node/edge IDs. Implementations that cannot
 //     produce a rationale must return ErrNoRationale.
-//   - Pure simulation: SimulateOutcome never writes to Storage or any contract.
+//   - Pure simulation: SimulateOutcome never writes to the state model or any contract.
 //   - Trust filtering: RecommendPeer never returns a peer below the minimum
 //     trust threshold; returns ErrInsufficientTrust if no peer qualifies.
 type ReasonerContract interface {
@@ -97,40 +99,40 @@ var (
 
 // ── Proposer ──────────────────────────────────────────────────────────────────
 
-// ProposerContract detects statistical patterns suggesting new backbone edges.
+// RelationshipLookup answers whether a relationship already runs from -> to with a
+// sign, so a proposer does not re-propose what the model already holds. The state
+// map implements it (a retired relationship does not count); LookupOntology adapts
+// the declaration layer for callers that pair constructs explicitly.
+type RelationshipLookup interface {
+	Covered(from, to string, sign int) bool
+}
+
+// ProposerContract detects statistical patterns suggesting new relationships.
 //
-// The natural entry point from the Bridge and IngestSample is ObserveConstruct,
-// which feeds a single construct value and internally pairs it against every
-// other construct the proposer has seen. Observe remains public for callers
-// (tests, control-surface HTTP handlers) that already know the pair to feed.
+// ObserveProperty is the entry point from IngestSample: every observed property is
+// fed, and the implementation pairs a scoped property (non-empty subject) only with
+// unscoped ones, direction scoped -> unscoped, inside a time tolerance. Observe is
+// the explicit path for a caller that already knows the pair; ObserveConstruct is
+// the explicit construct-pairing path kept for callers that drive it directly.
 //
 // Guarantees:
-//   - Read-only observation: Observe and ObserveConstruct never modify Storage
-//     or Ontology.
-//   - Confirm delegates: Confirm calls OntologyContract.AddValidatedProposition;
-//     it never writes to Storage directly.
-//   - Permanent suppression: after Reject, the same (fromID, toID, direction)
-//     triple is not re-proposed within the current deployment session.
+//   - Read-only observation: no Observe* method modifies the model.
+//   - Confirm never writes: it returns the proposition and the facade applies it,
+//     which is what makes "never modifies the backbone directly" true.
+//   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
+//     or an operator's Defer, that pair is not re-emitted under either sign within
+//     the session; Forget clears it, so a subject that departs and returns can be
+//     proposed again. A cap deferral is the proposer's own and provisional: it
+//     re-enters when it outranks a pending candidate.
 //   - Candidates: GetCandidates returns only Pending entries.
+//   - Forget drops every buffer and candidate involving a property, so a departed
+//     subject does not accumulate.
 type ProposerContract interface {
 	Observe(fromID, toID string, valueA, valueB float64) error
-	// ObserveConstruct records the latest value observed for a single construct.
-	// The proposer internally pairs construct values across its latestValues map
-	// so callers (Bridge, IngestSample) need not know which pairs to supply.
 	ObserveConstruct(constructID string, value float64) error
+	ObserveProperty(id, subject string, value float64, at time.Time) error
+	Forget(propertyID string) error
 	GetCandidates() ([]*types.CandidateEdge, error)
-	// Confirm marks a candidate accepted and returns the proposition it represents.
-	//
-	// It does not add that proposition anywhere: the caller does, through the facade,
-	// which is the only path that reaches both the declaration and the state model.
-	// This shape is what makes the "never modifies the backbone directly" guarantee
-	// above true rather than aspirational — an implementation that wrote the
-	// declaration itself would produce a confirmed candidate that appears in
-	// Propositions() and in no traversal, which is the failure the propose-then-confirm
-	// protocol exists to prevent.
-	//
-	// Returns (nil, nil) when the implementation has nothing to add — a disabled
-	// proposer, or a candidate already confirmed.
 	Confirm(candidateID string) (*types.Proposition, error)
 	Reject(candidateID string) error
 	Defer(candidateID string) error
@@ -166,20 +168,27 @@ type TunerContract interface {
 // CollectorContract reads raw metrics from a source and emits normalized samples.
 //
 // The collector sits between a metric source (cgroup filesystem, Netdata HTTP API,
-// kubelet /metrics, etc.) and the Updater. It normalizes observations into
-// MetricSamples. It knows nothing about the graph topology — that mapping is
-// the bridge's responsibility.
+// kubelet /metrics, a pushing application) and the facade's ingestion. It turns
+// observations into MetricSamples that declare their subject, unit and range. It
+// knows nothing about the graph — routing a sample into a construct is the domain
+// specification's business, done at ingestion.
 //
 // Guarantees:
 //   - Pure read: Collect never modifies any system state.
 //   - Empty on no data: Collect returns ([], nil) when no new samples are ready;
 //     it never returns a non-nil error for a temporarily unavailable source.
-//   - Deterministic EventID: the same physical observation always produces the
-//     same EventID, enabling end-to-end idempotency with the Updater.
-//   - Metric type stability: AvailableMetrics returns the same set for the
-//     entire lifetime of the instance; Collect never emits a MetricType outside it.
+//   - Deterministic EventID: the same physical observation (source, node, subject,
+//     metric, anchor timestamp) always produces the same EventID.
+//   - Metric type stability: AvailableMetrics returns the same set for the entire
+//     lifetime of the instance; Collect never emits a MetricType outside it. Subjects
+//     change the instances of a type, never the set of types.
 //   - Node ID completeness: every emitted MetricSample has a non-empty NodeID.
 //   - SourceID stability: SourceID returns the same string across restarts.
+//   - Subjects are implied by observation: a collector MAY set Subject on a sample; a
+//     subject exists iff something observed it this tick. A collector never emits a
+//     "gone" event — silence is the signal, and the map interprets it.
+//   - Declared meaning: a collector MUST set Unit and Range on every sample of a type
+//     it emits, and keep them stable per type.
 type CollectorContract interface {
 	// Collect reads one batch of current metric samples from the source.
 	// Returns an empty slice (not an error) when no new data is available.

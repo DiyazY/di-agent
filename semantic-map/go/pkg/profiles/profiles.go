@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
+	"github.com/DiyazY/di-agent/internal/scripted"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/peers"
@@ -62,6 +63,18 @@ type Config struct {
 	// Empty string disables the cgroup collector (Build returns nil for the
 	// CollectorContract handle).
 	CgroupRoot string
+
+	// CgroupSubjects walks pod cgroups (and CgroupUnitGlobs-allowlisted units) as
+	// subjects. CgroupMaxSubjects bounds the walk (0 = 256). CgroupCmdLabel stamps a
+	// cmd= label from /proc (needs hostPID). See minimal.CgroupOptions.
+	CgroupSubjects    bool
+	CgroupUnitGlobs   []string
+	CgroupMaxSubjects int
+	CgroupCmdLabel    bool
+
+	// ScriptPath runs the synthetic system from a scenario file instead of any real
+	// collector — for driving a live daemon through a known story.
+	ScriptPath string
 
 	// NetdataURL is the base URL of a Netdata daemon to poll for live metrics
 	// (e.g. "http://localhost:19999"). Empty string disables the Netdata collector.
@@ -252,7 +265,10 @@ func Build(profileName string, cfg Config) (*semmap.SemanticMap, contracts.Colle
 		if _, err := seedStateMap(cfg.StateMap, cfg.DomainSpec, pw, cfg.KD); err != nil {
 			return nil, nil, err
 		}
-		sm, coll := buildEdgeMinimal(cfg, pw)
+		sm, coll, err := buildEdgeMinimal(cfg, pw)
+		if err != nil {
+			return nil, nil, err
+		}
 		return sm, coll, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown profile %q", profileName)
@@ -274,7 +290,7 @@ func validateKD(pw *priorWeightsFile, kd string) error {
 	return fmt.Errorf("KD %q not found in prior_weights.json distributions %v", kd, pw.Distributions)
 }
 
-func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract) {
+func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, contracts.CollectorContract, error) {
 	ontology := minimal.NewOntologyFromSpec(cfg.DomainSpec)
 
 	// Peer registry + outbound HTTP client. Always constructed (cheap, no
@@ -311,7 +327,8 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 		if bufSize == 0 {
 			bufSize = 120
 		}
-		proposer = minimal.NewMICorrelationProposer(ontology, thresh, minPairs, bufSize)
+		proposer = minimal.NewMICorrelationProposer(cfg.StateMap, thresh, minPairs, bufSize,
+			time.Duration(cfg.PairWindowSeconds)*time.Second)
 	} else {
 		proposer = minimal.NewDisabledProposer()
 	}
@@ -341,19 +358,52 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	hasCgroup := cfg.CgroupRoot != "" && cfg.NodeID != ""
 	hasNetdata := cfg.NetdataURL != ""
 
+	if err := minimal.ValidUnitGlobs(cfg.CgroupUnitGlobs); err != nil {
+		return nil, nil, err
+	}
+	cgOpts := minimal.CgroupOptions{
+		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
+		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,
+	}
+
+	if cfg.ScriptPath != "" {
+		// Refused rather than logged: a daemon with no collector looks exactly like
+		// one whose telemetry has not arrived yet, and the follow-up line it used to
+		// print ("collection loop disabled") is the message for a deliberate choice.
+		sc, err := scripted.LoadScenario(cfg.ScriptPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+		}
+		// The script stamps simulated time one tick per Collect while the map sweeps
+		// on the wall clock. An interval above the tick makes every property go stale
+		// and then retire while the script is still emitting; one below it means
+		// nothing ever goes stale. Not a drift to warn about: a configuration the
+		// daemon must not start with.
+		if tick := time.Duration(sc.TickSeconds) * time.Second; cfg.CollectInterval > 0 && cfg.CollectInterval != tick {
+			return nil, nil, fmt.Errorf("-script %s ticks every %s but -collect-interval is %s: simulated time would run "+
+				"off the wall clock the map sweeps on, retiring or immortalising every property; set -collect-interval=%s",
+				sc.Name, tick, cfg.CollectInterval, tick)
+		}
+		script, err := scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
+		if err != nil {
+			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+		}
+		return sm, script, nil
+	}
+
 	switch {
 	case hasCgroup && hasNetdata:
-		cgroupC := minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+		cgroupC := minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
 		netdataC := minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
 		collector = minimal.NewMultiCollector(cgroupC, netdataC)
 	case hasNetdata:
 		collector = minimal.NewNetdataCollector(cfg.NodeID, cfg.NetdataURL, nil)
 	case hasCgroup:
-		collector = minimal.NewCgroupCollector(cfg.NodeID, cfg.CgroupRoot)
+		collector = minimal.NewCgroupCollectorWithOptions(cfg.NodeID, cfg.CgroupRoot, cgOpts)
 		// else: collector stays nil — collection loop disabled
 	}
 
-	return sm, collector
+	return sm, collector, nil
 }
 
 // The calibration is applied in one place — seedStateMap, which puts each per-cluster

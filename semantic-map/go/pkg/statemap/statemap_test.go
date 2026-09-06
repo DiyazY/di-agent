@@ -3,6 +3,8 @@ package statemap
 import (
 	"math"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -115,6 +117,10 @@ func TestDerivedPropertySummarisesLiveMembersOnly(t *testing.T) {
 	mem, _ := m.Property("mem")
 	if mem.Status != Stale {
 		t.Errorf("mem status %s after a minute of silence; want stale", mem.Status)
+	}
+	d, _ = m.Property("resource_use")
+	if d.Status != Active {
+		t.Errorf("derived is %s while cpu is still active; want active", d.Status)
 	}
 }
 
@@ -557,7 +563,7 @@ func seed(t *testing.T, m *Map, c *clock) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"cpu", "mem", "pressure"} {
-		if err := m.Observe(id, 0.4, c.now()); err != nil {
+		if err := m.Record(Observation{ID: id, Value: 0.4, At: c.now(), Subject: subjectOf(id)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1269,5 +1275,771 @@ func TestAlphaSlowDefaultsToTheDerivedConstant(t *testing.T) {
 	fast := Config{}.withDefaults().Alpha
 	if got >= fast {
 		t.Errorf("AlphaSlow %v is not slower than Alpha %v", got, fast)
+	}
+}
+
+// ── subjects: a property is observable property × subject ─────────────────────
+
+func TestRecordStampsSubjectUnitRangeAndLabelsAtAdmission(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	rng := [2]float64{0, 100}
+	err := m.Record(Observation{
+		ID: "queue_depth@pod:abc", Value: 7, At: c.now(), EventID: "e1",
+		Subject: "pod:abc", Unit: "items", Range: &rng, Source: "app:ingest",
+		Labels: map[string]string{"kind": "pod"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("queue_depth@pod:abc")
+	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != rng || !p.RangeDeclared ||
+		p.Source != "app:ingest" || p.Labels["kind"] != "pod" {
+		t.Errorf("admitted property %+v; want subject, unit, range, source and labels from the observation", p)
+	}
+}
+
+func TestRecordWithoutRangeAssumesUnitIntervalAndSaysSo(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Record(Observation{ID: "x@disk:sda", Value: 0.2, At: c.now(), Subject: "disk:sda"}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("x@disk:sda")
+	if p.Range != [2]float64{0, 1} || p.RangeDeclared {
+		t.Errorf("got range %v declared=%v; want [0,1] assumed and range_declared=false", p.Range, p.RangeDeclared)
+	}
+}
+
+func TestRecordMergesLabelsAndKeepsSubjectImmutable(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "burstable"}})
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 2, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"name": "redis-0", "qos": "guaranteed"}})
+	p, _ := m.Property("a@pod:1")
+	if p.Labels["name"] != "redis-0" || p.Labels["qos"] != "guaranteed" {
+		t.Errorf("labels %v; want merged with later keys winning", p.Labels)
+	}
+	// A different subject under the same id is a conflict, journaled and not applied.
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 3, At: c.now(), Subject: "pod:2"})
+	p, _ = m.Property("a@pod:1")
+	if p.Subject != "pod:1" {
+		t.Errorf("subject changed to %q; it is part of the identity and must not move", p.Subject)
+	}
+	var conflict bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyConflict && e.Target == "a@pod:1" {
+			conflict = true
+		}
+	}
+	if !conflict {
+		t.Error("subject conflict was not journaled")
+	}
+}
+
+func TestCensusCountsSubjectsAndQueryFiltersBySubject(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .1, At: c.now(), Subject: "pod:1"})
+	_ = m.Record(Observation{ID: "mem@pod:1", Value: .1, At: c.now(), Subject: "pod:1"})
+	_ = m.Record(Observation{ID: "cpu@pod:2", Value: .1, At: c.now(), Subject: "pod:2"})
+	_ = m.Record(Observation{ID: "cpu", Value: .1, At: c.now()})
+	if got := m.Census().Subjects; got != 2 {
+		t.Errorf("census subjects=%d, want 2 (node scope is not a subject)", got)
+	}
+	v := m.State(Query{Subject: "pod:1"})
+	if len(v.Properties) != 2 {
+		t.Errorf("Query{Subject: pod:1} returned %d properties, want 2", len(v.Properties))
+	}
+}
+
+// ── review fix round 1: Record must reject a Derived id before mutating state,
+// and a redeclared Range must count as declared ────────────────────────────────
+
+func TestRecordOnDerivedIdIsRejectedWithoutSideEffects(t *testing.T) {
+	m, c := newTestMap(t, Config{ConvergenceObservations: 4})
+	if err := m.DeclareProperty(Property{ID: "cpu", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeclareProperty(Property{
+		ID: "RC", Kind: Derived, Members: []string{"cpu"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("cpu", 0.5, c.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	revBefore := m.Revision()
+	eventsBefore := len(m.Journal().Events(0, 0))
+
+	c.advance(time.Second)
+	err := m.Record(Observation{
+		ID: "RC", Value: 0.5, At: c.now(), Subject: "pod:x",
+		Labels: map[string]string{"k": "v"},
+	})
+	if err == nil {
+		t.Fatal("want an error recording onto a derived id, got nil")
+	}
+	if got := m.Revision(); got != revBefore {
+		t.Errorf("revision advanced from %d to %d on a rejected observation", revBefore, got)
+	}
+	if got := len(m.Journal().Events(0, 0)); got != eventsBefore {
+		t.Errorf("journal grew from %d to %d events on a rejected observation", eventsBefore, got)
+	}
+	rc, _ := m.Property("RC")
+	if len(rc.Labels) != 0 {
+		t.Errorf("RC.Labels = %v; want untouched by the rejected observation", rc.Labels)
+	}
+}
+
+// TestRedeclaringTheSameRangeMarksItDeclared covers the range a producer declares that
+// happens to equal the range the map had already assumed. Only comparing the numbers
+// would leave such a property flagged as assumed forever — and an assumed range is not
+// a cosmetic flag: every estimate that reads the property carries a caveat saying its
+// contribution was normalised by a range nobody declared, and reconcileDeclarationLocked
+// lets a later producer overwrite a range the operator declared while the flag is false.
+func TestRedeclaringTheSameRangeMarksItDeclared(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Observe("q", 0.5, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("q")
+	if p.Range != ([2]float64{0, 1}) || p.RangeDeclared {
+		t.Fatalf("admitted q is %v declared=%v; want the assumed [0,1]", p.Range, p.RangeDeclared)
+	}
+
+	eventsBefore := len(m.Journal().Events(0, 0))
+	if err := m.DeclareProperty(Property{ID: "q", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = m.Property("q")
+	if !p.RangeDeclared {
+		t.Error("RangeDeclared = false after a declaration carrying [0,1], the same numbers the map had assumed; want true")
+	}
+	redeclared := 0
+	for _, e := range m.Journal().Events(0, 0)[eventsBefore:] {
+		if e.Kind == EventPropertyRedeclared && e.Target == "q" {
+			redeclared++
+			if e.Detail["range_declared"] != true {
+				t.Errorf("redeclaration journaled %v; want range_declared recorded on the flip", e.Detail)
+			}
+		}
+	}
+	if redeclared != 1 {
+		t.Errorf("%d redeclaration events for the flip; want exactly 1", redeclared)
+	}
+
+	// Idempotent: declaring it again changes nothing, so the journal stays silent.
+	eventsBefore = len(m.Journal().Events(0, 0))
+	if err := m.DeclareProperty(Property{ID: "q", Range: [2]float64{0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range m.Journal().Events(0, 0)[eventsBefore:] {
+		if e.Target == "q" {
+			t.Errorf("re-declaring an unchanged property journaled %+v; want silence", e)
+		}
+	}
+}
+
+// TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration is the upgrade case: a
+// snapshot written before range_declared existed restores every property with the flag
+// false, and the collectors that re-declare on start mostly declare the same numbers
+// the map already holds. Without the fix every seeded property on an upgraded agent
+// answers estimates with a false "range was assumed, not declared" caveat.
+func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, id := range []string{"a", "b@pod:1"} {
+		if err := m.Record(Observation{ID: id, Value: 0.4, At: c.now(), Subject: subjectOf(id)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
+	if ok, err := restored.Load(path); err != nil || !ok {
+		t.Fatalf("Load = %v, %v; want a restored snapshot", ok, err)
+	}
+	for _, id := range []string{"a", "b@pod:1"} {
+		if p, _ := restored.Property(id); p.RangeDeclared {
+			t.Fatalf("%s restored with RangeDeclared=true; this test needs the pre-branch shape it models", id)
+		}
+		if err := restored.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}, Subject: subjectOf(id)}); err != nil {
+			t.Fatal(err)
+		}
+		if p, _ := restored.Property(id); !p.RangeDeclared {
+			t.Errorf("%s: RangeDeclared = false after the producer re-declared its range; want true", id)
+		}
+	}
+}
+
+func TestRedeclaringARangeMakesItDeclared(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Record(Observation{ID: "q@pod:1", Value: 5, At: c.now(), Subject: "pod:1"}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("q@pod:1")
+	if p.RangeDeclared {
+		t.Fatalf("admitted property already has RangeDeclared=true; want an assumed range")
+	}
+
+	if err := m.DeclareProperty(Property{ID: "q@pod:1", Subject: "pod:1", Range: [2]float64{0, 100}}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = m.Property("q@pod:1")
+	if !p.RangeDeclared {
+		t.Fatalf("RangeDeclared = false after DeclareProperty carried a Range; want true")
+	}
+
+	c.advance(time.Second)
+	rng := [2]float64{0, 1}
+	if err := m.Record(Observation{ID: "q@pod:1", Value: 6, At: c.now(), Subject: "pod:1", Range: &rng}); err == nil {
+		t.Error("an observation contradicting the declared range was applied")
+	}
+	p, _ = m.Property("q@pod:1")
+	if p.Range != ([2]float64{0, 100}) {
+		t.Errorf("Range = %v after a conflicting observation; want the declared [0,100] to hold", p.Range)
+	}
+	var conflict bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyConflict && e.Target == "q@pod:1" {
+			conflict = true
+		}
+	}
+	if !conflict {
+		t.Error("range conflict was not journaled")
+	}
+}
+
+func TestRecordAdoptsRangeAndUnitDeclaredLate(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.Record(Observation{ID: "x@pod:1", Value: 0.5, At: c.now(), Subject: "pod:1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	eventsBefore := len(m.Journal().Events(0, 0))
+	c.advance(time.Second)
+	rng := [2]float64{0, 10}
+	if err := m.Record(Observation{
+		ID: "x@pod:1", Value: 0.6, At: c.now(), Subject: "pod:1", Unit: "items", Range: &rng,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("x@pod:1")
+	if p.Unit != "items" {
+		t.Errorf("Unit = %q, want %q", p.Unit, "items")
+	}
+	if p.Range != ([2]float64{0, 10}) {
+		t.Errorf("Range = %v, want [0,10]", p.Range)
+	}
+	if !p.RangeDeclared {
+		t.Error("RangeDeclared = false after a late Range declaration; want true")
+	}
+	for _, e := range m.Journal().Events(0, 0)[eventsBefore:] {
+		if e.Kind == EventPropertyConflict && e.Target == "x@pod:1" {
+			t.Errorf("unexpected property.conflict journaled for a late range/unit declaration: %+v", e)
+		}
+	}
+}
+
+func TestSweepRetirementCascadesToRelationships(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: time.Minute, AdmitUnknown: true})
+	_ = m.DeclareProperty(Property{ID: "pressure"})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .5, At: c.now(), Subject: "pod:1"})
+	_ = m.Observe("pressure", .2, c.now())
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:1", To: "pressure", Sign: 1, Label: "discovered"}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(2 * time.Minute)
+	_ = m.Observe("pressure", .2, c.now()) // the node-level property stays alive
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "cpu@pod:1" {
+		t.Fatalf("retired=%v; want cpu@pod:1", retired)
+	}
+	r, _ := m.Relationship(RelationshipID("cpu@pod:1", "pressure", "discovered"))
+	if r.Status != Retired || !strings.Contains(r.RetiredReason, "cpu@pod:1") {
+		t.Errorf("relationship %+v; want retired by cascade from its endpoint", r)
+	}
+}
+
+// TestSweepReleasesTheLockWhenItPanics guards the write lock against a panic raised
+// inside Sweep's locked body. net/http recovers a panic raised in a handler and keeps
+// serving, so a Sweep that took the lock without `defer Unlock` would leave the daemon
+// answering connections while every map operation blocks forever — a wedge with no
+// crash to point at. The clock is the injectable thing inside the locked body, so it
+// stands in for any panic reachable from there.
+func TestSweepReleasesTheLockWhenItPanics(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("x", 1, c.now())
+
+	var calls int
+	at := c.t.Add(time.Minute)
+	m.SetClock(func() time.Time {
+		calls++
+		if calls == 2 {
+			panic("clock failed under the write lock")
+		}
+		return at
+	})
+
+	m.Sweep() // first call: x falls silent past RetireAfter, so this runs retireLocked
+	if p, ok := m.Property("x"); !ok || p.Status != Retired {
+		t.Fatalf("x is %+v; the first sweep was meant to retire it through retireLocked", p)
+	}
+
+	var panicked bool
+	func() {
+		defer func() { panicked = recover() != nil }()
+		m.Sweep() // second clock call: panics with the write lock held
+	}()
+	if !panicked {
+		t.Fatal("the second sweep did not panic; this test cannot observe a leaked lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Property("x")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Property blocked for a second after a panic inside Sweep: the write lock was never released")
+	}
+}
+
+func TestRetirePropertyReleasesTheLockWhenItPanics(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("x", 1, c.now())
+	m.SetClock(func() time.Time { panic("clock failed under the write lock") })
+
+	var panicked bool
+	func() {
+		defer func() { panicked = recover() != nil }()
+		_ = m.RetireProperty("x", "test", "operator")
+	}()
+	if !panicked {
+		t.Fatal("RetireProperty did not panic; this test cannot observe a leaked lock")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Property("x")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Property blocked for a second after a panic inside RetireProperty: the write lock was never released")
+	}
+}
+
+func TestRetireHookFiresOnBothPaths(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	var got []string
+	m.SetRetireHook(func(id string) { got = append(got, id) })
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	if err := m.RetireProperty("a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	m.Sweep()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("hook saw %v; want [a b] (operator path then sweep path)", got)
+	}
+}
+
+func TestObservationRevivesARetiredProperty(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .3, At: c.now(), Subject: "pod:1"})
+	c.advance(time.Minute)
+	m.Sweep()
+	if p, _ := m.Property("cpu@pod:1"); p.Status != Retired {
+		t.Fatalf("setup: status %s, want retired", p.Status)
+	}
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .4, At: c.now(), Subject: "pod:1"})
+	p, _ := m.Property("cpu@pod:1")
+	if p.Status != Active || p.RetiredReason != "" {
+		t.Errorf("after re-observation: %+v; want active with the retirement reason cleared", p)
+	}
+	var revived bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyRedeclared && e.Target == "cpu@pod:1" && e.Detail["revived"] == true {
+			revived = true
+		}
+	}
+	if !revived {
+		t.Error("revival was not journaled")
+	}
+}
+
+func TestDerivedGoesStaleWhenNoMemberIsActiveAndReturnsWithThem(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, ConvergenceObservations: 2})
+	_ = m.DeclareProperty(Property{ID: "cpu", Range: [2]float64{0, 1}})
+	_ = m.DeclareProperty(Property{ID: "RC", Kind: Derived, Members: []string{"cpu"}})
+	_ = m.Observe("cpu", .6, c.now())
+	if d, _ := m.Property("RC"); d.Status != Active || d.Value != .6 {
+		t.Fatalf("setup: %+v", d)
+	}
+	// A quiet node: nothing observes, only the sweep runs.
+	c.advance(time.Minute)
+	m.Sweep()
+	d, _ := m.Property("RC")
+	if d.Status != Stale || d.Confidence != 0 {
+		t.Errorf("derived after all members went stale: status=%s confidence=%.2f; want stale, 0", d.Status, d.Confidence)
+	}
+	if d.NObservations == 0 {
+		t.Error("going stale must not erase how much the summary had rested on")
+	}
+	c.advance(time.Second)
+	_ = m.Observe("cpu", .7, c.now())
+	if d, _ = m.Property("RC"); d.Status != Active {
+		t.Errorf("derived did not return to active with its member: %+v", d)
+	}
+}
+
+func TestResetRelationshipReturnsTheClaimToUnknown(t *testing.T) {
+	m, c := newTestMap(t, Config{Learn: true, LearnConfig: LearnConfig{PairWindowSeconds: 5, MinSupport: 3, Window: 10}})
+	_ = m.DeclareProperty(Property{ID: "a"})
+	_ = m.DeclareProperty(Property{ID: "b"})
+	_ = m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Label: "L"})
+	for i := 0; i < 6; i++ {
+		x := float64(i) / 10
+		_ = m.ObserveEvent("a", x, c.now(), "a"+strconv.Itoa(i))
+		_ = m.ObserveEvent("b", x*0.9, c.now(), "b"+strconv.Itoa(i))
+		c.advance(time.Second)
+	}
+	id := RelationshipID("a", "b", "L")
+	if r, _ := m.Relationship(id); r.Established == nil {
+		t.Fatal("setup: established layer never formed")
+	}
+	if err := m.ResetRelationship(id, "operator", "test"); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship(id)
+	if _, known := r.Effective(); known || r.Established != nil || r.SignAgreements != 0 || r.SignConflicts != 0 {
+		t.Errorf("after reset: %+v; want no effective strength, no established layer, no sign tally", r)
+	}
+}
+
+func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	_ = m.Observe("src", .5, c.now())
+	_ = m.Observe("dst", .5, c.now())
+	_ = m.DeclareRelationship(Relationship{From: "src", To: "dst", Sign: 1})
+	c.advance(time.Minute)
+	_ = m.Observe("dst", .5, c.now())
+	m.Sweep()
+	b := m.Decide("d1", "test")
+	b.RelationshipsInto("dst")
+	d := b.Commit(nil)
+	var found bool
+	for _, cv := range d.Caveats {
+		if strings.Contains(cv, "stale endpoint src") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("caveats %v; want one naming the stale endpoint", d.Caveats)
+	}
+
+	// Both endpoints stale: the reader is owed both names, not whichever the map
+	// iteration happened to write last.
+	c.advance(time.Minute)
+	m.Sweep()
+	b = m.Decide("d2", "test")
+	b.RelationshipsInto("dst")
+	d = b.Commit(nil)
+	var stale []string
+	for _, cv := range d.Caveats {
+		if strings.Contains(cv, "stale endpoint") {
+			stale = append(stale, cv)
+		}
+	}
+	if len(stale) != 2 {
+		t.Fatalf("caveats %v; want one per stale endpoint (2)", d.Caveats)
+	}
+	var named int
+	for _, end := range []string{"src", "dst"} {
+		for _, cv := range stale {
+			if strings.HasSuffix(cv, "stale endpoint "+end) {
+				named++
+			}
+		}
+	}
+	if named != 2 {
+		t.Errorf("stale caveats %v; want one naming src and one naming dst", stale)
+	}
+}
+
+func TestCoveredIgnoresRetiredAndOppositeSign(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	_ = m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Label: "L"})
+	if !m.Covered("a", "b", 1) {
+		t.Error("a declared active relationship must count as covered")
+	}
+	if m.Covered("a", "b", -1) || m.Covered("b", "a", 1) {
+		t.Error("the opposite sign and the reverse direction are different claims")
+	}
+	_ = m.RetireRelationship(RelationshipID("a", "b", "L"), "test", "operator")
+	if m.Covered("a", "b", 1) {
+		t.Error("a retired relationship does not cover the pair: structure must be able to re-earn its place")
+	}
+}
+
+// TestDeclareRelationshipCarriesNoEvidence: a declaration asserts that a relationship
+// exists and which way it runs. What it is worth is for the machine to say, so any
+// strength, support or established value the caller supplies is dropped, and a
+// provenance the map does not define is refused — otherwise POST /state/relationships
+// can fabricate a learned edge.
+func TestDeclareRelationshipCarriesNoEvidence(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a", Value: 1, At: c.now()})
+	_ = m.Record(Observation{ID: "b", Value: 1, At: c.now()})
+	est, asserted := 0.95, 0.7
+	err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1, Strength: 0.9, Confidence: 1,
+		NObservations: 500, Established: &est, Assertion: &asserted, SignAgreements: 400, SignConflicts: 3,
+		Provenance: Discovered})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship("a->b")
+	if _, known := r.Effective(); known {
+		t.Errorf("a freshly declared relationship has an effective strength (%+v); a declaration carries no evidence", r)
+	}
+	if r.NObservations != 0 || r.Established != nil || r.Assertion != nil || r.SignAgreements != 0 ||
+		r.SignConflicts != 0 || r.Strength != 0 || r.Confidence != 0 {
+		t.Errorf("caller-supplied evidence survived the declaration: %+v", r)
+	}
+	if err := m.DeclareRelationship(Relationship{From: "b", To: "a", Sign: 1, Provenance: "learned"}); err == nil {
+		t.Error("provenance \"learned\" was accepted at declaration; the map decides what is learned")
+	}
+}
+
+// TestReadPathsCopyLabelsAndMembers: a view, a Property and a committed decision are
+// copies. Labels merge in place on a later observation, so a shallow copy would let a
+// journaled decision change after the fact and let a caller write into the map.
+func TestReadPathsCopyLabelsAndMembers(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 1, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "burstable"}})
+	b := m.Decide("d1", "what was qos when I decided")
+	_, _ = b.Property("a@pod:1")
+	d := b.Commit(nil)
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "a@pod:1", Value: 2, At: c.now(), Subject: "pod:1",
+		Labels: map[string]string{"qos": "guaranteed"}})
+	if got := d.PropertiesRead[0].Labels["qos"]; got != "burstable" {
+		t.Errorf("the decision's recorded labels read %q after a later observation; the record aliases the live map", got)
+	}
+	v := m.State(Query{})
+	v.Properties[0].Labels["qos"] = "hacked"
+	p, _ := m.Property("a@pod:1")
+	p.Labels["extra"] = "x"
+	live, _ := m.Property("a@pod:1")
+	if live.Labels["qos"] == "hacked" || live.Labels["extra"] != "" {
+		t.Errorf("writing into a view or a returned Property reached the map: %v", live.Labels)
+	}
+	members := []string{"a@pod:1"}
+	if err := m.DeclareProperty(Property{ID: "d", Kind: Derived, Members: members}); err != nil {
+		t.Fatal(err)
+	}
+	members[0] = "zzz"
+	dp, _ := m.Property("d")
+	if dp.Members[0] != "a@pod:1" {
+		t.Errorf("members alias the caller's slice: %v", dp.Members)
+	}
+}
+
+// TestRecordRefusesAnInvalidRange: a declared range is what the estimator normalises
+// by, so an inverted, empty or non-finite one is refused at the door, as the wire does.
+func TestRecordRefusesAnInvalidRange(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, rng := range [][2]float64{{1, 0}, {5, 5}, {math.NaN(), 1}, {0, math.Inf(1)}} {
+		r := rng
+		if err := m.Record(Observation{ID: "x", Value: 0.5, At: c.now(), Range: &r}); err == nil {
+			t.Errorf("range %v was accepted", rng)
+		}
+	}
+	if _, ok := m.Property("x"); ok {
+		t.Error("a refused observation admitted the property anyway")
+	}
+}
+
+// TestDeclarePropertyRefusesAnEmptyOrUndeclaredRange: [5,5] cannot normalise anything,
+// and RangeDeclared without a range bypasses normalisation with no "assumed" caveat.
+func TestDeclarePropertyRefusesAnEmptyOrUndeclaredRange(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	if err := m.DeclareProperty(Property{ID: "a", Range: [2]float64{5, 5}}); err == nil {
+		t.Error("empty range [5,5] was accepted")
+	}
+	if err := m.DeclareProperty(Property{ID: "b", RangeDeclared: true}); err == nil {
+		t.Error("RangeDeclared without a range was accepted")
+	}
+}
+
+// TestRecordRefusesASubjectThatDoesNotMatchTheId: the subject is part of the id
+// (metric@subject), and its charset is what the HTTP surface can address.
+func TestRecordRefusesASubjectThatDoesNotMatchTheId(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	for _, o := range []Observation{
+		{ID: "cpu@pod:a", Subject: "pod:b"},
+		{ID: "cpu", Subject: "pod:a"},
+		{ID: "cpu@pod/evil", Subject: "pod/evil"},
+	} {
+		o.Value, o.At = 0.5, c.now()
+		if err := m.Record(o); err == nil {
+			t.Errorf("observation id=%q subject=%q was accepted", o.ID, o.Subject)
+		}
+	}
+	if err := m.DeclareProperty(Property{ID: "x@pod/evil", Subject: "pod/evil"}); err == nil {
+		t.Error("a declaration with an invalid subject was accepted")
+	}
+	if err := m.DeclareProperty(Property{ID: "x", Subject: "pod:a"}); err == nil {
+		t.Error("a declaration whose subject is not in its id was accepted")
+	}
+}
+
+// TestConflictingDeclarationIsRefusedNotAveraged: Record's own doc calls a differing
+// subject, unit or range "a fault worth seeing rather than a value worth averaging";
+// the value was being averaged. An app pushing percent against a share-of-node
+// property would have moved the EMA by ~45×.
+func TestConflictingDeclarationIsRefusedNotAveraged(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	share, percent := [2]float64{0, 1}, [2]float64{0, 100}
+	_ = m.Record(Observation{ID: "cpu@pod:a", Value: 0.1, At: c.now(), Subject: "pod:a", Unit: "share", Range: &share})
+	c.advance(time.Second)
+	if err := m.Record(Observation{ID: "cpu@pod:a", Value: 50, At: c.now(), Subject: "pod:a", Unit: "percent", Range: &percent}); err == nil {
+		t.Error("an observation whose unit and range contradict the property's was accepted")
+	}
+	p, _ := m.Property("cpu@pod:a")
+	if p.NObservations != 1 || p.Value != 0.1 {
+		t.Errorf("the contradicting value was averaged in: n=%d value=%v", p.NObservations, p.Value)
+	}
+	var conflict bool
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyConflict && e.Target == "cpu@pod:a" {
+			conflict = true
+		}
+	}
+	if !conflict {
+		t.Error("the conflict was not journaled")
+	}
+	// An observation of a scoped id that carries no subject is the same fault: it is
+	// how an unscoped push named "cpu@pod:a" would land on the pod's property.
+	c.advance(time.Second)
+	if err := m.Observe("cpu@pod:a", 0.2, c.now()); err == nil {
+		t.Error("an unscoped observation of a scoped property was accepted")
+	}
+}
+
+// subjectOf returns the subject an id of the form <metric>@<subject> names.
+func subjectOf(id string) string {
+	_, subject, _ := strings.Cut(id, "@")
+	return subject
+}
+
+// TestRetireHookRunsOutsideTheLock: the hook is allowed to read the map — the sweep
+// hands it to the proposer, and a future hook will look at what was retired. A hook
+// that calls back into the map would deadlock if it ran under the write lock, and
+// the hook test that only appends to a slice would never notice.
+func TestRetireHookRunsOutsideTheLock(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	var seen []Status
+	m.SetRetireHook(func(id string) {
+		p, _ := m.Property(id) // takes the read lock: hangs if the hook ran under the write lock
+		seen = append(seen, p.Status)
+	})
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = m.RetireProperty("a", "test", "operator")
+		c.advance(time.Minute)
+		m.Sweep()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retire hook deadlocked: it ran while the map's write lock was held")
+	}
+	if len(seen) != 2 || seen[0] != Retired || seen[1] != Retired {
+		t.Errorf("hook read %v; want the retired status of both properties", seen)
+	}
+}
+
+// TestRevivalKeepsCascadeRetiredRelationshipsRetired: a subject that returns is
+// exhibited again; the structure that retired with it is not re-asserted by that
+// alone — it re-earns its place through the proposer.
+func TestRevivalKeepsCascadeRetiredRelationshipsRetired(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .3, At: c.now(), Subject: "pod:1"})
+	_ = m.Observe("pressure", .3, c.now())
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:1", To: "pressure", Sign: 1, Label: "d"}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	_ = m.Observe("pressure", .3, c.now()) // the node keeps reporting; only the pod goes silent
+	m.Sweep()
+	if r, _ := m.Relationship(RelationshipID("cpu@pod:1", "pressure", "d")); r.Status != Retired {
+		t.Fatalf("setup: relationship %s, want retired by the cascade", r.Status)
+	}
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .4, At: c.now(), Subject: "pod:1"})
+	if p, _ := m.Property("cpu@pod:1"); p.Status != Active {
+		t.Fatalf("the property did not revive: %s", p.Status)
+	}
+	if r, _ := m.Relationship(RelationshipID("cpu@pod:1", "pressure", "d")); r.Status != Retired {
+		t.Errorf("relationship %s after the property revived; want it to stay retired until re-earned", r.Status)
+	}
+}
+
+// TestRetireHookPanicDoesNotKillTheSweep: the hook runs outside the lock on the
+// sweep goroutine; a panic in it must not take the sweep down or skip the
+// properties after it.
+func TestRetireHookPanicDoesNotKillTheSweep(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	var calls []string
+	m.SetRetireHook(func(id string) {
+		calls = append(calls, id)
+		if id == "a" {
+			panic("hook bug")
+		}
+	})
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	c.advance(time.Minute)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a panicking hook escaped Sweep: %v", r)
+			}
+		}()
+		m.Sweep()
+	}()
+	if len(calls) != 2 {
+		t.Errorf("hook calls %v; want both properties despite the panic on the first", calls)
+	}
+}
+
+// TestDeclarePropertyRefusesAnUnknownStatusAndAScopedDerived: Status is a closed
+// set, and a derived property is node-level structure — a summary scoped to one
+// subject would be a subject summarising itself.
+func TestDeclarePropertyRefusesAnUnknownStatusAndAScopedDerived(t *testing.T) {
+	m, _ := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.DeclareProperty(Property{ID: "x", Status: "bogus"}); err == nil {
+		t.Error("status \"bogus\" was accepted")
+	}
+	_ = m.DeclareProperty(Property{ID: "cpu@pod:a", Subject: "pod:a"})
+	if err := m.DeclareProperty(Property{ID: "sum@pod:a", Subject: "pod:a", Kind: Derived, Members: []string{"cpu@pod:a"}}); err == nil {
+		t.Error("a derived property scoped to a subject was accepted")
 	}
 }

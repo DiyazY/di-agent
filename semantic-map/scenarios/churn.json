@@ -1,0 +1,23 @@
+{
+  "name": "churn",
+  "seed": 5,
+  "tick_seconds": 10,
+  "duration_seconds": 5400,
+  "noise": 0.01,
+  "node": {
+    "node_cpu": {"coupling": "sum", "base": 0.10, "of": "cpu_utilization"},
+    "pressure": {"coupling": "sum", "base": 0.05, "of": "cpu_utilization"}
+  },
+  "subjects": [
+    {"id": "pod:a", "arrive": 0, "depart": 2400, "return": 4200,
+     "properties": {"cpu_utilization": {"pattern": "sine", "min": 0.10, "max": 0.60, "period": 600}}},
+    {"id": "pod:steady", "arrive": 0,
+     "properties": {"cpu_utilization": {"pattern": "constant", "value": 0.15}}}
+  ],
+  "expect": {
+    "admitted_within_ticks": 1,
+    "stale_within_seconds": 120,
+    "retired_within_seconds": 600,
+    "candidates": [{"from": "cpu_utilization@pod:a", "to": "pressure", "sign": 1, "within_seconds": 1200, "reproposed_after_return": true}]
+  }
+}

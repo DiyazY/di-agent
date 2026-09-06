@@ -4,21 +4,28 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/contracts"
+	"github.com/DiyazY/di-agent/pkg/stats"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // MICorrelationProposer is a production-grade ProposerContract implementation.
 //
 // It maintains a fixed-size ring buffer of (valueA, valueB) observations per
-// construct pair. Once `minPairs` samples accumulate, it computes the Pearson
-// correlation coefficient over the window. If |r| > threshold AND no existing
-// proposition between the pair exists AND the candidate was not previously
-// rejected, it emits a CandidateEdge.
+// pair. Once `minPairs` samples accumulate, it computes the Pearson
+// correlation coefficient over the window. If |r| >= threshold AND the pair is
+// not already covered by a relationship with that sign (per lookup) AND the
+// candidate is not settled — confirmed, rejected, or deferred by an operator —
+// it emits a CandidateEdge; a cap-deferred candidate is refreshed and re-enters
+// when it outranks a pending one.
 //
 // Pearson correlation stands in for mutual information here — it captures
 // linear dependence cheaply and deterministically. The name "MI" is kept for
@@ -26,179 +33,336 @@ import (
 // edge-standard or cloud-full profile may swap in true mutual-information
 // estimation without changing the interface.
 //
-// p-values are computed via the Fisher z-transform (two-tailed). The natural
-// entry point from IngestSample is ObserveConstruct, which pairs a new
-// construct value against every other construct seen so far.
-type MICorrelationProposer struct {
-	ontology contracts.OntologyContract
-
-	mu           sync.Mutex
-	buffers      map[string]*pairBuffer          // key: fromID + "→" + toID
-	candidates   map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
-	order        []string                        // insertion order of CandidateIDs, for stable history iteration
-	latestValues map[string]float64              // construct → most recent observed value
-
-	threshold float64 // |Pearson r| trigger to emit a candidate
-	minPairs  int     // minimum buffered samples before evaluating
-	bufSize   int     // ring buffer capacity
-}
-
-type pairBuffer struct {
-	a, b  []float64
-	pos   int
-	count int // total samples ever buffered (capped at bufSize)
-}
-
-// NewMICorrelationProposer builds an MICorrelationProposer.
+// p-values are computed via the Fisher z-transform (two-tailed).
 //
-//	threshold: |Pearson r| above which a candidate is emitted (e.g. 0.8)
-//	minPairs:  observations required before correlation is computed
-//	bufSize:   ring buffer capacity per pair; larger windows are more stable
-//	            but slower to react
-func NewMICorrelationProposer(
-	ontology contracts.OntologyContract,
-	threshold float64,
-	minPairs, bufSize int,
-) *MICorrelationProposer {
+// ObserveProperty, the property path with the scope rule, is the entry point
+// from ingestion: a scoped property (non-empty subject) pairs only with
+// unscoped ones, direction scoped -> unscoped, inside a time tolerance.
+// Observe is the explicit path for a caller that already knows the pair and
+// supplies both values; ObserveConstruct is the explicit construct path that
+// pairs each construct value with the latest of every other construct,
+// lexicographically. Ingestion uses neither.
+type MICorrelationProposer struct {
+	lookup contracts.RelationshipLookup
+
+	mu      sync.Mutex
+	buffers map[string]*stats.PairWindow // key: fromID + "→" + toID
+	// lastPair remembers, per buffer key, the timestamps of the last pair folded, so
+	// a reading takes part in at most one pair per counterpart: without it each tick
+	// at a shared cadence folded (x_i, y_{i-1}) on x's arrival and (x_i, y_i) on
+	// y's, counting every reading twice.
+	lastPair   map[string][2]int64
+	candidates map[string]*types.CandidateEdge // key: CandidateID — holds the LATEST status
+	order      []string                        // insertion order of CandidateIDs, for stable history iteration (and, since the cap must be deterministic, stable cap eviction)
+
+	latestConstructs map[string]float64     // explicit construct path: id → last value
+	latestProps      map[string]latestValue // property path: id → last value, time, scope
+
+	threshold  float64
+	minPairs   int
+	bufSize    int
+	pairWindow time.Duration
+	maxPending int
+	logf       func(format string, args ...any)
+	seq        uint64 // identity for pairs that carry no timestamps
+}
+
+type latestValue struct {
+	value  float64
+	at     time.Time
+	scoped bool
+}
+
+// NewMICorrelationProposer builds the proposer. lookup answers "already known";
+// pairWindow is the time tolerance for the property path (0 = 15s).
+func NewMICorrelationProposer(lookup contracts.RelationshipLookup, threshold float64,
+	minPairs, bufSize int, pairWindow time.Duration) *MICorrelationProposer {
 	if minPairs < 3 {
-		minPairs = 3 // Pearson is undefined for n < 2; require ≥3 for stability
+		minPairs = 3
 	}
 	if bufSize < minPairs {
 		bufSize = minPairs
 	}
+	if pairWindow <= 0 {
+		pairWindow = 15 * time.Second
+	}
 	return &MICorrelationProposer{
-		ontology:     ontology,
-		buffers:      make(map[string]*pairBuffer),
-		candidates:   make(map[string]*types.CandidateEdge),
-		latestValues: make(map[string]float64),
-		threshold:    threshold,
-		minPairs:     minPairs,
-		bufSize:      bufSize,
+		lookup:           lookup,
+		buffers:          make(map[string]*stats.PairWindow),
+		lastPair:         make(map[string][2]int64),
+		candidates:       make(map[string]*types.CandidateEdge),
+		latestConstructs: make(map[string]float64),
+		latestProps:      make(map[string]latestValue),
+		threshold:        threshold,
+		minPairs:         minPairs,
+		bufSize:          bufSize,
+		pairWindow:       pairWindow,
+		maxPending:       64,
 	}
 }
 
-// Observe appends a (valueA, valueB) pair to the ring buffer for
-// (fromID, toID), then re-evaluates correlation if the buffer has enough
-// samples. Emission rules:
-//
-//   - If a non-deprecated proposition already exists between (fromID, toID)
-//     in either direction (regardless of sign), no candidate is emitted —
-//     the backbone already covers this pair.
-//   - If a previously rejected candidate exists for this pair, it is not
-//     re-emitted within the session (permanent suppression per the contract).
-//   - Otherwise, if |r| > threshold, a CandidateEdge is created or updated
-//     in-place (idempotent on the deterministic CandidateID).
+// SetMaxPending bounds the number of Pending candidates; the excess is deferred,
+// weakest (|r|·n) first, and stays visible in history.
+func (p *MICorrelationProposer) SetMaxPending(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n > 0 {
+		p.maxPending = n
+	}
+}
+
+// Observe is the explicit path: the caller supplies the pair directly. There is no
+// scope rule and no time tolerance; identity for deduplication comes from the
+// sequence counter, not from timestamps.
 func (p *MICorrelationProposer) Observe(fromID, toID string, valueA, valueB float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.observeLocked(fromID, toID, valueA, valueB)
+	p.seq++
+	return p.observeLocked(fromID, toID, valueA, valueB, strconv.FormatUint(p.seq, 10))
 }
 
-// observeLocked is the lock-free inner body of Observe. Callers must hold p.mu.
-func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64) error {
-	key := fromID + "→" + toID
-	buf, ok := p.buffers[key]
-	if !ok {
-		buf = &pairBuffer{a: make([]float64, p.bufSize), b: make([]float64, p.bufSize)}
-		p.buffers[key] = buf
-	}
-	buf.a[buf.pos] = valueA
-	buf.b[buf.pos] = valueB
-	buf.pos = (buf.pos + 1) % p.bufSize
-	if buf.count < p.bufSize {
-		buf.count++
-	}
-
-	if buf.count < p.minPairs {
-		return nil
-	}
-
-	r := pearson(buf.a[:buf.count], buf.b[:buf.count])
-	if math.IsNaN(r) || math.Abs(r) < p.threshold {
-		return nil
-	}
-
-	direction := types.Positive
-	if r < 0 {
-		direction = types.Negative
-	}
-
-	// Backbone coverage check: skip if a non-deprecated proposition with the
-	// same (from, to, direction) already exists. The multigraph permits a
-	// conflict-pair sibling (opposite direction) to be proposed separately —
-	// this is how the Di-Select P2/P3, P5/P6, P7/P9 conflict pairs would be
-	// discovered if they were not part of the bootstrap.
-	covered, err := p.pairAlreadyCovered(fromID, toID, direction)
-	if err != nil {
-		return err
-	}
-	if covered {
-		return nil
-	}
-
-	candID := "P-prop-" + fromID + "-" + toID
-
-	// Suppression check: never re-emit a rejected candidate.
-	if existing, ok := p.candidates[candID]; ok && existing.Status == types.Rejected {
-		return nil
-	}
-
-	if existing, ok := p.candidates[candID]; ok && existing.Status == types.Pending {
-		// Idempotent refresh of an already-pending candidate — update score
-		// and observation count without flipping direction (a previously
-		// emitted positive candidate that now sees negative correlation
-		// keeps its original direction; operators see the up-to-date score).
-		existing.MIScore = math.Abs(r)
-		existing.PValue = fisherPValue(r, buf.count)
-		existing.NObservations = buf.count
-		return nil
-	}
-
-	cand := &types.CandidateEdge{
-		CandidateID:   candID,
-		FromID:        fromID,
-		ToID:          toID,
-		Direction:     direction,
-		MIScore:       math.Abs(r),
-		PValue:        fisherPValue(r, buf.count),
-		NObservations: buf.count,
-		Status:        types.Pending,
-	}
-	p.candidates[candID] = cand
-	p.order = append(p.order, candID)
-	return nil
-}
-
-// ObserveConstruct records the latest value observed for a single construct.
-// It internally pairs the new value against every other construct for which a
-// value has been seen, feeding consistent (lexicographic) pair ordering into
-// observeLocked so buffer keys are deterministic regardless of call order.
+// ObserveConstruct is the explicit construct-pairing path: it pairs the value with
+// the latest value of every other construct fed this way, in lexicographic order and
+// without a time tolerance, because its callers supply no timestamps.
 func (p *MICorrelationProposer) ObserveConstruct(constructID string, value float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	// Update latest value before pairing so the current observation is
-	// available when other constructs call ObserveConstruct later.
-	p.latestValues[constructID] = value
-
-	// Pair with every other construct for which we have a value.
+	p.latestConstructs[constructID] = value
 	var firstErr error
-	for otherID, otherVal := range p.latestValues {
+	for otherID, otherVal := range p.latestConstructs {
 		if otherID == constructID {
 			continue
 		}
-		// Feed with consistent ordering: lexicographically smaller ID is "from".
-		fromID, toID := constructID, otherID
-		valA, valB := value, otherVal
+		fromID, toID, valA, valB := constructID, otherID, value, otherVal
 		if otherID < constructID {
-			fromID, toID = otherID, constructID
-			valA, valB = otherVal, value
+			fromID, toID, valA, valB = otherID, constructID, otherVal, value
 		}
-		if err := p.observeLocked(fromID, toID, valA, valB); err != nil && firstErr == nil {
+		p.seq++
+		if err := p.observeLocked(fromID, toID, valA, valB, strconv.FormatUint(p.seq, 10)); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// ObserveProperty is the entry point from ingestion. The scope rule: a scoped
+// property (non-empty subject) pairs only with unscoped ones, never with another
+// scoped one, and the direction is scoped -> unscoped — a subject is a component of
+// the node, so the modelling assumption is component influences whole. Readings
+// further apart than pairWindow do not form a pair.
+func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float64, at time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	me := latestValue{value: value, at: at, scoped: subject != ""}
+	p.latestProps[id] = me
+	for otherID, other := range p.latestProps {
+		if otherID == id || other.scoped == me.scoped {
+			continue
+		}
+		gap := at.Sub(other.at)
+		if gap < 0 {
+			gap = -gap
+		}
+		if gap > p.pairWindow {
+			continue
+		}
+		from, to, x, y := id, otherID, value, other.value
+		xAt, yAt := at.UnixNano(), other.at.UnixNano()
+		if !me.scoped {
+			from, to, x, y = otherID, id, other.value, value
+			xAt, yAt = other.at.UnixNano(), at.UnixNano()
+		}
+		key := from + "→" + to
+		if lp, used := p.lastPair[key]; used && (lp[0] == xAt || lp[1] == yAt) {
+			continue // that reading already took part in a pair with this counterpart
+		}
+		identity := from + "|" + to + "|" + strconv.FormatInt(at.Unix(), 10) + "|" + strconv.FormatInt(other.at.Unix(), 10)
+		_ = p.observeLocked(from, to, x, y, identity) // never non-nil; the contract keeps the error return
+		p.lastPair[key] = [2]int64{xAt, yAt}
+	}
+	return nil
+}
+
+// Forget drops the buffers, latest values and candidates involving a property.
+func (p *MICorrelationProposer) Forget(propertyID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.latestProps, propertyID)
+	delete(p.latestConstructs, propertyID)
+	for key := range p.buffers {
+		from, to, _ := strings.Cut(key, "→")
+		if from == propertyID || to == propertyID {
+			delete(p.buffers, key)
+			delete(p.lastPair, key)
+		}
+	}
+	kept := p.order[:0]
+	for _, cid := range p.order {
+		c := p.candidates[cid]
+		if c != nil && (c.FromID == propertyID || c.ToID == propertyID) {
+			delete(p.candidates, cid)
+			continue
+		}
+		kept = append(kept, cid)
+	}
+	p.order = kept
+	return nil
+}
+
+func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, valueB float64, identity string) error {
+	key := fromID + "→" + toID
+	buf, ok := p.buffers[key]
+	if !ok {
+		buf = stats.NewPairWindow(p.bufSize)
+		p.buffers[key] = buf
+	}
+	if !buf.Fold(identity, valueA, valueB) {
+		return nil
+	}
+	if buf.Len() < p.minPairs {
+		return nil
+	}
+	r, ok := buf.Pearson()
+	if !ok || math.Abs(r) < p.threshold {
+		return nil
+	}
+	direction, sign := types.Positive, 1
+	if r < 0 {
+		direction, sign = types.Negative, -1
+	}
+	if p.lookup != nil && p.lookup.Covered(fromID, toID, sign) {
+		return nil
+	}
+	candID := fromID + "->" + toID
+	if existing, ok := p.candidates[candID]; ok {
+		switch existing.Status {
+		case types.Confirmed:
+			return nil // a confirmed pair is settled; never re-emitted
+		case types.Rejected:
+			return nil // permanent suppression within the session
+		case types.Deferred:
+			if existing.Reason != deferredByCap {
+				return nil // an operator's deferral is not overturned by evidence
+			}
+			existing.Direction, existing.MIScore = direction, math.Abs(r)
+			existing.PValue, existing.NObservations = stats.FisherPValue(r, buf.Len()), buf.Len()
+			if p.outranksPendingLocked(existing) {
+				existing.Status, existing.Reason = types.Pending, ""
+				p.log("proposer: %s re-enters pending with |r|·n=%.1f; the cap defers the weakest instead", candID, score(existing))
+				p.enforceCapLocked()
+			}
+			return nil
+		case types.Pending:
+			existing.Direction = direction
+			existing.MIScore = math.Abs(r)
+			existing.PValue = stats.FisherPValue(r, buf.Len())
+			existing.NObservations = buf.Len()
+			return nil
+		}
+	}
+	p.candidates[candID] = &types.CandidateEdge{
+		CandidateID: candID, FromID: fromID, ToID: toID, Direction: direction,
+		MIScore: math.Abs(r), PValue: stats.FisherPValue(r, buf.Len()),
+		NObservations: buf.Len(), Status: types.Pending,
+	}
+	p.order = append(p.order, candID)
+	p.enforceCapLocked()
+	return nil
+}
+
+// enforceCapLocked defers the weakest pending candidates until at most maxPending
+// remain. Deferred rather than deleted: an operator can see in history that the
+// proposer had more to say than the cap allowed.
+//
+// Candidates are collected by walking p.order (insertion order), not by ranging
+// over the p.candidates map — Go's map iteration order is randomized, and ranging
+// over it would make the choice of "weakest" nondeterministic across runs. The
+// comparison itself is made total by tie-breaking on CandidateID: among equal
+// |r|·n scores the lexicographically larger id is treated as weaker. Equal means
+// bit-equal, which series with identical readings produce; affine-related series
+// do not — Pearson is affine-invariant in exact arithmetic, but in float64 their
+// |r| land one ULP apart and which rounds lowest depends on the platform's
+// arithmetic (fused multiply-add on arm64, not on amd64 v1). The choice is
+// therefore reproducible run to run on one machine, not across architectures. A
+// deferral is session-permanent, so an arbitrary choice here would be a silent,
+// unreproducible loss.
+// SetLogger routes the proposer's own log lines (cap deferrals and re-entries)
+// somewhere other than the standard logger; tests capture them.
+func (p *MICorrelationProposer) SetLogger(f func(format string, args ...any)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.logf = f
+}
+
+func (p *MICorrelationProposer) log(format string, args ...any) {
+	if p.logf != nil {
+		p.logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
+// Reasons a Deferred candidate carries, so history can tell the proposer's choice
+// from an operator's.
+const (
+	deferredByCap      = "cap"
+	deferredByOperator = "operator"
+)
+
+func score(c *types.CandidateEdge) float64 { return c.MIScore * float64(c.NObservations) }
+
+// weaker is the total order the cap uses: lower |r|·n, then the lexicographically
+// larger id among bit-equal scores.
+func weaker(a, b *types.CandidateEdge) bool {
+	sa, sb := score(a), score(b)
+	return sa < sb || (sa == sb && a.CandidateID > b.CandidateID)
+}
+
+func (p *MICorrelationProposer) pendingLocked() []*types.CandidateEdge {
+	var pending []*types.CandidateEdge
+	for _, cid := range p.order {
+		c := p.candidates[cid]
+		if c != nil && c.Status == types.Pending {
+			pending = append(pending, c)
+		}
+	}
+	return pending
+}
+
+// outranksPendingLocked reports whether a cap-deferred candidate would survive the
+// cap now: there is room, or it is stronger than the weakest pending candidate.
+func (p *MICorrelationProposer) outranksPendingLocked(c *types.CandidateEdge) bool {
+	pending := p.pendingLocked()
+	if len(pending) < p.maxPending {
+		return true
+	}
+	weakest := pending[0]
+	for _, w := range pending[1:] {
+		if weaker(w, weakest) {
+			weakest = w
+		}
+	}
+	return weaker(weakest, c)
+}
+
+func (p *MICorrelationProposer) enforceCapLocked() {
+	pending := p.pendingLocked()
+	for len(pending) > p.maxPending {
+		weakest := 0
+		for i, c := range pending {
+			if weaker(c, pending[weakest]) {
+				weakest = i
+			}
+		}
+		w := pending[weakest]
+		w.Status, w.Reason = types.Deferred, deferredByCap
+		p.log("proposer: %s deferred by the pending cap (%d): |r|·n=%.1f is the weakest; it re-enters if it outranks a pending candidate",
+			w.CandidateID, p.maxPending, score(w))
+		pending = append(pending[:weakest], pending[weakest+1:]...)
+	}
 }
 
 // GetCandidates returns Pending candidates sorted by CandidateID for stable
@@ -229,9 +393,9 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 // exact failure propose-then-confirm exists to prevent, one layer over. The facade adds
 // the returned proposition through its own path, which declares both halves.
 //
-// The candidate is only marked Confirmed on the way out, so a caller that fails to apply
-// the proposition can retry: an unapplied confirmation must not leave the candidate in a
-// state where it can never be confirmed again.
+// The candidate is marked Confirmed here, before the facade applies the proposition.
+// If applying fails the facade calls Reopen, so the candidate returns to Pending rather
+// than standing in history as confirmed with nothing behind it.
 func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -256,9 +420,28 @@ func (p *MICorrelationProposer) Confirm(candidateID string) (*types.Proposition,
 	return prop, nil
 }
 
-// Reject marks a candidate as permanently suppressed for this session.
-// The candidate stays in the map so subsequent Observe calls on the same
-// pair are short-circuited; a history entry is appended.
+// Reopen returns a Confirmed candidate to Pending. The facade calls it when the
+// relationship a confirmation stands for could not be declared, so the candidate can
+// be retried or rejected instead of standing in history as confirmed with nothing
+// behind it.
+func (p *MICorrelationProposer) Reopen(candidateID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.candidates[candidateID]
+	if !ok {
+		return fmt.Errorf("candidate %q not found", candidateID)
+	}
+	if c.Status != types.Confirmed {
+		return fmt.Errorf("candidate %q is not Confirmed (status=%v)", candidateID, c.Status)
+	}
+	c.Status, c.Reason = types.Pending, ""
+	return nil
+}
+
+// Reject marks a candidate as permanently suppressed for this session. The candidate
+// stays in the map so subsequent observations of the same pair are short-circuited,
+// and its history entry reads Rejected. A Confirmed candidate cannot be rejected: the
+// relationship it became is in the map, and retiring that is the operator's move.
 func (p *MICorrelationProposer) Reject(candidateID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -266,15 +449,18 @@ func (p *MICorrelationProposer) Reject(candidateID string) error {
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	c.Status = types.Rejected
+	if c.Status == types.Confirmed {
+		return fmt.Errorf("candidate %q is Confirmed: the relationship it became is in the map; retire that instead", candidateID)
+	}
+	c.Status, c.Reason = types.Rejected, ""
 	return nil
 }
 
-// Defer marks a candidate as Deferred — it moves out of GetCandidates but
-// remains in the candidates map. In this v1 implementation Defer behaves
-// like a weaker form of Reject: re-Observe on the same pair will not
-// re-emit while the deferred entry is present. A richer profile may
-// re-promote deferred candidates after a fresh evidence cycle; not yet.
+// Defer marks a candidate as Deferred by an operator — out of GetCandidates, still in
+// history with Reason "operator", and not overturned by later evidence. A cap deferral
+// (Reason "cap") is the proposer's own, provisional choice and re-enters when it
+// outranks a pending candidate; an operator may Defer a cap-deferred candidate to
+// make it stick. Confirmed and Rejected candidates cannot be deferred.
 func (p *MICorrelationProposer) Defer(candidateID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -282,7 +468,10 @@ func (p *MICorrelationProposer) Defer(candidateID string) error {
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	c.Status = types.Deferred
+	if c.Status == types.Confirmed || c.Status == types.Rejected {
+		return fmt.Errorf("candidate %q is %v and cannot be deferred", candidateID, c.Status)
+	}
+	c.Status, c.Reason = types.Deferred, deferredByOperator
 	return nil
 }
 
@@ -305,67 +494,6 @@ func (p *MICorrelationProposer) GetHistory() ([]*types.CandidateEdge, error) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-// pairAlreadyCovered reports whether the ontology backbone already has a
-// non-deprecated proposition connecting (fromID, toID) with the same
-// direction. Conflict-pair siblings (opposite direction on the same pair)
-// are intentionally NOT considered covered — the multigraph allows them.
-func (p *MICorrelationProposer) pairAlreadyCovered(fromID, toID string, dir types.Direction) (bool, error) {
-	props, err := p.ontology.Propositions()
-	if err != nil {
-		return false, err
-	}
-	for _, prop := range props {
-		if prop.Deprecated {
-			continue
-		}
-		if prop.FromConstruct == fromID && prop.ToConstruct == toID && prop.Direction == dir {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// pearson computes the Pearson correlation coefficient over equal-length
-// slices. Returns NaN if either input has zero variance.
-func pearson(xs, ys []float64) float64 {
-	n := len(xs)
-	if n < 2 || n != len(ys) {
-		return math.NaN()
-	}
-	var sumX, sumY float64
-	for i := 0; i < n; i++ {
-		sumX += xs[i]
-		sumY += ys[i]
-	}
-	meanX := sumX / float64(n)
-	meanY := sumY / float64(n)
-
-	var num, denX, denY float64
-	for i := 0; i < n; i++ {
-		dx := xs[i] - meanX
-		dy := ys[i] - meanY
-		num += dx * dy
-		denX += dx * dx
-		denY += dy * dy
-	}
-	if denX == 0 || denY == 0 {
-		return math.NaN()
-	}
-	return num / math.Sqrt(denX*denY)
-}
-
-// fisherPValue returns the two-tailed p-value for Pearson r using the
-// Fisher z-transform: z = atanh(r) * sqrt(n-3), then N(0,1) tail probability.
-// Returns 1.0 when n < 4 (not enough data for a valid z-transform).
-func fisherPValue(r float64, n int) float64 {
-	if n < 4 {
-		return 1.0
-	}
-	z := math.Atanh(r) * math.Sqrt(float64(n-3))
-	// Two-tailed: P = 2 * (1 - Φ(|z|)) = erfc(|z|/sqrt(2))
-	return math.Erfc(math.Abs(z) / math.Sqrt2)
-}
-
 func synthesizePropSuffix(candidateID string) string {
 	h := sha256.Sum256([]byte(candidateID))
 	return hex.EncodeToString(h[:4]) // 8 hex chars
@@ -374,4 +502,30 @@ func synthesizePropSuffix(candidateID string) string {
 func copyCandidate(c *types.CandidateEdge) *types.CandidateEdge {
 	cp := *c
 	return &cp
+}
+
+// LookupOntology adapts the declaration layer to RelationshipLookup: a pair is covered
+// when a non-deprecated proposition runs from -> to with the same direction. Used by
+// callers that pair constructs explicitly; the daemon passes the state map instead.
+func LookupOntology(o contracts.OntologyContract) contracts.RelationshipLookup {
+	return ontologyLookup{o: o}
+}
+
+type ontologyLookup struct{ o contracts.OntologyContract }
+
+func (l ontologyLookup) Covered(from, to string, sign int) bool {
+	props, err := l.o.Propositions()
+	if err != nil {
+		return false
+	}
+	dir := types.Positive
+	if sign < 0 {
+		dir = types.Negative
+	}
+	for _, prop := range props {
+		if !prop.Deprecated && prop.FromConstruct == from && prop.ToConstruct == to && prop.Direction == dir {
+			return true
+		}
+	}
+	return false
 }

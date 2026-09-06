@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/stats"
 )
 
 // Persistence exists because an agent whose value is accumulated ground truth loses
@@ -194,7 +196,7 @@ func (m *Map) Load(path string) (bool, error) {
 	// windows are not restored, so the first pairs after a restart rebuild support
 	// rather than continuing a window that spans the gap.
 	m.latest = make(map[string]observation)
-	m.windows = make(map[string]*pairWindow)
+	m.windows = make(map[string]*stats.PairWindow)
 
 	m.bump(EventPropertyRedeclared, "", "restore", map[string]any{
 		"restored_from":  path,

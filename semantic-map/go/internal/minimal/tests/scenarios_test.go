@@ -854,8 +854,8 @@ func peerByURL(t *testing.T, sm *semmap.SemanticMap, url string) *peers.Descript
 //  5. Verified: a new non-deprecated proposition covering CE↔RC exists.
 func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	o := minimal.NewOntologyFromSpec(mustSpec())
-	proposer := minimal.NewMICorrelationProposer(o, 0.7, 20, 80)
 	state := stateFor(t)
+	proposer := minimal.NewMICorrelationProposer(state, 0.7, 20, 80, 0)
 	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil)
 	r.AttachState(state)
 

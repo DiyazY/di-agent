@@ -401,7 +401,7 @@ The rule we hold to: **no new contract without a second implementation that need
 
 | Contract      | Responsibility                                              | Key guarantees                                                                                            |
 | ------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Collector** | Read raw metrics from a source; emit normalized samples     | Pure read; deterministic `event_id`; `available_metrics()` is static; never raises on empty data         |
+| **Collector** | reads a source and emits `MetricSample`s; may scope a sample to a subject; declares unit and range per type | Pure read; deterministic `event_id`; `available_metrics()` is static; never raises on empty data         |
 | **Ontology**  | The declaration layer — which constructs exist, which propositions relate them, whether a proposed one is valid | Returns whatever the loaded specification declares, with every proposition endpoint a declared construct; constructs and propositions are append-only, never removed or direction-reversed. Holds **no** strength and **no** history: a proposition's magnitude is its relationship's prior and its withdrawal is that relationship's retirement, both in the state model, and the journal is the one audit record |
 | **Reasoner**  | Produce agent decisions with traceable rationales           | Every result includes a non-empty rationale referencing the properties and relationships read; `SimulateOutcome` is pure (read-only) |
 | **Proposer**  | Detect statistical patterns suggesting new backbone claims  | Never modifies the model or the Ontology directly; `Reject` permanently suppresses within session          |
@@ -419,13 +419,20 @@ opening the viewer read weights and confidences that entered no decision, on a p
 looked exactly like the one that used to. So the contracts went, their implementations
 (`InMemoryStorage`, `EMAUpdater`, `RelationalEMAUpdater`) went, their compliance suites went,
 and the graph surfaces now project the state model — see §5, "The graph surfaces are a
-projection". `POST /ingest`, which named a construct pair and a magnitude directly, went
+projection". The endpoint that ingested a construct pair and a magnitude directly went
 with them: an observation is of a property, and a single number about a pair is an
 assertion rather than a measurement.
 
 ### Behavioral guarantees
 
 Guarantees are not just signatures — they are documented pre/post-conditions on each method in the contract source files. The compliance test suites in `go/compliance/` verify them mechanically. **A new implementation is valid if and only if it passes the compliance suite for its contract.** This is the definition, not a check.
+
+Subjects and discovery added guarantees to two of the five contracts:
+
+- **Collector** — subjects are implied by observation: a collector MAY set `Subject` on a sample; a subject exists iff something observed it this tick. A collector never emits a "gone" event — silence is the signal, and the map interprets it.
+- **Collector** — declared meaning: a collector MUST set `Unit` and `Range` on every sample of a type it emits, and keep them stable per type.
+- **Proposer** — the scope rule: `ObserveProperty` pairs a scoped property (non-empty subject) only with unscoped ones, direction scoped → unscoped, inside a time tolerance.
+- **Proposer** — `Forget` drops every buffer and candidate involving a property, so a departed subject does not accumulate.
 
 Compliance suites exist for all five contracts (`compliance/{collector,ontology,reasoner,proposer,tuner}.go`). Each runs against a factory the implementation supplies, so a new ontology or collector can be validated with a single test file wired to the suite.
 
@@ -642,25 +649,30 @@ Each `MetricSample` carries:
 | ---------------- | ------------ | -------------------------------------------------------- |
 | `node_id`        | `str`        | Cluster node (`"master"`, `"node_1"`, …)                |
 | `metric_type`    | `MetricType` | Semantic type — see catalogue below                      |
-| `value`          | `float`      | Normalized value in the fixed unit for the metric type   |
+| `value`          | `float`      | The reading, in the declared `unit`; routed types are fractions on [0,1] |
 | `timestamp_unix` | `int`        | Unix timestamp of the observation                        |
 | `event_id`       | `str`        | Deterministic ID — same observation always → same ID     |
-| `container_id`   | `str`        | Empty for node-level aggregates; set for per-container   |
+| `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
+| `unit`           | `str`        | What the value means (`share-of-node-capacity`, `items`, …); stamped on the property at admission |
+| `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Required with `unit` on every sample (a contract MUST) |
+| `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
-**`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + container_id + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
+**`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + subject + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
 
 **`available_metrics()` is static** — declared once at construction, never changes within a deployment session. It says what this collector can report without calling `collect()` first.
 
 ### MetricType catalogue
 
-Routing is declared in `domain_spec.json`, not in code, and every route fixes its
-unit as a fraction on [0,1]. Collectors must normalize before emitting: edge
-weights are Bernoulli parameters and the divergence measure is defined on that
-interval, so an out-of-range observation is clipped and the affected edge stops
+Routing is declared in `domain_spec.json`, not in code, and every *routed* type is a
+fraction on [0,1]: construct polarity and the divergence measure are defined on that
+interval, so an out-of-range observation there is clipped and the affected edge stops
 responding to evidence while aggregates keep tracing a smooth curve. A replay
 harness that passed network throughput in raw bytes per second produced exactly
-that failure, silently.
+that failure, silently. The set of types is open by union (below): an unrouted type —
+any name a producer sends, most often scoped to a subject — carries whatever `unit` and
+`range` it declares, and the map normalises by the declared range wherever it needs a
+fraction.
 
 | `MetricType`            | Construct | Polarity | Note                                                       |
 | ----------------------- | --------- | -------- | ---------------------------------------------------------- |
@@ -677,6 +689,10 @@ that failure, silently.
 | `scheduling_latency_ms` | PS        | worse    | Pending → Scheduled, likewise                              |
 | `cpu_pressure_ratio`    | PS        | worse    | PSI `cpu.some` stall fraction                              |
 | `io_pressure_ratio`     | PS        | worse    | PSI `io.some` stall fraction                               |
+
+The catalogue names the types a collector or a test can reference; it is not the
+limit of what the map accepts. The set of `MetricType`s the map actually admits is
+open by union — it is whatever its producers declare, routed or not.
 
 An unrouted `MetricType` is ignored rather than rejected: forward compatibility is
 deliberate, so a collector upgraded ahead of the specification does not break
@@ -810,6 +826,18 @@ through concluding. The snapshot carries a format version and an owner, and a mi
 in either is refused rather than guessed at — a version 1 file half-loads under version
 2's field names, and a snapshot copied from another host would install that machine's
 observations as this one's history at full confidence.
+
+#### The three paces
+
+The map changes at three rates, and each is a setting rather than an accident.
+
+| Pace | Appears | Disappears |
+|---|---|---|
+| **Property** | one observation, at confidence 0 | stale after `-stale-after` (2 m) → retired after `-retire-after` (10 m), cascading to incident relationships |
+| **Magnitude** | `-alpha` (0.2) for the recent layer, `-alpha-slow` (0.001) for the established layer | — |
+| **Structure** | `-proposer-min-pairs` (30) co-observations inside `-pair-window-seconds` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
+
+Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
 
 ### Peer state: knowledge crossing a node boundary
 
@@ -960,13 +988,16 @@ the agent has seen enough to say so.
 Which construct plays which role comes from `domain_spec.json`'s `cost_model` block.
 The cost function was the last place in the daemon that knew a construct by name.
 
+**Counterfactuals.** `assume=<property>=<value>` substitutes a source's value in the contribution sum; `without=<subject>` takes every property of that subject to its range floor. Contributions are normalised by each source's declared range (`(v − lo)/(hi − lo)`), so a kW reading and a ratio can share a sum, and the projection is `level + Δ·(hi_t − lo_t)`, clamped to the target's range. Strength is a correlation magnitude used as a unit sensitivity, not a fitted slope, and every counterfactual says so. The decision records the assumptions and exclusions beside the properties and relationships read, so the answer is re-derivable after the system has moved on.
+
 ### What ingestion does
 
 `IngestSample` records the sample against the metric's own property, and everything else
 follows from the model: derived properties recompute from their members, and the estimator
-folds the observation into the relationships incident to whatever moved. The routed
-construct is passed to the Proposer, which needs construct-level values to look for
-relations the backbone does not declare.
+folds the observation into the relationships incident to whatever moved. Every observed
+property, routed or not, is then fed to the Proposer through `ObserveProperty`, which
+looks for relations between subjects and node-level properties that nothing declared
+(§6).
 
 The order matters and is the substantive part: the state model records the observation
 **before** the routing table is consulted. The routing table says what this agent knows how
@@ -983,11 +1014,31 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go` | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `CgroupCollector`   | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; declares `share-of-node-capacity` `[0,1]` (`cpu_throttle_ratio` as `share-of-periods`); subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; bounded by `-cgroup-max-subjects`; silence, not events, marks a departed subject; unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `-cgroup-units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, cpu\_throttle\_ratio |
+| `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
+| `SystemScript`      | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
 | `ParquetReplay`     | Netdata parquet datasets (out-of-process HTTP) | dissertation reproducibility | ✅ done — `cmd/replay/`               | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps           |
 | `KubeletCollector`  | kubelet `/metrics/resource`      | `edge-standard`         | planned | pod\_startup\_ms, scheduling\_latency\_ms                            |
 | `NetdataCollector`  | Netdata HTTP streaming API       | `edge-minimal` + `cloud-full` | ✅ done — `internal/minimal/collector_netdata.go` | cpu\_utilization, memory\_utilization, network\_rx\_bps, network\_tx\_bps |
+
+The `CgroupCollector` reports memory from two different places, because a cgroup v2
+root carries no memory files at all. The **root's** share comes from `/proc/meminfo`,
+as `(MemTotal − MemAvailable) / MemTotal`; when meminfo is unreadable the node simply
+has no memory property, which is the honest answer. A **subject's** share is its own
+`memory.current` over `MemTotal`; when `MemTotal` is unknown the subject has no memory
+property at all, because `memory.current` over the subject's own `memory.max` is a
+share of its limit, a different quantity, and the estimator normalises by what a sample
+declares. A root that *does* carry memory files — the daemon
+itself running inside a container, whose cgroup is its root — keeps the subject rule
+and is measured against `MemTotal`, so the ratio is still against the machine and not
+the container's limit. The declared unit `share-of-node-capacity` names exactly that
+quantity, not a fraction of any per-process or per-container ceiling; the one reading
+that is not a share of the node, `cpu_throttle_ratio` (throttled CFS periods over
+elapsed periods), is declared as `share-of-periods` instead. The two sources
+account for page cache differently — meminfo's `MemAvailable` excludes reclaimable
+cache, `memory.current` includes a cgroup's own — so the node figure and the sum of its
+subjects' figures are not the same quantity and are not expected to add up.
 
 Multiple collectors can run concurrently in the same agent (e.g., `edge-standard` runs both Cgroup and Kubelet). The map ingests all their outputs — event identities make overlapping reports of the same physical observation harmless.
 
@@ -1050,7 +1101,7 @@ dissertation arc is *engineering hygiene*, not a published figure.
 
 ### Implementation status
 
-Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and passes the routed construct to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
+Ingestion is `SemanticMap.IngestSample`, which records the sample in the state model and feeds the property to the Proposer. The autonomous scheduler that ticks the configured collector lives in `go/cmd/agent/main.go::runCollectionLoop`; it is started by `startCollectionLoop` once the daemon has built its profile. Both pieces are profile-agnostic — adding a new collector means returning it from a profile build function, no changes to the loop or to ingestion.
 
 ---
 
@@ -1061,21 +1112,33 @@ The Proposer contract supports discovering relationships the loaded specificatio
 ```
 Telemetry accumulates in the evidence layer
         ↓
-Proposer computes mutual information between construct time series
+Proposer pairs each scoped property with the node-level properties it co-occurs
+with — one pair per reading (the scope rule below)
         ↓
-If MI > threshold AND p < 0.05 AND n_observations > min_support:
+If |r| ≥ -proposer-threshold AND n ≥ -proposer-min-pairs AND the map does not
+already hold the pair:
     → Emit CandidateEdge (visible via GET /candidates)
         ↓
 Operator reviews: confirm / reject / defer
         ↓
-Confirm → OntologyContract.AddValidatedProposition()
-          (structural validation runs first — contradictions are rejected)
+Confirm → a Discovered relationship in the state map (scoped pair), declared by
+          the facade; a sign that contradicts an existing edge is refused and the
+          candidate reopened. A construct pair goes through
+          OntologyContract.AddValidatedProposition() instead.
 Reject  → Suppressed for this deployment session
+Defer   → out of the pending list; an operator's deferral stands, the cap's
+          re-enters when it outranks a pending candidate
 ```
 
-The Proposer **never modifies the backbone directly**. `Confirm` delegates to `OntologyContract.AddValidatedProposition`, which validates the new edge against existing propositions before accepting. A proposed edge that contradicts a validated proposition (e.g., a positive direction where a negative is already established) is rejected.
+The Proposer **never modifies the map or the backbone directly**. `Confirm` returns the proposition and the facade applies it: a scoped pair becomes a `Discovered` relationship in the state map, a construct pair goes through `OntologyContract.AddValidatedProposition`, which validates it against existing propositions. A declaration that fails — a positive direction where a negative already stands — reopens the candidate rather than leaving history saying Confirmed about a relationship that does not exist.
 
-The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It ring-buffers construct-level observations fed by `IngestSample` via `ObserveConstruct`, pairs values across constructs lexicographically, and emits `CandidateEdge`s when `|Pearson r|` exceeds the threshold (default 0.85). P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). `Confirm` delegates to `OntologyContract.AddValidatedProposition` with evidence source tag `proposer-mi`. The coverage check is direction-aware so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
+The `edge-minimal` profile ships with `MICorrelationProposer` enabled by default (daemon flag `-proposer=true`). It keeps one pair window per `(from, to)`, fed by `IngestSample` via `ObserveProperty` with one pair per reading — so `n` counts co-observations, not arrivals — and emits `CandidateEdge`s when `|Pearson r|` reaches the threshold (default 0.85) over at least `-proposer-min-pairs` pairs. P-values are computed via the Fisher z-transform (`z = atanh(r) × √(n−3)`, two-tailed using `math.Erfc`). The proposition a confirmation returns carries evidence source tag `proposer-mi`. The coverage check against the state map is direction-aware, so conflict-pair siblings (opposite direction on the same `(from, to)`) remain reachable there; the candidate cache itself is keyed on `(from, to)`, and a settled candidate — confirmed, rejected, or deferred by an operator — is not re-emitted under either sign within the session. Pearson stands in for true mutual information here — a richer estimator can drop in at `edge-standard`/`cloud-full` without touching the interface. Pass `-proposer=false` on resource-constrained nodes where the ring-buffer overhead is undesirable.
+
+### The scope rule and Discovered provenance
+
+The proposer is fed every observed property. It pairs a **scoped** property (one with a subject) only with **unscoped** node-level properties — never two subjects, never two node-level properties (the backbone's business) — in the direction scoped → unscoped: a subject is a component of the node, so the stated assumption is component influences whole. Readings further apart than the pair window do not form a pair; coverage is checked against the state map (a retired relationship does not count); pending candidates are capped at 64 with the weakest deferred; a retired property is forgotten.
+
+Confirming such a candidate declares a state-map relationship with provenance **Discovered** and label `discovered`. It never becomes a proposition: Di-Select's vocabulary is constructs, and a pod↔pressure edge is a fact about this machine. Provenance answers why an edge exists (seeded, discovered, asserted); the two strength layers answer what it is worth. `ObserveConstruct` remains as the explicit construct-pairing path for callers that drive it directly; ingestion does not use it.
 
 ---
 
@@ -1195,6 +1258,8 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/confirm`        | path only                                                              | `204 No Content`              | Promote a proposer candidate to a validated proposition                                                |
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session                                                    |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Keep the candidate pending; re-surface on next review                                                  |
+| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/JS/CSS for the viewer; served by `http.FileServer` over an `embed.FS` sub-tree            |
 
 Errors on the new endpoints follow a single shape:
@@ -1240,6 +1305,7 @@ There is no explicit `/ui/{$}` → `/ui/index.html` redirect. `http.FileServer` 
 | `proposition add <id> <f> <t> ±<s>` | `POST /ontology/proposition`                |                                                             |
 | `reset <from> <to>`                 | `POST /agent/reset`                         | Discard the evidence, keep the claim                        |
 | `candidates [list|confirm|reject|defer]` | `GET/POST /candidates*`                 |                                                             |
+| `estimate <target> [--assume p=v]... [--without x]...` | `GET /state/estimate` | Answer from the map, optionally under hypotheses; prints the decision id |
 | `recommend` / `simulate`            | the corresponding POST                      | Existing endpoints                                          |
 | `watch graph|edges`                 | polled GET                                  | 2s ticker; clear-screen unless `--no-color`                 |
 | `dot`                               | `GET /graph` → Graphviz                     | Direct paste into `dot -Tpdf`                               |

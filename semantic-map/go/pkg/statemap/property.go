@@ -37,11 +37,14 @@ package statemap
 
 import (
 	"fmt"
+	"github.com/DiyazY/di-agent/pkg/types"
 	"math"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/DiyazY/di-agent/pkg/stats"
 )
 
 // Kind distinguishes a property fed by telemetry from one computed from others.
@@ -122,6 +125,21 @@ type Property struct {
 	// Members are the properties a derived property aggregates.
 	Members []string `json:"members,omitempty"`
 
+	// Subject names what this property is a property of: "" for the node itself,
+	// "<kind>:<identity>" for anything narrower. It is part of the id and immutable
+	// after admission; it is stored rather than parsed back out so a subjects view is
+	// a group-by, not a regex.
+	Subject string `json:"subject,omitempty"`
+
+	// Labels is informational context stamped by the producer — a pod's QoS class,
+	// its cgroup path, a command name. Merged on later observations so enrichment can
+	// arrive late. Nothing in the map branches on a label.
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// RangeDeclared is true when a producer declared Range. False means [0,1] was
+	// assumed at admission, which an estimate has to say when it normalises by it.
+	RangeDeclared bool `json:"range_declared,omitempty"`
+
 	Status        Status    `json:"status"`
 	FirstObserved time.Time `json:"first_observed,omitzero"`
 	LastObserved  time.Time `json:"last_observed,omitzero"`
@@ -147,6 +165,11 @@ const (
 
 	// Asserted by an operator, overriding what was seeded or learned.
 	Asserted Provenance = "asserted"
+
+	// Discovered from this system's observations by the proposer and confirmed by an
+	// operator. It stays Discovered as strength is learned: provenance answers why the
+	// edge exists, the strength layers answer what it is worth.
+	Discovered Provenance = "discovered"
 )
 
 // Relationship is a directed association between two properties.
@@ -420,7 +443,7 @@ type Map struct {
 	// learns strengths itself rather than recording an estimate computed elsewhere, so
 	// there is one model of the system rather than two kept in step.
 	latest   map[string]observation
-	windows  map[string]*pairWindow
+	windows  map[string]*stats.PairWindow
 	learning bool
 	learn    LearnConfig
 
@@ -438,6 +461,10 @@ type Map struct {
 
 	// now is injectable so lifecycle transitions can be tested without sleeping.
 	now func() time.Time
+
+	// onRetire is called, outside the lock, with the id of every property that
+	// retires — by an operator or by silence. See SetRetireHook.
+	onRetire func(propertyID string)
 }
 
 // New builds an empty map.
@@ -452,7 +479,7 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		latest:        make(map[string]observation),
-		windows:       make(map[string]*pairWindow),
+		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
 		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
@@ -491,14 +518,33 @@ func (m *Map) DeclareProperty(p Property) error {
 	if p.Kind == "" {
 		p.Kind = Observed
 	}
+	if err := validScope(p.ID, p.Subject); err != nil {
+		return err
+	}
+	switch p.Status {
+	case "", Active, Stale, Retired:
+	default:
+		return fmt.Errorf("property %q declares status %q; want active, stale or retired", p.ID, p.Status)
+	}
+	if p.Kind == Derived && p.Subject != "" {
+		// A derived property is node-level structure: a summary scoped to one
+		// subject would be a subject summarising itself.
+		return fmt.Errorf("derived property %q cannot be scoped to a subject", p.ID)
+	}
+	if p.RangeDeclared && p.Range == ([2]float64{}) {
+		return fmt.Errorf("property %q declares a range it does not give", p.ID)
+	}
+	if p.Range != ([2]float64{}) {
+		if err := validRange(p.Range); err != nil {
+			return fmt.Errorf("property %q: %w", p.ID, err)
+		}
+		p.RangeDeclared = true
+	}
 	if p.Kind == Derived && len(p.Members) == 0 {
 		return fmt.Errorf("derived property %q has no members: it would have nothing to summarise", p.ID)
 	}
 	if p.Kind == Observed && len(p.Members) > 0 {
 		return fmt.Errorf("observed property %q lists members: a property is fed by telemetry or computed from others, not both", p.ID)
-	}
-	if p.Range[1] < p.Range[0] {
-		return fmt.Errorf("property %q has inverted range [%v, %v]", p.ID, p.Range[0], p.Range[1])
 	}
 
 	m.mu.Lock()
@@ -507,7 +553,7 @@ func (m *Map) DeclareProperty(p Property) error {
 	now := m.now()
 	existing, ok := m.properties[p.ID]
 	if !ok {
-		np := p
+		np := p.clone()
 		if np.Status == "" {
 			np.Status = Active
 		}
@@ -536,9 +582,22 @@ func (m *Map) DeclareProperty(p Property) error {
 		changed["source"] = p.Source
 		existing.Source = p.Source
 	}
-	if p.Range != ([2]float64{}) && existing.Range != p.Range {
-		changed["range"] = p.Range
-		existing.Range = p.Range
+	if p.Range != ([2]float64{}) {
+		// A declaration that carries a range declares it, whether or not the numbers
+		// differ from what the map had assumed. Comparing only the numbers left a
+		// property whose producer declares exactly the assumed [0,1] flagged as
+		// assumed forever: every estimate reading it would caveat a range that was in
+		// fact declared, and reconcileDeclarationLocked would let a later producer
+		// overwrite it. The journal still only hears about an actual change, so a
+		// collector restart re-declaring the same thing stays silent.
+		if existing.Range != p.Range {
+			changed["range"] = p.Range
+			existing.Range = p.Range
+		}
+		if !existing.RangeDeclared {
+			changed["range_declared"] = true
+			existing.RangeDeclared = true
+		}
 	}
 	if len(p.Members) > 0 && !sameStrings(existing.Members, p.Members) {
 		changed["members"] = p.Members
@@ -557,33 +616,49 @@ func (m *Map) DeclareProperty(p Property) error {
 	return nil
 }
 
-// Observe records a measurement of a property.
-//
-// An unknown property is admitted when Config.AdmitUnknown is set, which is the
-// mechanism by which the map follows a system that changes rather than a schema
-// someone wrote down. The admission is journalled, so a property that appears in
-// production is discoverable afterwards.
-func (m *Map) Observe(id string, value float64, at time.Time) error {
-	return m.ObserveEvent(id, value, at, "")
+// Observation is one reading of a property, with everything the producer declared
+// about it. Record is the one path into the map for telemetry; Observe and
+// ObserveEvent are conveniences over it.
+type Observation struct {
+	ID      string
+	Value   float64
+	At      time.Time
+	EventID string
+	Subject string
+	Unit    string
+	Range   *[2]float64
+	Source  string
+	Labels  map[string]string
 }
 
-// ObserveEvent is Observe with the observation's event identity.
-//
-// The identity does two jobs. The paired estimator uses it to recognise a pair it has
-// already folded in, and this method uses it to recognise the observation itself: an
-// event already seen is a no-op. Both matter for the same reason — a caller replaying an
-// archive, or a collector that re-sends after a timeout, would otherwise inflate
-// confidence, which is a claim about how much observation stands behind a value. The
-// value would barely move (the same number re-averaged is the same number) while the
-// count behind it doubled, so the map would report certainty it had not earned.
-//
-// An observation with no event identity cannot be recognised and is always applied.
+func (m *Map) Observe(id string, value float64, at time.Time) error {
+	return m.Record(Observation{ID: id, Value: value, At: at})
+}
+
 func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID string) error {
+	return m.Record(Observation{ID: id, Value: value, At: at, EventID: eventID})
+}
+
+// Record applies one observation. An unknown property is admitted when
+// Config.AdmitUnknown is set and stamped with the observation's subject, unit, range,
+// source and labels — the mechanism by which the map follows a system that changes
+// rather than a schema someone wrote down. A later observation merges labels; a
+// unit or range declared late is adopted; subject, unit and range are fixed once
+// declared, and an observation that contradicts them is journaled as a conflict and
+// refused, because two producers describing one id differently is a fault worth
+// seeing rather than a value worth averaging.
+func (m *Map) Record(o Observation) error {
+	id, value, at, eventID := o.ID, o.Value, o.At, o.EventID
 	if id == "" {
 		return fmt.Errorf("observation needs a property id")
 	}
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("property %q observed with non-finite value", id)
+	}
+	if o.Range != nil {
+		if err := validRange(*o.Range); err != nil {
+			return fmt.Errorf("property %q: %w", id, err)
+		}
 	}
 	if at.IsZero() {
 		at = m.now()
@@ -604,18 +679,41 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 		if !m.cfg.AdmitUnknown {
 			return fmt.Errorf("property %q is not declared and admission is disabled", id)
 		}
+		if err := validScope(id, o.Subject); err != nil {
+			return err
+		}
 		p = &Property{
 			ID: id, Kind: Observed, Status: Active,
 			Range: [2]float64{0, 1}, Source: "admitted-on-observation",
+			Subject: o.Subject, Unit: o.Unit,
+		}
+		if o.Range != nil {
+			p.Range = *o.Range
+			p.RangeDeclared = true
+		}
+		if o.Source != "" {
+			p.Source = o.Source
+		}
+		if len(o.Labels) > 0 {
+			p.Labels = copyLabels(o.Labels)
 		}
 		m.properties[id] = p
 		m.bump(EventPropertyAdmitted, id, "system", map[string]any{
-			"value": value, "reason": "first observation of an undeclared property",
+			"value": value, "subject": o.Subject, "unit": o.Unit,
+			"range_declared": p.RangeDeclared,
+			"reason":         "first observation of an undeclared property",
 		}, at)
-	}
-	if p.Kind == Derived {
-		return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
-			id, p.Members)
+	} else {
+		// Checked before reconciling: a derived id is rejected outright, and
+		// reconciling first would journal a conflict and advance the revision for an
+		// observation that is about to be refused anyway.
+		if p.Kind == Derived {
+			return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
+				id, p.Members)
+		}
+		if err := m.reconcileDeclarationLocked(p, o, at); err != nil {
+			return err
+		}
 	}
 
 	if p.Range != ([2]float64{}) && (value < p.Range[0] || value > p.Range[1]) {
@@ -630,7 +728,16 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 	p.NObservations++
 	p.LastObserved = at
 	p.Confidence = clamp01(float64(p.NObservations) / float64(m.cfg.ConvergenceObservations))
-	if p.Status != Retired {
+	if p.Status == Retired {
+		// The system is exhibiting it again, which is exactly the event retirement
+		// was recording the absence of. Its retired relationships stay retired:
+		// structure re-earns its place through the proposer.
+		p.Status = Active
+		p.RetiredReason = ""
+		m.bump(EventPropertyRedeclared, id, "system", map[string]any{
+			"revived": true, "reason": "observed after retirement",
+		}, at)
+	} else {
 		p.Status = Active
 	}
 	m.revision++
@@ -656,6 +763,108 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 	return nil
 }
 
+// reconcileDeclarationLocked merges what a later observation says about a property
+// with what the map already holds. Labels merge; subject, unit and range are fixed once
+// declared, and an observation that contradicts them is journaled as a conflict and
+// refused: two producers describing one id differently is a fault worth seeing, not a
+// value worth averaging. Nothing else about the property changes on a refusal.
+func (m *Map) reconcileDeclarationLocked(p *Property, o Observation, at time.Time) error {
+	conflict := map[string]any{}
+	if o.Subject != p.Subject {
+		// Including an observation with no subject at all: that is how an unscoped
+		// reading named "cpu@pod:a" would land on the pod's property.
+		conflict["subject"] = map[string]string{"held": p.Subject, "observed": o.Subject}
+	}
+	if o.Unit != "" && p.Unit != "" && o.Unit != p.Unit {
+		conflict["unit"] = map[string]string{"held": p.Unit, "observed": o.Unit}
+	}
+	if o.Range != nil && p.RangeDeclared && *o.Range != p.Range {
+		conflict["range"] = map[string]any{"held": p.Range, "observed": *o.Range}
+	}
+	if len(conflict) > 0 {
+		m.bump(EventPropertyConflict, p.ID, "system", conflict, at)
+		fields := make([]string, 0, len(conflict))
+		for k := range conflict {
+			fields = append(fields, k)
+		}
+		sort.Strings(fields)
+		return fmt.Errorf("observation of %q contradicts its declaration (%s); journaled as a conflict and not applied",
+			p.ID, strings.Join(fields, ", "))
+	}
+	if o.Range != nil && !p.RangeDeclared {
+		// A declaration arriving after an assumption is not a conflict; it is the
+		// producer saying what it meant, and the map takes it.
+		p.Range = *o.Range
+		p.RangeDeclared = true
+	}
+	if o.Unit != "" && p.Unit == "" {
+		p.Unit = o.Unit
+	}
+	if len(o.Labels) > 0 {
+		if p.Labels == nil {
+			p.Labels = map[string]string{}
+		}
+		for k, v := range o.Labels {
+			p.Labels[k] = v
+		}
+	}
+	return nil
+}
+
+// validRange refuses a range the estimator could not normalise by: non-finite
+// bounds, or hi not above lo.
+func validRange(r [2]float64) error {
+	if math.IsNaN(r[0]) || math.IsNaN(r[1]) || math.IsInf(r[0], 0) || math.IsInf(r[1], 0) {
+		return fmt.Errorf("range [%v, %v] is not finite", r[0], r[1])
+	}
+	if r[1] <= r[0] {
+		return fmt.Errorf("range [%v, %v] is empty: hi must exceed lo", r[0], r[1])
+	}
+	return nil
+}
+
+// validScope checks that a subject, when present, is well-formed and is the suffix
+// of the id (<metric>@<subject>), and that an id without a subject does not look
+// scoped. The subject is part of the identity; the two must not disagree.
+func validScope(id, subject string) error {
+	if subject == "" {
+		if strings.Contains(id, "@") {
+			return fmt.Errorf("property %q looks scoped (metric@subject) but carries no subject", id)
+		}
+		return nil
+	}
+	if !types.ValidSubject(subject) {
+		return fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", subject)
+	}
+	metric, ok := strings.CutSuffix(id, "@"+subject)
+	if !ok || !types.ValidMetricType(metric) {
+		return fmt.Errorf("property %q does not have the form <metric>@%s", id, subject)
+	}
+	return nil
+}
+
+// clone is a deep copy of a property: Labels and Members are the two fields that
+// are mutated in place (label merges, member updates), so a shallow copy handed to
+// a reader would let a committed decision change after the fact and let a caller
+// write into the map.
+func (p Property) clone() Property {
+	if p.Labels != nil {
+		p.Labels = copyLabels(p.Labels)
+	}
+	if p.Members != nil {
+		p.Members = append([]string(nil), p.Members...)
+	}
+	return p
+}
+
+func copyLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func containsString(hay []string, needle string) bool {
 	for _, h := range hay {
 		if h == needle {
@@ -665,45 +874,118 @@ func containsString(hay []string, needle string) bool {
 	return false
 }
 
-// RetireProperty withdraws a property from reasoning, keeping its record.
-func (m *Map) RetireProperty(id, reason, actor string) error {
+// SetRetireHook registers a function called, outside the lock, with the id of every
+// property that retires — by an operator or by silence. The facade uses it to let the
+// proposer forget a subject that is gone.
+func (m *Map) SetRetireHook(fn func(propertyID string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.onRetire = fn
+}
 
-	p, ok := m.properties[id]
-	if !ok {
-		return fmt.Errorf("property %q not found", id)
-	}
-	if p.Status == Retired {
-		return nil
-	}
+// retireLocked withdraws a property and every relationship incident to it. Caller
+// holds the write lock. Both retirement paths use it, so an edge cannot be left
+// active with a retired endpoint whichever way the endpoint went.
+func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 	p.Status = Retired
 	p.RetiredReason = reason
-	now := m.now()
-
-	// A relationship whose endpoint is gone cannot be evaluated. Retiring it with a
-	// reason that points at the cause keeps the graph consistent and the audit
-	// trail readable, rather than leaving edges that silently never fire.
 	for _, r := range m.relationships {
 		if r.Status == Retired {
 			continue
 		}
-		if r.From == id || r.To == id {
+		if r.From == p.ID || r.To == p.ID {
 			r.Status = Retired
-			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", id, reason)
+			r.RetiredReason = fmt.Sprintf("endpoint %s retired: %s", p.ID, reason)
 			m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{
-				"reason": r.RetiredReason, "cascade_from": id,
+				"reason": r.RetiredReason, "cascade_from": p.ID,
 			}, now)
 		}
 	}
-	m.bump(EventPropertyRetired, id, actor, map[string]any{"reason": reason}, now)
+	m.bump(EventPropertyRetired, p.ID, actor, map[string]any{"reason": reason}, now)
+}
+
+func (m *Map) fireRetireHook(ids []string) {
+	m.mu.RLock()
+	fn := m.onRetire
+	m.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	for _, id := range ids {
+		// The hook runs outside the lock, so an observation can revive the
+		// property between the retirement and this call. Re-check, and skip a
+		// property that is exhibited again: forgetting it would drop the
+		// proposer's live buffers for a live property. The window between this
+		// check and the call remains, and is benign — Forget only drops buffers.
+		m.mu.RLock()
+		p, ok := m.properties[id]
+		retired := ok && p.Status == Retired
+		m.mu.RUnlock()
+		if !retired {
+			continue
+		}
+		m.callRetireHook(fn, id)
+	}
+}
+
+// callRetireHook runs one hook call under a recover: the hook is the caller's
+// code on the sweep goroutine, and a panic there must neither take the sweep down
+// nor skip the properties after it. The failure is journaled, not hidden.
+func (m *Map) callRetireHook(fn func(string), id string) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.mu.Lock()
+			m.bump(EventHookFailed, id, "system", map[string]any{"panic": fmt.Sprint(r)}, m.now())
+			m.mu.Unlock()
+		}
+	}()
+	fn(id)
+}
+
+// RetireProperty withdraws a property from reasoning, keeping its record.
+func (m *Map) RetireProperty(id, reason, actor string) error {
+	retired, err := m.retirePropertyLocked(id, reason, actor)
+	if err != nil || !retired {
+		return err
+	}
+	m.fireRetireHook([]string{id})
 	return nil
+}
+
+// retirePropertyLocked is the part of RetireProperty that runs under the write lock,
+// split out so the unlock can be deferred. A panic anywhere in here — the clock, the
+// journal, a hook a future revision adds — would otherwise leave the map's write lock
+// held forever, and net/http recovers a handler panic, so the daemon would go on
+// accepting connections while every map operation blocked on it. It reports whether
+// anything was actually retired, so the caller knows to fire the hook.
+func (m *Map) retirePropertyLocked(id, reason, actor string) (retired bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.properties[id]
+	if !ok {
+		return false, fmt.Errorf("property %q not found", id)
+	}
+	if p.Status == Retired {
+		return false, nil
+	}
+	m.retireLocked(p, reason, actor, m.now())
+	return true, nil
 }
 
 // Sweep applies time-based lifecycle transitions and returns what changed. It is
 // idempotent, so a caller may run it on a timer or before a query without
 // producing duplicate journal entries for the same transition.
 func (m *Map) Sweep() (stale, retired []string) {
+	stale, retired = m.sweepLocked()
+	m.fireRetireHook(retired)
+	return stale, retired
+}
+
+// sweepLocked is the part of Sweep that runs under the write lock, split out for the
+// same reason as retirePropertyLocked: the unlock is deferred, so a panic raised in
+// here cannot wedge the map. The retire hook runs afterwards, outside the lock, so a
+// hook that reads the map cannot deadlock against the sweep that called it.
+func (m *Map) sweepLocked() (stale, retired []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -715,11 +997,8 @@ func (m *Map) Sweep() (stale, retired []string) {
 		silence := now.Sub(p.LastObserved)
 		switch {
 		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter:
-			p.Status = Retired
-			p.RetiredReason = fmt.Sprintf("no observation for %s", silence.Round(time.Second))
+			m.retireLocked(p, fmt.Sprintf("no observation for %s", silence.Round(time.Second)), "sweep", now)
 			retired = append(retired, p.ID)
-			m.bump(EventPropertyRetired, p.ID, "sweep",
-				map[string]any{"reason": p.RetiredReason, "silence_s": silence.Seconds()}, now)
 		case silence > m.cfg.StaleAfter && p.Status != Stale:
 			p.Status = Stale
 			stale = append(stale, p.ID)
@@ -729,6 +1008,7 @@ func (m *Map) Sweep() (stale, retired []string) {
 	}
 	sort.Strings(stale)
 	sort.Strings(retired)
+	m.recomputeDerivedLocked(now)
 	return stale, retired
 }
 
@@ -758,8 +1038,17 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 			n++
 		}
 		if n == 0 {
+			// A summary of nothing is stale, not current. The last value is kept so a
+			// decision made from it stays reconstructible; the count is kept so "how
+			// much did this rest on" is still answerable; confidence says none of it
+			// is supported now.
 			d.Confidence = 0
-			d.NObservations = 0
+			if d.Status == Active && d.NObservations > 0 {
+				d.Status = Stale
+				m.bump(EventPropertyStale, d.ID, "sweep", map[string]any{
+					"reason": "no active member with observations",
+				}, at)
+			}
 			continue
 		}
 		d.Value = sum / float64(n)
@@ -768,6 +1057,12 @@ func (m *Map) recomputeDerivedLocked(at time.Time) {
 		d.LastObserved = at
 		if d.FirstObserved.IsZero() {
 			d.FirstObserved = at
+		}
+		if d.Status == Stale {
+			d.Status = Active
+			m.bump(EventPropertyRedeclared, d.ID, "system", map[string]any{
+				"revived": true, "reason": "a member is active again", "members_active": n,
+			}, at)
 		}
 	}
 }
@@ -793,9 +1088,23 @@ func (m *Map) DeclareRelationship(r Relationship) error {
 	if r.Sign != 1 && r.Sign != -1 {
 		return fmt.Errorf("relationship %s->%s has sign %d, want +1 or -1", r.From, r.To, r.Sign)
 	}
-	if r.Provenance == "" {
+	switch r.Provenance {
+	case "":
 		r.Provenance = Seeded
+	case Seeded, Asserted, Discovered:
+	default:
+		// Learned is what the map writes when it folds evidence; a declaration
+		// cannot claim it, or a caller could fabricate a learned edge.
+		return fmt.Errorf("relationship %s->%s declares provenance %q; only seeded, asserted or discovered can be declared",
+			r.From, r.To, r.Provenance)
 	}
+	// A declaration asserts that a relationship exists and which way it runs. What
+	// it is worth is for the machine to say, so every evidence field the caller may
+	// have filled — including through POST /state/relationships — is dropped here.
+	r.Strength, r.Confidence, r.NObservations = 0, 0, 0
+	r.Established, r.Assertion = nil, nil
+	r.SignAgreements, r.SignConflicts, r.SignSuspectFlag = 0, 0, false
+	r.FirstObserved, r.LastObserved = time.Time{}, time.Time{}
 	r.ID = RelationshipID(r.From, r.To, r.Label)
 
 	m.mu.Lock()
@@ -995,6 +1304,10 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 	r.NObservations = 0
 	r.FirstObserved = time.Time{}
 	r.LastObserved = time.Time{}
+	r.Established = nil
+	r.SignAgreements = 0
+	r.SignConflicts = 0
+	r.SignSuspectFlag = false
 	if r.Provenance == Learned {
 		// Back to seeded: the strength in force is the prior again, and provenance has to
 		// say so or the next reader will treat an unobserved edge as a measured one.

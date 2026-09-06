@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -199,6 +201,29 @@ func (c *Client) Candidates(ctx context.Context) ([]CandidateEdge, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// Estimate calls GET /state/estimate with optional hypotheses. assume is
+// property → value; without lists subjects or properties taken to their floor.
+func (c *Client) Estimate(ctx context.Context, target string, assume map[string]float64, without []string) (*EstimateResponse, error) {
+	q := url.Values{}
+	q.Set("target", target)
+	keys := make([]string, 0, len(assume))
+	for k := range assume {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		q.Add("assume", k+"="+strconv.FormatFloat(assume[k], 'g', -1, 64))
+	}
+	for _, w := range without {
+		q.Add("without", w)
+	}
+	var out EstimateResponse
+	if err := c.getJSON(ctx, "/state/estimate", q, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // ── Mutation endpoints ────────────────────────────────────────────────────────

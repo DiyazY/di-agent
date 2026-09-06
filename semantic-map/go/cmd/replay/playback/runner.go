@@ -19,11 +19,10 @@
 //	EventID = sha256("replay:" + filename + ":" + hostname + ":" +
 //	                 chart_context + ":" + metric_id + ":" + relative_time)[:16]
 //
-//	This makes the replay idempotent through the Updater: replaying the
-//	same parquet twice cannot inflate edge n_observations on the second
-//	pass — the dedupe set inside UpdateEdge will skip every EventID it
-//	has seen. End-to-end idempotency proof is in the acceptance section
-//	of the README.
+//	This makes the replay idempotent through the state model: replaying the
+//	same parquet twice cannot inflate n_observations on the second pass,
+//	because the map recognises an event id it has already applied.
+//	End-to-end idempotency proof is in the acceptance section of the README.
 package playback
 
 import (
@@ -94,7 +93,7 @@ func (s Summary) String() string {
 
 // EventID returns the deterministic 16-character event identifier for one
 // (filename, hostname, chart_context, metric_id, relative_time) tuple. It
-// is the contract that makes re-replays idempotent through the Updater.
+// is the contract that makes re-replays idempotent through the state model.
 // Exported so unit tests can assert determinism without reaching into
 // internals.
 func EventID(parquetFilename, hostname, chartContext, metricID string, relativeTime int64) string {
@@ -107,10 +106,20 @@ func EventID(parquetFilename, hostname, chartContext, metricID string, relativeT
 	return hex.EncodeToString(h[:8]) // 16 hex chars
 }
 
-// Run streams the parquet at cfg.ParquetPath through the Bridge of the
-// daemon behind sender. Each row that maps to a known MetricType becomes
-// one POST /ingest-sample call. Rows are grouped by relative_time; the
-// wall clock advances by 1/Speed seconds between consecutive groups.
+// replayRange is the range every replayed sample is declared with: mapping.FromRow
+// normalises each supported triple to a fraction of node capacity (or of a 1 Gbps
+// reference for the two network rates) before it becomes a value here.
+var replayRange = [2]float64{0, 1}
+
+// SourceID is the stable source identifier the replayed samples carry — one per
+// parquet, matching the "replay:<file>" prefix the EventID hashes over, so a property
+// in the map names the dataset it came from.
+func SourceID(parquetFilename string) string { return "replay:" + parquetFilename }
+
+// Run streams the parquet at cfg.ParquetPath into the daemon behind sender
+// via the facade's IngestSample. Each row that maps to a known MetricType
+// becomes one POST /ingest-sample call. Rows are grouped by relative_time;
+// the wall clock advances by 1/Speed seconds between consecutive groups.
 //
 // Returns the Summary after the parquet is fully consumed, or the first
 // HTTP error if /ingest-sample fails (subsequent rows are not sent — a
@@ -199,12 +208,16 @@ func Run(ctx context.Context, sender Sender, cfg Config) (*Summary, error) {
 			summary.SamplesSkipped++
 			continue
 		}
+		rng := replayRange
 		req := client.MetricSampleRequest{
 			NodeID:        row.Hostname,
 			MetricType:    string(m.MetricType),
 			Value:         m.Value,
 			TimestampUnix: time.Now().Unix(),
 			EventID:       EventID(parquetName, row.Hostname, row.ChartContext, row.MetricID, row.RelativeTime),
+			Unit:          "fraction",
+			Range:         &rng,
+			Source:        SourceID(parquetName),
 			Labels: map[string]string{
 				"parquet":       parquetName,
 				"chart_context": row.ChartContext,

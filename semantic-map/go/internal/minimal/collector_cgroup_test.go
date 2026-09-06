@@ -1,0 +1,559 @@
+package minimal
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/DiyazY/di-agent/pkg/types"
+)
+
+const testUID = "8f3c1234-aaaa-bbbb-cccc-1234567890ab"
+
+func writeCgroup(t *testing.T, dir string, usageUsec, periods, throttled uint64, memCurrent string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cpu := "usage_usec " + strconv.FormatUint(usageUsec, 10) + "\nnr_periods " + strconv.FormatUint(periods, 10) +
+		"\nnr_throttled " + strconv.FormatUint(throttled, 10) + "\n"
+	for name, content := range map[string]string{"cpu.stat": cpu, "memory.current": memCurrent + "\n", "memory.max": "max\n", "cgroup.procs": "4242\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// nestedPodUID is a pod-shaped cgroup created INSIDE podA's directory, so the walk
+// would recognise it if (and only if) it wrongly descended into an already-recognised
+// subject. It must never appear as a subject.
+const nestedPodUID = "22222222-3333-4444-5555-666666666666"
+
+// Fake /proc/meminfo values for the tree below: a node with 8 GiB of which 6 GiB is
+// available, so the node memory share is (8192000 − 6144000) / 8192000 = 0.25.
+const (
+	fakeMemTotalKB     = 8192000
+	fakeMemAvailableKB = 6144000
+	fakeMemShare       = float64(fakeMemTotalKB-fakeMemAvailableKB) / float64(fakeMemTotalKB)
+)
+
+// writeRootCgroup writes a cgroup v2 hierarchy ROOT: cpu.stat, and deliberately no
+// memory.current / memory.max. The kernel does not create memory files at the root of
+// a v2 hierarchy, so a fixture that writes them there certifies a filesystem shape no
+// real host can present.
+func writeRootCgroup(t *testing.T, dir string, usageUsec, periods, throttled uint64) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cpu := "usage_usec " + strconv.FormatUint(usageUsec, 10) + "\nnr_periods " + strconv.FormatUint(periods, 10) +
+		"\nnr_throttled " + strconv.FormatUint(throttled, 10) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(cpu), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFakeProc writes a /proc tree holding just the meminfo the root's memory share
+// is computed from.
+func writeFakeProc(t *testing.T) string {
+	t.Helper()
+	procRoot := t.TempDir()
+	meminfo := "MemTotal:       " + strconv.Itoa(fakeMemTotalKB) + " kB\n" +
+		"MemFree:          123456 kB\n" +
+		"MemAvailable:   " + strconv.Itoa(fakeMemAvailableKB) + " kB\n"
+	if err := os.WriteFile(filepath.Join(procRoot, "meminfo"), []byte(meminfo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return procRoot
+}
+
+// fakeTree builds a root with one systemd pod (plus a container scope AND a nested
+// pod-shaped cgroup under it), one cgroupfs pod, and one systemd unit, alongside a
+// fake /proc the root's memory share comes from.
+func fakeTree(t *testing.T) (root, podA, podB, unit, procRoot string) {
+	t.Helper()
+	root = t.TempDir()
+	procRoot = writeFakeProc(t)
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	podA = filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+	writeCgroup(t, podA, 1_000_000, 100, 10, "268435456")
+	writeCgroup(t, filepath.Join(podA, "cri-containerd-abc.scope"), 900_000, 100, 10, "200000000")
+	// A directory the recogniser WOULD accept as a pod subject, nested inside podA.
+	// The walk must not descend into podA (already a recognised subject) to find it.
+	writeCgroup(t, filepath.Join(podA, "kubepods-burstable-pod22222222_3333_4444_5555_666666666666.slice"), 100_000, 0, 0, "10000000")
+	podB = filepath.Join(root, "kubepods", "besteffort", "pod"+"11111111-2222-3333-4444-555555555555")
+	writeCgroup(t, podB, 500_000, 0, 0, "134217728")
+	unit = filepath.Join(root, "system.slice", "k0sworker.service")
+	writeCgroup(t, unit, 2_000_000, 0, 0, "67108864")
+	return
+}
+
+func advance(t *testing.T, dir string, usageUsec, periods, throttled uint64) {
+	t.Helper()
+	cpu := "usage_usec " + strconv.FormatUint(usageUsec, 10) + "\nnr_periods " + strconv.FormatUint(periods, 10) +
+		"\nnr_throttled " + strconv.FormatUint(throttled, 10) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(cpu), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func bySubject(samples []*types.MetricSample) map[string]map[types.MetricType]*types.MetricSample {
+	out := map[string]map[types.MetricType]*types.MetricSample{}
+	for _, s := range samples {
+		if out[s.Subject] == nil {
+			out[s.Subject] = map[types.MetricType]*types.MetricSample{}
+		}
+		out[s.Subject][s.MetricType] = s
+	}
+	return out
+}
+
+func TestCollectWalksPodsAsSubjects(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c.numCPU = 4
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	advance(t, podA, 1_000_000+40_000, 110, 15) // +40ms cpu over ~20ms wall on 4 cpus ≈ 0.5 share
+	advance(t, podB, 500_000, 0, 0)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	a := got["pod:"+testUID]
+	if a == nil {
+		t.Fatalf("pod A missing; subjects=%v", keys(got))
+	}
+	if a[types.MemoryUtilization] == nil || a[types.MemoryUtilization].Value != float64(268435456)/float64(4<<30) {
+		t.Errorf("pod A memory share %v; want memory.current / MemTotal", a[types.MemoryUtilization])
+	}
+	if s := a[types.CPUUtilization]; s == nil || s.Value <= 0 || s.Value > 1 || s.Unit != "share-of-node-capacity" || s.Range == nil || s.Labels["qos"] != "burstable" {
+		t.Errorf("pod A cpu sample %+v; want a share in (0,1] with declared unit/range and labels", s)
+	}
+	if s := a[types.CPUThrottleRatio]; s == nil || s.Value != 0.5 {
+		t.Errorf("pod A throttle %v; want 5/10 = 0.5", s)
+	}
+	if got["pod:11111111-2222-3333-4444-555555555555"][types.CPUThrottleRatio] != nil {
+		t.Error("a pod whose periods never advance must not get a throttle property")
+	}
+	if _, ok := got[""]; !ok {
+		t.Error("the node-level (root) samples must still be emitted")
+	}
+	if _, ok := got["pod:"+nestedPodUID]; ok {
+		t.Error("the walk must not descend into a recognised directory: the nested pod-shaped cgroup under podA must not become its own subject")
+	}
+	for subj := range got {
+		if subj != "" && subj[:4] != "pod:" {
+			t.Errorf("unexpected subject %q: units are off by default and container scopes are never subjects", subj)
+		}
+	}
+}
+
+func TestCollectUnitsAllowlistAndCap(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 1, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, _ := c.Collect()
+	got := bySubject(samples)
+	delete(got, "")
+	if len(got) != 1 {
+		t.Errorf("cap of 1 subject not enforced: %v", keys(got))
+	}
+	c2 := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, _ = c2.Collect()
+	if bySubject(samples)["unit:k0sworker.service"] == nil {
+		t.Error("allowlisted unit was not a subject")
+	}
+}
+
+func TestVanishedSubjectDropsItsSnapshotAndEmitsNothing(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c.Collect()
+	if err := os.RemoveAll(podA); err != nil {
+		t.Fatal(err)
+	}
+	samples, _ := c.Collect()
+	if bySubject(samples)["pod:"+testUID] != nil {
+		t.Error("a vanished pod produced samples")
+	}
+	c.mu.Lock()
+	_, still := c.prev["pod:"+testUID]
+	c.mu.Unlock()
+	if still {
+		t.Error("the vanished subject's snapshot was kept")
+	}
+}
+
+// TestRootMemoryComesFromMeminfoOnCgroupV2 pins where the node-level memory share
+// comes from. The root of a cgroup v2 hierarchy has no memory.current / memory.max, so
+// reading them there fails and the node would have no memory property at all — the one
+// number an operator asking "how much memory is this machine using" expects. /proc
+// answers it instead: (MemTotal − MemAvailable) / MemTotal.
+func TestRootMemoryComesFromMeminfoOnCgroupV2(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, _ := c.Collect()
+	s := bySubject(samples)[""][types.MemoryUtilization]
+	if s == nil {
+		t.Fatal("the root emitted no memory sample; a cgroup v2 root has no memory files, so /proc/meminfo must answer")
+	}
+	if s.Value != fakeMemShare {
+		t.Errorf("root memory share %v; want (MemTotal − MemAvailable) / MemTotal = %v", s.Value, fakeMemShare)
+	}
+	if s.Unit != "share-of-node-capacity" || s.Range == nil {
+		t.Errorf("root memory sample %+v; want the declared unit and range", s)
+	}
+}
+
+// TestRootMemoryIsSilentWhenMeminfoIsUnreadable: no memory files at the root and no
+// readable meminfo means the collector has no basis for a node memory share, and
+// inventing one would be worse than not answering.
+func TestRootMemoryIsSilentWhenMeminfoIsUnreadable(t *testing.T) {
+	root, _, _, _, _ := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{MemTotalBytes: 4 << 30, ProcRoot: t.TempDir()})
+	samples, _ := c.Collect()
+	if s := bySubject(samples)[""][types.MemoryUtilization]; s != nil {
+		t.Errorf("root memory sample %+v; want none when neither the cgroup nor meminfo can say", s)
+	}
+}
+
+// TestSubjectWithoutMemoryAccountingStillReportsCPU covers the case where a systemd
+// unit's cgroup has no memory.current/memory.max (memory accounting disabled for that
+// unit) but does have cpu.stat. Losing memory must not discard the CPU samples: only
+// the memory sample should be skipped.
+func TestSubjectWithoutMemoryAccountingStillReportsCPU(t *testing.T) {
+	root := t.TempDir()
+	writeCgroup(t, root, 10_000_000, 0, 0, "2147483648")
+	unit := filepath.Join(root, "system.slice", "k0sworker.service")
+	if err := os.MkdirAll(unit, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unit, "cgroup.procs"), []byte("4242\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately no memory.current / memory.max in this directory.
+	advance(t, unit, 1_000_000, 0, 0)
+
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"k0s*.service"}, MaxSubjects: 256, MemTotalBytes: 4 << 30})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	advance(t, unit, 1_040_000, 0, 0)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	u := got["unit:k0sworker.service"]
+	if u == nil {
+		t.Fatalf("unit subject missing entirely because memory accounting is absent; subjects=%v", keys(got))
+	}
+	if u[types.CPUUtilization] == nil {
+		t.Error("unit subject should still report cpu_utilization when memory.current/memory.max are absent")
+	}
+	if u[types.MemoryUtilization] != nil {
+		t.Error("unit subject should have no memory_utilization sample when memory.current/memory.max are absent")
+	}
+}
+
+// TestReadMemTotalParsesMeminfoAndFallsBackToZero covers readMemTotal directly: a
+// well-formed meminfo file, a missing file, and a malformed MemTotal value.
+func TestReadMemTotalParsesMeminfoAndFallsBackToZero(t *testing.T) {
+	dir := t.TempDir()
+
+	good := filepath.Join(dir, "meminfo_good")
+	if err := os.WriteFile(good, []byte("MemTotal:       16384000 kB\nMemFree:          123456 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readMemTotal(good), uint64(16384000*1024); got != want {
+		t.Errorf("readMemTotal(good) = %d; want %d", got, want)
+	}
+
+	missing := filepath.Join(dir, "does-not-exist")
+	if got := readMemTotal(missing); got != 0 {
+		t.Errorf("readMemTotal(missing) = %d; want 0", got)
+	}
+
+	malformed := filepath.Join(dir, "meminfo_bad")
+	if err := os.WriteFile(malformed, []byte("MemTotal:       notanumber kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readMemTotal(malformed); got != 0 {
+		t.Errorf("readMemTotal(malformed) = %d; want 0", got)
+	}
+}
+
+// TestCmdLabelReadsArgv0AndIgnoresEmpty covers cmdLabel directly: a normal argv0, an
+// empty cmdline (must not yield the filepath.Base("") == "." bug), and a cgroup.procs
+// with no PID.
+func TestCmdLabelReadsArgv0AndIgnoresEmpty(t *testing.T) {
+	root := t.TempDir()
+	procRoot := t.TempDir()
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, CmdLabel: true, ProcRoot: procRoot, MemTotalBytes: 4 << 30})
+
+	// Case 1: argv0 is /usr/bin/ffmpeg -> cmd=ffmpeg.
+	dir1 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir1, "cgroup.procs"), []byte("111\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pidDir1 := filepath.Join(procRoot, "111")
+	if err := os.MkdirAll(pidDir1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir1, "cmdline"), []byte("/usr/bin/ffmpeg\x00-i\x00in.mp4\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := c.cmdLabel(dir1), "ffmpeg"; got != want {
+		t.Errorf("cmdLabel with argv0=/usr/bin/ffmpeg = %q; want %q", got, want)
+	}
+
+	// Case 2: empty cmdline -> no cmd label ("").
+	dir2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir2, "cgroup.procs"), []byte("222\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pidDir2 := filepath.Join(procRoot, "222")
+	if err := os.MkdirAll(pidDir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pidDir2, "cmdline"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.cmdLabel(dir2); got != "" {
+		t.Errorf("cmdLabel with empty cmdline = %q; want \"\" (not \".\")", got)
+	}
+
+	// Case 3: cgroup.procs has no PID -> no label.
+	dir3 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir3, "cgroup.procs"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.cmdLabel(dir3); got != "" {
+		t.Errorf("cmdLabel with no PID in cgroup.procs = %q; want \"\"", got)
+	}
+}
+
+func keys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestSubjectMemoryIsSilentWhenNodeCapacityIsUnknown: without MemTotal there is no
+// share of node capacity to report. memory.current / memory.max is a share of the
+// subject's own limit — a different quantity — and stamping it with this collector's
+// unit would hand the estimator a number that is not what it says it is.
+func TestSubjectMemoryIsSilentWhenNodeCapacityIsUnknown(t *testing.T) {
+	root := t.TempDir()
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	pod := filepath.Join(root, "kubepods", "besteffort", "pod11111111-2222-3333-4444-555555555555")
+	writeCgroup(t, pod, 500_000, 0, 0, "67108864")
+	if err := os.WriteFile(filepath.Join(pod, "memory.max"), []byte("134217728\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No meminfo under ProcRoot and no MemTotalBytes: node capacity is unknown.
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, ProcRoot: t.TempDir()})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range samples {
+		if s.Subject != "" && s.MetricType == types.MemoryUtilization {
+			t.Errorf("subject %s emitted memory %v as %q with node capacity unknown; want no sample rather than a share of the pod's own limit",
+				s.Subject, s.Value, s.Unit)
+		}
+	}
+}
+
+// TestThrottleRatioDeclaresItsOwnUnit: throttled periods over elapsed periods is a
+// share of the subject's CFS periods, not a share of node capacity, and the estimator
+// normalises by what the sample declares.
+func TestThrottleRatioDeclaresItsOwnUnit(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	advance(t, podA, 1_040_000, 110, 15)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var throttle *types.MetricSample
+	for _, s := range samples {
+		if s.Subject != "" && s.MetricType == types.CPUThrottleRatio {
+			throttle = s
+		}
+	}
+	if throttle == nil {
+		t.Fatal("no throttle sample for the pod after two collects")
+	}
+	if throttle.Unit != "share-of-periods" || throttle.Range == nil || *throttle.Range != [2]float64{0, 1} {
+		t.Errorf("throttle sample unit %q range %v; want share-of-periods on [0,1]", throttle.Unit, throttle.Range)
+	}
+}
+
+// TestThrottleDeltaSurvivesACounterReset: usage is guarded against a counter that
+// went backwards; the throttle delta was not. A cgroup recreated under the same
+// subject between two ticks restarts both counters, and if nr_periods has already
+// passed the old value while nr_throttled has not, the unsigned subtraction wraps to
+// a maximal, plausible-looking cpu_throttle_ratio of 1.0.
+func TestThrottleDeltaSurvivesACounterReset(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	advance(t, podA, 1_000_000, 1000, 900)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	advance(t, podA, 1_040_000, 1200, 10) // recreated: periods ran past, throttled restarted
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range samples {
+		if s.Subject == "pod:"+testUID && s.MetricType == types.CPUThrottleRatio {
+			t.Errorf("throttle ratio %v emitted across a counter reset; want no sample rather than a wrapped delta", s.Value)
+		}
+	}
+}
+
+func captureLogs(opts CgroupOptions) (CgroupOptions, *[]string) {
+	var lines []string
+	opts.Logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	return opts, &lines
+}
+
+// TestUnreadableRootIsLoggedOnce: a cgroup v1 host, or a container whose
+// /sys/fs/cgroup is not the host's, leaves the root's cpu.stat unreadable. The
+// collector then produces no node properties forever, and nothing said so.
+func TestUnreadableRootIsLoggedOnce(t *testing.T) {
+	root := t.TempDir() // no cpu.stat at all
+	opts, lines := captureLogs(CgroupOptions{MemTotalBytes: 4 << 30, ProcRoot: t.TempDir()})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	for i := 0; i < 3; i++ {
+		if _, err := c.Collect(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "cpu.stat") {
+		t.Errorf("unreadable root logged %d times (%v); want exactly one line naming cpu.stat", len(*lines), *lines)
+	}
+}
+
+// TestRootWithoutPodCgroupsIsLoggedOnce: subjects on and no kubepods directory under
+// the root means the agent is probably reading its own container's cgroup as the
+// node — the one deployment mistake that yields plausible numbers about the wrong
+// thing. It must be said once.
+func TestRootWithoutPodCgroupsIsLoggedOnce(t *testing.T) {
+	root := t.TempDir()
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: t.TempDir()})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	for i := 0; i < 3; i++ {
+		if _, err := c.Collect(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "kubepods") {
+		t.Errorf("missing pod cgroups logged %d times (%v); want exactly one line naming kubepods", len(*lines), *lines)
+	}
+}
+
+// TestSubjectCapTruncationIsVisible: the cap used to log once per process and the
+// census then under-counted with no trace. The skipped count is logged whenever it
+// changes, so a growing node keeps saying how much it is not showing.
+func TestSubjectCapTruncationIsVisible(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t) // two pods
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MaxSubjects: 1, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	_, _ = c.Collect()
+	_, _ = c.Collect()
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], "1 ") {
+		t.Fatalf("cap truncation logged %d times (%v); want one line while 1 subject is skipped", len(*lines), *lines)
+	}
+	writeCgroup(t, filepath.Join(root, "kubepods", "besteffort", "pod99999999-2222-3333-4444-555555555555"), 500_000, 0, 0, "1024")
+	_, _ = c.Collect()
+	if len(*lines) != 2 || !strings.Contains((*lines)[1], "2 ") {
+		t.Errorf("after a third pod appeared the skipped count changed to 2 and was not logged: %v", *lines)
+	}
+}
+
+// fakeClock returns a clock the tests advance instead of sleeping.
+func fakeClock(start time.Time) (func() time.Time, func(d time.Duration)) {
+	now := start
+	return func() time.Time { return now }, func(d time.Duration) { now = now.Add(d) }
+}
+
+// TestCPUStatWithoutUsageIsNotAMeasurement: a cpu.stat with no usage_usec key
+// parsed to 0 and, two ticks later, emitted cpu_utilization = 0 as a reading.
+func TestCPUStatWithoutUsageIsNotAMeasurement(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	if err := os.WriteFile(filepath.Join(podB, "cpu.stat"), []byte("nr_periods 100\nnr_throttled 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now, advanceClock := fakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: now})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	advanceClock(10 * time.Second)
+	advance(t, podA, 1_040_000, 110, 15)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if got["pod:"+testUID][types.CPUUtilization] == nil {
+		t.Error("the pod with usage_usec emitted no cpu_utilization after 10 s on the injected clock")
+	}
+	for subject, m := range got {
+		if subject != "pod:"+testUID && subject != "" && m[types.CPUUtilization] != nil {
+			t.Errorf("subject %s emitted cpu_utilization %v from a cpu.stat with no usage_usec", subject, m[types.CPUUtilization].Value)
+		}
+	}
+}
+
+// TestDeepPodShapedDirectoryIsNotASubject: the walk is depth-bounded; a pod-shaped
+// name four levels down is not a subject however it is named.
+func TestDeepPodShapedDirectoryIsNotASubject(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	deep := filepath.Join(root, "kubepods.slice", "x.slice", "y.slice", "z.slice", "kubepods-pod33333333_4444_5555_6666_777777777777.slice")
+	writeCgroup(t, deep, 100_000, 0, 0, "1024")
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, _ := c.Collect()
+	if bySubject(samples)["pod:33333333-4444-5555-6666-777777777777"] != nil {
+		t.Error("a pod-shaped directory beyond the depth bound became a subject")
+	}
+}
+
+// TestSubjectWithUnreadableCPUStatIsAbsentThisTick: unreadable files are transient
+// per contract — the subject is simply absent from the batch, with no error.
+func TestSubjectWithUnreadableCPUStatIsAbsentThisTick(t *testing.T) {
+	root, _, podB, _, procRoot := fakeTree(t)
+	if err := os.Remove(filepath.Join(podB, "cpu.stat")); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatalf("an unreadable subject must not be an error: %v", err)
+	}
+	if bySubject(samples)["pod:11111111-2222-3333-4444-555555555555"] != nil {
+		t.Error("a subject whose cpu.stat is unreadable emitted samples")
+	}
+	if bySubject(samples)["pod:"+testUID] == nil {
+		t.Error("the readable subject beside it went missing too")
+	}
+}

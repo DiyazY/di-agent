@@ -299,3 +299,88 @@ func TestSweepIsExposed(t *testing.T) {
 func timeZero() time.Time {
 	return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 }
+
+func TestEstimate_AssumeAndWithoutParams(t *testing.T) {
+	sm, srv := stateFixture(t)
+	rng := [2]float64{0, 100}
+	_ = sm.Record(statemap.Observation{ID: "queue@pod:a", Value: 50, At: time.Now(), Subject: "pod:a", Range: &rng})
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	_ = sm.DeclareRelationship(statemap.Relationship{From: "queue@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
+	_ = sm.AssertRelationshipStrength(statemap.RelationshipID("queue@pod:a", "cpu_pressure_ratio", "discovered"), 0.8, "op", "t")
+
+	var res statemap.EstimateResult
+	code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=queue@pod:a=100", &res)
+	if code != 200 || res.Hypothetical == nil {
+		t.Fatalf("code=%d hypothetical=%v", code, res.Hypothetical)
+	}
+	if res.Hypothetical.Delta < 0.39 || res.Hypothetical.Delta > 0.41 {
+		t.Errorf("delta=%.3f; want ≈0.4", res.Hypothetical.Delta)
+	}
+	code = getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&without=pod:a", &res)
+	if code != 200 || len(res.Excluded) != 1 || res.Excluded[0] != "pod:a" {
+		t.Errorf("without: code=%d excluded=%v", code, res.Excluded)
+	}
+	var d statemap.Decision
+	if code := getState(t, srv.URL+"/state/decisions/"+res.DecisionID, &d); code != 200 || len(d.Excluded) != 1 {
+		t.Errorf("decision replay: code=%d assumptions=%v excluded=%v", code, d.Assumptions, d.Excluded)
+	}
+	if _, ok := d.Assumptions["queue@pod:a"]; !ok {
+		t.Errorf("decision replay lacks the floor assumption: %v", d.Assumptions)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=garbage", nil); code != 400 {
+		t.Errorf("malformed assume returned %d, want 400", code)
+	}
+}
+
+func TestEstimate_EmptyWithoutIsRejected(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&without=", nil); code != 400 {
+		t.Errorf("empty without returned %d, want 400", code)
+	}
+}
+
+func TestEstimate_ReusedIdAndNonFiniteAssumeAreRejected(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-1", nil); code != 200 {
+		t.Fatalf("first estimate under ask-1: %d", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-1", nil); code != 409 {
+		t.Errorf("reused decision id returned %d, want 409", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=cpu_pressure_ratio=NaN", nil); code != 400 {
+		t.Errorf("NaN assume returned %d, want 400", code)
+	}
+}
+
+func TestEstimate_RequestShapeErrorsAndIdPassthrough(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate", nil); code != 400 {
+		t.Errorf("missing target returned %d, want 400", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=cpu_pressure_ratio=abc", nil); code != 400 {
+		t.Errorf("non-numeric assume returned %d, want 400", code)
+	}
+	resp, err := http.Get(srv.URL + "/state/estimate?target=nothing_here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown target returned %d, want 404", resp.StatusCode)
+	}
+	if id, _ := body["decision_id"].(string); id == "" {
+		t.Errorf("unknown target's 404 body lacks the decision id that was still recorded: %v", body)
+	}
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-9", &res); code != 200 || res.DecisionID != "ask-9" {
+		t.Errorf("id passthrough: code=%d decision_id=%q, want 200 and ask-9", code, res.DecisionID)
+	}
+	if code := getState(t, srv.URL+"/state/decisions/ask-9", nil); code != 200 {
+		t.Errorf("the decision recorded under the caller's id is not retrievable: %d", code)
+	}
+}

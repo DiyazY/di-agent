@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/domain"
@@ -225,5 +226,247 @@ func TestIngestSampleNormalizesToConstructPolarity(t *testing.T) {
 		t.Errorf("stored value %.4f, want 0.75 — a metric opposed to its construct must "+
 			"be reflected on the way in, or the construct summarises two quantities that "+
 			"cancel", p.Value)
+	}
+}
+
+// TestIngestSample_FeedsProposerAndForgetsOnRetirement pins the join Task 12 makes:
+// every observed property reaches the proposer through ObserveProperty (not just
+// routed constructs), and a property's retirement — through the map's retire hook —
+// makes the proposer forget it, so a candidate cannot outlive the endpoint it names.
+func TestIngestSample_FeedsProposerAndForgetsOnRetirement(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true, Learn: true}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		ts := t0 + int64(i)*10
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: ts,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a", Unit: "share-of-node-capacity", Range: &[2]float64{0, 1}})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: ts + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, err := sm.PendingCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range cs {
+		if c.FromID == "cpu_utilization@pod:a" && c.ToID == "cpu_pressure_ratio" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ingestion did not reach the proposer; candidates=%v", cs)
+	}
+
+	if err := state.RetireProperty("cpu_utilization@pod:a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ = sm.PendingCandidates()
+	for _, c := range cs {
+		if c.FromID == "cpu_utilization@pod:a" {
+			t.Error("candidate survived its endpoint's retirement")
+		}
+	}
+}
+
+func TestIngestSample_ScopedSampleBecomesMetricAtSubject(t *testing.T) {
+	sm, state := newMap(t)
+	rng := [2]float64{0, 50}
+	s := &types.MetricSample{MetricType: "queue_depth", Value: 3, TimestampUnix: 1000, EventID: "q1",
+		Subject: "pod:abc", Unit: "items", Range: &rng, Source: "app"}
+	if err := sm.IngestSample(s); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Property("queue_depth"); ok {
+		t.Error("a scoped sample must not land on the node-level id")
+	}
+	p, ok := state.Property("queue_depth@pod:abc")
+	if !ok || p.Subject != "pod:abc" || p.Unit != "items" || p.Range != rng {
+		t.Fatalf("scoped property %+v ok=%v; want metric_type@subject with the declared unit and range", p, ok)
+	}
+}
+
+// TestIngestSample_ScopedReadingOfARoutedTypeIsNeitherReflectedNorRouted: a scoped
+// reading of a routed metric type is still unrouted — polarity and construct
+// membership are node-level concerns. The route used here is opposed to its
+// construct, so a reading that went through NormalizeForConstruct would come out
+// reflected (0.25 → 0.75), and one that reached the construct would move its
+// derived value; neither may happen.
+func TestIngestSample_ScopedReadingOfARoutedTypeIsNeitherReflectedNorRouted(t *testing.T) {
+	spec := mustSpec()
+	target := spec.Constructs[0].ConstructID
+	if err := spec.AddMetricRoute(domain.MetricRoute{MetricType: "synthetic_headroom", ConstructID: target,
+		Unit: "fraction", Range: [2]float64{0, 1}, Polarity: domain.HigherIsBetter}); err != nil {
+		t.Fatal(err)
+	}
+	if got := spec.NormalizeForConstruct("synthetic_headroom", 0.25); got != 0.75 {
+		t.Fatalf("precondition: the route must be opposed to its construct; normalised 0.25 to %v", got)
+	}
+	state := statemap.New(statemap.Config{Owner: "test-node", ConvergenceObservations: 10, Alpha: 0.5, AdmitUnknown: true}, statemap.NewJournal(0))
+	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil),
+		minimal.NewDisabledProposer(), minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	before, _ := state.Property(target)
+
+	rng := [2]float64{0, 1}
+	if err := sm.IngestSample(&types.MetricSample{MetricType: "synthetic_headroom", Value: 0.25, TimestampUnix: 1000,
+		EventID: "h-scoped", Subject: "pod:abc", Unit: "fraction", Range: &rng}); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := state.Property("synthetic_headroom@pod:abc")
+	if !ok || p.Value != 0.25 {
+		t.Errorf("scoped value %.3f ok=%v; want 0.25 untouched by the construct's polarity", p.Value, ok)
+	}
+	// The seed declares a node-level property for every routed type; the scoped
+	// reading must not have been recorded against it.
+	if node, ok := state.Property("synthetic_headroom"); ok && node.NObservations != 0 {
+		t.Errorf("the scoped reading was recorded on the node-level id: %+v", node)
+	}
+	after, _ := state.Property(target)
+	if after.NObservations != before.NObservations || after.Value != before.Value {
+		t.Errorf("construct %s moved from %+v to %+v on a scoped reading; scoped samples are never routed", target, before, after)
+	}
+}
+
+// TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship pins Task 13's branch:
+// a candidate naming a scoped property (a pod↔pressure pair, not two Di-Select
+// constructs) must not become a proposition when confirmed. It becomes a state-map
+// relationship with Discovered provenance instead — a fact about this machine, not a
+// claim in Di-Select's vocabulary.
+func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) == 0 {
+		t.Fatal("setup: no candidate")
+	}
+	before, _ := sm.Propositions()
+	if err := sm.ConfirmCandidate(cs[0].CandidateID); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := sm.Propositions()
+	if len(after) != len(before) {
+		t.Errorf("a scoped candidate must not become a proposition (%d -> %d)", len(before), len(after))
+	}
+	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_pressure_ratio", "discovered"))
+	if !ok || r.Provenance != statemap.Discovered || r.Sign != 1 {
+		t.Fatalf("relationship %+v ok=%v; want Discovered, sign +1, label discovered", r, ok)
+	}
+	if state.Census().Discovered != 1 {
+		t.Errorf("census discovered=%d, want 1", state.Census().Discovered)
+	}
+}
+
+// TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending: the proposer marks
+// a candidate Confirmed before the facade declares the relationship. When the
+// declaration is refused — here an opposite-sign edge already exists — the error must
+// not leave a candidate that history calls Confirmed, that no relationship backs, and
+// that can never be retried or rejected.
+func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.T) {
+	spec := mustSpec()
+	ontology := minimal.NewOntologyFromSpec(spec)
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * x, TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) == 0 {
+		t.Fatal("setup: no candidate")
+	}
+	// An earlier claim in the opposite direction makes the declaration fail.
+	if err := state.DeclareRelationship(statemap.Relationship{From: "cpu_utilization@pod:a", To: "cpu_pressure_ratio",
+		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID); err == nil {
+		t.Fatal("confirming against an opposite-sign edge succeeded")
+	}
+	after, _ := sm.PendingCandidates()
+	if len(after) != 1 || after[0].CandidateID != cs[0].CandidateID {
+		t.Errorf("after the failed declaration the candidate is gone from pending: %v; want it back, retryable", after)
+	}
+	h, _ := proposer.GetHistory()
+	for _, c := range h {
+		if c.CandidateID == cs[0].CandidateID && c.Status == types.Confirmed {
+			t.Error("history calls the candidate Confirmed although no relationship was declared")
+		}
+	}
+}
+
+// TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne: a candidate with a
+// negative direction becomes a relationship with sign −1; with the wrong sign,
+// Covered would miss it and the pair would be proposed forever.
+func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) {
+	spec := mustSpec()
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * (1 - x), TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 || cs[0].Direction != types.Negative {
+		t.Fatalf("candidates %+v; want one Negative", cs)
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID); err != nil {
+		t.Fatal(err)
+	}
+	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_pressure_ratio", "discovered"))
+	if !ok || r.Sign != -1 {
+		t.Errorf("relationship %+v ok=%v; want sign -1", r, ok)
+	}
+	if !state.Covered("cpu_utilization@pod:a", "cpu_pressure_ratio", -1) {
+		t.Error("the confirmed negative edge is not covered, so it would be proposed again")
 	}
 }

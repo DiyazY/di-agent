@@ -58,6 +58,9 @@ go run ./cmd/mapctl deprecate P1 "smoke test"   # soft-delete a proposition
 go run ./cmd/mapctl history --since 1h    # audit log entries
 go run ./cmd/mapctl reset RC PS           # discard evidence → back to unknown
 go run ./cmd/mapctl tune "prioritize performance" # natural-language strength assertion
+go run ./cmd/mapctl estimate cpu_pressure_ratio \
+  --assume cpu_utilization@pod:<uid>=0.6 --without pod:<uid>   # answer, optionally under hypotheses
+# <uid> is a pod's UID as it appears in GET /state — properties are named <metric_type>@<subject>
 ```
 
 ```bash
@@ -99,6 +102,23 @@ semantic-map/
 │
 │  ── Go layer (edge daemon) ──────────────────────────────────────
 │
+├── scenarios/                  Scenario files for SystemScript: a synthetic system
+│   │                           with known ground truth (subjects on a schedule + a
+│   │                           coupled node model), loaded by
+│   │                           internal/minimal/tests/scenario_files_test.go
+│   ├── linear.json             One subject, sum coupling — counterfactual estimate
+│   │                           against a linear ground truth
+│   ├── saturation.json         Logistic coupling — counterfactual against a
+│   │                           saturating (nonlinear) ground truth
+│   ├── churn.json              Subjects arrive, depart and return — admission,
+│   │                           staleness and retirement timing
+│   ├── confounded.json         One subject drives a node property; a second
+│   │                           co-varies with it without driving anything —
+│   │                           both are proposed, and the map cannot tell
+│   │                           which is the cause
+│   └── decoupled.json          A subject the node model never reads — asserts no
+│                               discovery candidate is proposed from it
+│
 └── go/
     ├── go.mod                  Module: github.com/DiyazY/di-agent
     │
@@ -106,6 +126,14 @@ semantic-map/
     │   ├── types/types.go      Go equivalents of all Python types
     │   ├── contracts/          The contract surface — five interfaces
     │   │   └── contracts.go    Collector, Ontology, Reasoner, Proposer, Tuner + sentinel errors
+    │   ├── stats/              Shared estimator primitives (concrete, NOT a contract)
+    │   │   ├── stats.go        PairWindow (dedup'd ring buffer) + Pearson + FisherPValue —
+    │   │   │                   the one estimator statemap and the MI proposer both use
+    │   │   └── stats_test.go   Ring dedup, Pearson, Fisher p-value coverage
+    │   ├── ingest/client/      Wire face of the sample boundary for applications
+    │   │   ├── client.go       Client.Push — a workload POSTs its own metrics under its own
+    │   │   │                   subject, same MetricSample an in-process collector produces
+    │   │   └── client_test.go  Push wire-format + EventID determinism coverage
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
@@ -137,8 +165,20 @@ semantic-map/
     │       └── state_seed.go   SeedStateMap — spec metrics/constructs → properties; structure only
     │
     ├── internal/               Implementation packages — not importable externally
+    │   ├── scripted/           Synthetic collectors for demos, scenarios and tests
+    │   │   ├── collector.go    ScriptedCollector — programmable patterns (Constant /
+    │   │   │                   Ramp / Step / Sine / Burst / Noisy)
+    │   │   ├── collector_test.go
+    │   │   ├── scenario.go     Scenario — a synthetic system with known ground
+    │   │   │                   truth loaded from a JSON file in scenarios/
+    │   │   ├── scenario_test.go
+    │   │   ├── system.go       SystemScript — CollectorContract over a Scenario:
+    │   │   │                   subjects on a schedule + a coupled node model
+    │   │   └── system_test.go
     │   └── minimal/            edge-minimal profile implementations
     │       ├── collector_cgroup.go   CgroupCollector   (cgroups v2, no daemon)
+    │       ├── cgroup_recognise.go   Subject recognisers: pod cgroups (systemd + cgroupfs
+    │       │                         drivers) and allowlisted system.slice units
     │       ├── collector_netdata.go  NetdataCollector  (Netdata HTTP API v1, system.cpu/ram/net)
     │       ├── multi_collector.go    MultiCollector    (fan-out to N collectors)
     │       ├── ontology.go     SpecOntology           (the declaration layer: constructs and
@@ -298,32 +338,86 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 ### `POST /ingest-sample`
 
-Feed one typed `MetricSample` through the Bridge. The daemon maps the
-`metric_type` to its primary construct, looks up every relationship that
-touches that construct, and calls `UpdateEdge` on each unique `(from, to)`
-pair — i.e. the same fan-out the in-process collection loop performs.
+Feed one typed `MetricSample` to the facade's `IngestSample`. The daemon records
+the observation as a property, recomputes whatever derives from it, and folds it
+into every relationship incident to that property — the same path an in-process
+collector uses.
 
 ```json
 {"node_id":"master","metric_type":"cpu_utilization","value":0.71,
  "timestamp_unix":1703208286,"event_id":"replay:idle_run1:master:system.cpu:idle:0"}
 ```
 
-`metric_type` must be one of the values in `pkg/types.MetricType` (e.g.
-`cpu_utilization`, `memory_utilization`, `network_rx_bps`, …); unknown
-values return `400`. This is the public-API entry point for out-of-tree
-collectors — the parquet replay tool in particular speaks only this
-endpoint.
+Four more fields are optional and let a producer describe what it is reporting:
+
+| Field     | Type          | Meaning                                                                 |
+| --------- | ------------- | ------------------------------------------------------------------------ |
+| `subject` | `str`         | Empty for a node-level reading; `<kind>:<identity>` (e.g. `pod:1234`) to scope it to something other than the node itself |
+| `unit`    | `str`         | The unit the value is expressed in                                       |
+| `range`   | `[lo, hi]`    | The value's declared bounds                                              |
+| `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
+
+A malformed `subject` (not `<kind>:<identity>` over `[A-Za-z0-9._:-]`) returns `400`.
+`metric_type` need not be one of the values the domain specification routes: an
+unrouted type, or any sample carrying a non-empty `subject`, is still recorded as a
+property and answered `202`, not `400`:
+
+```json
+{"recorded": true, "routed": false, "metric_type": "queue_depth", "subject": "pod:1234",
+ "note": "scoped readings are not routed: recorded as a property of the subject, not summarised by any construct"}
+```
+
+A routed, unscoped sample is acknowledged with `204 No Content`. This is the
+public-API entry point for out-of-tree collectors — the parquet replay tool in
+particular speaks only this endpoint.
+
+### Pushing application metrics
+
+A workload on the node can be an instrument of its own state. It pushes samples to
+the agent under its own subject with a declared unit and range; the map admits them
+beside the resource properties the cgroup collector observes for the same subject.
+
+```go
+c := client.New("http://127.0.0.1:8080", os.Getenv("NODE_NAME"), "pod:"+os.Getenv("POD_UID"), "app:transcoder")
+ack, err := c.Push(ctx, client.Metric{Type: "queue_depth", Unit: "items", Range: [2]float64{0, 100}}, float64(len(queue)), time.Now(), nil)
+```
+
+`Push` refuses a malformed subject or metric type, an empty unit or an empty range before
+sending, naming the field. The `Ack` says whether a construct summarises the reading
+(`Routed`, the 204 case) or it was recorded as a property nothing summarises (202, with
+the agent's `Note`) — for a scoped subject always the latter, and for a node-level push
+the way a mistyped metric type shows up.
+
+`NODE_NAME` and `POD_UID` come from the downward API (`spec.nodeName`, `metadata.uid`). In Python:
+
+```python
+import hashlib, json, time, urllib.request
+def push(base, node, subject, source, metric, unit, rng, value):
+    at = int(time.time())
+    eid = hashlib.sha256(f"{source}|{node}|{subject}|{metric}|{at}".encode()).hexdigest()[:16]
+    body = json.dumps({"node_id": node, "metric_type": metric, "value": value, "timestamp_unix": at,
+                       "event_id": eid, "subject": subject, "unit": unit, "range": rng, "source": source}).encode()
+    req = urllib.request.Request(base + "/ingest-sample", body, {"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=5).read()
+```
 
 ### `GET /candidates`
 
 Lists Proposer candidate edges pending review.
 
 ```json
-[{"candidate_id":"cand-001","from_id":"CO","to_id":"PS","direction":1,
-  "mi_score":0.73,"p_value":0.002,"n_observations":1240,"deployments_seen":2,"status":0}]
+[{"CandidateID":"cpu_utilization@pod:a->pressure","FromID":"cpu_utilization@pod:a","ToID":"pressure",
+  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending"}]
 ```
 
-Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`.
+`Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
+candidate carries `Reason`: `cap` when the proposer's pending cap deferred it (provisional;
+it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
+stands). `Direction` is `0` for positive, `1` for negative.
+
+Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. A confirmation whose
+declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
+a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
 
 ### Full endpoint table
 
@@ -368,7 +462,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/relationships`              | `Relationship`                                           | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
-| GET  | `/state/estimate`                   | `?target=&id=` — answers from the map, returns a decision id | State model |
+| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses; `id` names the decision (default `est-<revision>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=`                                         | State model |
 | GET  | `/state/decisions`                  | `?limit=`                                                | State model |
 | GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
@@ -680,19 +774,40 @@ the shape of the real thing.
 | `-kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `-kd` answer identically until telemetry arrives. |
 | `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
+| `-cgroup-subjects`  | `true`           | Walk pod cgroups (and `-cgroup-units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
+| `-cgroup-units`     | `""`             | Comma-separated globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `k0s*.service,containerd.service`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
+| `-cgroup-max-subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
+| `-cgroup-cmd-label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |
 | `-netdata-url`      | `""`             | Base URL of a Netdata daemon to poll for live node metrics (e.g. `http://localhost:19999`). Empty disables Netdata collection. When set together with `-cgroup-root`, both run as a `MultiCollector`. |
+| `-script`           | `""`             | Run the synthetic system from this scenario file instead of real collectors — replaces cgroup and Netdata collection entirely when set. `-collect-interval` must equal the scenario's `tick_seconds` (all seed scenarios use 10s): the script stamps simulated time one tick per collect while the map sweeps on the wall clock, so the daemon refuses to start when they differ, as it does when the file cannot be loaded. |
 | `-proposer`         | `true`           | Enable `MICorrelationProposer` (Fisher z p-values, construct-level pairing). Set `false` on nodes where ring-buffer overhead is undesirable; the daemon falls back to `DisabledProposer` (no-op). |
+| `-proposer-threshold` | `0.85`         | `\|Pearson r\|` above which the proposer emits a candidate. |
+| `-proposer-min-pairs` | `30`           | Co-observations a pair needs inside the pair window before it can become a candidate — the pace at which structure appears. |
 | `-tuner`            | `true`           | Enable `RuleBasedTuner`. Set `false` to disable operator tuning entirely; `POST /agent/tune` still accepts requests but returns empty adjustments. |
 | `-regime`           | `""`             | Dynamics preset (`stable`/`default`/`bursty`/`volatile`). Overrides `-alpha` and `-convergence` when set. |
 | `-peers`            | `""`             | Comma-separated peer agent URLs to register at startup. Additional peers can be added at runtime via `POST /peers`. |
+
+#### Scenario file format
+
+A scenario is JSON with a name, `seed`, `tick_seconds`, `duration_seconds`, optional `noise`, and three blocks:
+
+| Block | Fields |
+| --- | --- |
+| `node` | one entry per node-level property, `{"coupling": "sum" \| "logistic" \| "none", "base", "of", "theta", "k"}`. `sum` is `base + Σ` over active subjects of their property `of`; `logistic` is `σ((x − theta)/k)` where `x` is the node property `of` (or, if `of` names a subject property, `base +` its sum); `none` is `base`, a property nothing drives. |
+| `subjects` | `{"id": "<kind>:<identity>", "arrive", "depart", "return", "properties": {...}}`, times in seconds from the start; `depart` absent means never, `return` revives the same subject. Each property is `{"pattern": "constant" \| "ramp" \| "sine" \| "burst", "value", "min", "max", "period", "burst_start", "burst_duration", "unit", "range"}` — `constant` holds `value`; `ramp` goes `min → max` over `period` seconds then holds; `sine` oscillates between `min` and `max` with `period`; `burst` is `min` except `max` during `[burst_start, burst_start + burst_duration)`, repeating every `period` when it is positive. Schedules are relative to the subject's arrival or return. |
+| `expect` | what the runner asserts: `admitted_within_ticks`, `stale_within_seconds`, `retired_within_seconds`; `candidates` (`{"from", "to", "sign", "within_seconds", "reproposed_after_return"}`), `no_candidates_from` (subject ids that must never be proposed), and `counterfactuals` (`{"target", "assume": {"<property>@<subject>": value}, "regime": "linear" \| "saturated", "tolerance", "min_error"}` — `linear` asserts the projection is within `tolerance` of the model's truth, `saturated` asserts it is at least `min_error` off and that the standing slope caveat is present). |
+
+Property names are metric types (`[A-Za-z0-9._-]`); the runner addresses a subject's property as `<property>@<subject>`. The loader validates all of this and refuses a file it cannot run: every `of` must name an existing subject property (or, for `logistic`, a non-logistic node property), a `linear` counterfactual needs `tolerance > 0` and a `saturated` one `min_error > 0`, its target must be a node property and its `assume` keys must name existing subject properties. Past `duration_seconds` the script emits nothing and logs once that the scenario finished.
+
+See `scenarios/` for five seed scenario files to drive `-script` with a known ground truth: `linear` and `saturation` (single-subject couplings, one that extrapolates and one that saturates), `confounded` (one subject drives a node property while another merely co-varies with it — the map proposes both, because correlation alone cannot separate them), `decoupled` (a correlated subject plus an uncorrelated noise subject) and `churn` (a subject that departs and returns, exercising staleness and retirement).
 
 **State model** — the properties this system exhibits, their lifecycle, and what this agent holds about other nodes.
 
 | Flag                     | Default | Meaning                                                                            |
 | ------------------------ | ------- | ---------------------------------------------------------------------------------- |
 | `-stale-after`           | `2m`    | Silence after which a property is marked stale. Its last value is kept and labelled: a stale reading is evidence about the past, and silence is not evidence about the present. |
-| `-retire-after`          | `0`     | Silence after which a property is retired automatically. `0` leaves retirement to an operator. Retirement is soft and cascades to relationships that reference the property. |
+| `-retire-after`          | `10m`   | Silence after which a property is retired automatically, cascading to relationships that reference it. The default, `10m`, is five default stale windows — long enough that a restarting collector is not mistaken for a departed subject — and does not follow `-stale-after`. `0` leaves retirement to an operator. Retirement is soft. |
 | `-sweep-interval`        | `0`     | How often lifecycle transitions are applied. `0` derives an interval from `-stale-after`. |
 | `-no-admit`              | `false` | Refuse to create a property for an undeclared metric. The default admits it and journals the admission, because a model that cannot represent something new describes the system as it was when someone wrote it down. |
 | `-no-learn`              | `false` | Disable the paired estimator. Every relationship then stays at `basis: unknown` with confidence 0 for the life of the process — an agent that can report levels and nothing about how they relate. |

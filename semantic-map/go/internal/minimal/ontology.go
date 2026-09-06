@@ -64,9 +64,9 @@ func NewOntologyFromSpec(spec *domain.Spec) *SpecOntology {
 	return o
 }
 
-// Spec exposes the loaded model so the Bridge can resolve metric routing and the
-// facade can read the adjustment policy. Both are part of the domain model, and
-// keeping them in one place is what lets a runtime-added construct be reachable.
+// Spec exposes the loaded model so the facade can resolve metric routing and read
+// the adjustment policy. Both are part of the domain model, and keeping them in
+// one place is what lets a runtime-added construct be reachable.
 func (o *SpecOntology) Spec() *domain.Spec { return o.spec }
 
 // Constructs returns a defensive copy of the construct list. Callers may mutate the

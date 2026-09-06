@@ -100,6 +100,7 @@ func NewRootCmd() *cobra.Command {
 		newPropositionCmd(deps),
 		newResetCmd(deps),
 		newCandidatesCmd(deps),
+		newEstimateCmd(deps),
 		newRecommendCmd(deps),
 		newSimulateCmd(deps),
 		newWatchCmd(deps),

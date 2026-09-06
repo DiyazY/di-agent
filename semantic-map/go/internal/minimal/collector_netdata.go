@@ -141,6 +141,14 @@ func (n *NetdataCollector) fetchChart(chart string) (*netdataResponse, bool) {
 	return &nd, true
 }
 
+// netdataRange is the range every reading this collector emits is declared with.
+// Each of the four charts is normalised to a fraction before it becomes a sample:
+// CPU from idle percentage, memory against the sum of the RAM dimensions, and the
+// two network rates against a 1 Gbps reference. Declaring it is a contract MUST —
+// an undeclared range makes the map assume [0,1] and caveat every answer that
+// reads the property for having assumed it.
+var netdataRange = [2]float64{0, 1}
+
 // sample builds a MetricSample with a deterministic EventID.
 // The key includes the source ID, nodeID, metric type, and the Netdata
 // timestamp — so the same physical observation always produces the same EventID.
@@ -148,6 +156,7 @@ func (n *NetdataCollector) sample(mt types.MetricType, value float64, ts int64) 
 	key := fmt.Sprintf("%s:%s:%s:%d", n.sid, n.nodeID, string(mt), ts)
 	h := sha256.Sum256([]byte(key))
 	eid := fmt.Sprintf("%x", h[:8])
+	rng := netdataRange
 
 	return &types.MetricSample{
 		NodeID:        n.nodeID,
@@ -155,6 +164,9 @@ func (n *NetdataCollector) sample(mt types.MetricType, value float64, ts int64) 
 		Value:         value,
 		TimestampUnix: ts,
 		EventID:       eid,
+		Unit:          "fraction",
+		Range:         &rng,
+		Source:        n.sid,
 	}
 }
 

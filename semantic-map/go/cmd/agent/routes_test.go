@@ -1070,3 +1070,99 @@ func newTestState(t *testing.T) *statemap.Map {
 		AdmitUnknown:            true,
 	}, statemap.NewJournal(0))
 }
+
+func TestIngestSample_RejectsMalformedSubject(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"cpu_utilization","value":0.1,"timestamp_unix":1,"event_id":"e","subject":"pod/x"}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 for a subject containing '/'", resp.StatusCode)
+	}
+}
+
+func TestIngestSample_CarriesSubjectUnitRangeSource(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	body := `{"node_id":"","metric_type":"queue_depth","value":7,"timestamp_unix":1000,
+	          "event_id":"e1","subject":"pod:abc","unit":"items","range":[0,100],"source":"app:ingest"}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (scoped samples are never routed)", resp.StatusCode)
+	}
+	p, ok := sm.State().Property("queue_depth@pod:abc")
+	if !ok {
+		t.Fatal("scoped property was not admitted under metric_type@subject")
+	}
+	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != [2]float64{0, 100} || p.Source != "app:ingest" {
+		t.Errorf("admitted property %+v; want subject/unit/range/source stamped from the sample", p)
+	}
+}
+
+// TestIngestSample_RejectsAMetricTypeThatIsNotASegment: a property id is
+// metric_type@subject, so an unscoped sample named "cpu_utilization@pod:a" would land
+// on the scoped property's id with no conflict recorded.
+func TestIngestSample_RejectsAMetricTypeThatIsNotASegment(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	for _, mt := range []string{"cpu_utilization@pod:a", "a/b", "a b"} {
+		body := `{"metric_type":"` + mt + `","value":0.5,"timestamp_unix":1000,"event_id":"e1","unit":"fraction","range":[0,1]}`
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("metric_type %q: status %d, want 400", mt, resp.StatusCode)
+		}
+	}
+}
+
+// TestIngestSample_EmptyRangeIs400: a range that cannot normalise anything is
+// refused at the wire, as the map refuses it.
+func TestIngestSample_EmptyRangeIs400(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"queue_depth","value":7,"timestamp_unix":1000,"event_id":"e1","subject":"pod:abc","unit":"items","range":[5,5]}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty range: status %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestIngestSample_ScopedReadingOfARoutedTypeIs202: a scoped reading of a routed
+// metric type is recorded but never routed, and the 202 note says so — a regression
+// to 204 would tell the producer its reading reached a construct.
+func TestIngestSample_ScopedReadingOfARoutedTypeIs202(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"cpu_utilization","value":0.4,"timestamp_unix":1000,"event_id":"e1","subject":"pod:abc","unit":"fraction","range":[0,1]}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("scoped routed type: status %d, want 202", resp.StatusCode)
+	}
+	var ack map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack["routed"] != false || !strings.Contains(ack["note"].(string), "scoped") {
+		t.Errorf("202 body %v; want routed:false with a note about scoped readings", ack)
+	}
+}

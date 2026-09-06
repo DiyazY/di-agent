@@ -15,6 +15,8 @@ const (
 	EventPropertyAdmitted   EventKind = "property.admitted"
 	EventPropertyStale      EventKind = "property.stale"
 	EventPropertyRetired    EventKind = "property.retired"
+	EventPropertyConflict   EventKind = "property.conflict"
+	EventHookFailed         EventKind = "hook.failed"
 
 	EventRelationshipDeclared EventKind = "relationship.declared"
 	EventRelationshipAsserted EventKind = "relationship.asserted"
@@ -69,6 +71,12 @@ type Decision struct {
 	// these values and these relationships this strength, at this revision".
 	PropertiesRead    []Property     `json:"properties_read"`
 	RelationshipsRead []Relationship `json:"relationships_read"`
+
+	// Assumptions are the hypothetical source values an estimate substituted, and
+	// Excluded the subjects or properties taken to their floor. Recorded so a
+	// counterfactual is re-derivable: what was observed AND what was supposed.
+	Assumptions map[string]float64 `json:"assumptions,omitempty"`
+	Excluded    []string           `json:"excluded,omitempty"`
 
 	// Rationale is the human-readable form of the same content.
 	Rationale string `json:"rationale"`
@@ -174,8 +182,49 @@ func (j *Journal) Decision(id string) (*Decision, bool) {
 	if !ok {
 		return nil, false
 	}
-	copied := *d
-	return &copied, true
+	return d.clone(), true
+}
+
+// clone is a deep copy of the audit record: the maps and slices a caller could
+// write into are copied, so what the journal remembers cannot change through a
+// returned decision.
+func (d *Decision) clone() *Decision {
+	c := *d
+	if d.Assumptions != nil {
+		c.Assumptions = make(map[string]float64, len(d.Assumptions))
+		for k, v := range d.Assumptions {
+			c.Assumptions[k] = v
+		}
+	}
+	c.Excluded = append([]string(nil), d.Excluded...)
+	c.Caveats = append([]string(nil), d.Caveats...)
+	if d.PropertiesRead != nil {
+		c.PropertiesRead = make([]Property, len(d.PropertiesRead))
+		for i := range d.PropertiesRead {
+			c.PropertiesRead[i] = d.PropertiesRead[i].clone()
+		}
+	}
+	if d.RelationshipsRead != nil {
+		c.RelationshipsRead = make([]Relationship, len(d.RelationshipsRead))
+		for i, r := range d.RelationshipsRead {
+			if r.Established != nil {
+				v := *r.Established
+				r.Established = &v
+			}
+			if r.Assertion != nil {
+				v := *r.Assertion
+				r.Assertion = &v
+			}
+			c.RelationshipsRead[i] = r
+		}
+	}
+	if d.Answer != nil {
+		c.Answer = make(map[string]any, len(d.Answer))
+		for k, v := range d.Answer {
+			c.Answer[k] = v
+		}
+	}
+	return &c
 }
 
 // Decisions returns the most recent decisions, newest first.
@@ -187,8 +236,7 @@ func (j *Journal) Decisions(limit int) []*Decision {
 		if j.events[i].Decision == nil {
 			continue
 		}
-		c := *j.events[i].Decision
-		out = append(out, &c)
+		out = append(out, j.events[i].Decision.clone())
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -212,17 +260,19 @@ func (j *Journal) Stats() (held int, dropped uint64, oldest uint64) {
 // recording cannot drift apart. A caller that reads a property through the builder
 // has, by construction, recorded that it read it.
 type DecisionBuilder struct {
-	m         *Map
-	id        string
-	question  string
-	at        time.Time
-	revision  uint64
-	props     []Property
-	rels      []Relationship
-	caveats   []string
-	seenProp  map[string]bool
-	seenRel   map[string]bool
-	rationale []string
+	m           *Map
+	id          string
+	question    string
+	at          time.Time
+	revision    uint64
+	props       []Property
+	rels        []Relationship
+	caveats     []string
+	seenProp    map[string]bool
+	seenRel     map[string]bool
+	rationale   []string
+	assumptions map[string]float64
+	excluded    []string
 }
 
 // Decide starts a decision record pinned to the map's current revision.
@@ -234,6 +284,7 @@ func (m *Map) Decide(id, question string) *DecisionBuilder {
 	return &DecisionBuilder{
 		m: m, id: id, question: question, at: now, revision: rev,
 		seenProp: map[string]bool{}, seenRel: map[string]bool{},
+		assumptions: map[string]float64{},
 	}
 }
 
@@ -245,7 +296,7 @@ func (b *DecisionBuilder) Property(id string) (Property, bool) {
 	p, ok := b.m.properties[id]
 	var copied Property
 	if ok {
-		copied = *p
+		copied = p.clone()
 	}
 	b.m.mu.RUnlock()
 
@@ -278,18 +329,24 @@ func (b *DecisionBuilder) Property(id string) (Property, bool) {
 }
 
 // RelationshipsInto reads the active relationships terminating at a property and
-// records them as inputs.
+// records them as inputs. A relationship has no stored staleness; it is as fresh as
+// its endpoints, so the caveat is derived from them here.
 func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 	b.m.mu.RLock()
 	var out []Relationship
+	// Both endpoints can be stale at once, and both are the reader's business: a
+	// single slot per relationship silently kept whichever was checked last.
+	staleEnds := map[string][]string{}
 	for _, r := range b.m.relationships {
-		if r.To != propertyID {
-			continue
-		}
-		if r.Status == Retired {
+		if r.To != propertyID || r.Status == Retired {
 			continue
 		}
 		out = append(out, *r)
+		for _, end := range []string{r.From, r.To} {
+			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
+				staleEnds[r.ID] = append(staleEnds[r.ID], end)
+			}
+		}
 	}
 	b.m.mu.RUnlock()
 
@@ -299,8 +356,8 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 			b.seenRel[r.ID] = true
 			b.rels = append(b.rels, r)
 		}
-		if r.Status == Stale {
-			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s is stale", r.ID))
+		for _, end := range staleEnds[r.ID] {
+			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
 		}
 	}
 	return out
@@ -315,6 +372,15 @@ func (b *DecisionBuilder) Note(format string, args ...any) {
 func (b *DecisionBuilder) Caveat(format string, args ...any) {
 	b.caveats = append(b.caveats, fmt.Sprintf(format, args...))
 }
+
+// Assume records a hypothetical value for a property, as an input to the decision.
+func (b *DecisionBuilder) Assume(id string, v float64) {
+	b.assumptions[id] = v
+	b.rationale = append(b.rationale, fmt.Sprintf("assumed %s = %.4f", id, v))
+}
+
+// Exclude records a subject or property taken to its floor.
+func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
 
 // Commit records the decision in the journal and returns it.
 func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
@@ -334,6 +400,10 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		}
 		parts = append(parts, "relationships: "+describeIDs(ids))
 	}
+	var assumptions map[string]float64
+	if len(b.assumptions) > 0 {
+		assumptions = b.assumptions
+	}
 	d := &Decision{
 		ID:                b.id,
 		At:                b.at,
@@ -342,6 +412,8 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		Answer:            answer,
 		PropertiesRead:    b.props,
 		RelationshipsRead: b.rels,
+		Assumptions:       assumptions,
+		Excluded:          b.excluded,
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}
