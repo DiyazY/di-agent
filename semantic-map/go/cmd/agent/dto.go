@@ -295,11 +295,16 @@ func eventToDTO(e *types.OntologyEvent) OntologyEventDTO {
 	}
 }
 
-// metricTypeValidator answers whether the loaded domain specification routes a
-// metric type. /ingest-sample does NOT reject an unrouted type: the state map admits
-// it as a property and the handler answers 202, so the caller learns the sample was
-// recorded and that nothing summarises it. What the routing table says is what the
-// agent can summarise, not what the system may exhibit.
+// metricTypeValidator is the routing question a sample boundary may put to the
+// semantic map: which construct, if any, the loaded domain specification routes a
+// metric type to. *semmap.SemanticMap satisfies it with RoutedConstruct.
+//
+// It does not gate conversion. sampleRequestToTypes accepts it but never consults
+// it, because an unrouted metric type is not an error at /ingest-sample: the state
+// map admits the reading as a property, and the handler in routes.go asks the map
+// directly, after ingestion, whether to answer 202 (recorded, summarised by no
+// construct) instead of 204. What the routing table says is what the agent can
+// summarise, not what the system may exhibit.
 //
 // This asks the specification rather than carrying a list. A hardcoded copy here
 // was a third place routing knowledge lived, and it silently rejected the two PSI
