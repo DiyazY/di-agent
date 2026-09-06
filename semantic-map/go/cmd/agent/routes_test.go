@@ -1126,3 +1126,43 @@ func TestIngestSample_RejectsAMetricTypeThatIsNotASegment(t *testing.T) {
 		}
 	}
 }
+
+// TestIngestSample_EmptyRangeIs400: a range that cannot normalise anything is
+// refused at the wire, as the map refuses it.
+func TestIngestSample_EmptyRangeIs400(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"queue_depth","value":7,"timestamp_unix":1000,"event_id":"e1","subject":"pod:abc","unit":"items","range":[5,5]}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty range: status %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestIngestSample_ScopedReadingOfARoutedTypeIs202: a scoped reading of a routed
+// metric type is recorded but never routed, and the 202 note says so — a regression
+// to 204 would tell the producer its reading reached a construct.
+func TestIngestSample_ScopedReadingOfARoutedTypeIs202(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	body := `{"metric_type":"cpu_utilization","value":0.4,"timestamp_unix":1000,"event_id":"e1","subject":"pod:abc","unit":"fraction","range":[0,1]}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("scoped routed type: status %d, want 202", resp.StatusCode)
+	}
+	var ack map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack["routed"] != false || !strings.Contains(ack["note"].(string), "scoped") {
+		t.Errorf("202 body %v; want routed:false with a note about scoped readings", ack)
+	}
+}

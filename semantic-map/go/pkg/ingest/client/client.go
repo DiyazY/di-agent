@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/DiyazY/di-agent/pkg/types"
 	"io"
 	"net/http"
 	"strconv"
@@ -48,44 +49,70 @@ func EventID(source, node, subject, metric string, at time.Time) string {
 	return hex.EncodeToString(h[:8])
 }
 
-type sample struct {
-	NodeID        string            `json:"node_id"`
-	MetricType    string            `json:"metric_type"`
-	Value         float64           `json:"value"`
-	TimestampUnix int64             `json:"timestamp_unix"`
-	EventID       string            `json:"event_id"`
-	Subject       string            `json:"subject,omitempty"`
-	Unit          string            `json:"unit,omitempty"`
-	Range         *[2]float64       `json:"range,omitempty"`
-	Source        string            `json:"source,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
+// Ack is what the agent said about an accepted reading. Routed is true when a
+// construct summarises the metric type (204); false when the reading was recorded
+// as a property nothing summarises (202), which is always the case for a scoped
+// subject and is otherwise how a mistyped metric type shows up — Note carries the
+// agent's words for it.
+type Ack struct {
+	Status int
+	Routed bool
+	Note   string
 }
 
-// Push posts one reading. 202 and 204 are success; anything else is an error
-// carrying the server's body.
-func (c *Client) Push(ctx context.Context, m Metric, value float64, at time.Time, labels map[string]string) error {
+// validate refuses a sample the agent would refuse, naming the field, before any
+// request is made.
+func (c *Client) validate(m Metric) error {
+	if !types.ValidSubject(c.Subject) {
+		return fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", c.Subject)
+	}
+	if !types.ValidMetricType(m.Type) {
+		return fmt.Errorf("metric type %q is not a single segment over [A-Za-z0-9._-]", m.Type)
+	}
+	if m.Unit == "" {
+		return fmt.Errorf("metric %s declares no unit", m.Type)
+	}
+	if m.Range[1] <= m.Range[0] {
+		return fmt.Errorf("metric %s declares an empty range %v", m.Type, m.Range)
+	}
+	return nil
+}
+
+// Push posts one reading. 202 and 204 are success and the Ack says which; anything
+// else is an error carrying the server's body.
+func (c *Client) Push(ctx context.Context, m Metric, value float64, at time.Time, labels map[string]string) (Ack, error) {
+	if err := c.validate(m); err != nil {
+		return Ack{}, err
+	}
 	rng := m.Range
-	body, err := json.Marshal(sample{
-		NodeID: c.NodeID, MetricType: m.Type, Value: value, TimestampUnix: at.Unix(),
+	body, err := json.Marshal(types.MetricSample{
+		NodeID: c.NodeID, MetricType: types.MetricType(m.Type), Value: value, TimestampUnix: at.Unix(),
 		EventID: EventID(c.Source, c.NodeID, c.Subject, m.Type, at),
 		Subject: c.Subject, Unit: m.Unit, Range: &rng, Source: c.Source, Labels: labels,
 	})
 	if err != nil {
-		return err
+		return Ack{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/ingest-sample", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return Ack{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return Ack{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusNoContent {
-		return nil
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return Ack{Status: resp.StatusCode, Routed: true}, nil
+	case http.StatusAccepted:
+		var reply struct {
+			Note string `json:"note"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&reply)
+		return Ack{Status: resp.StatusCode, Routed: false, Note: reply.Note}, nil
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("ingest-sample: %s: %s", resp.Status, bytes.TrimSpace(msg))
+	return Ack{Status: resp.StatusCode}, fmt.Errorf("ingest-sample: %s: %s", resp.Status, bytes.TrimSpace(msg))
 }

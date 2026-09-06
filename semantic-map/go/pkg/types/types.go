@@ -3,7 +3,10 @@
 package types
 
 import (
+	"encoding/json"
+	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -24,6 +27,40 @@ const (
 	Rejected                  // suppressed for this deployment session
 	Deferred                  // re-evaluate after more observations
 )
+
+var candidateStatusNames = [...]string{"pending", "confirmed", "rejected", "deferred"}
+
+func (s CandidateStatus) String() string {
+	if int(s) >= 0 && int(s) < len(candidateStatusNames) {
+		return candidateStatusNames[s]
+	}
+	return strconv.Itoa(int(s))
+}
+
+// MarshalJSON puts the name on the wire: as an integer, Pending serialised as 0,
+// which a reader could not tell from a missing field.
+func (s CandidateStatus) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
+
+// UnmarshalJSON accepts the name, and still the number for readings written by an
+// older agent.
+func (s *CandidateStatus) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &name); err == nil {
+		for i, n := range candidateStatusNames {
+			if n == name {
+				*s = CandidateStatus(i)
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown candidate status %q", name)
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("candidate status must be a name or a number: %s", b)
+	}
+	*s = CandidateStatus(n)
+	return nil
+}
 
 // ── Graph primitives ──────────────────────────────────────────────────────────
 
@@ -244,16 +281,16 @@ const (
 // declaration of what the value means; the map stamps them at admission.
 // Labels is informational; nothing branches on it.
 type MetricSample struct {
-	NodeID        string
-	MetricType    MetricType
-	Value         float64
-	TimestampUnix int64
-	EventID       string
-	Subject       string
-	Unit          string
-	Range         *[2]float64
-	Source        string
-	Labels        map[string]string
+	NodeID        string            `json:"node_id"`
+	MetricType    MetricType        `json:"metric_type"`
+	Value         float64           `json:"value"`
+	TimestampUnix int64             `json:"timestamp_unix"`
+	EventID       string            `json:"event_id"`
+	Subject       string            `json:"subject,omitempty"`
+	Unit          string            `json:"unit,omitempty"`
+	Range         *[2]float64       `json:"range,omitempty"`
+	Source        string            `json:"source,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 var subjectRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[A-Za-z0-9._:-]+$`)

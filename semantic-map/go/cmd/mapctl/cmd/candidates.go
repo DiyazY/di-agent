@@ -101,7 +101,7 @@ func renderCandidatesTable(w io.Writer, candidates []client.CandidateEdge) {
 			fmt.Sprintf("%.3g", c.PValue),
 			fmt.Sprintf("%d", c.NObservations),
 			fmt.Sprintf("%d", c.DeploymentsSeen),
-			statusLabel(c.Status),
+			statusLabel(c.Status, c.Reason),
 		})
 	}
 	render.Table(w, []string{"ID", "From", "To", "Dir", "MI", "p-value", "N", "Deploys", "Status"}, rows)
@@ -117,17 +117,11 @@ func directionLabel(d int) string {
 	return "+"
 }
 
-// statusLabel maps types.CandidateStatus to a human label.
-func statusLabel(s int) string {
-	switch s {
-	case 0:
-		return "pending"
-	case 1:
-		return "confirmed"
-	case 2:
-		return "rejected"
-	case 3:
-		return "deferred"
+// statusLabel renders the named status the agent sends, with who deferred a deferred
+// candidate ("deferred (cap)" vs "deferred (operator)").
+func statusLabel(status, reason string) string {
+	if reason != "" {
+		return status + " (" + reason + ")"
 	}
-	return fmt.Sprintf("%d", s)
+	return status
 }

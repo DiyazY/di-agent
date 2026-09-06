@@ -353,3 +353,34 @@ func TestEstimate_ReusedIdAndNonFiniteAssumeAreRejected(t *testing.T) {
 		t.Errorf("NaN assume returned %d, want 400", code)
 	}
 }
+
+func TestEstimate_RequestShapeErrorsAndIdPassthrough(t *testing.T) {
+	sm, srv := stateFixture(t)
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if code := getState(t, srv.URL+"/state/estimate", nil); code != 400 {
+		t.Errorf("missing target returned %d, want 400", code)
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&assume=cpu_pressure_ratio=abc", nil); code != 400 {
+		t.Errorf("non-numeric assume returned %d, want 400", code)
+	}
+	resp, err := http.Get(srv.URL + "/state/estimate?target=nothing_here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown target returned %d, want 404", resp.StatusCode)
+	}
+	if id, _ := body["decision_id"].(string); id == "" {
+		t.Errorf("unknown target's 404 body lacks the decision id that was still recorded: %v", body)
+	}
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio&id=ask-9", &res); code != 200 || res.DecisionID != "ask-9" {
+		t.Errorf("id passthrough: code=%d decision_id=%q, want 200 and ask-9", code, res.DecisionID)
+	}
+	if code := getState(t, srv.URL+"/state/decisions/ask-9", nil); code != 200 {
+		t.Errorf("the decision recorded under the caller's id is not retrievable: %d", code)
+	}
+}

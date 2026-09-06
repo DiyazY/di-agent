@@ -76,3 +76,29 @@ func TestEstimateCommandRendersAnUnmeasuredStrengthAsAbsent(t *testing.T) {
 		t.Errorf("unmeasured strength rendered as a number: %q", row)
 	}
 }
+
+// TestCandidatesCommandDecodesNamedStatuses: the agent names candidate statuses on
+// the wire; the command decodes them and shows who deferred a deferred one.
+func TestCandidatesCommandDecodesNamedStatuses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"CandidateID":"cpu@pod:a->pressure","FromID":"cpu@pod:a","ToID":"pressure","Direction":0,
+		  "MIScore":0.91,"PValue":0.001,"NObservations":40,"DeploymentsSeen":0,"Status":"pending"},
+		 {"CandidateID":"cpu@pod:b->pressure","FromID":"cpu@pod:b","ToID":"pressure","Direction":0,
+		  "MIScore":0.85,"PValue":0.002,"NObservations":30,"DeploymentsSeen":0,"Status":"deferred","Reason":"cap"}]`))
+	}))
+	defer srv.Close()
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--addr", srv.URL, "candidates"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"pending", "deferred (cap)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+}

@@ -175,7 +175,8 @@ type CandidateEdge struct {
 	PValue          float64 `json:"PValue"`
 	NObservations   int     `json:"NObservations"`
 	DeploymentsSeen int     `json:"DeploymentsSeen"`
-	Status          int     `json:"Status"`
+	Status          string  `json:"Status"`
+	Reason          string  `json:"Reason,omitempty"`
 }
 
 // ── Peer coordination DTOs ────────────────────────────────────────────────────

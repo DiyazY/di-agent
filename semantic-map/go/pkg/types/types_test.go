@@ -1,6 +1,10 @@
 package types
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestValidSubject(t *testing.T) {
 	good := []string{"", "pod:8f3c1234-aaaa-bbbb-cccc-1234567890ab", "unit:k0sworker.service", "disk:mmcblk0", "a:b:c"}
@@ -29,5 +33,28 @@ func TestValidMetricType(t *testing.T) {
 		if ValidMetricType(bad) {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// TestCandidateStatusIsNamedInJSON: as an integer, Pending serialised as 0, which a
+// reader cannot tell from a missing field. The names go on the wire; numbers are
+// still accepted on the way in for older clients.
+func TestCandidateStatusIsNamedInJSON(t *testing.T) {
+	b, err := json.Marshal(CandidateEdge{CandidateID: "a->b", Status: Pending})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"Status":"pending"`) {
+		t.Errorf("%s lacks a named status", b)
+	}
+	var e CandidateEdge
+	if err := json.Unmarshal([]byte(`{"CandidateID":"a->b","Status":"deferred"}`), &e); err != nil || e.Status != Deferred {
+		t.Errorf("named status did not decode: %+v %v", e, err)
+	}
+	if err := json.Unmarshal([]byte(`{"CandidateID":"a->b","Status":3}`), &e); err != nil || e.Status != Deferred {
+		t.Errorf("numeric status did not decode: %+v %v", e, err)
+	}
+	if Confirmed.String() != "confirmed" {
+		t.Errorf("String() = %q", Confirmed.String())
 	}
 }
