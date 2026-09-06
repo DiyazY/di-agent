@@ -14,6 +14,7 @@
 //	agent -profile edge-minimal -addr :8080 -alpha 0.2 -convergence 500 \
 //	      -priors /path/to/prior_weights.json -kd k0s \
 //	      -collect-interval 10s -cgroup-root /sys/fs/cgroup \
+//	      [-script scenarios/linear.json] \
 //	      -peers http://node_1:8080,http://node_2:8080
 //
 // The -kd flag selects per-distribution edge weights from prior_weights.json
@@ -22,8 +23,10 @@
 //
 // The autonomous collection loop ticks at -collect-interval, calls
 // CollectorContract.Collect on the profile's collector, and runs each sample
-// through the facade's IngestSample. Setting -collect-interval=0 or
-// -cgroup-root="" disables it (the manual POST /ingest-sample path still works).
+// through the facade's IngestSample. The collector is the cgroup one at
+// -cgroup-root, the Netdata one at -netdata-url, both together, or the synthetic
+// system from -script; with none configured, or -collect-interval=0, the loop is
+// disabled and only the manual POST /ingest-sample path updates the model.
 //
 // -regime (stable|default|bursty|volatile) sets alpha and convergence to a
 // pre-characterised bundle matching the deployment's dynamics. Overrides any

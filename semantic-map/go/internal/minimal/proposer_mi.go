@@ -21,9 +21,11 @@ import (
 //
 // It maintains a fixed-size ring buffer of (valueA, valueB) observations per
 // pair. Once `minPairs` samples accumulate, it computes the Pearson
-// correlation coefficient over the window. If |r| > threshold AND no existing
-// relationship between the pair exists (per lookup) AND the candidate was not
-// previously rejected or deferred, it emits a CandidateEdge.
+// correlation coefficient over the window. If |r| >= threshold AND the pair is
+// not already covered by a relationship with that sign (per lookup) AND the
+// candidate is not settled — confirmed, rejected, or deferred by an operator —
+// it emits a CandidateEdge; a cap-deferred candidate is refreshed and re-enters
+// when it outranks a pending one.
 //
 // Pearson correlation stands in for mutual information here — it captures
 // linear dependence cheaply and deterministically. The name "MI" is kept for
@@ -36,9 +38,10 @@ import (
 // ObserveProperty, the property path with the scope rule, is the entry point
 // from ingestion: a scoped property (non-empty subject) pairs only with
 // unscoped ones, direction scoped -> unscoped, inside a time tolerance.
-// ObserveConstruct is the explicit construct-pairing path kept for callers
-// that already know the pair and supply no timestamps; Observe is the
-// lowest-level explicit path either builds on.
+// Observe is the explicit path for a caller that already knows the pair and
+// supplies both values; ObserveConstruct is the explicit construct path that
+// pairs each construct value with the latest of every other construct,
+// lexicographically. Ingestion uses neither.
 type MICorrelationProposer struct {
 	lookup contracts.RelationshipLookup
 

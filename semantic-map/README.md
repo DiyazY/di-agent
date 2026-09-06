@@ -379,8 +379,14 @@ beside the resource properties the cgroup collector observes for the same subjec
 
 ```go
 c := client.New("http://127.0.0.1:8080", os.Getenv("NODE_NAME"), "pod:"+os.Getenv("POD_UID"), "app:transcoder")
-_ = c.Push(ctx, client.Metric{Type: "queue_depth", Unit: "items", Range: [2]float64{0, 100}}, float64(len(queue)), time.Now(), nil)
+ack, err := c.Push(ctx, client.Metric{Type: "queue_depth", Unit: "items", Range: [2]float64{0, 100}}, float64(len(queue)), time.Now(), nil)
 ```
+
+`Push` refuses a malformed subject or metric type, an empty unit or an empty range before
+sending, naming the field. The `Ack` says whether a construct summarises the reading
+(`Routed`, the 204 case) or it was recorded as a property nothing summarises (202, with
+the agent's `Note`) — for a scoped subject always the latter, and for a node-level push
+the way a mistyped metric type shows up.
 
 `NODE_NAME` and `POD_UID` come from the downward API (`spec.nodeName`, `metadata.uid`). In Python:
 
@@ -400,11 +406,18 @@ def push(base, node, subject, source, metric, unit, rng, value):
 Lists Proposer candidate edges pending review.
 
 ```json
-[{"candidate_id":"cand-001","from_id":"CO","to_id":"PS","direction":1,
-  "mi_score":0.73,"p_value":0.002,"n_observations":1240,"deployments_seen":2,"status":0}]
+[{"CandidateID":"cpu_utilization@pod:a->pressure","FromID":"cpu_utilization@pod:a","ToID":"pressure",
+  "Direction":0,"MIScore":0.91,"PValue":0.002,"NObservations":40,"DeploymentsSeen":0,"Status":"pending"}]
 ```
 
-Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`.
+`Status` is a name — `pending`, `confirmed`, `rejected` or `deferred` — and a deferred
+candidate carries `Reason`: `cap` when the proposer's pending cap deferred it (provisional;
+it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
+stands). `Direction` is `0` for positive, `1` for negative.
+
+Review via `POST /candidates/{id}/confirm`, `/reject`, or `/defer`. A confirmation whose
+declaration the map refuses (an opposite-sign edge already there) reopens the candidate;
+a confirmed candidate cannot be rejected or deferred — retire the relationship instead.
 
 ### Full endpoint table
 

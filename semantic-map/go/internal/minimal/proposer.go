@@ -6,11 +6,9 @@ import (
 	"github.com/DiyazY/di-agent/pkg/types"
 )
 
-// DisabledProposer is the edge-minimal ProposerContract implementation.
-// It satisfies the contract interface with no-ops — the edge-minimal profile
-// does not perform statistical pattern mining.
-// Use ThresholdProposer (edge-standard) or CorrelationMinerProposer (cloud-full)
-// to enable automatic graph extension.
+// DisabledProposer is the ProposerContract implementation for a node that should
+// not mine for structure (-proposer=false): it satisfies the contract with no-ops
+// and never emits a candidate. MICorrelationProposer is the one that does.
 type DisabledProposer struct{}
 
 func NewDisabledProposer() *DisabledProposer { return &DisabledProposer{} }

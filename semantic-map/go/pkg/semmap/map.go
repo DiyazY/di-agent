@@ -498,16 +498,14 @@ func (m *SemanticMap) History(since time.Time) ([]*types.OntologyEvent, error) {
 // The value is absolute: a new scan yields a new magnitude, not a delta. Callers that
 // think in deltas (see Tune) resolve the current value first and pass the result.
 //
-// What it writes is the PRIOR, and what was learned from this system is left untouched.
-// Those are separate fields precisely so that recalibrating an assumption cannot rewrite
-// observation history, and the effective strength blends the two by confidence — so on a
-// well-observed relationship an operator's number moves the answer very little. That is
-// the arithmetic behaving as designed rather than the write failing, and §7.3 measures
-// it. Asserting deliberately supersedes the per-cluster calibration that prior_init
-// seeded: an operator asserting a value for *this* deployment outranks a cross-cluster
-// estimate, the provenance field records that it is now an assertion, and cold-start
-// equivalence to Di-Select (paper §4.3) is a property of the state at c = 0 before any
-// operator action rather than an invariant for all time.
+// What it writes is the ASSERTION, and what was learned from this system is left
+// untouched. Those are separate fields precisely so that an operator's number cannot
+// rewrite observation history — and so that it is not diluted by it: an assertion
+// outranks both learned layers in full and does not decay, which is the arrangement
+// that replaced a blend by confidence under which a tune moved a well-observed
+// relationship by nothing at all (§7.3 measured it). The provenance field records
+// that the relationship is now asserted; the learned layers keep accumulating
+// underneath and return the moment the assertion is reset.
 //
 // Returns an error when no relationship carries the proposition — a declared claim the
 // agent does not model cannot be recalibrated, and reporting success would tell an
@@ -760,10 +758,9 @@ func (m *SemanticMap) Tune(text, operator string) ([]*types.TuneAdjustment, erro
 	// Apply and collect results.
 	//
 	// This goes through the facade's SetPropositionStrength, not the ontology's, so
-	// the new magnitude reaches both the storage EdgeDescriptor and the state model's
-	// relationship — the latter being what the Reasoner reads. Calling the ontology
-	// method directly would leave the tune visible in Propositions() and in the audit
-	// log while changing no agent decision.
+	// the new magnitude reaches the state model's relationship — which is what the
+	// Reasoner reads — and the audit log. Calling the ontology method directly would
+	// leave the tune visible in Propositions() while changing no agent decision.
 	var applied []*types.TuneAdjustment
 	var appliedIDs []string
 	for _, a := range adjustments {

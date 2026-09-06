@@ -367,7 +367,8 @@ func readMemInUseShare(path string) (float64, bool) {
 	return float64(total-available) / float64(total), true
 }
 
-// readMemTotal parses MemTotal from /proc/meminfo (kB). 0 when unavailable.
+// readMemTotal parses MemTotal from /proc/meminfo (a kB figure) and returns it in
+// bytes. 0 when unavailable.
 func readMemTotal(path string) uint64 {
 	f, err := os.Open(path)
 	if err != nil {
