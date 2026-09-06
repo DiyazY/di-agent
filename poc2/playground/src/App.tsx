@@ -4,6 +4,7 @@ import { fetchConfig, PlaygroundConfig } from "./api";
 import SystemPanel from "./components/SystemPanel";
 import SwitchboardPanel from "./components/SwitchboardPanel";
 import ShorePowerPanel from "./components/ShorePowerPanel";
+import ConditionsPanel from "./components/ConditionsPanel";
 
 export default function App() {
   // Which genset/propulsion/battery/auxload instances are deployed,
@@ -42,6 +43,10 @@ export default function App() {
         ))}
         {config?.shorePower && <ShorePowerPanel />}
         <SwitchboardPanel />
+        <ConditionsPanel
+          propulsionIds={config?.propulsionIds ?? []}
+          auxloadIds={config?.auxloadIds ?? []}
+        />
         {(config?.propulsionIds ?? []).map((id) => (
           <SystemPanel key={id} system="propulsion" id={id} />
         ))}

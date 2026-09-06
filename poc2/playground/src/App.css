@@ -75,6 +75,39 @@
   margin-bottom: 0.4rem;
 }
 
+.panel > label {
+  display: block;
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin: 0.75rem 0 0.4rem;
+}
+
+.panel select {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #f8fafc;
+  text-transform: capitalize;
+}
+
+.panel .slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.panel .slider-row input[type="range"] {
+  flex: 1;
+}
+
+.panel .slider-row .value {
+  width: 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .load-control .slider-row {
   display: flex;
   align-items: center;
