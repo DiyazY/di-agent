@@ -26,6 +26,13 @@ INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "di-agent")
 INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "telemetry")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
 
+NUM_CYLINDERS = 8
+GENSET_CYLINDER_FIELDS = tuple(
+    f"{base}_{index}"
+    for base in ("cylinder_pressure_bar", "cylinder_exhaust_temp_c")
+    for index in range(1, NUM_CYLINDERS + 1)
+)
+
 # Each entry maps the tag key identifying a message's source to the measurement
 # name and float fields written for that source.
 MESSAGE_SCHEMAS = {
@@ -39,6 +46,14 @@ MESSAGE_SCHEMAS = {
             "bsfc_g_per_kwh",
             "co2_kg_per_s",
             "nox_kg_per_s",
+            "air_pressure_kpa",
+            "ambient_temp_c",
+            "oil_temp_c",
+            "oil_pressure_bar",
+            "vibration_x_mm_s",
+            "vibration_y_mm_s",
+            "vibration_z_mm_s",
+            *GENSET_CYLINDER_FIELDS,
         ),
     },
     "propulsion_id": {

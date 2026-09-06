@@ -10,14 +10,23 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from genset import build_genset
+from sensors import NUM_CYLINDERS, SensorSimulator
 
 logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "genset.telemetry")
 STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
-# Max load ratio change allowed per second, so the API can't force an instant jump.
-RAMP_RATE_PER_S = float(os.environ.get("RAMP_RATE_PER_S", "0.05"))
+# Ramp rate is piecewise: 0-50% load ramps faster than 50-100%, so that reaching 50%
+# load takes ~50s and reaching 100% load takes ~190s total, matching typical genset
+# loading guidance (fast up to half load, slower beyond).
+RAMP_RATE_LOW_PER_S = float(os.environ.get("RAMP_RATE_LOW_PER_S", str(0.5))) # 0.5 / 50
+RAMP_RATE_HIGH_PER_S = float(os.environ.get("RAMP_RATE_HIGH_PER_S", str(0.178))) # 0.5 / 140
+RAMP_SWITCH_LOAD_RATIO = float(os.environ.get("RAMP_SWITCH_LOAD_RATIO", "0.5"))
+# Unloading is a single constant rate so that 100% -> 0% always takes ~45s.
+RAMP_RATE_DOWN_PER_S = float(os.environ.get("RAMP_RATE_DOWN_PER_S", str(1.0))) # 1.0 / 45
+# Seed for the Gaussian sensor simulator; unset gives a fresh random sequence per start.
+SENSOR_SEED = os.environ.get("SENSOR_SEED")
 
 
 def _make_producer() -> KafkaProducer:
@@ -40,6 +49,7 @@ class GensetController:
     def __init__(self) -> None:
         self.genset = build_genset()
         self.genset_id = os.environ.get("GENSET_ID", self.genset.name)
+        self._sensors = SensorSimulator(seed=int(SENSOR_SEED) if SENSOR_SEED is not None else None)
 
         self._lock = threading.Lock()
         self._target_load_ratio = 0.0
@@ -102,12 +112,21 @@ class GensetController:
             self._record_error("telemetry worker stopped unexpectedly")
 
     def _run_loop(self) -> None:
-        max_step = RAMP_RATE_PER_S * STEP_INTERVAL_S
         while not self._stop_event.is_set():
             with self._lock:
                 target = self._target_load_ratio
                 current = self._current_load_ratio
 
+            rate = (
+                RAMP_RATE_DOWN_PER_S
+                if target < current
+                else (
+                    RAMP_RATE_LOW_PER_S
+                    if current < RAMP_SWITCH_LOAD_RATIO
+                    else RAMP_RATE_HIGH_PER_S
+                )
+            )
+            max_step = rate * STEP_INTERVAL_S
             delta = max(-max_step, min(max_step, target - current))
             current += delta
             # Genset.rated_power is the generator's rated power (electric output side), so the
@@ -145,6 +164,8 @@ class GensetController:
                 "co2_kg_per_s": co2_kg_per_s,
                 "nox_kg_per_s": nox_kg_per_s,
             }
+            # Gaussian auxiliary sensors (ambient, lube oil, vibration, per-cylinder).
+            message.update(self._sensors.simulate(load_ratio))
 
             with self._lock:
                 self._current_load_ratio = current
@@ -158,7 +179,10 @@ class GensetController:
                 f"fuel_flow={message['fuel_flow_kg_per_s']:.5f}kg/s "
                 f"bsfc={message['bsfc_g_per_kwh']:.1f}g/kWh "
                 f"co2={message['co2_kg_per_s']:.5f}kg/s "
-                f"nox={message['nox_kg_per_s']:.6f}kg/s"
+                f"nox={message['nox_kg_per_s']:.6f}kg/s "
+                f"oil_temp={message['oil_temp_c']:.1f}C "
+                f"oil_press={message['oil_pressure_bar']:.2f}bar "
+                f"exh_temp_avg={np.mean([message[f'cylinder_exhaust_temp_c_{i}'] for i in range(1, NUM_CYLINDERS + 1)]):.1f}C"
             )
 
             self._stop_event.wait(STEP_INTERVAL_S)
