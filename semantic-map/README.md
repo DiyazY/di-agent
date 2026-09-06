@@ -762,7 +762,7 @@ the shape of the real thing.
 | `-collect-interval` | `10s`            | How often the autonomous collection loop ticks the profile's collector. Set to `0` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
 | `-cgroup-root`      | `/sys/fs/cgroup` | Filesystem root the cgroup collector reads from. Empty string disables the loop (useful on macOS dev machines or nodes without cgroups v2). |
 | `-cgroup-subjects`  | `true`           | Walk pod cgroups (and `-cgroup-units`) as subjects: each becomes its own set of properties, admitted on first observation and retired on silence. |
-| `-cgroup-units`     | `""`             | Comma-separated globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `k0s*.service,containerd.service`); empty models none. |
+| `-cgroup-units`     | `""`             | Comma-separated globs of systemd units under `system.slice` to model as `unit:<name>` subjects (e.g. `k0s*.service,containerd.service`); empty models none. A malformed pattern is refused at startup. A unit whose name needs sanitising to the subject charset gets a short hash suffix so distinct units stay distinct; the `unit` label keeps the true name. |
 | `-cgroup-max-subjects` | `256`         | Upper bound on subjects the cgroup walk admits per tick; beyond it the rest are skipped. |
 | `-cgroup-cmd-label` | `false`          | Stamp `cmd=<argv0>` from each subject's first process (label only; needs `/proc` visibility, i.e. hostPID or privileged). |
 | `-node-id`          | `""`             | Identifier this agent puts on emitted `MetricSample`s and uses in event IDs. Empty falls back to `os.Hostname()`. |

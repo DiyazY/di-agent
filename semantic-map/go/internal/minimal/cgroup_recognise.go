@@ -1,6 +1,9 @@
 package minimal
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"path"
 	"regexp"
 	"strings"
@@ -21,16 +24,25 @@ var podUIDRe = regexp.MustCompile(`^(?:kubepods-(?:besteffort|burstable)-|kubepo
 // sanitiseIdentity converts a name to a valid subject identity by replacing every byte
 // outside [A-Za-z0-9._-] with '_'. The subject charset is [A-Za-z0-9._:-] after the colon,
 // and types.ValidSubject enforces it at the wire; the label keeps the true name so tracing
-// back to the original cgroup is always possible.
+// back to the original cgroup is always possible. A name that needed a replacement
+// gets a short hash of the original appended, so the mapping stays injective:
+// without it "a@b.service" and "a_b.service" would share one subject, one EMA and
+// one CPU snapshot, with the unit label flipping between them every tick.
 func sanitiseIdentity(name string) string {
 	b := []byte(name)
+	var changed bool
 	for i, ch := range b {
 		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
 			ch == '.' || ch == '_' || ch == '-') {
 			b[i] = '_'
+			changed = true
 		}
 	}
-	return string(b)
+	if !changed {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return string(b) + "-" + hex.EncodeToString(sum[:3])
 }
 
 // recogniseKubepods recognises a pod-level cgroup under the kubelet's tree, for both
@@ -64,6 +76,17 @@ func recogniseKubepods(relPath string) (subjectInfo, bool) {
 		subject: "pod:" + uid,
 		labels:  map[string]string{"kind": "pod", "pod_uid": uid, "qos": qos, "driver": driver, "cgroup": relPath},
 	}, true
+}
+
+// ValidUnitGlobs reports the first -cgroup-units pattern path.Match cannot parse. A
+// bad pattern used to match nothing on every call and say nothing about it.
+func ValidUnitGlobs(globs []string) error {
+	for _, g := range globs {
+		if _, err := path.Match(g, ""); err != nil {
+			return fmt.Errorf("-cgroup-units pattern %q: %v", g, err)
+		}
+	}
+	return nil
 }
 
 // recogniseUnits recognises direct children of system.slice whose name matches one

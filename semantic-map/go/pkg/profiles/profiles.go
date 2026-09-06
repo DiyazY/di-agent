@@ -358,6 +358,9 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 	hasCgroup := cfg.CgroupRoot != "" && cfg.NodeID != ""
 	hasNetdata := cfg.NetdataURL != ""
 
+	if err := minimal.ValidUnitGlobs(cfg.CgroupUnitGlobs); err != nil {
+		return nil, nil, err
+	}
 	cgOpts := minimal.CgroupOptions{
 		Subjects: cfg.CgroupSubjects, UnitGlobs: cfg.CgroupUnitGlobs,
 		MaxSubjects: cfg.CgroupMaxSubjects, CmdLabel: cfg.CgroupCmdLabel,

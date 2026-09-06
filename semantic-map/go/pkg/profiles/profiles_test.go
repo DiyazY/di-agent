@@ -188,3 +188,13 @@ func TestBuildRefusesACollectIntervalThatDisagreesWithTheTick(t *testing.T) {
 		t.Fatalf("matching interval: err=%v coll=%v; want the synthetic system", err, coll)
 	}
 }
+
+// TestBuildRefusesAMalformedUnitGlob: a `-cgroup-units` pattern path.Match cannot
+// parse matched nothing on every call and said nothing about it.
+func TestBuildRefusesAMalformedUnitGlob(t *testing.T) {
+	_, _, err := Build("edge-minimal", Config{DomainSpec: mustSpec(), NodeID: "n1", CgroupRoot: t.TempDir(),
+		CgroupSubjects: true, CgroupUnitGlobs: []string{"[k0s"}, EMAAlpha: 0.2, ConvergenceThreshold: 10, MinTrustScore: 0.5})
+	if err == nil || !strings.Contains(err.Error(), "[k0s") {
+		t.Fatalf("err=%v; want a refusal naming the pattern", err)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -97,6 +98,9 @@ type CgroupOptions struct {
 	MemTotalBytes uint64
 	// ProcRoot is where /proc is mounted (tests point it at a fake tree).
 	ProcRoot string
+	// Now is the clock the CPU windows are measured on; nil means time.Now. Tests
+	// advance it instead of sleeping.
+	Now func() time.Time
 	// Logf receives the collector's own log lines: an unreadable root, a root with
 	// no pod cgroups while subjects are on, and subjects skipped by the cap. nil
 	// means the standard logger.
@@ -143,10 +147,29 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 		c.memTotal = readMemTotal(filepath.Join(opts.ProcRoot, "meminfo"))
 	}
 	c.recognise = []recogniser{recogniseKubepods}
-	if len(opts.UnitGlobs) > 0 {
-		c.recognise = append(c.recognise, recogniseUnits(opts.UnitGlobs))
+	// A malformed pattern is dropped here with a line (Build refuses it earlier
+	// through ValidUnitGlobs); path.Match would otherwise report the error on every
+	// call and the pattern would match nothing, silently.
+	var globs []string
+	for _, g := range opts.UnitGlobs {
+		if _, err := path.Match(g, ""); err != nil {
+			c.log("cgroup collector: -cgroup-units pattern %q is malformed (%v) and is ignored", g, err)
+			continue
+		}
+		globs = append(globs, g)
+	}
+	c.opts.UnitGlobs = globs
+	if len(globs) > 0 {
+		c.recognise = append(c.recognise, recogniseUnits(globs))
 	}
 	return c
+}
+
+func (c *CgroupCollector) now() time.Time {
+	if c.opts.Now != nil {
+		return c.opts.Now()
+	}
+	return time.Now()
 }
 
 func (c *CgroupCollector) SourceID() string                     { return c.sid }
@@ -157,7 +180,7 @@ func (c *CgroupCollector) AvailableMetrics() []types.MetricType { return cgroupA
 // the subject cap, and readable this tick; nothing is emitted for one that has gone, and
 // its snapshot is dropped. Unreadable files are transient: skipped, not errors.
 func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
-	now := time.Now()
+	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -408,6 +431,7 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 	defer f.Close()
 
 	stat := &rawCPUStat{}
+	var sawUsage bool
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -421,13 +445,22 @@ func readCPUStat(path string) (*rawCPUStat, error) {
 		switch fields[0] {
 		case "usage_usec":
 			stat.usageUsec = v
+			sawUsage = true
 		case "nr_periods":
 			stat.nrPeriods = v
 		case "nr_throttled":
 			stat.nrThrottled = v
 		}
 	}
-	return stat, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if !sawUsage {
+		// Parsed to 0, this would become cpu_utilization = 0 two ticks later — a
+		// reading of nothing presented as a measurement of idleness.
+		return nil, fmt.Errorf("%s has no usage_usec", path)
+	}
+	return stat, nil
 }
 
 // readMemoryCurrent returns the cgroup's memory.current in bytes. memory.max is not

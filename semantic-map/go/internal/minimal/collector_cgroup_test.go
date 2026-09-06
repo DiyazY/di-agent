@@ -489,3 +489,71 @@ func TestSubjectCapTruncationIsVisible(t *testing.T) {
 		t.Errorf("after a third pod appeared the skipped count changed to 2 and was not logged: %v", *lines)
 	}
 }
+
+// fakeClock returns a clock the tests advance instead of sleeping.
+func fakeClock(start time.Time) (func() time.Time, func(d time.Duration)) {
+	now := start
+	return func() time.Time { return now }, func(d time.Duration) { now = now.Add(d) }
+}
+
+// TestCPUStatWithoutUsageIsNotAMeasurement: a cpu.stat with no usage_usec key
+// parsed to 0 and, two ticks later, emitted cpu_utilization = 0 as a reading.
+func TestCPUStatWithoutUsageIsNotAMeasurement(t *testing.T) {
+	root, podA, podB, _, procRoot := fakeTree(t)
+	if err := os.WriteFile(filepath.Join(podB, "cpu.stat"), []byte("nr_periods 100\nnr_throttled 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now, advanceClock := fakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: now})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	advanceClock(10 * time.Second)
+	advance(t, podA, 1_040_000, 110, 15)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := bySubject(samples)
+	if got["pod:"+testUID][types.CPUUtilization] == nil {
+		t.Error("the pod with usage_usec emitted no cpu_utilization after 10 s on the injected clock")
+	}
+	for subject, m := range got {
+		if subject != "pod:"+testUID && subject != "" && m[types.CPUUtilization] != nil {
+			t.Errorf("subject %s emitted cpu_utilization %v from a cpu.stat with no usage_usec", subject, m[types.CPUUtilization].Value)
+		}
+	}
+}
+
+// TestDeepPodShapedDirectoryIsNotASubject: the walk is depth-bounded; a pod-shaped
+// name four levels down is not a subject however it is named.
+func TestDeepPodShapedDirectoryIsNotASubject(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	deep := filepath.Join(root, "kubepods.slice", "x.slice", "y.slice", "z.slice", "kubepods-pod33333333_4444_5555_6666_777777777777.slice")
+	writeCgroup(t, deep, 100_000, 0, 0, "1024")
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, _ := c.Collect()
+	if bySubject(samples)["pod:33333333-4444-5555-6666-777777777777"] != nil {
+		t.Error("a pod-shaped directory beyond the depth bound became a subject")
+	}
+}
+
+// TestSubjectWithUnreadableCPUStatIsAbsentThisTick: unreadable files are transient
+// per contract — the subject is simply absent from the batch, with no error.
+func TestSubjectWithUnreadableCPUStatIsAbsentThisTick(t *testing.T) {
+	root, _, podB, _, procRoot := fakeTree(t)
+	if err := os.Remove(filepath.Join(podB, "cpu.stat")); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatalf("an unreadable subject must not be an error: %v", err)
+	}
+	if bySubject(samples)["pod:11111111-2222-3333-4444-555555555555"] != nil {
+		t.Error("a subject whose cpu.stat is unreadable emitted samples")
+	}
+	if bySubject(samples)["pod:"+testUID] == nil {
+		t.Error("the readable subject beside it went missing too")
+	}
+}

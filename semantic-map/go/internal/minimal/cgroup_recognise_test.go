@@ -1,6 +1,8 @@
 package minimal
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/DiyazY/di-agent/pkg/types"
@@ -63,8 +65,8 @@ func TestRecogniseUnitsHonoursGlobs(t *testing.T) {
 	info, ok := r2("system.slice/getty@tty1.service")
 	if !ok {
 		t.Errorf("getty@tty1.service: ok=false, expected true")
-	} else if info.subject != "unit:getty_tty1.service" {
-		t.Errorf("getty@tty1.service: subject=%q want unit:getty_tty1.service", info.subject)
+	} else if !strings.HasPrefix(info.subject, "unit:getty_tty1.service-") || !types.ValidSubject(info.subject) {
+		t.Errorf("getty@tty1.service: subject=%q want unit:getty_tty1.service-<hash>, valid on the wire", info.subject)
 	} else if info.labels["unit"] != "getty@tty1.service" {
 		t.Errorf("getty@tty1.service: labels[unit]=%q want getty@tty1.service", info.labels["unit"])
 	}
@@ -112,5 +114,53 @@ func TestRecognisedSubjectsAreValidOnTheWire(t *testing.T) {
 		if !types.ValidSubject(info.subject) {
 			t.Errorf("recogniseUnits(*) for %q: subject %q is not valid on the wire", path, info.subject)
 		}
+	}
+}
+
+// TestSanitisedUnitNamesStayDistinct: sanitising to the subject charset must be
+// injective, or two units whose names differ only in a replaced byte share one
+// property, one EMA and one CPU snapshot, and the `unit` label flips between them
+// every tick.
+func TestSanitisedUnitNamesStayDistinct(t *testing.T) {
+	r := recogniseUnits([]string{"*.service"})
+	a, okA := r("system.slice/a@b.service")
+	b, okB := r("system.slice/a_b.service")
+	if !okA || !okB {
+		t.Fatalf("both units must be recognised: %v %v", okA, okB)
+	}
+	if a.subject == b.subject {
+		t.Errorf("a@b.service and a_b.service sanitised to the same subject %q", a.subject)
+	}
+	for _, info := range []subjectInfo{a, b} {
+		if !types.ValidSubject(info.subject) {
+			t.Errorf("subject %q is not valid on the wire", info.subject)
+		}
+	}
+	if plain, _ := r("system.slice/plain.service"); plain.subject != "unit:plain.service" {
+		t.Errorf("a name that needs no sanitising must be used as is; got %q", plain.subject)
+	}
+}
+
+// TestBadUnitGlobIsDroppedAndLogged: path.Match reports a malformed pattern on every
+// call, and the error was discarded, so `-cgroup-units='[k0s'` matched nothing
+// silently. The validator refuses it and the constructor drops it with a line.
+func TestBadUnitGlobIsDroppedAndLogged(t *testing.T) {
+	if err := ValidUnitGlobs([]string{"k0s*.service", "[k0s"}); err == nil {
+		t.Error("a malformed glob passed validation")
+	}
+	root, _, _, _, procRoot := fakeTree(t)
+	var lines []string
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, UnitGlobs: []string{"[k0s", "k0s*.service"},
+		MaxSubjects: 8, MemTotalBytes: 4 << 30, ProcRoot: procRoot,
+		Logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }})
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bySubject(samples)["unit:k0sworker.service"] == nil {
+		t.Error("the well-formed glob beside the bad one stopped matching")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "[k0s") {
+		t.Errorf("bad glob logged %d times (%v); want one line naming it", len(lines), lines)
 	}
 }
