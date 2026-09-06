@@ -7,7 +7,7 @@ import time
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
-from switchboard import ConsumerRequest, allocate_power
+from switchboard import ConsumerRequest, allocate_power, summarize_source_health
 
 logger = logging.getLogger(__name__)
 
@@ -137,38 +137,48 @@ class SwitchboardController:
 
     def get_status(self) -> dict:
         with self._lock:
+            gensets = {
+                genset_id: {
+                    "power_kw": power_kw,
+                    "co2_kg_per_s": co2_kg_per_s,
+                    "nox_kg_per_s": nox_kg_per_s,
+                    "stale": self._is_stale(received_at),
+                }
+                for genset_id, (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
+                in self._genset_power_kw.items()
+            }
+            batteries = {
+                battery_id: {
+                    "power_kw": power_kw,
+                    "stale": self._is_stale(received_at),
+                }
+                for battery_id, (power_kw, received_at) in self._battery_power_kw.items()
+            }
+            consumers = {
+                consumer_id: {
+                    "requested_power_kw": requested_power_kw,
+                    "priority": priority,
+                    "allocated_power_kw": self._last_allocations.get(consumer_id, 0.0),
+                    "stale": self._is_stale(received_at),
+                }
+                for consumer_id, (requested_power_kw, priority, received_at)
+                in self._consumer_requests.items()
+            }
             return {
                 "switchboard_id": self.switchboard_id,
                 "available_supply_kw": self._get_available_supply_kw(),
                 "total_demand_kw": self._get_total_demand_kw(),
                 "total_co2_kg_per_s": self._get_total_co2_kg_per_s(),
                 "total_nox_kg_per_s": self._get_total_nox_kg_per_s(),
-                "gensets": {
-                    genset_id: {
-                        "power_kw": power_kw,
-                        "co2_kg_per_s": co2_kg_per_s,
-                        "nox_kg_per_s": nox_kg_per_s,
-                        "stale": self._is_stale(received_at),
-                    }
-                    for genset_id, (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
-                    in self._genset_power_kw.items()
-                },
-                "batteries": {
-                    battery_id: {
-                        "power_kw": power_kw,
-                        "stale": self._is_stale(received_at),
-                    }
-                    for battery_id, (power_kw, received_at) in self._battery_power_kw.items()
-                },
-                "consumers": {
-                    consumer_id: {
-                        "requested_power_kw": requested_power_kw,
-                        "priority": priority,
-                        "allocated_power_kw": self._last_allocations.get(consumer_id, 0.0),
-                        "stale": self._is_stale(received_at),
-                    }
-                    for consumer_id, (requested_power_kw, priority, received_at)
-                    in self._consumer_requests.items()
+                "gensets": gensets,
+                "batteries": batteries,
+                "consumers": consumers,
+                "source_health": summarize_source_health(gensets, batteries, consumers),
+                "data_quality": {
+                    "total_sources": len(gensets) + len(batteries),
+                    "stale_sources": sum(1 for item in gensets.values() if item["stale"]) + sum(1 for item in batteries.values() if item["stale"]),
+                    "total_consumers": len(consumers),
+                    "stale_consumers": sum(1 for item in consumers.values() if item["stale"]),
                 },
             }
 

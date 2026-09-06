@@ -113,6 +113,8 @@ telemetryWriter:
     repository: telemetry-writer
     tag: ""
   kafkaGroupId: telemetry-writer
+  logEveryNMessages: 50
+  strictValidation: true
   nodeSelector: {}
   resources: {}
 

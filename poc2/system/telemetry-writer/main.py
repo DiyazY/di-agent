@@ -27,6 +27,8 @@ INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "di-agent")
 INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "telemetry")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
+LOG_EVERY_N_MESSAGES = int(os.environ.get("LOG_EVERY_N_MESSAGES", "50"))
+STRICT_VALIDATION = os.environ.get("STRICT_VALIDATION", "true").lower() == "true"
 
 NUM_CYLINDERS = 8
 GENSET_CYLINDER_FIELDS = tuple(
@@ -150,6 +152,7 @@ def main() -> None:
     consumer = _make_consumer()
     client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
     write_api = client.write_api(write_options=SYNCHRONOUS)
+    stats = {"seen": 0, "written": 0, "dropped": 0}
 
     print(f"Consuming {KAFKA_TOPICS} from {KAFKA_BROKERS}, writing to {INFLUXDB_URL} "
           f"(org={INFLUXDB_ORG}, bucket={INFLUXDB_BUCKET})")
@@ -157,12 +160,27 @@ def main() -> None:
     try:
         for record in consumer:
             message = record.value
+            stats["seen"] += 1
             try:
                 points = _to_points(message)
                 write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+                stats["written"] += 1
             except (KeyError, ValueError, TypeError) as exc:
-                print(f"Skipping malformed message {message!r}: {exc}")
+                stats["dropped"] += 1
+                if STRICT_VALIDATION:
+                    print(f"Dropped malformed message {message!r}: {exc}")
+                else:
+                    print(f"Skipping malformed message {message!r}: {exc}")
+            if LOG_EVERY_N_MESSAGES and stats["seen"] % LOG_EVERY_N_MESSAGES == 0:
+                print(
+                    "telemetry-writer stats: "
+                    f"seen={stats['seen']} written={stats['written']} dropped={stats['dropped']}"
+                )
     finally:
+        print(
+            "telemetry-writer final stats: "
+            f"seen={stats['seen']} written={stats['written']} dropped={stats['dropped']}"
+        )
         write_api.close()
         client.close()
         consumer.close()

@@ -43,6 +43,10 @@ spec:
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
             - name: KAFKA_GROUP_ID
               value: {{ .Values.telemetryWriter.kafkaGroupId | quote }}
+            - name: LOG_EVERY_N_MESSAGES
+              value: {{ .Values.telemetryWriter.logEveryNMessages | quote }}
+            - name: STRICT_VALIDATION
+              value: {{ .Values.telemetryWriter.strictValidation | quote }}
             - name: INFLUXDB_URL
               value: "http://influxdb:{{ .Values.influxdb.port }}"
             - name: INFLUXDB_ORG

@@ -20,6 +20,12 @@ export interface SystemStatus {
   [key: string]: unknown;
 }
 
+export interface SourceHealthSummary {
+  total: number;
+  stale: number;
+  healthy: number;
+}
+
 export interface SwitchboardStatus {
   switchboard_id: string;
   available_supply_kw: number;
@@ -35,6 +41,17 @@ export interface SwitchboardStatus {
     string,
     { requested_power_kw: number; priority: number; allocated_power_kw: number; stale: boolean }
   >;
+  source_health?: {
+    gensets: SourceHealthSummary;
+    batteries: SourceHealthSummary;
+    consumers: SourceHealthSummary;
+  };
+  data_quality?: {
+    total_sources: number;
+    stale_sources: number;
+    total_consumers: number;
+    stale_consumers: number;
+  };
 }
 
 export interface ShorePowerStatus {
