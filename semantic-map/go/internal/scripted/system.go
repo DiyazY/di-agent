@@ -3,6 +3,7 @@ package scripted
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"math"
 	"math/rand"
 	"sort"
@@ -18,10 +19,14 @@ import (
 // exercises the whole daemon path as a third, simulated instrument, and the runner
 // scores the map's answers against NodeValues.
 type SystemScript struct {
-	sc     *Scenario
-	nodeID string
-	sid    string
-	start  time.Time
+	// Logf receives the one line the script says for itself: that the scenario is
+	// over and it will emit nothing further. nil means the standard logger.
+	Logf     func(format string, args ...any)
+	finished bool
+	sc       *Scenario
+	nodeID   string
+	sid      string
+	start    time.Time
 
 	mu   sync.Mutex
 	tick int64
@@ -33,7 +38,13 @@ type SystemScript struct {
 
 // NewSystemScript builds the collector. Samples at tick n carry the timestamp
 // start + n·TickSeconds, so a runner with an injected clock can follow them.
-func NewSystemScript(nodeID string, sc *Scenario, start time.Time) *SystemScript {
+func NewSystemScript(nodeID string, sc *Scenario, start time.Time) (*SystemScript, error) {
+	// A literal scenario bypasses LoadScenario; NodeValues cannot compute a truth
+	// for a coupling it does not know, so refuse here rather than hand back a
+	// script whose truth table is silently incomplete.
+	if err := sc.Validate(); err != nil {
+		return nil, err
+	}
 	s := &SystemScript{sc: sc, nodeID: nodeID, sid: "system-script:" + sc.Name, start: start,
 		rng: rand.New(rand.NewSource(sc.Seed))}
 	seen := map[string]bool{}
@@ -51,10 +62,18 @@ func NewSystemScript(nodeID string, sc *Scenario, start time.Time) *SystemScript
 		s.available = append(s.available, types.MetricType(name))
 	}
 	sort.Slice(s.available, func(i, j int) bool { return s.available[i] < s.available[j] })
-	return s
+	return s, nil
 }
 
 func (s *SystemScript) SourceID() string { return s.sid }
+
+func (s *SystemScript) log(format string, args ...any) {
+	if s.Logf != nil {
+		s.Logf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
 
 func (s *SystemScript) AvailableMetrics() []types.MetricType {
 	out := make([]types.MetricType, len(s.available))
@@ -124,6 +143,10 @@ func (s *SystemScript) NodeValues(sec int, override map[string]float64) map[stri
 			out[name] = clip01(c.Base + sum(c.Of))
 		case "none":
 			out[name] = clip01(c.Base)
+		case "logistic":
+			// second pass below, once the sums it may read are in place
+		default:
+			panic("scripted: coupling " + c.Coupling + " reached NodeValues; Validate refuses it, and NewSystemScript validates")
 		}
 	}
 	for _, name := range s.nodeNames {
@@ -148,6 +171,12 @@ func (s *SystemScript) Collect() ([]*types.MetricSample, error) {
 	s.tick++
 	sec := int(s.tick) * s.sc.TickSeconds
 	if sec > s.sc.DurationSeconds {
+		if !s.finished {
+			// On a live daemon this looks exactly like telemetry that stopped.
+			s.finished = true
+			s.log("script: scenario %s finished after %d ticks (%ds); emitting nothing further",
+				s.sc.Name, s.tick-1, s.sc.DurationSeconds)
+		}
 		return nil, nil
 	}
 	at := s.At(s.tick).Unix()

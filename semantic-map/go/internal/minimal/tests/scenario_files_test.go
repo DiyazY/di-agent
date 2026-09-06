@@ -75,7 +75,10 @@ func driveScenario(t *testing.T, sc *scripted.Scenario, narrate func(tick int64,
 	sm := semmap.New(ontology, reasoner, proposer, minimal.NewDisabledTuner())
 	sm.SetIdentity("sim", false)
 	sm.AttachState(state)
-	collector := scripted.NewSystemScript("sim", sc, start)
+	collector, err := scripted.NewSystemScript("sim", sc, start)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	r := &scenarioRun{sc: sc, state: state, sm: sm, collector: collector,
 		firstSeen: map[string]int64{}, stale: map[string]int64{}, retired: map[string]int64{},

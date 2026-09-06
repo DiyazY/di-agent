@@ -1,7 +1,9 @@
 package scripted
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,8 +26,8 @@ func scenarioForTest() *Scenario {
 
 func TestSystemScriptEmitsScopedAndNodeSamplesDeterministically(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	a := NewSystemScript("sim", scenarioForTest(), start)
-	b := NewSystemScript("sim", scenarioForTest(), start)
+	a, _ := NewSystemScript("sim", scenarioForTest(), start)
+	b, _ := NewSystemScript("sim", scenarioForTest(), start)
 	sa, _ := a.Collect()
 	sb, _ := b.Collect()
 	if len(sa) != 4 || len(sb) != 4 {
@@ -53,7 +55,7 @@ func TestSystemScriptEmitsScopedAndNodeSamplesDeterministically(t *testing.T) {
 }
 
 func TestSystemScriptNodeTruthFollowsCouplings(t *testing.T) {
-	s := NewSystemScript("sim", scenarioForTest(), time.Now())
+	s, _ := NewSystemScript("sim", scenarioForTest(), time.Now())
 	v := s.NodeValues(100, nil)
 	if !nearf(v["node_cpu"], 0.4) || !nearf(v["idle"], 0.02) {
 		t.Errorf("node_cpu=%.3f idle=%.3f; want 0.4 and 0.02", v["node_cpu"], v["idle"])
@@ -69,7 +71,7 @@ func TestSystemScriptNodeTruthFollowsCouplings(t *testing.T) {
 }
 
 func TestSystemScriptSubjectLifetime(t *testing.T) {
-	s := NewSystemScript("sim", scenarioForTest(), time.Now())
+	s, _ := NewSystemScript("sim", scenarioForTest(), time.Now())
 	sub := s.sc.Subjects[0]
 	for sec, want := range map[int]bool{0: true, 299: true, 300: false, 399: false, 400: true, 599: true} {
 		if got := s.Active(sub, sec); got != want {
@@ -82,3 +84,66 @@ func TestSystemScriptSubjectLifetime(t *testing.T) {
 }
 
 func nearf(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+// TestNewSystemScriptValidatesALiteralScenario: a scenario built in Go bypasses
+// LoadScenario, and NodeValues cannot compute a truth for a coupling it does not know.
+// The constructor must refuse rather than hand back a script whose truth table is
+// silently empty.
+func TestNewSystemScriptValidatesALiteralScenario(t *testing.T) {
+	sc := scenarioForTest()
+	sc.Node["weird"] = Coupling{Coupling: "magic", Of: "cpu_utilization"}
+	if _, err := NewSystemScript("sim", sc, time.Now()); err == nil {
+		t.Fatal("a scenario with an unknown coupling was accepted")
+	}
+}
+
+// TestRampAndBurstPatterns: the two patterns no seed scenario uses.
+func TestRampAndBurstPatterns(t *testing.T) {
+	ramp := PropertySpec{Pattern: "ramp", Min: 0.2, Max: 0.8, Period: 100}
+	for _, c := range []struct {
+		t    int
+		want float64
+	}{{0, 0.2}, {50, 0.5}, {100, 0.8}, {250, 0.8}} {
+		if got := evalPattern(ramp, c.t); math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("ramp at t=%d: %v, want %v", c.t, got, c.want)
+		}
+	}
+	if got := evalPattern(PropertySpec{Pattern: "ramp", Min: 0.2, Max: 0.8}, 0); got != 0.8 {
+		t.Errorf("ramp without a period must hold max; got %v", got)
+	}
+	burst := PropertySpec{Pattern: "burst", Min: 0.1, Max: 0.9, Period: 100, BurstStart: 20, BurstDuration: 30}
+	for _, c := range []struct {
+		t    int
+		want float64
+	}{{0, 0.1}, {20, 0.9}, {49, 0.9}, {50, 0.1}, {120, 0.9}, {170, 0.1}} {
+		if got := evalPattern(burst, c.t); got != c.want {
+			t.Errorf("burst at t=%d: %v, want %v", c.t, got, c.want)
+		}
+	}
+	once := PropertySpec{Pattern: "burst", Min: 0.1, Max: 0.9, BurstStart: 20, BurstDuration: 30}
+	if got := evalPattern(once, 120); got != 0.1 {
+		t.Errorf("a burst without a period must not repeat; at t=120 got %v", got)
+	}
+}
+
+// TestSystemScriptSaysWhenTheScenarioIsOver: past duration_seconds the script emits
+// nothing, forever, and a live daemon would look like one whose telemetry stopped.
+// It says so once.
+func TestSystemScriptSaysWhenTheScenarioIsOver(t *testing.T) {
+	sc := scenarioForTest()
+	sc.DurationSeconds = 30 // three ticks
+	s, err := NewSystemScript("sim", sc, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	s.Logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	for i := 0; i < 6; i++ {
+		if _, err := s.Collect(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "finished") {
+		t.Errorf("logged %v; want exactly one line saying the scenario finished", lines)
+	}
+}

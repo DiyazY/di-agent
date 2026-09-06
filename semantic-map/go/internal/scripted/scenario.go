@@ -127,20 +127,6 @@ func (s *Scenario) Validate() error {
 	if s.TickSeconds <= 0 || s.DurationSeconds <= 0 {
 		return fmt.Errorf("tick_seconds and duration_seconds must be positive")
 	}
-	for name, c := range s.Node {
-		if !types.ValidMetricType(name) {
-			return fmt.Errorf("node property %q is not a metric type over [A-Za-z0-9._-]", name)
-		}
-		if !couplings[c.Coupling] {
-			return fmt.Errorf("node %s: unknown coupling %q", name, c.Coupling)
-		}
-		if c.Coupling != "none" && c.Of == "" {
-			return fmt.Errorf("node %s: coupling %s needs `of`", name, c.Coupling)
-		}
-		if c.Coupling == "logistic" && c.K <= 0 {
-			return fmt.Errorf("node %s: logistic needs k > 0", name)
-		}
-	}
 	for _, sub := range s.Subjects {
 		if sub.ID == "" || !types.ValidSubject(sub.ID) {
 			return fmt.Errorf("subject %q is not <kind>:<identity> over [A-Za-z0-9._:-]", sub.ID)
@@ -166,6 +152,43 @@ func (s *Scenario) Validate() error {
 			return fmt.Errorf("subject %s returns without departing first", sub.ID)
 		}
 	}
+	// What `of` may name: a subject property (for sum, and for logistic over a sum)
+	// or a non-logistic node property (for logistic). A name that matches nothing
+	// would make the coupling a constant and the truth table quietly wrong.
+	subjectProps := map[string]bool{}
+	for _, sub := range s.Subjects {
+		for name := range sub.Properties {
+			subjectProps[name] = true
+		}
+	}
+	for name, c := range s.Node {
+		if !types.ValidMetricType(name) {
+			return fmt.Errorf("node property %q is not a metric type over [A-Za-z0-9._-]", name)
+		}
+		if !couplings[c.Coupling] {
+			return fmt.Errorf("node %s: unknown coupling %q", name, c.Coupling)
+		}
+		if c.Coupling != "none" && c.Of == "" {
+			return fmt.Errorf("node %s: coupling %s needs `of`", name, c.Coupling)
+		}
+		if c.Coupling == "logistic" && c.K <= 0 {
+			return fmt.Errorf("node %s: logistic needs k > 0", name)
+		}
+		switch c.Coupling {
+		case "sum":
+			if !subjectProps[c.Of] {
+				return fmt.Errorf("node %s: `of` %q names no subject property", name, c.Of)
+			}
+		case "logistic":
+			other, isNode := s.Node[c.Of]
+			if !isNode && !subjectProps[c.Of] {
+				return fmt.Errorf("node %s: `of` %q names no node or subject property", name, c.Of)
+			}
+			if isNode && other.Coupling == "logistic" {
+				return fmt.Errorf("node %s: logistic over logistic node %q is not supported (its value depends on evaluation order)", name, c.Of)
+			}
+		}
+	}
 	for _, c := range s.Expect.Candidates {
 		if !c.ReproposedAfterReturn {
 			continue
@@ -181,8 +204,37 @@ func (s *Scenario) Validate() error {
 		}
 	}
 	for _, cf := range s.Expect.Counterfactuals {
-		if cf.Regime != "linear" && cf.Regime != "saturated" {
+		if _, isNode := s.Node[cf.Target]; !isNode {
+			return fmt.Errorf("counterfactual target %q is not a node property", cf.Target)
+		}
+		switch cf.Regime {
+		case "linear":
+			if cf.Tolerance <= 0 {
+				return fmt.Errorf("counterfactual on %s: regime linear needs tolerance > 0", cf.Target)
+			}
+		case "saturated":
+			if cf.MinError <= 0 {
+				return fmt.Errorf("counterfactual on %s: regime saturated needs min_error > 0, or the assertion passes vacuously", cf.Target)
+			}
+		default:
 			return fmt.Errorf("counterfactual on %s: regime must be linear or saturated", cf.Target)
+		}
+		// An override key that names nothing is silently a no-op, and the "truth"
+		// then equals the baseline.
+		for key := range cf.Assume {
+			prop, subject, ok := strings.Cut(key, "@")
+			if !ok {
+				return fmt.Errorf("counterfactual on %s: assume key %q must be <property>@<subject>", cf.Target, key)
+			}
+			var found bool
+			for _, sub := range s.Subjects {
+				if sub.ID == subject {
+					_, found = sub.Properties[prop]
+				}
+			}
+			if !found {
+				return fmt.Errorf("counterfactual on %s: assume key %q names no subject property", cf.Target, key)
+			}
 		}
 	}
 	return nil

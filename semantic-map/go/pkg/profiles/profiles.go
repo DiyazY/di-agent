@@ -381,7 +381,11 @@ func buildEdgeMinimal(cfg Config, pw *priorWeightsFile) (*semmap.SemanticMap, co
 				"off the wall clock the map sweeps on, retiring or immortalising every property; set -collect-interval=%s",
 				sc.Name, tick, cfg.CollectInterval, tick)
 		}
-		return sm, scripted.NewSystemScript(cfg.NodeID, sc, time.Now()), nil
+		script, err := scripted.NewSystemScript(cfg.NodeID, sc, time.Now())
+		if err != nil {
+			return nil, nil, fmt.Errorf("-script %s: %w", cfg.ScriptPath, err)
+		}
+		return sm, script, nil
 	}
 
 	switch {
