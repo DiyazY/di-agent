@@ -1,0 +1,68 @@
+# One Deployment + Service per propulsion instance (propulsion-1..N); each
+# requests power from, and is allocated power by, the switchboard.
+{{- range $i := until (.Values.propulsion.count | int) }}
+{{- $n := add1 $i }}
+{{- $name := printf "propulsion-%d" $n }}
+{{- $priorities := $.Values.propulsion.priorities }}
+{{- $priority := index $priorities (mod $i (len $priorities)) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: propulsion
+    propulsion-id: {{ $name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      propulsion-id: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: propulsion
+        propulsion-id: {{ $name }}
+      {{- include "diagent.podAnnotations" $ | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" $.Values.propulsion.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: propulsion
+          image: {{ include "diagent.customImage" (dict "global" $.Values.global "image" $.Values.propulsion.image) }}
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PROPULSION_ID
+              value: {{ $name | quote }}
+            - name: PROPULSION_PRIORITY
+              value: {{ $priority | quote }}
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ $.Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ $.Values.propulsion.kafkaTopic | quote }}
+            - name: REQUEST_KAFKA_TOPIC
+              value: {{ $.Values.propulsion.requestKafkaTopic | quote }}
+            - name: ALLOCATION_KAFKA_TOPIC
+              value: {{ $.Values.propulsion.allocationKafkaTopic | quote }}
+          resources:
+            {{- toYaml $.Values.propulsion.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: propulsion
+    propulsion-id: {{ $name }}
+spec:
+  selector:
+    propulsion-id: {{ $name }}
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+{{- end }}

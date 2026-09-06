@@ -1,0 +1,61 @@
+# One Deployment + Service per genset instance (genset-1..genset-N),
+# matching the addressable-per-instance pattern the playground frontend
+# depends on (see templates/playground.yaml).
+{{- range $i := until (.Values.genset.count | int) }}
+{{- $n := add1 $i }}
+{{- $name := printf "genset-%d" $n }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: genset
+    genset-id: {{ $name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      genset-id: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: genset
+        genset-id: {{ $name }}
+      {{- include "diagent.podAnnotations" $ | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" $.Values.genset.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: genset
+          image: {{ include "diagent.customImage" (dict "global" $.Values.global "image" $.Values.genset.image) }}
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: GENSET_ID
+              value: {{ $name | quote }}
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ $.Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ $.Values.genset.kafkaTopic | quote }}
+          resources:
+            {{- toYaml $.Values.genset.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: genset
+    genset-id: {{ $name }}
+spec:
+  selector:
+    genset-id: {{ $name }}
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+{{- end }}
