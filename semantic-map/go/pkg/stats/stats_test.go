@@ -33,13 +33,13 @@ func TestFisherPValue(t *testing.T) {
 }
 
 func TestPairWindowDedupsAndBounds(t *testing.T) {
-	w := NewPairWindow()
-	if !w.Fold("a", 1, 2, 3) || w.Fold("a", 1, 2, 3) {
+	w := NewPairWindow(3)
+	if !w.Fold("a", 1, 2) || w.Fold("a", 1, 2) {
 		t.Fatal("first fold of an identity must succeed and the second must be rejected")
 	}
-	w.Fold("b", 2, 4, 3)
-	w.Fold("c", 3, 6, 3)
-	w.Fold("d", 4, 8, 3) // evicts the oldest; capacity 3
+	w.Fold("b", 2, 4)
+	w.Fold("c", 3, 6)
+	w.Fold("d", 4, 8) // evicts the oldest; capacity 3
 	if w.Len() != 3 {
 		t.Fatalf("len=%d, want 3", w.Len())
 	}

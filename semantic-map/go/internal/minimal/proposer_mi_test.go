@@ -732,3 +732,31 @@ func TestSettledCandidatesCannotBeRejectedOrDeferred(t *testing.T) {
 		}
 	}
 }
+
+// TestObserveProperty_NeverPairsTwoUnscopedProperties: node-level properties are the
+// backbone's business; two of them that correlate perfectly must not become a
+// candidate through the property path.
+func TestObserveProperty_NeverPairsTwoUnscopedProperties(t *testing.T) {
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		_ = p.ObserveProperty("cpu@pod:a", "pod:a", x, at)
+		_ = p.ObserveProperty("pressure", "", x, at)
+		_ = p.ObserveProperty("load", "", 0.5*x, at)
+	}
+	h, _ := p.GetHistory()
+	var scoped int
+	for _, c := range h {
+		if !strings.Contains(c.FromID, "@") && !strings.Contains(c.ToID, "@") {
+			t.Errorf("two unscoped properties were paired: %s", c.CandidateID)
+		}
+		if strings.Contains(c.FromID, "@") {
+			scoped++
+		}
+	}
+	if scoped != 2 {
+		t.Errorf("%d scoped candidates; want pod:a paired with both node properties", scoped)
+	}
+}

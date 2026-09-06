@@ -8,33 +8,39 @@ import "math"
 // PairWindow is a fixed-capacity ring of paired observations with a dedup set keyed
 // by pair identity, so a replayed batch cannot fold the same physical pair twice.
 type PairWindow struct {
-	xs, ys []float64
-	next   int
-	seen   map[string]struct{}
+	xs, ys   []float64
+	next     int
+	capacity int
+	seen     map[string]struct{}
 }
 
-func NewPairWindow() *PairWindow { return &PairWindow{seen: make(map[string]struct{})} }
+// NewPairWindow builds a ring of the given capacity; 0 or less is unbounded. The
+// capacity belongs to the window, not to each Fold call: the ring's invariants
+// (len ≤ capacity, next < capacity) hold only if every fold agrees on it.
+func NewPairWindow(capacity int) *PairWindow {
+	return &PairWindow{capacity: capacity, seen: make(map[string]struct{})}
+}
 
-// Fold adds (x, y) under identity unless that identity was already folded. capacity
-// bounds the ring; the dedup set is trimmed when it exceeds 4*capacity, because an
-// identity that can no longer be in the window cannot be a duplicate of anything in
-// it. Returns false when the pair was a duplicate.
-func (w *PairWindow) Fold(identity string, x, y float64, capacity int) bool {
+// Fold adds (x, y) under identity unless that identity was already folded. The
+// dedup set is trimmed when it exceeds 4*capacity, because an identity that can no
+// longer be in the window cannot be a duplicate of anything in it. Returns false
+// when the pair was a duplicate.
+func (w *PairWindow) Fold(identity string, x, y float64) bool {
 	if _, dup := w.seen[identity]; dup {
 		return false
 	}
 	w.seen[identity] = struct{}{}
-	if capacity > 0 && len(w.seen) > 4*capacity {
+	if w.capacity > 0 && len(w.seen) > 4*w.capacity {
 		w.seen = map[string]struct{}{identity: {}}
 	}
-	if capacity <= 0 || len(w.xs) < capacity {
+	if w.capacity <= 0 || len(w.xs) < w.capacity {
 		w.xs = append(w.xs, x)
 		w.ys = append(w.ys, y)
 		return true
 	}
 	w.xs[w.next] = x
 	w.ys[w.next] = y
-	w.next = (w.next + 1) % capacity
+	w.next = (w.next + 1) % w.capacity
 	return true
 }
 

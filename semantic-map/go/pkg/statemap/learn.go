@@ -118,12 +118,12 @@ func (m *Map) learnFromObservationLocked(propertyID string, obs observation) {
 func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at time.Time) {
 	w, ok := m.windows[r.ID]
 	if !ok {
-		w = stats.NewPairWindow()
+		w = stats.NewPairWindow(m.learn.Window)
 		m.windows[r.ID] = w
 	}
 	// Idempotency: the same physical pair must not be folded twice, or replaying a
 	// batch of telemetry would inflate the estimate by re-adding its own points.
-	if !w.Fold(identity, x, y, m.learn.Window) {
+	if !w.Fold(identity, x, y) {
 		return
 	}
 	if w.Len() < m.learn.MinSupport {

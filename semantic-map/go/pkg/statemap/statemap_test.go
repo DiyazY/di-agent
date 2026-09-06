@@ -1975,3 +1975,71 @@ func TestRetireHookRunsOutsideTheLock(t *testing.T) {
 		t.Errorf("hook read %v; want the retired status of both properties", seen)
 	}
 }
+
+// TestRevivalKeepsCascadeRetiredRelationshipsRetired: a subject that returns is
+// exhibited again; the structure that retired with it is not re-asserted by that
+// alone — it re-earns its place through the proposer.
+func TestRevivalKeepsCascadeRetiredRelationshipsRetired(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .3, At: c.now(), Subject: "pod:1"})
+	_ = m.Observe("pressure", .3, c.now())
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:1", To: "pressure", Sign: 1, Label: "d"}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Minute)
+	_ = m.Observe("pressure", .3, c.now()) // the node keeps reporting; only the pod goes silent
+	m.Sweep()
+	if r, _ := m.Relationship(RelationshipID("cpu@pod:1", "pressure", "d")); r.Status != Retired {
+		t.Fatalf("setup: relationship %s, want retired by the cascade", r.Status)
+	}
+	c.advance(time.Second)
+	_ = m.Record(Observation{ID: "cpu@pod:1", Value: .4, At: c.now(), Subject: "pod:1"})
+	if p, _ := m.Property("cpu@pod:1"); p.Status != Active {
+		t.Fatalf("the property did not revive: %s", p.Status)
+	}
+	if r, _ := m.Relationship(RelationshipID("cpu@pod:1", "pressure", "d")); r.Status != Retired {
+		t.Errorf("relationship %s after the property revived; want it to stay retired until re-earned", r.Status)
+	}
+}
+
+// TestRetireHookPanicDoesNotKillTheSweep: the hook runs outside the lock on the
+// sweep goroutine; a panic in it must not take the sweep down or skip the
+// properties after it.
+func TestRetireHookPanicDoesNotKillTheSweep(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, RetireAfter: 20 * time.Second, AdmitUnknown: true})
+	var calls []string
+	m.SetRetireHook(func(id string) {
+		calls = append(calls, id)
+		if id == "a" {
+			panic("hook bug")
+		}
+	})
+	_ = m.Observe("a", 1, c.now())
+	_ = m.Observe("b", 1, c.now())
+	c.advance(time.Minute)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a panicking hook escaped Sweep: %v", r)
+			}
+		}()
+		m.Sweep()
+	}()
+	if len(calls) != 2 {
+		t.Errorf("hook calls %v; want both properties despite the panic on the first", calls)
+	}
+}
+
+// TestDeclarePropertyRefusesAnUnknownStatusAndAScopedDerived: Status is a closed
+// set, and a derived property is node-level structure — a summary scoped to one
+// subject would be a subject summarising itself.
+func TestDeclarePropertyRefusesAnUnknownStatusAndAScopedDerived(t *testing.T) {
+	m, _ := newTestMap(t, Config{AdmitUnknown: true})
+	if err := m.DeclareProperty(Property{ID: "x", Status: "bogus"}); err == nil {
+		t.Error("status \"bogus\" was accepted")
+	}
+	_ = m.DeclareProperty(Property{ID: "cpu@pod:a", Subject: "pod:a"})
+	if err := m.DeclareProperty(Property{ID: "sum@pod:a", Subject: "pod:a", Kind: Derived, Members: []string{"cpu@pod:a"}}); err == nil {
+		t.Error("a derived property scoped to a subject was accepted")
+	}
+}

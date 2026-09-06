@@ -16,6 +16,7 @@ const (
 	EventPropertyStale      EventKind = "property.stale"
 	EventPropertyRetired    EventKind = "property.retired"
 	EventPropertyConflict   EventKind = "property.conflict"
+	EventHookFailed         EventKind = "hook.failed"
 
 	EventRelationshipDeclared EventKind = "relationship.declared"
 	EventRelationshipAsserted EventKind = "relationship.asserted"
@@ -181,8 +182,49 @@ func (j *Journal) Decision(id string) (*Decision, bool) {
 	if !ok {
 		return nil, false
 	}
-	copied := *d
-	return &copied, true
+	return d.clone(), true
+}
+
+// clone is a deep copy of the audit record: the maps and slices a caller could
+// write into are copied, so what the journal remembers cannot change through a
+// returned decision.
+func (d *Decision) clone() *Decision {
+	c := *d
+	if d.Assumptions != nil {
+		c.Assumptions = make(map[string]float64, len(d.Assumptions))
+		for k, v := range d.Assumptions {
+			c.Assumptions[k] = v
+		}
+	}
+	c.Excluded = append([]string(nil), d.Excluded...)
+	c.Caveats = append([]string(nil), d.Caveats...)
+	if d.PropertiesRead != nil {
+		c.PropertiesRead = make([]Property, len(d.PropertiesRead))
+		for i := range d.PropertiesRead {
+			c.PropertiesRead[i] = d.PropertiesRead[i].clone()
+		}
+	}
+	if d.RelationshipsRead != nil {
+		c.RelationshipsRead = make([]Relationship, len(d.RelationshipsRead))
+		for i, r := range d.RelationshipsRead {
+			if r.Established != nil {
+				v := *r.Established
+				r.Established = &v
+			}
+			if r.Assertion != nil {
+				v := *r.Assertion
+				r.Assertion = &v
+			}
+			c.RelationshipsRead[i] = r
+		}
+	}
+	if d.Answer != nil {
+		c.Answer = make(map[string]any, len(d.Answer))
+		for k, v := range d.Answer {
+			c.Answer[k] = v
+		}
+	}
+	return &c
 }
 
 // Decisions returns the most recent decisions, newest first.
@@ -194,8 +236,7 @@ func (j *Journal) Decisions(limit int) []*Decision {
 		if j.events[i].Decision == nil {
 			continue
 		}
-		c := *j.events[i].Decision
-		out = append(out, &c)
+		out = append(out, j.events[i].Decision.clone())
 		if limit > 0 && len(out) >= limit {
 			break
 		}

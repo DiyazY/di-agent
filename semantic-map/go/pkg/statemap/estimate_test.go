@@ -1,6 +1,7 @@
 package statemap
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
@@ -422,5 +423,43 @@ func TestEstimateUnmatchedAssumptionIsRecordedAndNamed(t *testing.T) {
 	}
 	if v, ok := res.Assumptions["idle@pod:z"]; !ok || v != 0.5 {
 		t.Errorf("assumptions %v; want the unmatched assumption recorded as asked", res.Assumptions)
+	}
+}
+
+// TestJournalDecisionIsACopy: the journal hands out its audit record; a caller
+// writing into it must not change what the journal remembers.
+func TestJournalDecisionIsACopy(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{ID: "ask-copy", Target: "pressure", Assume: map[string]float64{"cpu@pod:b": 0.9}})
+	if res.Err != "" {
+		t.Fatal(res.Err)
+	}
+	d, _ := m.Journal().Decision("ask-copy")
+	d.Assumptions["cpu@pod:b"] = 42
+	d.Excluded = append(d.Excluded, "tampered")
+	if len(d.PropertiesRead) > 0 {
+		d.PropertiesRead[0].Labels = map[string]string{"tampered": "yes"}
+	}
+	again, _ := m.Journal().Decision("ask-copy")
+	if again.Assumptions["cpu@pod:b"] != 0.9 || len(again.Excluded) != 0 {
+		t.Errorf("the journal's record changed through a returned copy: %+v", again)
+	}
+	if len(again.PropertiesRead) > 0 && again.PropertiesRead[0].Labels["tampered"] != "" {
+		t.Error("the journal's recorded properties changed through a returned copy")
+	}
+}
+
+// TestInfluenceJSONKeepsAZeroStrength: a learned zero and "no strength yet" are
+// different facts; omitempty dropped the field for the first and made it look like
+// the second.
+func TestInfluenceJSONKeepsAZeroStrength(t *testing.T) {
+	b, err := json.Marshal(Influence{Relationship: "r", Source: "s", Known: true, Strength: 0, Contribution: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"effective_strength":0`, `"contribution":0`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("%s lacks %s", b, want)
+		}
 	}
 }

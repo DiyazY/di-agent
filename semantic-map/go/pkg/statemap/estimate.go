@@ -16,8 +16,9 @@ type EstimateRequest struct {
 	Target string
 	// Assume substitutes a source property's value in the contribution sum.
 	Assume map[string]float64
-	// Without takes every active property of a subject (or one named property) to
-	// its range floor: a workload leaving means its shares go to zero.
+	// Without takes every present property of a subject — active or stale, since a
+	// departing subject's readings are already going quiet — or one named property,
+	// to its range floor: a workload leaving means its shares go to zero.
 	Without []string
 }
 
@@ -26,9 +27,9 @@ type Influence struct {
 	Relationship string  `json:"relationship"`
 	Source       string  `json:"source"`
 	SourceValue  float64 `json:"source_value"`
-	Strength     float64 `json:"effective_strength,omitempty"`
+	Strength     float64 `json:"effective_strength"`
 	Sign         int     `json:"sign"`
-	Contribution float64 `json:"contribution,omitempty"`
+	Contribution float64 `json:"contribution"`
 	Provenance   string  `json:"provenance"`
 	Basis        string  `json:"basis"`
 	Known        bool    `json:"known"`
@@ -102,9 +103,12 @@ func normalise(p Property, v float64) float64 {
 }
 
 // Estimate answers a question FROM the map and records the answer with the state
-// that produced it, including whatever was hypothesised. The answer is assembled by
-// reading through a DecisionBuilder, so the record of what was read is produced by
-// the reading itself and cannot drift from it.
+// that produced it, including whatever was hypothesised. The target and every source
+// it reads are read through a DecisionBuilder, so the record of what the arithmetic
+// consumed is produced by the reading itself and cannot drift from it. The `without`
+// exclusions are resolved into floor assumptions from the map before the decision is
+// opened, and the record holds those assumptions by value; a floored property that
+// relates to the target through nothing is in Assumptions and not in PropertiesRead.
 func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	target := req.Target
 	for _, w := range req.Without {

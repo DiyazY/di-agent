@@ -155,7 +155,6 @@ func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float6
 	}
 	me := latestValue{value: value, at: at, scoped: subject != ""}
 	p.latestProps[id] = me
-	var firstErr error
 	for otherID, other := range p.latestProps {
 		if otherID == id || other.scoped == me.scoped {
 			continue
@@ -178,12 +177,10 @@ func (p *MICorrelationProposer) ObserveProperty(id, subject string, value float6
 			continue // that reading already took part in a pair with this counterpart
 		}
 		identity := from + "|" + to + "|" + strconv.FormatInt(at.Unix(), 10) + "|" + strconv.FormatInt(other.at.Unix(), 10)
-		if err := p.observeLocked(from, to, x, y, identity); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		_ = p.observeLocked(from, to, x, y, identity) // never non-nil; the contract keeps the error return
 		p.lastPair[key] = [2]int64{xAt, yAt}
 	}
-	return firstErr
+	return nil
 }
 
 // Forget drops the buffers, latest values and candidates involving a property.
@@ -216,10 +213,10 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 	key := fromID + "→" + toID
 	buf, ok := p.buffers[key]
 	if !ok {
-		buf = stats.NewPairWindow()
+		buf = stats.NewPairWindow(p.bufSize)
 		p.buffers[key] = buf
 	}
-	if !buf.Fold(identity, valueA, valueB, p.bufSize) {
+	if !buf.Fold(identity, valueA, valueB) {
 		return nil
 	}
 	if buf.Len() < p.minPairs {

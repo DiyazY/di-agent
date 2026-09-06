@@ -521,6 +521,16 @@ func (m *Map) DeclareProperty(p Property) error {
 	if err := validScope(p.ID, p.Subject); err != nil {
 		return err
 	}
+	switch p.Status {
+	case "", Active, Stale, Retired:
+	default:
+		return fmt.Errorf("property %q declares status %q; want active, stale or retired", p.ID, p.Status)
+	}
+	if p.Kind == Derived && p.Subject != "" {
+		// A derived property is node-level structure: a summary scoped to one
+		// subject would be a subject summarising itself.
+		return fmt.Errorf("derived property %q cannot be scoped to a subject", p.ID)
+	}
 	if p.RangeDeclared && p.Range == ([2]float64{}) {
 		return fmt.Errorf("property %q declares a range it does not give", p.ID)
 	}
@@ -632,9 +642,10 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 // Record applies one observation. An unknown property is admitted when
 // Config.AdmitUnknown is set and stamped with the observation's subject, unit, range,
 // source and labels — the mechanism by which the map follows a system that changes
-// rather than a schema someone wrote down. A later observation merges labels and
-// never moves subject, unit or range: a disagreement there is journaled as a
-// conflict, because two producers describing one id differently is a fault worth
+// rather than a schema someone wrote down. A later observation merges labels; a
+// unit or range declared late is adopted; subject, unit and range are fixed once
+// declared, and an observation that contradicts them is journaled as a conflict and
+// refused, because two producers describing one id differently is a fault worth
 // seeing rather than a value worth averaging.
 func (m *Map) Record(o Observation) error {
 	id, value, at, eventID := o.ID, o.Value, o.At, o.EventID
@@ -901,8 +912,34 @@ func (m *Map) fireRetireHook(ids []string) {
 		return
 	}
 	for _, id := range ids {
-		fn(id)
+		// The hook runs outside the lock, so an observation can revive the
+		// property between the retirement and this call. Re-check, and skip a
+		// property that is exhibited again: forgetting it would drop the
+		// proposer's live buffers for a live property. The window between this
+		// check and the call remains, and is benign — Forget only drops buffers.
+		m.mu.RLock()
+		p, ok := m.properties[id]
+		retired := ok && p.Status == Retired
+		m.mu.RUnlock()
+		if !retired {
+			continue
+		}
+		m.callRetireHook(fn, id)
 	}
+}
+
+// callRetireHook runs one hook call under a recover: the hook is the caller's
+// code on the sweep goroutine, and a panic there must neither take the sweep down
+// nor skip the properties after it. The failure is journaled, not hidden.
+func (m *Map) callRetireHook(fn func(string), id string) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.mu.Lock()
+			m.bump(EventHookFailed, id, "system", map[string]any{"panic": fmt.Sprint(r)}, m.now())
+			m.mu.Unlock()
+		}
+	}()
+	fn(id)
 }
 
 // RetireProperty withdraws a property from reasoning, keeping its record.

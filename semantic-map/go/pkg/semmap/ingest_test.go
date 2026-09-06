@@ -434,3 +434,39 @@ func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.
 		}
 	}
 }
+
+// TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne: a candidate with a
+// negative direction becomes a relationship with sign −1; with the wrong sign,
+// Covered would miss it and the pair would be proposed forever.
+func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) {
+	spec := mustSpec()
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	_, _ = profiles.SeedStateMap(state, spec, "", "")
+	proposer := minimal.NewMICorrelationProposer(state, 0.8, 10, 60, 15*time.Second)
+	reasoner := minimal.NewRuleEngineReasoner(spec, 0.5, nil, nil)
+	reasoner.AttachState(state)
+	sm := semmap.New(minimal.NewOntologyFromSpec(spec), reasoner, proposer, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+	t0 := int64(1_700_000_000)
+	for i := 0; i < 40; i++ {
+		x := float64(i%20) / 20
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUUtilization, Value: x, TimestampUnix: t0 + int64(i)*10,
+			EventID: "p" + strconv.Itoa(i), Subject: "pod:a"})
+		_ = sm.IngestSample(&types.MetricSample{MetricType: types.CPUPressureRatio, Value: 0.9 * (1 - x), TimestampUnix: t0 + int64(i)*10 + 1,
+			EventID: "n" + strconv.Itoa(i)})
+	}
+	cs, _ := sm.PendingCandidates()
+	if len(cs) != 1 || cs[0].Direction != types.Negative {
+		t.Fatalf("candidates %+v; want one Negative", cs)
+	}
+	if err := sm.ConfirmCandidate(cs[0].CandidateID); err != nil {
+		t.Fatal(err)
+	}
+	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_pressure_ratio", "discovered"))
+	if !ok || r.Sign != -1 {
+		t.Errorf("relationship %+v ok=%v; want sign -1", r, ok)
+	}
+	if !state.Covered("cpu_utilization@pod:a", "cpu_pressure_ratio", -1) {
+		t.Error("the confirmed negative edge is not covered, so it would be proposed again")
+	}
+}
