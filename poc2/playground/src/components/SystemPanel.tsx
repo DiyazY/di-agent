@@ -125,6 +125,18 @@ export default function SystemPanel({ system, id }: Props) {
           </strong>
         </div>
       )}
+      {system === "battery" && (
+        <div className="metric-row">
+          <span>{status?.time_to_full_hr !== undefined ? "Time to full" : "Time to empty"}</span>
+          <strong>
+            {status?.time_to_empty_hr !== undefined
+              ? `${status.time_to_empty_hr.toFixed(1)} h`
+              : status?.time_to_full_hr !== undefined
+              ? `${status.time_to_full_hr.toFixed(1)} h`
+              : "stable"}
+          </strong>
+        </div>
+      )}
 
       <div className="load-control">
         <label htmlFor={`${id}-slider`}>Set target load ratio</label>

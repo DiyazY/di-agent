@@ -37,6 +37,8 @@ spec:
               value: {{ .Values.battery.kafkaTopic | quote }}
             - name: AUXLOAD_KAFKA_TOPIC
               value: {{ .Values.auxload.kafkaTopic | quote }}
+            - name: SHORE_POWER_KAFKA_TOPIC
+              value: {{ .Values.shorePower.kafkaTopic | quote }}
             - name: SWITCHBOARD_KAFKA_TOPIC
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
             - name: KAFKA_GROUP_ID

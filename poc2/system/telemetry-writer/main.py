@@ -11,12 +11,14 @@ GENSET_KAFKA_TOPIC = os.environ.get("GENSET_KAFKA_TOPIC", "genset.telemetry")
 PROPULSION_KAFKA_TOPIC = os.environ.get("PROPULSION_KAFKA_TOPIC", "propulsion.telemetry")
 BATTERY_KAFKA_TOPIC = os.environ.get("BATTERY_KAFKA_TOPIC", "battery.telemetry")
 AUXLOAD_KAFKA_TOPIC = os.environ.get("AUXLOAD_KAFKA_TOPIC", "auxload.telemetry")
+SHORE_POWER_KAFKA_TOPIC = os.environ.get("SHORE_POWER_KAFKA_TOPIC", "shore_power.telemetry")
 SWITCHBOARD_KAFKA_TOPIC = os.environ.get("SWITCHBOARD_KAFKA_TOPIC", "switchboard.telemetry")
 KAFKA_TOPICS = [
     GENSET_KAFKA_TOPIC,
     PROPULSION_KAFKA_TOPIC,
     BATTERY_KAFKA_TOPIC,
     AUXLOAD_KAFKA_TOPIC,
+    SHORE_POWER_KAFKA_TOPIC,
     SWITCHBOARD_KAFKA_TOPIC,
 ]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
@@ -68,7 +70,19 @@ MESSAGE_SCHEMAS = {
     },
     "battery_id": {
         "measurement": "battery_telemetry",
-        "fields": ("load_ratio", "power_kw", "soc"),
+        "fields": (
+            "load_ratio",
+            "power_kw",
+            "charge_power_kw",
+            "soc",
+            "soc_rate_per_hour",
+            "time_to_empty_hr",
+            "time_to_full_hr",
+        ),
+    },
+    "shore_power_id": {
+        "measurement": "shore_power_telemetry",
+        "fields": ("power_ratio", "input_power_kw", "power_kw", "losses_kw"),
     },
     "auxload_id": {
         "measurement": "auxload_telemetry",

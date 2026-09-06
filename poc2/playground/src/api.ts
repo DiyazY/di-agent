@@ -5,6 +5,7 @@ export interface PlaygroundConfig {
   propulsionIds: string[];
   batteryIds: string[];
   auxloadIds: string[];
+  shorePower: boolean;
 }
 
 export interface SystemStatus {
@@ -13,6 +14,9 @@ export interface SystemStatus {
   allocated_power_kw?: number;
   speed_rpm?: number;
   soc?: number;
+  soc_rate_per_hour?: number;
+  time_to_empty_hr?: number;
+  time_to_full_hr?: number;
   [key: string]: unknown;
 }
 
@@ -31,6 +35,18 @@ export interface SwitchboardStatus {
     string,
     { requested_power_kw: number; priority: number; allocated_power_kw: number; stale: boolean }
   >;
+}
+
+export interface ShorePowerStatus {
+  shore_power_id: string;
+  connected: boolean;
+  target_power_ratio: number;
+  current_power_ratio: number;
+  last_message?: {
+    power_kw: number;
+    losses_kw: number;
+    [key: string]: unknown;
+  } | null;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -76,6 +92,30 @@ export function setLoad(
   return apiFetch(`/api/${system}/${id}/load`, {
     method: "POST",
     body: JSON.stringify({ load_ratio: loadRatio }),
+  });
+}
+
+export function fetchShorePowerHealth(): Promise<{ status: string }> {
+  return apiFetch(`/api/shore-power/health`);
+}
+
+export function fetchShorePowerStatus(): Promise<ShorePowerStatus> {
+  return apiFetch(`/api/shore-power/status`);
+}
+
+export function setShorePowerConnected(connected: boolean): Promise<{ connected: boolean }> {
+  return apiFetch(`/api/shore-power/connect`, {
+    method: "POST",
+    body: JSON.stringify({ connected }),
+  });
+}
+
+export function setShorePowerRatio(
+  powerRatio: number
+): Promise<{ target_power_ratio: number }> {
+  return apiFetch(`/api/shore-power/power`, {
+    method: "POST",
+    body: JSON.stringify({ power_ratio: powerRatio }),
   });
 }
 

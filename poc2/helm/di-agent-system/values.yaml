@@ -72,6 +72,17 @@ battery:
   nodeSelector: {}
   resources: {}
 
+shorePower:
+  image:
+    repository: shore-power
+    tag: ""
+  kafkaTopic: shore_power.telemetry
+  ratedPowerKw: "1000"
+  # DNS name (Service:port) of the battery instance to charge while connected.
+  batteryUrl: "http://battery-1:8000"
+  nodeSelector: {}
+  resources: {}
+
 auxload:
   image:
     repository: auxload

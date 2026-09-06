@@ -30,6 +30,11 @@ server {
 
     ${AUXLOAD_LOCATIONS}
 
+    location /api/shore-power/ {
+        proxy_pass http://${SHORE_POWER_UPSTREAM}/;
+        proxy_set_header Host $host;
+    }
+
     location /api/switchboard/ {
         proxy_pass http://${SWITCHBOARD_UPSTREAM}/;
         proxy_set_header Host $host;
