@@ -1,0 +1,8 @@
+services:
+  di-agent:
+    build: ./go
+    restart: unless-stopped
+    deploy:
+      mode: global
+    x-ports:
+      - "9090:9090@host" 

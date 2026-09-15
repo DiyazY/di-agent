@@ -1,0 +1,73 @@
+# React/Vite frontend, served via nginx which proxies /api/* to each
+# genset/propulsion/battery/auxload/switchboard Service by in-cluster DNS
+# name (see poc2/playground/nginx.conf.template — the nginx entrypoint
+# envsubst's these env vars into its config at container start). Exposed via
+# NodePort so it's reachable regardless of which node it's scheduled on.
+{{- $locations := dict "genset" "" "propulsion" "" "battery" "" "auxload" "" }}
+{{- $ids := dict "genset" (list) "propulsion" (list) "battery" (list) "auxload" (list) }}
+{{- range $svc, $count := (dict "genset" .Values.genset.count "propulsion" .Values.propulsion.count "battery" .Values.battery.count "auxload" .Values.auxload.count) }}
+{{- range $i := until ($count | int) }}
+{{- $n := add1 $i }}
+{{- $id := printf "%s-%d" $svc $n }}
+{{- $_ := set $locations $svc (printf "%slocation /api/%s/%s/ { proxy_pass http://%s:8000/; proxy_set_header Host $host; } " (index $locations $svc) $svc $id $id) }}
+{{- $_ := set $ids $svc (append (index $ids $svc) $id) }}
+{{- end }}
+{{- end }}
+{{- $configJson := printf "{\"gensetIds\":%s,\"propulsionIds\":%s,\"batteryIds\":%s,\"auxloadIds\":%s}" ((index $ids "genset") | toJson) ((index $ids "propulsion") | toJson) ((index $ids "battery") | toJson) ((index $ids "auxload") | toJson) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playground
+  labels:
+    app: playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playground
+  template:
+    metadata:
+      labels:
+        app: playground
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.playground.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: playground
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.playground.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 80
+          env:
+            - name: GENSET_LOCATIONS
+              value: {{ index $locations "genset" | quote }}
+            - name: PROPULSION_LOCATIONS
+              value: {{ index $locations "propulsion" | quote }}
+            - name: BATTERY_LOCATIONS
+              value: {{ index $locations "battery" | quote }}
+            - name: AUXLOAD_LOCATIONS
+              value: {{ index $locations "auxload" | quote }}
+            - name: SWITCHBOARD_UPSTREAM
+              value: {{ .Values.playground.switchboardUpstream | quote }}
+            - name: CONFIG_JSON
+              value: {{ $configJson | quote }}
+          resources:
+            {{- toYaml .Values.playground.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playground
+  labels:
+    app: playground
+spec:
+  type: NodePort
+  selector:
+    app: playground
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: {{ .Values.playground.nodePort }}
