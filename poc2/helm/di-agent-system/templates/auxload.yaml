@@ -1,0 +1,67 @@
+# One Deployment + Service per auxiliary (hotel) load instance
+# (auxload-1..N); requests power from, and is allocated power by, the
+# switchboard, same as propulsion.
+{{- range $i := until (.Values.auxload.count | int) }}
+{{- $n := add1 $i }}
+{{- $name := printf "auxload-%d" $n }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app: auxload
+    auxload-id: {{ $name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      auxload-id: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app: auxload
+        auxload-id: {{ $name }}
+      {{- include "diagent.podAnnotations" $ | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" $.Values.auxload.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
+      {{- with $.Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: auxload
+          image: {{ include "diagent.customImage" (dict "global" $.Values.global "image" $.Values.auxload.image) }}
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: AUXLOAD_ID
+              value: {{ $name | quote }}
+            - name: INITIAL_LOAD_RATIO
+              value: {{ $.Values.auxload.initialLoadRatio | quote }}
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ $.Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ $.Values.auxload.kafkaTopic | quote }}
+            - name: REQUEST_KAFKA_TOPIC
+              value: {{ $.Values.auxload.requestKafkaTopic | quote }}
+            - name: ALLOCATION_KAFKA_TOPIC
+              value: {{ $.Values.auxload.allocationKafkaTopic | quote }}
+          resources:
+            {{- toYaml $.Values.auxload.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app: auxload
+    auxload-id: {{ $name }}
+spec:
+  selector:
+    auxload-id: {{ $name }}
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+{{- end }}
