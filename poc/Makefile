@@ -38,6 +38,9 @@ peers:
 workload-heavy:
 	@bash $(SCRIPTS)/workload.sh $(VM1) heavy
 
+workload-light:
+	@bash $(SCRIPTS)/workload.sh $(VM1) light
+
 workload-stop:
 	@bash $(SCRIPTS)/workload.sh $(VM1) stop
 
