@@ -1,5 +1,5 @@
-# Kafka consumer that writes genset/propulsion/switchboard telemetry into
-# InfluxDB. No externally-exposed port (consumer only).
+# Kafka consumer that writes system telemetry into InfluxDB. No externally-
+# exposed port (consumer only).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,6 +15,7 @@ spec:
     metadata:
       labels:
         app: telemetry-writer
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryWriter.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
@@ -32,10 +33,20 @@ spec:
               value: {{ .Values.genset.kafkaTopic | quote }}
             - name: PROPULSION_KAFKA_TOPIC
               value: {{ .Values.propulsion.kafkaTopic | quote }}
+            - name: BATTERY_KAFKA_TOPIC
+              value: {{ .Values.battery.kafkaTopic | quote }}
+            - name: AUXLOAD_KAFKA_TOPIC
+              value: {{ .Values.auxload.kafkaTopic | quote }}
+            - name: SHORE_POWER_KAFKA_TOPIC
+              value: {{ .Values.shorePower.kafkaTopic | quote }}
             - name: SWITCHBOARD_KAFKA_TOPIC
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
             - name: KAFKA_GROUP_ID
               value: {{ .Values.telemetryWriter.kafkaGroupId | quote }}
+            - name: LOG_EVERY_N_MESSAGES
+              value: {{ .Values.telemetryWriter.logEveryNMessages | quote }}
+            - name: STRICT_VALIDATION
+              value: {{ .Values.telemetryWriter.strictValidation | quote }}
             - name: INFLUXDB_URL
               value: "http://influxdb:{{ .Values.influxdb.port }}"
             - name: INFLUXDB_ORG
@@ -45,7 +56,7 @@ spec:
             - name: INFLUXDB_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: influxdb-credentials
+                  name: {{ .Values.influxdb.existingSecret }}
                   key: admin-token
           resources:
             {{- toYaml .Values.telemetryWriter.resources | nindent 12 }}

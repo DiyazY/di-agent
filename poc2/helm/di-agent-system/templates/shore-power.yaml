@@ -1,0 +1,54 @@
+# Single shore power instance: when connected, charges the battery via its
+# /charge endpoint (see poc2/system/shore-power).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shore-power
+  labels:
+    app: shore-power
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shore-power
+  template:
+    metadata:
+      labels:
+        app: shore-power
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.shorePower.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: shore-power
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.shorePower.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.shorePower.kafkaTopic | quote }}
+            - name: RATED_POWER_KW
+              value: {{ .Values.shorePower.ratedPowerKw | quote }}
+            - name: BATTERY_URL
+              value: {{ .Values.shorePower.batteryUrl | quote }}
+          resources:
+            {{- toYaml .Values.shorePower.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shore-power
+  labels:
+    app: shore-power
+spec:
+  selector:
+    app: shore-power
+  ports:
+    - port: 8000
+      targetPort: 8000

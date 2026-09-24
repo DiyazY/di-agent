@@ -99,6 +99,7 @@ cmd_build() {
     goarch="${target#*/}"
 
     info "building for $target"
+    mkdir -p "$(dirname "$AGENT_BIN")"
     step "go build -o $AGENT_BIN ./cmd/agent"
     GOOS="$goos" GOARCH="$goarch" go build -o "$AGENT_BIN" ./cmd/agent
     step "go build -o $MAPCTL_BIN ./cmd/mapctl"

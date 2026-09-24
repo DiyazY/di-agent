@@ -5,14 +5,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY propulsion.py controller.py main.py sensors.py .
+COPY shore_power.py controller.py main.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
-    KAFKA_TOPIC=propulsion.telemetry \
-    REQUEST_KAFKA_TOPIC=switchboard.requests \
-    ALLOCATION_KAFKA_TOPIC=switchboard.telemetry \
+    KAFKA_TOPIC=shore_power.telemetry \
     STEP_INTERVAL_S=1 \
-    RAMP_RATE_PER_S=0.05
+    RAMP_RATE_PER_S=0.1 \
+    RATED_POWER_KW=1000 \
+    BATTERY_URL=http://battery:8000
 
 EXPOSE 8000
 
