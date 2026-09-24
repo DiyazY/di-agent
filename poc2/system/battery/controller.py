@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -8,6 +9,8 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from battery import build_battery
+
+logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "battery.telemetry")
@@ -53,6 +56,7 @@ class BatteryController:
         self._producer: KafkaProducer | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._errors: list[str] = []
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -83,7 +87,28 @@ class BatteryController:
                 "last_message": self._last_message,
             }
 
+    def get_health(self) -> dict:
+        thread_status = {"telemetry": self._thread is not None and self._thread.is_alive()}
+        with self._lock:
+            errors = list(self._errors)
+        healthy = all(thread_status.values()) and not errors
+        return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+
+    def _record_error(self, message: str) -> None:
+        with self._lock:
+            self._errors.append(message)
+
+    def _send(self, topic: str, *, key: str, value: dict) -> None:
+        self._producer.send(topic, key=key, value=value).get(timeout=5)
+
     def _run(self) -> None:
+        try:
+            self._run_loop()
+        except Exception:
+            logger.exception("Telemetry worker stopped unexpectedly")
+            self._record_error("telemetry worker stopped unexpectedly")
+
+    def _run_loop(self) -> None:
         max_step = RAMP_RATE_PER_S * STEP_INTERVAL_S
         while not self._stop_event.is_set():
             with self._lock:
@@ -117,7 +142,7 @@ class BatteryController:
                 self._soc = soc
                 self._last_message = message
 
-            self._producer.send(KAFKA_TOPIC, key=self.battery_id, value=message)
+            self._send(KAFKA_TOPIC, key=self.battery_id, value=message)
             print(
                 f"load={message['load_ratio'] * 100:.1f}% "
                 f"power={message['power_kw']:.1f}kW "

@@ -1,2 +1,2 @@
-instance-id: vm-001
-local-hostname: ubuntu-vm
+instance-id: ${instance_id}
+local-hostname: ${hostname}

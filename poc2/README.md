@@ -62,6 +62,30 @@ The scripts expect the SSH key to be at:
 
 From this directory, choose one cluster distribution:
 
+Before installing the Helm chart, create the credentials in the target
+namespace. Set strong, unique values in your shell; do not add them to a
+values file or commit them. The InfluxDB token must be usable by the
+telemetry writer and Grafana datasource.
+
+```bash
+kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n default create secret generic influxdb-credentials \
+	--from-literal=admin-user="$INFLUXDB_ADMIN_USER" \
+	--from-literal=admin-password="$INFLUXDB_ADMIN_PASSWORD" \
+	--from-literal=admin-token="$INFLUXDB_ADMIN_TOKEN"
+kubectl -n default create secret generic grafana-credentials \
+	--from-literal=admin-user="$GRAFANA_ADMIN_USER" \
+	--from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD"
+```
+
+Use the namespace passed to `make helm-install` when it differs from `default`:
+
+```bash
+make helm-install HELM_NAMESPACE=di-agent-system
+```
+
+Then choose one cluster distribution:
+
 ```bash
 make provision
 make k8s       # kubeadm, or use: make k3s

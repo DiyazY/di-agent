@@ -20,6 +20,7 @@ spec:
       labels:
         app: battery
         battery-id: {{ $name }}
+      {{- include "diagent.podAnnotations" $ | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" $.Values.battery.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
       {{- with $.Values.global.imagePullSecrets }}
