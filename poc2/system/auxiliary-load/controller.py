@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -7,6 +8,8 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
 from aux_load import build_auxiliary_load
+
+logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "auxload.telemetry")
@@ -78,6 +81,7 @@ class AuxLoadController:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._consumer_thread: threading.Thread | None = None
+        self._errors: list[str] = []
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -115,6 +119,26 @@ class AuxLoadController:
                 "last_message": self._last_message,
             }
 
+    def get_health(self) -> dict:
+        threads = {
+            "telemetry": self._thread,
+            "allocation_consumer": self._consumer_thread,
+        }
+        with self._lock:
+            errors = list(self._errors)
+        thread_status = {
+            name: thread is not None and thread.is_alive() for name, thread in threads.items()
+        }
+        healthy = all(thread_status.values()) and not errors
+        return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+
+    def _record_error(self, message: str) -> None:
+        with self._lock:
+            self._errors.append(message)
+
+    def _send(self, topic: str, *, key: str, value: dict) -> None:
+        self._producer.send(topic, key=key, value=value).get(timeout=5)
+
     def _consume_allocations(self) -> None:
         try:
             for record in self._consumer:
@@ -130,7 +154,8 @@ class AuxLoadController:
                     self._allocation = (float(allocated_power_kw), time.time())
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Allocation consumer stopped unexpectedly")
+                self._record_error("allocation_consumer stopped unexpectedly")
 
     def _get_allocated_power_kw(self) -> float:
         """0 kW if no allocation was ever received, or the last one is stale
@@ -143,6 +168,13 @@ class AuxLoadController:
         return allocated_power_kw
 
     def _run(self) -> None:
+        try:
+            self._run_loop()
+        except Exception:
+            logger.exception("Telemetry worker stopped unexpectedly")
+            self._record_error("telemetry worker stopped unexpectedly")
+
+    def _run_loop(self) -> None:
         max_step = RAMP_RATE_PER_S * STEP_INTERVAL_S
         while not self._stop_event.is_set():
             with self._lock:
@@ -157,7 +189,7 @@ class AuxLoadController:
                 desired_power_output_kw
             )
 
-            self._producer.send(
+            self._send(
                 REQUEST_KAFKA_TOPIC,
                 key=self.auxload_id,
                 value={
@@ -187,7 +219,7 @@ class AuxLoadController:
                 self._achieved_load_ratio = float(load_ratio)
                 self._last_message = message
 
-            self._producer.send(KAFKA_TOPIC, key=self.auxload_id, value=message)
+            self._send(KAFKA_TOPIC, key=self.auxload_id, value=message)
             print(
                 f"load={message['load_ratio'] * 100:.1f}% "
                 f"power_output={message['power_output_kw']:.1f}kW "

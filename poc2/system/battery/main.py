@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from controller import BatteryController
@@ -23,8 +23,11 @@ class LoadRequest(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+def health(response: Response) -> dict:
+    health_data = controller.get_health()
+    if health_data["status"] != "ok":
+        response.status_code = 503
+    return health_data
 
 
 @app.get("/status")

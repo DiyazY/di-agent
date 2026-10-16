@@ -7,9 +7,11 @@ global:
   # propulsion, battery, auxload, telemetry-writer, playground). Public
   # images (kafka, influxdb, grafana) are referenced by their full upstream
   # repository path and are not affected by this value.
-  imageRegistry: ghcr.io/unlabs-dev
+  imageRegistry: ghcr.io/chuducanh242002
   imageTag: latest
-  imagePullPolicy: IfNotPresent
+  # Always is required so pods actually re-pull ":latest" on restart instead
+  # of reusing a node's cached image.
+  imagePullPolicy: Always
   # e.g. [{ name: ghcr-creds }] if the registry above is private.
   imagePullSecrets: []
   # Applied to every pod in this chart unless overridden per-service below.
@@ -89,12 +91,9 @@ influxdb:
   port: 8086
   org: di-agent
   bucket: telemetry
-  adminUser: admin
-  # Change these before deploying anywhere beyond a local/throwaway cluster;
-  # prefer passing via `--set` or a separate untracked values file rather
-  # than committing real credentials here.
-  adminPassword: admin12345
-  adminToken: change-me-too
+  # Pre-create this Secret in the release namespace. Required keys are
+  # admin-user, admin-password, and admin-token.
+  existingSecret: influxdb-credentials
   nodeSelector: {}
   resources: {}
 
@@ -111,8 +110,9 @@ grafana:
     repository: grafana/grafana
     tag: latest
   port: 3000
-  adminUser: admin
-  adminPassword: admin12345
+  # Pre-create this Secret in the release namespace. Required keys are
+  # admin-user and admin-password.
+  existingSecret: grafana-credentials
   nodeSelector: {}
   resources: {}
 

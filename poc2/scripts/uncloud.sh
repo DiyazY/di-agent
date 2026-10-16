@@ -103,6 +103,7 @@ main() {
         # Extra safety: one more short sleep for final network settling
         sleep 2
 
+        machine_configured=false
         if [ "$first_vm" = true ]; then
             echo -e "${YELLOW}Pulling $CORROSION_IMAGE on ubuntu@$vm_ip before init...${NC}"
             ssh -i ~/.ssh/id_ed25519_vms -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@$vm_ip" "sudo docker pull '$CORROSION_IMAGE'" || {
@@ -111,8 +112,10 @@ main() {
             }
 
             echo -e "${YELLOW}Running: uc machine init ubuntu@$vm_ip --name $vm_name -y --no-caddy --no-dns${NC} --public-ip none -i ~/.ssh/id_ed25519_vms"
-            uc machine init "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy --no-dns --public-ip none -i ~/.ssh/id_ed25519_vms
-            first_vm=false
+            if uc machine init "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy --no-dns --public-ip none -i ~/.ssh/id_ed25519_vms; then
+                machine_configured=true
+                first_vm=false
+            fi
         else
             echo -e "${YELLOW}Pulling $CORROSION_IMAGE on ubuntu@$vm_ip before add...${NC}"
             ssh -i ~/.ssh/id_ed25519_vms -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@$vm_ip" "sudo docker pull '$CORROSION_IMAGE'" || {
@@ -121,10 +124,12 @@ main() {
             }
 
             echo -e "${YELLOW}Running: uc machine add ubuntu@$vm_ip --name $vm_name -y --no-caddy -i ~/.ssh/id_ed25519_vms"
-            uc machine add "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy -i ~/.ssh/id_ed25519_vms
+            if uc machine add "ubuntu@$vm_ip" --name "$vm_name" -y --no-caddy -i ~/.ssh/id_ed25519_vms; then
+                machine_configured=true
+            fi
         fi
 
-        if [ $? -eq 0 ]; then
+        if [ "$machine_configured" = true ]; then
             echo -e "${GREEN}✓ Success: $vm_name ($vm_ip)${NC}"
         else
             echo -e "${RED}✗ Failed: $vm_name ($vm_ip)${NC}" >&2
