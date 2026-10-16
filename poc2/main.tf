@@ -48,12 +48,16 @@ resource "libvirt_volume" "vm_disk" {
 
 # Cloud-init configuration for VM1
 resource "libvirt_cloudinit_disk" "vm_init" {
-  name = "vm-cloudinit"
+  count = var.vm_count
+  name  = "vm${count.index + 1}-cloudinit"
 
   # User-data: Configure root password, enable SSH, install packages
   user_data      = file("${path.module}/config/cloud_init.yml")
   # Meta-data: Instance identification
-  meta_data      = file("${path.module}/config/metadata.yml") 
+  meta_data      = templatefile("${path.module}/config/metadata.yml", {
+    instance_id = "vm-${count.index + 1}"
+    hostname    = "${var.vm_hostname}${count.index + 1}"
+  })
 
 }
 
@@ -66,7 +70,7 @@ resource "libvirt_volume" "vm_cloudinit" {
 
   create = {
     content = {
-      url = libvirt_cloudinit_disk.vm_init.path
+      url = libvirt_cloudinit_disk.vm_init[count.index].path
     }
   }
 }
@@ -75,7 +79,7 @@ resource "libvirt_volume" "vm_cloudinit" {
 resource "libvirt_domain" "vm1" {
   count  = var.vm_count
   name   = "${var.vm_hostname}${count.index + 1}"
-  memory = 3
+  memory = 2
   memory_unit = "GiB"
   vcpu   = count.index == 0 ? 2 : 1 # First Control plane node gets 2 vCPUs, worker nodes get 1 vCPU
   type = "kvm"

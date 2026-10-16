@@ -10,6 +10,9 @@ COPY main.py .
 ENV KAFKA_BROKERS=localhost:9092 \
     GENSET_KAFKA_TOPIC=genset.telemetry \
     PROPULSION_KAFKA_TOPIC=propulsion.telemetry \
+    BATTERY_KAFKA_TOPIC=battery.telemetry \
+    AUXLOAD_KAFKA_TOPIC=auxload.telemetry \
+    SHORE_POWER_KAFKA_TOPIC=shore_power.telemetry \
     KAFKA_GROUP_ID=telemetry-writer \
     INFLUXDB_URL=http://localhost:8086 \
     INFLUXDB_ORG=di-agent \

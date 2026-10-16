@@ -21,6 +21,7 @@ spec:
       labels:
         app: auxload
         auxload-id: {{ $name }}
+      {{- include "diagent.podAnnotations" $ | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" $.Values.auxload.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
       {{- with $.Values.global.imagePullSecrets }}
