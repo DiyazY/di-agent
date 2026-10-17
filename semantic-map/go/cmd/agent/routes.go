@@ -633,7 +633,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 				return
 			}
 		}
-		if err := sm.ConfirmCandidate(id, req.From); err != nil {
+		if err := sm.ConfirmCandidate(id, req.From, operatorReview()); err != nil {
 			code := http.StatusInternalServerError
 			if errors.Is(err, contracts.ErrBadConfirmation) {
 				code = http.StatusBadRequest
@@ -646,7 +646,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	mux.HandleFunc("POST /candidates/{id}/reject", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.RejectCandidate(id); err != nil {
+		if err := sm.RejectCandidate(id, operatorReview()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -655,12 +655,17 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	mux.HandleFunc("POST /candidates/{id}/defer", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if err := sm.DeferCandidate(id); err != nil {
+		if err := sm.DeferCandidate(id, operatorReview()); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// operatorReview is the review an operator's action through the endpoints records.
+func operatorReview() types.CandidateReview {
+	return types.CandidateReview{By: types.ReviewerOperator, At: time.Now()}
 }
 
 // parseSince accepts an empty string (returns zero time), an RFC3339

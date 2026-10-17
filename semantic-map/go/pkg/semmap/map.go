@@ -373,8 +373,10 @@ func (m *SemanticMap) CandidateHistory() ([]*types.CandidateEdge, error) {
 // provenance — never a Di-Select proposition, whose vocabulary is constructs. A
 // candidate between constructs (the explicit construct path) goes through the
 // ontology.
-func (m *SemanticMap) ConfirmCandidate(candidateID, from string) error {
-	prop, err := m.proposer.Confirm(candidateID, from)
+//
+// rv is the review that decided it: an operator's, or the agent's own.
+func (m *SemanticMap) ConfirmCandidate(candidateID, from string, rv types.CandidateReview) error {
+	prop, err := m.proposer.Confirm(candidateID, from, rv)
 	if err != nil {
 		return err
 	}
@@ -389,7 +391,7 @@ func (m *SemanticMap) ConfirmCandidate(candidateID, from string) error {
 		err := m.state.DeclareRelationship(statemap.Relationship{
 			From: prop.FromConstruct, To: prop.ToConstruct, Label: "discovered", Sign: sign,
 			Provenance: statemap.Discovered,
-			Note:       "[discovered: " + prop.Description + "; confirmed by operator]",
+			Note:       "[discovered: " + prop.Description + "; confirmed by " + confirmedBy(rv) + "]",
 		})
 		if err != nil {
 			// The proposer marked the candidate Confirmed on the way out; with no
@@ -441,12 +443,34 @@ func (m *SemanticMap) isConstruct(id string) bool {
 	return false
 }
 
-func (m *SemanticMap) RejectCandidate(candidateID string) error {
-	return m.proposer.Reject(candidateID)
+func (m *SemanticMap) RejectCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Reject(candidateID, rv)
 }
 
-func (m *SemanticMap) DeferCandidate(candidateID string) error {
-	return m.proposer.Defer(candidateID)
+func (m *SemanticMap) DeferCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Defer(candidateID, rv)
+}
+
+// AnnotateCandidate records a review of a pending candidate that did not act on it:
+// an escalation, or a suggestion under an autonomy level that reserves the action.
+func (m *SemanticMap) AnnotateCandidate(candidateID string, rv types.CandidateReview) error {
+	return m.proposer.Annotate(candidateID, rv)
+}
+
+// confirmedBy names the reviewer in a discovered relationship's note, with the
+// decision that holds its reasoning when there is one.
+func confirmedBy(rv types.CandidateReview) string {
+	who := rv.By
+	if who == "" {
+		who = types.ReviewerOperator
+	}
+	if rv.Model != "" {
+		who += " " + rv.Model
+	}
+	if rv.DecisionID != "" {
+		who += ", decision " + rv.DecisionID
+	}
+	return who
 }
 
 // ── Read-side facade (introspection) ──────────────────────────────────────────

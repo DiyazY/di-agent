@@ -108,7 +108,7 @@ func TestMICorrelationProposer_ConfirmAddsProposition(t *testing.T) {
 	}
 	// Confirm returns the proposition rather than adding it: the caller applies it
 	// through the facade, which is the only path that reaches the state model too.
-	prop, err := p.Confirm(cs[0].CandidateID, "")
+	prop, err := p.Confirm(cs[0].CandidateID, "", types.CandidateReview{})
 	if err != nil {
 		t.Fatalf("Confirm error: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestMICorrelationProposer_RejectSuppressesReemission(t *testing.T) {
 		t.Fatalf("expected 1 pending candidate; got %d", len(cs))
 	}
 	cid := cs[0].CandidateID
-	if err := p.Reject(cid); err != nil {
+	if err := p.Reject(cid, types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -549,7 +549,7 @@ func TestConfirmedCandidateIsNeverReemitted(t *testing.T) {
 	if cid == "" {
 		t.Fatal("expected a candidate for cpu_utilization@pod:a before confirming")
 	}
-	if _, err := p.Confirm(cid, ""); err != nil {
+	if _, err := p.Confirm(cid, "", types.CandidateReview{}); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
 
@@ -711,7 +711,7 @@ func TestOperatorDeferralDoesNotReenter(t *testing.T) {
 		t.Fatal("no candidate to defer")
 	}
 	id := cs[0].CandidateID
-	if err := p.Defer(id); err != nil {
+	if err := p.Defer(id, types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 	feedScoped(p, 40, 2*time.Second)
@@ -734,13 +734,13 @@ func TestSettledCandidatesCannotBeRejectedOrDeferred(t *testing.T) {
 		t.Fatal("no candidate to confirm")
 	}
 	id := cs[0].CandidateID
-	if _, err := p.Confirm(id, ""); err != nil {
+	if _, err := p.Confirm(id, "", types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Reject(id); err == nil {
+	if err := p.Reject(id, types.CandidateReview{}); err == nil {
 		t.Error("a Confirmed candidate was rejected")
 	}
-	if err := p.Defer(id); err == nil {
+	if err := p.Defer(id, types.CandidateReview{}); err == nil {
 		t.Error("a Confirmed candidate was deferred")
 	}
 	h, _ := p.GetHistory()
@@ -913,7 +913,7 @@ func TestCompositionFlag(t *testing.T) {
 	if k, ok := kinds["cpu_utilization@pod:a->cpu_pressure_ratio"]; !ok || k != "" {
 		t.Errorf("pod CPU -> node pressure: kind %q (proposed=%v); want an ordinary candidate", k, ok)
 	}
-	prop, err := p.Confirm("cpu_utilization@pod:a->cpu_utilization", "")
+	prop, err := p.Confirm("cpu_utilization@pod:a->cpu_utilization", "", types.CandidateReview{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -940,7 +940,7 @@ func TestConfirmOrientation(t *testing.T) {
 	x := func(i int) float64 { return float64(i%10) / 10 }
 	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.5, 5, 60, 15*time.Second)
 	feedNodePair(p, 20, x, x, &unit, &unit)
-	if _, err := p.Confirm("a<->b", "b"); err != nil {
+	if _, err := p.Confirm("a<->b", "b", types.CandidateReview{}); err != nil {
 		t.Fatalf("undirected confirm from b: %v", err)
 	}
 
@@ -950,10 +950,10 @@ func TestConfirmOrientation(t *testing.T) {
 	if len(cs) == 0 {
 		t.Fatal("no scoped candidate to confirm")
 	}
-	if _, err := q.Confirm(cs[0].CandidateID, cs[0].ToID); !errors.Is(err, contracts.ErrBadConfirmation) {
+	if _, err := q.Confirm(cs[0].CandidateID, cs[0].ToID, types.CandidateReview{}); !errors.Is(err, contracts.ErrBadConfirmation) {
 		t.Errorf("directed candidate confirmed from its target: %v; want ErrBadConfirmation", err)
 	}
-	if _, err := q.Confirm(cs[0].CandidateID, cs[0].FromID); err != nil {
+	if _, err := q.Confirm(cs[0].CandidateID, cs[0].FromID, types.CandidateReview{}); err != nil {
 		t.Errorf("directed candidate confirmed from its source: %v", err)
 	}
 }
@@ -1037,7 +1037,7 @@ func TestSettledPairStopsBeingTested(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		tick(i)
 	}
-	if err := p.Reject("x<->y"); err != nil {
+	if err := p.Reject("x<->y", types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 20; i < 25; i++ {
@@ -1792,5 +1792,82 @@ func TestAPartOfFollowsTheLatestReading(t *testing.T) {
 		if k, ok := kind(); !ok || k != step.want {
 			t.Errorf("%s: kind %q (proposed %v); want %q", step.name, k, ok, step.want)
 		}
+	}
+}
+
+// reviewPair feeds a subject's metric and a node metric for readings [from, to): y
+// follows x exactly, plus noise of the given amplitude.
+func reviewPair(p *minimal.MICorrelationProposer, from, to int, noise float64) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := from; i < to; i++ {
+		at := t0.Add(time.Duration(i) * 10 * time.Second)
+		x := float64(i%10) / 10
+		y := x + noise*float64((i*7)%5-2)/2
+		for _, r := range []types.PropertyReading{
+			{ID: "m@pod:a", Subject: "pod:a", Value: x},
+			{ID: "node.m2", Value: y},
+		} {
+			r.At = at
+			_ = p.ObserveProperty(r)
+		}
+	}
+}
+
+func historyOf(t *testing.T, p *minimal.MICorrelationProposer, id string) *types.CandidateEdge {
+	t.Helper()
+	h, err := p.GetHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range h {
+		if c.CandidateID == id {
+			return c
+		}
+	}
+	t.Fatalf("%s is not in history", id)
+	return nil
+}
+
+func TestAnAgentRejectionReopensWhenTheEvidenceMoves(t *testing.T) {
+	const id = "m@pod:a->node.m2"
+	for _, tc := range []struct {
+		by         string
+		wantReason string
+		wantAfter  types.CandidateStatus
+	}{
+		{types.ReviewerDecisionModel, "agent", types.Pending},
+		{types.ReviewerOperator, "operator", types.Rejected},
+	} {
+		p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 30, 15*time.Second)
+		reviewPair(p, 0, 30, 0)
+		if err := p.Reject(id, types.CandidateReview{By: tc.by, Model: "m", DecisionID: "rv-1"}); err != nil {
+			t.Fatal(err)
+		}
+		c := historyOf(t, p, id)
+		if c.Status != types.Rejected || c.Reason != tc.wantReason || c.Review == nil ||
+			c.Review.By != tc.by || !c.Review.Applied || c.Review.MIScore != c.MIScore {
+			t.Fatalf("%s: rejected %v reason %q review %+v; want the review stamped with the evidence", tc.by, c.Status, c.Reason, c.Review)
+		}
+		reviewPair(p, 30, 31, 0) // the same evidence: the rejection stands
+		if c := historyOf(t, p, id); c.Status != types.Rejected {
+			t.Errorf("%s: the same evidence reopened the candidate (%v)", tc.by, c.Status)
+		}
+		reviewPair(p, 31, 61, 0.3) // r falls from 1 to about 0.9, still a candidate
+		if c := historyOf(t, p, id); c.Status != tc.wantAfter {
+			t.Errorf("%s: after the evidence moved (|r| %.3f) status %v; want %v", tc.by, c.MIScore, c.Status, tc.wantAfter)
+		}
+	}
+}
+
+func TestAnnotateKeepsTheCandidateInTheQueue(t *testing.T) {
+	const id = "m@pod:a->node.m2"
+	p := minimal.NewMICorrelationProposer(coveredNone{}, 0.8, 10, 30, 15*time.Second)
+	reviewPair(p, 0, 30, 0)
+	if err := p.Annotate(id, types.CandidateReview{By: types.ReviewerReasoningAgent, Tier: 2, Applied: true}); err != nil {
+		t.Fatal(err)
+	}
+	c := historyOf(t, p, id)
+	if c.Status != types.Pending || c.Review == nil || c.Review.Action != types.ReviewEscalate || c.Review.Applied {
+		t.Errorf("annotated: %v review %+v; want pending, escalated and not applied", c.Status, c.Review)
 	}
 }

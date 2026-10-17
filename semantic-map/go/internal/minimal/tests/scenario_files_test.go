@@ -13,6 +13,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/statemap"
+	"github.com/DiyazY/di-agent/pkg/types"
 )
 
 // scenarioRun is what driving a scenario through the daemon stack leaves behind.
@@ -140,7 +141,7 @@ func driveScenario(t *testing.T, sc *scripted.Scenario, narrate func(tick int64,
 			// retired and the candidate was forgotten, so a return proposes it afresh
 			// and confirming it again is the revival the lifecycle promises.
 			if _, want := expected[key]; want {
-				if err := sm.ConfirmCandidate(c.CandidateID, ""); err != nil {
+				if err := sm.ConfirmCandidate(c.CandidateID, "", types.CandidateReview{}); err != nil {
 					t.Fatalf("tick %d: confirm %s: %v", i, key, err)
 				}
 				r.confirmed[key] = true

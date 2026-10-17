@@ -133,10 +133,16 @@ type RelationshipLookup interface {
 //     undirected candidate needs from, one of its two ends, and the proposition
 //     runs from it. Anything else fails with ErrBadConfirmation and leaves the
 //     candidate Pending.
-//   - Settled candidates: a candidate is keyed on (from, to). After Reject, Confirm,
-//     or an operator's Defer, that pair is not re-emitted under either sign within
+//   - Reviews: Confirm, Reject, Defer and Annotate take the review that decided
+//     them, and the candidate carries the latest one, stamped with its evidence at
+//     the time. Annotate records a review without acting on it (an escalation, or a
+//     suggestion the autonomy level did not let the reviewer apply).
+//   - Settled candidates: a candidate is keyed on (from, to). After Confirm, or an
+//     operator's Reject or Defer, that pair is not re-emitted under either sign within
 //     the session; Forget clears it, so a subject that departs and returns can be
-//     proposed again. A cap deferral, or an untested one (its pair displaced from
+//     proposed again. An agent's Reject or Defer is not settled: the pair is still
+//     tested, and the candidate returns to Pending once its evidence has moved since
+//     the review (CandidateReview.Outdated). A cap deferral, or an untested one (its pair displaced from
 //     the budget), or a grouped one (an end joined an arithmetic group it does not
 //     represent), one the corrected bar tightened past, or one whose correlation
 //     weakened below the threshold by more than its sampling error, is the proposer's own and provisional: it
@@ -158,9 +164,10 @@ type ProposerContract interface {
 	ObserveProperty(r types.PropertyReading) error
 	Forget(propertyID string) error
 	GetCandidates() ([]*types.CandidateEdge, error)
-	Confirm(candidateID, from string) (*types.Proposition, error)
-	Reject(candidateID string) error
-	Defer(candidateID string) error
+	Confirm(candidateID, from string, rv types.CandidateReview) (*types.Proposition, error)
+	Reject(candidateID string, rv types.CandidateReview) error
+	Defer(candidateID string, rv types.CandidateReview) error
+	Annotate(candidateID string, rv types.CandidateReview) error
 	GetHistory() ([]*types.CandidateEdge, error)
 	Discovery() (*types.DiscoveryCounts, error)
 }

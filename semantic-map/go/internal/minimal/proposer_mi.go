@@ -400,11 +400,12 @@ func (p *MICorrelationProposer) worthTestingLocked(from, to string, undirected b
 	return true
 }
 
-// settled is a candidate evidence cannot change: confirmed, rejected, or deferred by
-// an operator. The proposer's own deferrals (cap, untested) can still re-enter.
+// settled is a candidate evidence cannot change: confirmed, or rejected or deferred
+// by an operator. The proposer's own deferrals (cap, untested) can still re-enter, and
+// so can an agent's rejection or deferral once the evidence has moved.
 func settled(c *types.CandidateEdge) bool {
-	return c.Status == types.Confirmed || c.Status == types.Rejected ||
-		(c.Status == types.Deferred && c.Reason == deferredByOperator)
+	return c.Status == types.Confirmed ||
+		((c.Status == types.Rejected || c.Status == types.Deferred) && c.Reason == byOperator)
 }
 
 // admitAllLocked starts testing every pair id can form now, while the budget has
@@ -1005,15 +1006,23 @@ func (p *MICorrelationProposer) observeLocked(fromID, toID string, valueA, value
 		switch existing.Status {
 		case types.Confirmed:
 			return nil // a confirmed pair is settled; never re-emitted
-		case types.Rejected:
-			return nil // permanent suppression within the session
-		case types.Deferred:
-			if existing.Reason == deferredByOperator {
-				return nil // an operator's deferral is not overturned by evidence
+		case types.Rejected, types.Deferred:
+			if existing.Reason == byOperator {
+				return nil // an operator's rejection or deferral is not overturned by evidence
 			}
 			existing.Direction, existing.MIScore = direction, math.Abs(r)
 			existing.PValue, existing.PBar, existing.NObservations = pv, bar, buf.Len()
 			existing.Kind = meta.kind
+			if existing.Reason == byAgent {
+				// An agent decided on evidence that may since have moved; until it has,
+				// the decision stands, and once it has, the candidate is reviewed again.
+				if existing.Review.Outdated(existing) {
+					existing.Status, existing.Reason = types.Pending, ""
+					p.log("proposer: %s returns to pending: its evidence moved since the agent's %s", candID, existing.Review.Action)
+					p.enforceCapLocked()
+				}
+				return nil
+			}
 			if p.outranksPendingLocked(existing) {
 				existing.Status, existing.Reason = types.Pending, ""
 				p.log("proposer: %s re-enters pending with |r|·n=%.1f; the cap defers the weakest instead", candID, score(existing))
@@ -1108,8 +1117,11 @@ func (p *MICorrelationProposer) log(format string, args ...any) {
 // Reasons a Deferred candidate carries, so history can tell the proposer's choice
 // from an operator's.
 const (
-	deferredByCap      = "cap"
-	deferredByOperator = "operator"
+	deferredByCap = "cap"
+	// byOperator and byAgent say who rejected or deferred a candidate. Only an
+	// operator's decision is final for the session.
+	byOperator = "operator"
+	byAgent    = "agent"
 	// deferredUntested is a pending candidate whose pair was displaced from the
 	// budget: its numbers stopped being updated.
 	deferredUntested = "untested"
@@ -1211,7 +1223,7 @@ func (p *MICorrelationProposer) GetCandidates() ([]*types.CandidateEdge, error) 
 // The candidate is marked Confirmed here, before the facade applies the proposition.
 // If applying fails the facade calls Reopen, so the candidate returns to Pending rather
 // than standing in history as confirmed with nothing behind it.
-func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Proposition, error) {
+func (p *MICorrelationProposer) Confirm(candidateID, from string, rv types.CandidateReview) (*types.Proposition, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.candidates[candidateID]
@@ -1246,7 +1258,7 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Propos
 		EvidenceSources: []string{"proposer-mi"},
 	}
 	if c.Undirected {
-		prop.Description += "; direction chosen by the operator"
+		prop.Description += "; direction chosen by the " + reviewerName(rv)
 	}
 	switch c.Kind {
 	case types.CandidateKindComposition:
@@ -1257,7 +1269,44 @@ func (p *MICorrelationProposer) Confirm(candidateID, from string) (*types.Propos
 		prop.Description += "; two metrics of one subject: they may hold together by construction"
 	}
 	c.Status = types.Confirmed
+	rv.Applied = true
+	c.Review = stamp(c, rv, types.ReviewConfirm)
 	return prop, nil
+}
+
+// stamp completes a review with the candidate's evidence as it stands, so a later
+// change in that evidence can be told from the one the decision was made on.
+func stamp(c *types.CandidateEdge, rv types.CandidateReview, action string) *types.CandidateReview {
+	if rv.By == "" {
+		rv.By = types.ReviewerOperator
+	}
+	if rv.Action == "" {
+		rv.Action = action
+	}
+	if rv.At.IsZero() {
+		rv.At = time.Now()
+	}
+	rv.MIScore, rv.NObservations, rv.Direction, rv.Kind = c.MIScore, c.NObservations, c.Direction, c.Kind
+	return &rv
+}
+
+// reviewerName is how a proposition's description names who oriented it.
+func reviewerName(rv types.CandidateReview) string {
+	switch {
+	case rv.By == "" || rv.By == types.ReviewerOperator:
+		return "operator"
+	case rv.Model != "":
+		return rv.By + " " + rv.Model
+	}
+	return rv.By
+}
+
+// reasonFor is who a rejection or deferral is attributed to.
+func reasonFor(rv types.CandidateReview) string {
+	if rv.By == "" || rv.By == types.ReviewerOperator {
+		return byOperator
+	}
+	return byAgent
 }
 
 // Reopen returns a Confirmed candidate to Pending. The facade calls it when the
@@ -1274,15 +1323,17 @@ func (p *MICorrelationProposer) Reopen(candidateID string) error {
 	if c.Status != types.Confirmed {
 		return fmt.Errorf("candidate %q is not Confirmed (status=%v)", candidateID, c.Status)
 	}
-	c.Status, c.Reason = types.Pending, ""
+	c.Status, c.Reason, c.Review = types.Pending, "", nil // the confirmation never took effect
 	return nil
 }
 
-// Reject marks a candidate as permanently suppressed for this session. The candidate
-// stays in the map so subsequent observations of the same pair are short-circuited,
-// and its history entry reads Rejected. A Confirmed candidate cannot be rejected: the
-// relationship it became is in the map, and retiring that is the operator's move.
-func (p *MICorrelationProposer) Reject(candidateID string) error {
+// Reject marks a candidate Rejected. An operator's rejection is permanent for the
+// session: the candidate stays in the map so later observations of the pair are
+// short-circuited. An agent's (Reason "agent") is not: the pair is still tested, and
+// the candidate returns to Pending once its evidence moves past what the review saw.
+// A Confirmed candidate cannot be rejected: the relationship it became is in the map,
+// and retiring that is the operator's move.
+func (p *MICorrelationProposer) Reject(candidateID string, rv types.CandidateReview) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.candidates[candidateID]
@@ -1292,26 +1343,53 @@ func (p *MICorrelationProposer) Reject(candidateID string) error {
 	if c.Status == types.Confirmed {
 		return fmt.Errorf("candidate %q is Confirmed: the relationship it became is in the map; retire that instead", candidateID)
 	}
-	c.Status, c.Reason = types.Rejected, ""
+	if settled(c) {
+		return fmt.Errorf("candidate %q is %v by the operator", candidateID, c.Status)
+	}
+	c.Status, c.Reason = types.Rejected, reasonFor(rv)
+	rv.Applied = true
+	c.Review = stamp(c, rv, types.ReviewReject)
 	return nil
 }
 
-// Defer marks a candidate as Deferred by an operator — out of GetCandidates, still in
-// history with Reason "operator", and not overturned by later evidence. A cap deferral
-// (Reason "cap") is the proposer's own, provisional choice and re-enters when it
-// outranks a pending candidate; an operator may Defer a cap-deferred candidate to
-// make it stick. Confirmed and Rejected candidates cannot be deferred.
-func (p *MICorrelationProposer) Defer(candidateID string) error {
+// Defer marks a candidate Deferred — out of GetCandidates, still in history. An
+// operator's deferral (Reason "operator") is not overturned by later evidence; an
+// agent's (Reason "agent") returns to Pending once the evidence moves past what the
+// review saw. A cap deferral (Reason "cap") is the proposer's own, provisional choice
+// and re-enters when it outranks a pending candidate; an operator may Defer a
+// cap-deferred candidate to make it stick. Confirmed candidates, and ones an operator
+// settled, cannot be deferred.
+func (p *MICorrelationProposer) Defer(candidateID string, rv types.CandidateReview) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	c, ok := p.candidates[candidateID]
 	if !ok {
 		return fmt.Errorf("candidate %q not found", candidateID)
 	}
-	if c.Status == types.Confirmed || c.Status == types.Rejected {
+	if settled(c) {
 		return fmt.Errorf("candidate %q is %v and cannot be deferred", candidateID, c.Status)
 	}
-	c.Status, c.Reason = types.Deferred, deferredByOperator
+	c.Status, c.Reason = types.Deferred, reasonFor(rv)
+	rv.Applied = true
+	c.Review = stamp(c, rv, types.ReviewDefer)
+	return nil
+}
+
+// Annotate records a review of a Pending candidate without acting on it: an
+// escalation, or what a reviewer would have done had the autonomy level let it.
+// The candidate stays Pending, in the operator's queue.
+func (p *MICorrelationProposer) Annotate(candidateID string, rv types.CandidateReview) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.candidates[candidateID]
+	if !ok {
+		return fmt.Errorf("candidate %q not found", candidateID)
+	}
+	if c.Status != types.Pending {
+		return fmt.Errorf("candidate %q is not Pending (status=%v)", candidateID, c.Status)
+	}
+	rv.Applied = false
+	c.Review = stamp(c, rv, types.ReviewEscalate)
 	return nil
 }
 
@@ -1342,6 +1420,10 @@ func synthesizePropSuffix(candidateID string) string {
 func copyCandidate(c *types.CandidateEdge) *types.CandidateEdge {
 	cp := *c
 	cp.Caveats = append([]string(nil), c.Caveats...)
+	if c.Review != nil {
+		rv := *c.Review
+		cp.Review = &rv
+	}
 	return &cp
 }
 

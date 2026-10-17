@@ -5,6 +5,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"time"
@@ -471,10 +472,73 @@ type CandidateEdge struct {
 	// end joined an arithmetic group it does not represent, "bar" when its p-value
 	// no longer clears the corrected bar as more pairs came to be tested, "weakened"
 	// when its |r| fell below the candidate threshold by more than its sampling
-	// error, "operator" when
-	// Defer was called. The proposer's own deferrals are provisional and re-enter
-	// when the evidence holds again; an operator's is not overturned.
+	// error, "operator" when an operator deferred it, "agent" when the agent did. The
+	// proposer's own deferrals are provisional and re-enter when the evidence holds
+	// again; an agent's re-enters when the evidence has moved since its review
+	// (CandidateReview.Outdated); an operator's is not overturned. A Rejected
+	// candidate carries "operator" or "agent" the same way: only an operator's
+	// rejection is permanent for the session.
 	Reason string
+	// Review is the latest review of the candidate: who looked at it, what they
+	// decided and on what evidence. Nil until someone has.
+	Review *CandidateReview
+}
+
+// Who reviewed a candidate.
+const (
+	ReviewerOperator       = "operator"        // through the review endpoints
+	ReviewerRules          = "rules"           // tier 0, in the daemon
+	ReviewerDecisionModel  = "decision-model"  // tier 1, one forward pass
+	ReviewerReasoningAgent = "reasoning-agent" // tier 2, a model calling tools
+)
+
+// What a review decided. Escalate means no tier was sure enough to act, and the
+// candidate stays in the operator's queue.
+const (
+	ReviewConfirm  = "confirm"
+	ReviewReject   = "reject"
+	ReviewDefer    = "defer"
+	ReviewEscalate = "escalate"
+)
+
+// CandidateReview records one review of a candidate. Applied is false when the
+// reviewer was only allowed to suggest, under the autonomy level in force: the
+// action is then what it would have done. DecisionID names the decision record
+// (GET /state/decisions/{id}) holding everything the review read; an operator's
+// review has none. The evidence fields are the candidate's numbers when it was
+// reviewed, so Outdated can tell when they have moved.
+type CandidateReview struct {
+	By            string
+	Model         string `json:",omitempty"`
+	Tier          int
+	Action        string
+	Applied       bool
+	DecisionID    string `json:",omitempty"`
+	At            time.Time
+	MIScore       float64
+	NObservations int
+	Direction     Direction
+	Kind          string
+}
+
+// Outdated reports whether c's evidence has moved materially since the review: its
+// sign or kind changed, or its |r| moved by more than two standard errors of
+// Fisher's z at the smaller of the two windows. A review that is outdated no
+// longer speaks for the candidate, so an agent's rejection or deferral reopens and
+// an escalated candidate is reviewed again.
+func (r *CandidateReview) Outdated(c *CandidateEdge) bool {
+	if r == nil {
+		return true
+	}
+	if c.Direction != r.Direction || c.Kind != r.Kind {
+		return true
+	}
+	n := min(c.NObservations, r.NObservations)
+	if n <= 3 {
+		return c.NObservations != r.NObservations
+	}
+	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
+	return math.Abs(z(c.MIScore)-z(r.MIScore)) > 2/math.Sqrt(float64(n-3))
 }
 
 // ── Ontology event log ────────────────────────────────────────────────────────

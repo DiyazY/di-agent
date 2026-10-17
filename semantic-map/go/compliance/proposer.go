@@ -110,7 +110,7 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 			t.Skip("implementation generated no candidates — vacuously satisfies Reject contract")
 		}
 		cid := cs[0].CandidateID
-		if err := p.Reject(cid); err != nil {
+		if err := p.Reject(cid, types.CandidateReview{}); err != nil {
 			t.Fatal(err)
 		}
 		after, _ := p.GetCandidates()
@@ -129,7 +129,7 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 			t.Skip("implementation generated no candidates — history check skipped")
 		}
 		cid := cs[0].CandidateID
-		if err := p.Reject(cid); err != nil {
+		if err := p.Reject(cid, types.CandidateReview{}); err != nil {
 			t.Fatal(err)
 		}
 		history, err := p.GetHistory()
@@ -162,7 +162,7 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 			t.Skip("implementation generated no candidates — defer check skipped")
 		}
 		cid := cs[0].CandidateID
-		if err := p.Defer(cid); err != nil {
+		if err := p.Defer(cid, types.CandidateReview{}); err != nil {
 			t.Fatal(err)
 		}
 		after, _ := p.GetCandidates()
@@ -304,14 +304,14 @@ func RunProposerCompliance(t *testing.T, factory ProposerFactory) {
 			t.Skip("implementation generated no undirected candidate — orientation check skipped")
 		}
 		for _, from := range []string{"", "not-an-end"} {
-			if _, err := p.Confirm(c.CandidateID, from); !errors.Is(err, contracts.ErrBadConfirmation) {
+			if _, err := p.Confirm(c.CandidateID, from, types.CandidateReview{}); !errors.Is(err, contracts.ErrBadConfirmation) {
 				t.Errorf("Confirm(%q, %q) = %v; want ErrBadConfirmation", c.CandidateID, from, err)
 			}
 		}
 		if still, _ := p.GetCandidates(); !containsCandidate(still, c.CandidateID) {
 			t.Fatalf("a refused confirmation must leave %s pending", c.CandidateID)
 		}
-		prop, err := p.Confirm(c.CandidateID, c.ToID)
+		prop, err := p.Confirm(c.CandidateID, c.ToID, types.CandidateReview{})
 		if err != nil {
 			t.Fatalf("Confirm from the second end: %v", err)
 		}

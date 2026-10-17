@@ -446,8 +446,19 @@ longer holds; a pending candidate inside that margin stays pending and shows its
 `untested` when its pair was displaced from the pair budget, so
 its numbers stopped being updated (it re-enters if the pair is tested again and still clears
 the threshold); `cap` when the proposer's pending cap deferred it (provisional;
-it re-enters when it outranks a pending candidate) or `operator` when `/defer` did (it
-stands). `Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
+it re-enters when it outranks a pending candidate), `operator` when `/defer` did (it
+stands) or `agent` when the agent deferred it (it returns to pending once its evidence
+moves). A rejected candidate carries `operator` or `agent` the same way: only an operator's
+rejection is permanent for the session; an agent's returns to pending once the sign or kind
+changes, or `|r|` moves by more than two standard errors of Fisher's z, since the review.
+`Direction` is `0` for positive, `1` for negative: the sign, not the orientation.
+
+`Review` is the latest review, `null` until there is one: `By` (`operator`, `rules`,
+`decision-model` or `reasoning-agent`), `Model`, `Tier`, `Action` (`confirm`, `reject`,
+`defer`, or `escalate` when no tier was sure enough and the candidate stays in this queue),
+`Applied` (false when the autonomy level let the reviewer only suggest), `DecisionID` (the
+record at `GET /state/decisions/{id}`; none for an operator), `At`, and the candidate's
+`MIScore`, `NObservations`, `Direction` and `Kind` when it was reviewed.
 
 `Undirected` is `true` for two node-level properties or two subjects' properties:
 correlation does not say which drives the other, so `FromID`/`ToID` are just the pair in

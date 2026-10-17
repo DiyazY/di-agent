@@ -895,7 +895,7 @@ func TestEvolution_ProposerNaturalDiscovery(t *testing.T) {
 	// returns the proposition and the facade applies it to both the declaration and the
 	// state model; confirming against the proposer alone would leave the claim declared
 	// and unmodelled, taking part in no answer.
-	if err := sm.ConfirmCandidate(cand.CandidateID, ""); err != nil {
+	if err := sm.ConfirmCandidate(cand.CandidateID, "", types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 

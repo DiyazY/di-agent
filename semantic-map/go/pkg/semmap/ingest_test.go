@@ -371,7 +371,7 @@ func TestConfirmCandidate_ScopedPairBecomesDiscoveredRelationship(t *testing.T) 
 		t.Fatal("setup: no candidate")
 	}
 	before, _ := sm.Propositions()
-	if err := sm.ConfirmCandidate(cs[0].CandidateID, ""); err != nil {
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, "", types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := sm.Propositions()
@@ -420,7 +420,7 @@ func TestConfirmCandidate_FailedDeclarationLeavesTheCandidatePending(t *testing.
 		Label: "discovered", Sign: -1, Provenance: statemap.Discovered}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sm.ConfirmCandidate(cs[0].CandidateID, ""); err == nil {
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, "", types.CandidateReview{}); err == nil {
 		t.Fatal("confirming against an opposite-sign edge succeeded")
 	}
 	after, _ := sm.PendingCandidates()
@@ -459,7 +459,7 @@ func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) 
 	if len(cs) != 1 || cs[0].Direction != types.Negative {
 		t.Fatalf("candidates %+v; want one Negative", cs)
 	}
-	if err := sm.ConfirmCandidate(cs[0].CandidateID, ""); err != nil {
+	if err := sm.ConfirmCandidate(cs[0].CandidateID, "", types.CandidateReview{}); err != nil {
 		t.Fatal(err)
 	}
 	r, ok := state.Relationship(statemap.RelationshipID("cpu_utilization@pod:a", "cpu_pressure_ratio", "discovered"))
