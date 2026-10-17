@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/autonomy"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -20,6 +21,9 @@ import (
 type stateResponse struct {
 	statemap.StateView
 	Discovery *types.DiscoveryCounts `json:"discovery,omitempty"`
+	// Autonomy is the level, models and thresholds the agent reviews candidates
+	// under, so a reader of the map can see who shaped it.
+	Autonomy *autonomy.Status `json:"autonomy,omitempty"`
 }
 
 // registerStateRoutes exposes the state model: what the system exhibits, how its
@@ -31,7 +35,8 @@ type stateResponse struct {
 //
 // discovery, when non-nil, supplies the proposer's rationing counts for GET /state:
 // an empty candidate list means nothing only if the pairs were actually tested.
-func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() (*types.DiscoveryCounts, error)) {
+func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() (*types.DiscoveryCounts, error),
+	autonomyOf func() *autonomy.Status) {
 	if sm == nil {
 		return
 	}
@@ -82,6 +87,9 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 				return
 			}
 			view.Discovery = d
+		}
+		if autonomyOf != nil {
+			view.Autonomy = autonomyOf()
 		}
 		writeJSON(w, view)
 	})

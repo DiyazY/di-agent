@@ -21,7 +21,7 @@ func nodeFixture(t *testing.T, owner string) (*statemap.Map, *httptest.Server) {
 		AdmitUnknown:            true,
 	}, statemap.NewJournal(0))
 	mux := http.NewServeMux()
-	registerStateRoutes(mux, sm, nil)
+	registerStateRoutes(mux, sm, nil, nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return sm, srv

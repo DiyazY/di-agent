@@ -30,7 +30,7 @@ func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 		t.Fatalf("seed: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerStateRoutes(mux, sm, nil)
+	registerStateRoutes(mux, sm, nil, nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return sm, srv

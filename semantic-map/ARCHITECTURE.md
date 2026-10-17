@@ -32,6 +32,7 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [12. PoC Deployment (`poc/`)](#12-poc-deployment-poc)
 - [13. Natural-Language Explain Layer (`pkg/explain`)](#13-natural-language-explain-layer-pkgexplain)
 - [14. Explain v2 — Planning, Critic, Sessions, Streaming](#14-explain-v2--planning-critic-sessions-streaming)
+- [15. Autonomous Candidate Review (`pkg/autonomy`)](#15-autonomous-candidate-review-pkgautonomy)
 
 ---
 
@@ -2008,3 +2009,84 @@ Three prompts, each versioned by filename: `explain-v1.md`, `planner-v1.md`, `cr
 | `cmd/agent/explain_route_test.go` | NDJSON content type and parse, 501 for non-streaming explainers |
 
 All run against a scripted mock LLM. No test requires Ollama.
+
+---
+
+## 15. Autonomous Candidate Review (`pkg/autonomy`)
+
+Candidate review is the one place the map waits on a person, and the first decision the
+agent takes on its own authority. How much authority is an operator setting
+(`-autonomy`); what the agent does with it is always a decision record.
+
+**Tiers, cheapest first.** A candidate goes up only as far as it has to.
+
+| Tier | Decider | Why it is the right tool |
+| ---- | ------- | ------------------------ |
+| 0 | rules in the daemon | Some candidates are settled by what they are. A `composition` candidate is a part against its whole, true by definition and the relationship `without=` answers from, so it is confirmed. There is one rule: the other kinds (`same-metric`, `same-subject`) make a shared driver or accounting *likelier*, which is a judgement about this system, so they are evidence for the models rather than verdicts. |
+| 1 | decision model | Escalation needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
+| 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
+| — | operator | What no tier was sure of keeps its place in the queue, with the review that escalated it. |
+
+**Levels.** `suggest` (0) records every tier's verdict as a suggestion and applies none —
+today's behaviour with the reasoning written down. `rules` (1) lets tier 0 act. `bounded`
+(2) lets the model tiers confirm and defer; a model's rejection is escalated, because a
+rejection hides a pair. `full` (3) lets every tier act above its threshold. Thresholds
+differ by action for the same reason: confirmation is undone by retirement with history
+kept, deferral costs only time, rejection the most. The defaults (0.85 / 0.95 / 0.7) are
+not calibrated — there is no labelled set of candidates yet, and building one from an
+operator's past reviews is a measurement round.
+
+**An agent's decision is provisional; an operator's is not.** An agent's rejection or
+deferral carries `Reason: "agent"`: the pair is still tested and the candidate returns to
+pending when its evidence moves past what the review saw (sign, kind, or `|r|` by more than
+two standard errors of Fisher's z). The same test decides when an escalated candidate is
+reviewed again, which is what keeps the models from being asked the same question every
+cycle. A candidate with a stale end waits: its window is not moving, so a decision now
+would be on frozen evidence.
+
+**Orientation.** An undirected candidate cannot be confirmed with an arbitrary end. The
+decision model is asked which end drives the other, with "unclear" as an option; the
+confirmation needs the confirm threshold on both questions, or it escalates.
+
+**Traceability.** A review is `Map.Decide` like an estimate: both properties are read
+through the `DecisionBuilder`, and `Inputs` holds the candidate, its neighbours, the level
+and thresholds, the exact state text each model was given, each model's probabilities, and
+the reasoning model's analysis and tool trace. The candidate's `Review` names the decision,
+the confirmed relationship's note names the reviewer and the decision, and `GET
+/state/decisions/{id}` reproduces it after the map has moved on. Model names and prompt
+versions (`review-decide-v1`, `review-reason-v1`) are in every record because the model
+choice is a snapshot.
+
+**What it does not do.** `/explain` stays read-only: autonomy is a separate surface whose
+only writes are the four review actions. No hosted model is contacted; the URL is the
+operator's. Escalation ends at the operator: a tier 3 on a peer or a bigger model is not
+built, because where it should live is open.
+
+**Every part is substitutable.** The reviewer depends on interfaces — `Map` for the
+semantic map, `Rule` (tier 0), `Decider` (tier 1), `Reasoner` (tier 2), `Tool` (what tier 2
+may read) and `Renderer` (how evidence becomes text) — and the daemon builds each from a
+registry by the name a flag gives. Each tier has its own URL and model, so the decision
+model can sit on the node while the reasoning model sits on a peer with memory to spare.
+Two tier 1 backends exist because the calibrated signal can come from two places: a
+decision model's typed-question endpoint (`systemone`, Ollama only), or any
+OpenAI-compatible server returning token log-probabilities (`openai-logprobs`), where the
+question is asked as lettered options with a one-token answer and the distribution is the
+letters' probabilities, normalised. The second carries `OptionMass` — how much of the
+model's probability fell on any letter — and below one half the verdict escalates: a model
+that wanted to say something else has not answered the question. The verdict records the
+backend, model, question-set version and renderer, so substituting any of them leaves the
+records comparable.
+
+**Models.** On a 24 GB Apple-silicon machine, `nimble-v3:9b-nvfp4` (6.9 GB, MLX) as tier 1
+and `qwen3.8:27b-nvfp4` (18 GB) as tier 2; the two do not stay resident together, so a
+tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 with no tier
+2. Nothing is known yet about either decision model's accuracy on candidates like these.
+
+| Test | Covers |
+| ---- | ------ |
+| `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates |
+| `pkg/autonomy/autonomy_test.go` | Which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model escalates and is counted |
+| `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
+
+All run against fake models. No test requires Ollama.
+
