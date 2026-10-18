@@ -26,7 +26,7 @@ func init() {
 // kind, the caveats, and the candidates sharing an end.
 type textRenderer struct{}
 
-func (textRenderer) Name() string { return "text-v1" }
+func (textRenderer) Name() string { return "text-v2" }
 
 func (textRenderer) Render(e Evidence, analysis string) string { return stateText(e, analysis) }
 
@@ -35,6 +35,9 @@ func stateText(e Evidence, analysis string) string {
 	var b strings.Builder
 	b.WriteString("A candidate relationship, found by correlating one machine's own telemetry. ")
 	b.WriteString("Nothing has been declared about it; it is only that two metrics moved together.\n\n")
+	if m := machineLine(e.Facts); m != "" {
+		fmt.Fprintf(&b, "Machine: %s\n", m)
+	}
 	fmt.Fprintf(&b, "Source: %s\n", describe(e.From))
 	fmt.Fprintf(&b, "Target: %s\n\n", describe(e.To))
 
@@ -107,6 +110,35 @@ func describe(p statemap.Property) string {
 		fmt.Fprintf(&b, "; read by %s", p.Source)
 	}
 	return b.String()
+}
+
+// machineLine is the facts that frame a value, in one line: what the machine is
+// and how much of it there is. Empty when nothing was read.
+func machineLine(facts []statemap.Fact) string {
+	by := map[string]statemap.Fact{}
+	for _, f := range facts {
+		by[f.Key] = f
+	}
+	var parts []string
+	if f, ok := by["machine_model"]; ok {
+		parts = append(parts, f.Value)
+	}
+	if f, ok := by["cpu_cores"]; ok {
+		cpu := f.Value + " CPU cores"
+		if m, ok := by["cpu_model"]; ok {
+			cpu += " (" + m.Value + ")"
+		}
+		parts = append(parts, cpu)
+	}
+	for _, k := range []string{"memory_total", "disk_total"} {
+		if f, ok := by[k]; ok && f.Number != nil {
+			parts = append(parts, fmt.Sprintf("%.1f GiB %s", *f.Number/(1<<30), strings.TrimSuffix(k, "_total")))
+		}
+	}
+	if f, ok := by["os"]; ok {
+		parts = append(parts, f.Value)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func kindNote(kind string) string {

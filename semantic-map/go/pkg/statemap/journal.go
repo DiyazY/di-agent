@@ -83,6 +83,9 @@ type Decision struct {
 	// like the rest.
 	Inputs map[string]any `json:"inputs,omitempty"`
 
+	// FactsRead are the machine's facts as they stood, when the decision read them.
+	FactsRead []Fact `json:"facts_read,omitempty"`
+
 	// Rationale is the human-readable form of the same content.
 	Rationale string `json:"rationale"`
 
@@ -279,6 +282,7 @@ type DecisionBuilder struct {
 	assumptions map[string]float64
 	excluded    []string
 	inputs      map[string]any
+	facts       []Fact
 }
 
 // Decide starts a decision record pinned to the map's current revision.
@@ -430,6 +434,7 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		Assumptions:       assumptions,
 		Excluded:          b.excluded,
 		Inputs:            b.inputs,
+		FactsRead:         b.facts,
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}

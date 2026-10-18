@@ -757,6 +757,19 @@ them, which keeps prior knowledge without the graph being about the framework.
 knowledge, `learned` from observing this system, `asserted` by an operator. An agent
 that cannot say why it believes an edge cannot be audited, so provenance is data.
 
+**Facts are the frame.** Beside its properties the map holds what the machine *is* — OS,
+kernel, CPU model and cores, memory, disk, boot time — read once at startup by a
+`facts.Source` (`host` reads `/proc`, `/sys` and `/etc/os-release`; another is a
+registration away). A fact is read, not learned: it has no confidence and no history,
+only its source and when it was read. It exists because a value means nothing without
+its frame — 0.3 of a core is most of a Raspberry Pi and a rounding error on a server —
+and an agent reasoning about one machine should not have to be told which machine it is.
+Every view carries the facts whatever its filter, and a decision that reads them keeps
+its own copy (`facts_read`). Reading the same value again changes nothing; a different
+value (memory hot-added, a disk grown) is journalled as `fact.changed`. They are not
+snapshotted: a restart reads the machine afresh, since a snapshot's facts would describe
+the machine as it was when it was written.
+
 **Lifecycle is the substance.** An observation of an unknown property admits it and
 journals the admission, so the map follows a system that changes rather than a schema
 someone wrote down. Silence marks a property stale and can retire it, because a model
@@ -1433,7 +1446,21 @@ the two that would otherwise compete are separated deliberately:
 | node arc | the value within its declared range, when one was declared |
 
 Properties scoped to a subject are enclosed and labelled with that subject, so the
-picture answers *which workloads are running* before anything is clicked.
+picture answers *which workloads are running* before anything is clicked. The machine's
+own properties are enclosed too — beside the workloads, not around them. In a node-local
+map everything is on this machine, so a box around the whole canvas would say nothing;
+a box of its own says which signals are the machine's and which a workload's. It is
+drawn solid where a workload's is dashed, labelled with the machine's facts
+(`di-node · 4 cores · 7.7 GiB · 18.3 GiB disk · Ubuntu 24.04.5 LTS`), and clicking it
+shows every fact with its source.
+
+**The drawer points at the canvas.** A Discovery row, clicked, highlights the
+candidate's two ends and draws the would-be edge between them, dashed in the colour a
+discovered relationship takes; opening a decision's trace highlights the properties and
+relationships it read and, for a candidate review, the candidate. Everything else is
+dimmed and the view zooms to what is pointed at.
+An end the canvas cannot draw — cleared by the search, or no longer in the map — is
+named in a toast rather than silently left out. Escape or a click on empty canvas lets go.
 
 **Honesty rules the console enforces.** These exist because the state model draws
 distinctions a naive renderer would flatten:
@@ -2084,7 +2111,10 @@ letters' probabilities, normalised. The second carries `OptionMass` — how much
 model's probability fell on any letter — and below one half the verdict escalates: a model
 that wanted to say something else has not answered the question. The verdict records the
 backend, model, question-set version and renderer, so substituting any of them leaves the
-records comparable.
+records comparable. The `text` renderer (`text-v2`) opens with the machine's facts —
+`Machine: QEMU Virtual Machine, 4 CPU cores (Apple CPU (part 0x000)), 7.7 GiB memory,
+18.3 GiB disk, Ubuntu 24.04.5 LTS` — so a model reads a correlation between two
+utilisations against how much machine there is.
 
 **Models.** On a 24 GB Apple-silicon machine, `nimble-v3:9b-nvfp4` (6.9 GB, MLX) as tier 1
 and `qwen3.8:27b-nvfp4` (18 GB) as tier 2; the two do not stay resident together, so a
@@ -2094,7 +2124,8 @@ tier 2 review pays a model load. On an 8 GB node, `tev1:4b` (4.4 GB) as tier 1 w
 | Test | Covers |
 | ---- | ------ |
 | `pkg/autonomy/parts_test.go` | A part registered from outside is built by name; unknown names are refused; `openai-logprobs` normalises over the letters and records the mass; little mass escalates; a refused `reasoning_effort` is dropped; a reasoner that keeps calling tools is stopped |
-| `pkg/autonomy/autonomy_test.go` | Which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
+| `pkg/autonomy/evidence_test.go` | The evidence names the machine from its facts, and says nothing of one when none were read |
+| `pkg/autonomy/autonomy_test.go` | The models are given the machine's facts and the decision keeps them; which tier acts at each level; an unsure model goes to tier 2 and then the operator; tier 2's analysis is scored by the decision model; the decision record's inputs; a reviewed candidate is not reviewed again; an undirected confirmation needs a driver; an unreachable model records nothing, stops the cycle and is retried |
 | `internal/minimal/proposer_mi_test.go` | An agent's rejection reopens when the evidence moves, an operator's does not; annotate keeps a candidate pending |
 
 All run against fake models. No test requires Ollama.

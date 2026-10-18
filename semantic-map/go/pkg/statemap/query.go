@@ -49,6 +49,11 @@ type StateView struct {
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
 
+	// Facts are the machine the properties belong to: its OS, CPU, memory, disk. Every
+	// view carries them, whatever the filter, since they are the frame its values are
+	// read in.
+	Facts []Fact `json:"facts,omitempty"`
+
 	// Counts summarises the whole map, not just the selection, so a caller can see
 	// what the filter excluded.
 	Counts StateCounts `json:"counts"`
@@ -122,7 +127,7 @@ func (m *Map) State(q Query) StateView {
 	// Empty, not nil: a filter that matches nothing is an answer, and it should
 	// serialise as [] rather than null, which a client has to special-case.
 	view := StateView{
-		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(),
+		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(), Facts: m.factsLocked(),
 		Properties: []Property{}, Relationships: []Relationship{},
 	}
 	selected := map[string]bool{}

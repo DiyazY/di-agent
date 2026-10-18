@@ -11,7 +11,7 @@
 //     happened.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective, directionSign, isEditing } from './model.js';
+import { fmt, escapeHTML, effective, directionSign, isEditing, factValue } from './model.js';
 
 const JOURNAL_BUFFER = 400;
 
@@ -35,6 +35,8 @@ export class Drawer {
     this.asking = false;
     this.askError = null;
     this.busy = new Set();  // panes with an operator-started request in flight
+    // The row whose part of the map is highlighted on the canvas: {pane, id}.
+    this.pointed = null;
     this.panes = {};
     for (const name of ['journal', 'decisions', 'discovery', 'subjects', 'cluster', 'backbone', 'ask']) {
       this.panes[name] = document.getElementById(`pane-${name}`);
@@ -236,6 +238,7 @@ export class Drawer {
       this.openDecisionID = id;
       if (!this.decisions.some((x) => x.id === id)) this.decisions.unshift(d);
       else this.decisions = this.decisions.map((x) => (x.id === id ? d : x));
+      if (!this.isPointed('decisions', id)) this.point('decisions', id, decisionSpan(d));
       this.renderDecisions();
     } catch (err) {
       this.ctx.toast(err.gone
@@ -258,7 +261,8 @@ export class Drawer {
       <table class="grid">
         <thead><tr><th>decision</th><th>question</th><th class="num">revision</th><th>when</th><th></th></tr></thead>
         <tbody>${this.decisions.map((d) => `
-          <tr data-decision="${escapeHTML(d.id)}">
+          <tr data-decision="${escapeHTML(d.id)}"${this.isPointed('decisions', d.id) ? ' class="pointed"' : ''}
+              title="open the trace, and highlight on the map what this decision read">
             <td class="mono">${escapeHTML(d.id)}</td>
             <td>${escapeHTML(d.question || '—')}</td>
             <td class="num">${fmt.int(d.revision)}</td>
@@ -274,8 +278,16 @@ export class Drawer {
       row.addEventListener('click', () => {
         const id = row.dataset.decision;
         this.openDecisionID = this.openDecisionID === id ? null : id;
+        const d = this.decisions.find((x) => x.id === id);
+        // Opening a trace points at what it read; closing it lets go.
+        if (this.openDecisionID ? !this.isPointed('decisions', id) : this.isPointed('decisions', id)) {
+          this.point('decisions', id, decisionSpan(d));
+        }
         this.renderDecisions();
       });
+    });
+    this.panes.decisions.querySelectorAll('[data-cite]').forEach((el) => {
+      el.addEventListener('click', (e) => { e.stopPropagation(); this.ctx.selectProperty(el.dataset.cite); });
     });
   }
 
@@ -284,7 +296,43 @@ export class Drawer {
   async pollCandidates() {
     const res = await api.candidates();
     this.candidates = Array.isArray(res) ? res : (res?.candidates || []);
+    // A candidate settled or withdrawn leaves the queue; what pointed at it lets go.
+    if (this.pointed?.pane === 'discovery' && !this.candidates.some((c) => c.CandidateID === this.pointed.id)) {
+      this.ctx.highlight(null);
+    }
   }
+
+  // ── pointing at the map ───────────────────────────────────────────────────
+
+  /**
+   * Highlight a row's part of the map, or let go of it when the row is already
+   * pointed at. The canvas says what it could not draw — a property filtered out by
+   * the search or no longer in the map — and that is passed on rather than shown as
+   * a highlight with a piece missing.
+   */
+  point(pane, id, spec) {
+    if (this.pointed?.pane === pane && this.pointed.id === id) {
+      this.ctx.highlight(null);
+      return;
+    }
+    this.ctx.highlight(null);
+    this.pointed = { pane, id };
+    const missing = this.ctx.highlight(spec) || [];
+    if (missing.length) {
+      const model = this.ctx.model();
+      this.ctx.toast(`Not on the canvas: ${missing.map((m) => (model ? model.display(m) : m)).join(', ')}`
+        + ' — cleared by the search, or no longer in the map.', 'err');
+    }
+  }
+
+  /** The canvas let go (Escape, a click on empty canvas, another row). */
+  unpoint() {
+    if (!this.pointed) return;
+    this.pointed = null;
+    this.renderActive();
+  }
+
+  isPointed(pane, id) { return this.pointed?.pane === pane && this.pointed.id === id; }
 
   /** How far discovery was rationed, from /state; empty when the proposer is off. */
   rationingLine() {
@@ -349,8 +397,8 @@ export class Drawer {
             c.Kind === 'same-subject' ? `<span class="muted" title="two metrics of one workload, such as a capped pod's CPU and its throttling, often move together by construction">same subject: may hold by construction</span>` : '',
             ...(c.Caveats || []).map((x) => `<span class="muted">${escapeHTML(x)}</span>`),
           ].filter(Boolean).join('<br>');
-          return `<tr>
-            <td class="mono" title="${from} ${c.Undirected ? '↔' : '→'} ${to}">${fromN} ${c.Undirected ? '↔' : '→'} ${toN}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
+          return `<tr data-cand-row="${id}"${this.isPointed('discovery', c.CandidateID) ? ' class="pointed"' : ''}>
+            <td class="mono" title="${from} ${c.Undirected ? '↔' : '→'} ${to} — click the row to see the pair on the map">${fromN} ${c.Undirected ? '↔' : '→'} ${toN}${notes ? `<div style="font-family:var(--font);font-size:11px;margin-top:2px">${notes}</div>` : ''}</td>
             <td style="color:${sign < 0 ? 'var(--sign-neg)' : 'var(--sign-pos)'}">${sign < 0 ? '↓ negative' : '↑ positive'}</td>
             <td class="num">${fmt.num(c.MIScore, 3)}</td>
             <td class="num" title="${c.PBar ? `cleared the bar ${Number(c.PBar).toPrecision(2)}, corrected for the pairs tested` : 'no correction for the pairs tested'}">${fmt.num(c.PValue, 4)}</td>
@@ -365,6 +413,16 @@ export class Drawer {
         }).join('')}</tbody>
       </table>
     </div>`;
+
+    this.panes.discovery.querySelectorAll('[data-cand-row]').forEach((row) => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        const c = this.candidates.find((x) => x.CandidateID === row.dataset.candRow);
+        if (!c) return;
+        this.point('discovery', c.CandidateID, { pairs: [{ from: c.FromID, to: c.ToID, undirected: !!c.Undirected }] });
+        this.renderDiscovery();
+      });
+    });
 
     this.panes.discovery.querySelectorAll('[data-cand]').forEach((b) => {
       b.addEventListener('click', async (e) => {
@@ -867,6 +925,20 @@ function detailLine(e) {
   return Object.entries(d).map(([k, v]) => `${k}=${plain(v)}`).join('  ');
 }
 
+/**
+ * What a decision covers on the map: the properties and relationships it read and,
+ * for a candidate review, the candidate's two ends as a would-be edge.
+ */
+function decisionSpan(d) {
+  if (!d) return { nodes: [] };
+  const c = d.inputs?.candidate;
+  return {
+    nodes: (d.properties_read || []).map((p) => p.id),
+    edges: (d.relationships_read || []).map((r) => r.id),
+    pairs: c?.FromID && c?.ToID ? [{ from: c.FromID, to: c.ToID, undirected: !!c.Undirected }] : [],
+  };
+}
+
 /** The full trace: what was read, what was supposed, and the agent's own words. */
 function decisionTrace(d) {
   const props = d.properties_read || [];
@@ -893,7 +965,8 @@ function decisionTrace(d) {
         <span style="text-transform:none;letter-spacing:0;font-weight:400"> — copied at the time, so this record cannot become a description of a later system</span>
       </h3>
       <div class="chips">
-        ${props.map((p) => `<span class="badge mono" title="confidence ${fmt.num(p.confidence, 3)}">
+        ${props.map((p) => `<span class="badge mono" data-cite="${escapeHTML(p.id)}" style="cursor:pointer"
+          title="confidence ${fmt.num(p.confidence, 3)} · click to inspect">
           ${escapeHTML(p.id)} = ${fmt.num(p.value, 3)}</span>`).join('')}
       </div>
       ${rels.length ? `<div class="chips" style="margin-top:6px">
@@ -904,6 +977,12 @@ function decisionTrace(d) {
             ${escapeHTML(r.from)} → ${escapeHTML(r.to)} ${eff.known ? fmt.num(eff.value, 3) : 'unknown'}</span>`;
         }).join('')}</div>` : ''}
     </div>
+
+    ${(d.facts_read || []).length ? `<div>
+      <h3 style="margin:0 0 6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-muted)">On the machine</h3>
+      <div class="chips">${d.facts_read.map((f) => `<span class="badge mono" title="read by ${escapeHTML(f.source)}">
+        ${escapeHTML(f.key)} ${escapeHTML(factValue(f))}</span>`).join('')}</div>
+    </div>` : ''}
 
     ${d.rationale ? `<pre class="rationale">${escapeHTML(d.rationale)}</pre>` : ''}
 

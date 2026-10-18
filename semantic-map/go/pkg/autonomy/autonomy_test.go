@@ -266,3 +266,34 @@ func TestAReasonerNeedsADecider(t *testing.T) {
 		t.Error("a reasoning model without a decision model was accepted")
 	}
 }
+
+// The models are given the machine the metrics belong to, and the decision keeps the
+// facts it read.
+func TestTheModelsAreGivenTheMachine(t *testing.T) {
+	const id = "cpu_utilization@pod:a->cpu_pressure"
+	m := newFakeMap(t, directed(id, ""))
+	if err := m.st.RecordFacts("host", []statemap.Fact{
+		statemap.NumberFact("cpu_cores", 4, "cores"), {Key: "os", Value: "Ubuntu 24.04.3 LTS"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &telling{fixed: fixed{actions: confident(types.ReviewConfirm)}}
+	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: d})
+	if len(d.facts) != 2 {
+		t.Errorf("the decision model was given facts %+v", d.facts)
+	}
+	dec, _ := m.st.Journal().Decision(m.cands[id].Review.DecisionID)
+	if dec == nil || len(dec.FactsRead) != 2 {
+		t.Fatalf("decision = %+v", dec)
+	}
+}
+
+type telling struct {
+	fixed
+	facts []statemap.Fact
+}
+
+func (d *telling) Decide(ctx context.Context, e autonomy.Evidence, analysis string) (*autonomy.Verdict, error) {
+	d.facts = e.Facts
+	return d.fixed.Decide(ctx, e, analysis)
+}

@@ -8,7 +8,7 @@
 // agent attached is shown rather than summarised away.
 
 import { api } from './api.js';
-import { fmt, escapeHTML, effective, isEditing } from './model.js';
+import { fmt, escapeHTML, effective, isEditing, factValue, subjectOf } from './model.js';
 import { sparkline, strengthLayers, contributionBars, signSplit, meter } from './charts.js';
 
 export class Inspector {
@@ -65,7 +65,9 @@ export class Inspector {
     this.restoreScroll = previous ? previous.scrollTop : 0;
 
     const model = this.ctx.model();
-    if (sel.type === 'property') {
+    if (sel.type === 'machine') {
+      this.renderMachine(model);
+    } else if (sel.type === 'property') {
       const p = model.property(sel.id);
       if (!p) return this.renderMissing(sel.id, 'property');
       this.renderProperty(p, model);
@@ -74,6 +76,40 @@ export class Inspector {
       if (!r) return this.renderMissing(sel.id, 'relationship');
       this.renderRelationship(r, model);
     }
+  }
+
+  /** What the machine is: the facts read at startup, each with where it came from. */
+  renderMachine(model) {
+    const facts = model.facts;
+    const own = model.properties.filter((p) => !subjectOf(p));
+    const subjects = model.subjects().length;
+    this.root.replaceChildren(node(`
+      <div class="inspector-head">
+        <div class="title"><div class="eyebrow">machine</div><h2>${escapeHTML(model.owner || 'this machine')}</h2></div>
+        <button class="btn ghost small" data-act="close" aria-label="close">✕</button>
+      </div>
+      <div class="inspector-body">
+        <div class="section">
+          <p class="muted" style="font-size:11.5px;margin:0;line-height:1.5">
+            ${own.length} of the map's properties are the machine's own; ${subjects} subject${subjects === 1 ? '' : 's'}
+            run on it. The facts below were read when the agent started and hold while it runs:
+            they are the frame its values are read in, and every review decision records them.</p>
+        </div>
+        <div class="section">
+          <h3>Facts</h3>
+          ${facts.length ? `<dl class="kv">${facts.map((f) => `
+            <dt>${escapeHTML(f.key.replace(/_/g, ' '))}</dt>
+            <dd title="read by ${escapeHTML(f.source)} · ${escapeHTML(fmt.clock(f.read_at))}">${escapeHTML(factValue(f))}</dd>`).join('')}
+          </dl>` : `<div class="empty"><strong>No facts read</strong>
+            <span class="why">The agent reads them at startup from the sources named by
+            <span class="mono">-facts</span> (default <span class="mono">host</span>);
+            <span class="mono">-facts none</span> turns them off.</span></div>`}
+        </div>
+        ${facts.length ? `<div class="section"><h3>Read by</h3><div class="chips">
+          ${[...new Set(facts.map((f) => f.source))].map((s) => `<span class="badge mono">${escapeHTML(s)}</span>`).join('')}
+        </div></div>` : ''}
+      </div>`));
+    this.wireCommon();
   }
 
   renderMissing(id, what) {

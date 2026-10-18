@@ -51,6 +51,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/facts"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
@@ -253,6 +254,11 @@ func main() {
 	autonomyRules := flag.String("autonomy-rules", "composition",
 		"tier 0 rules, comma-separated, first match decides; none for no rules")
 	autonomyRenderer := flag.String("autonomy-renderer", "text", "how a candidate's evidence is written for the models")
+	factSources := flag.String("facts", "host",
+		"comma-separated sources of the machine's facts (OS, CPU, memory, disk), read at startup; none for none (have: "+
+			strings.Join(facts.Names(), ", ")+")")
+	factsRoot := flag.String("facts-root", "",
+		"where the machine's filesystem is mounted, for an agent in a container reading its host (such as /host)")
 	autonomyDecisionBackend := flag.String("autonomy-decision-backend", "systemone",
 		"tier 1: systemone (Ollama decision models, /v1/systemone), openai-logprobs (any OpenAI-compatible "+
 			"server returning token log-probabilities: llama.cpp, vLLM, Ollama /v1), or none")
@@ -438,6 +444,12 @@ func main() {
 	}
 
 	if err := checkCanRecord(spec != nil, *noAdmit, state.Census().PropertiesTotal); err != nil {
+		log.Fatal(err)
+	}
+
+	// What the machine is, read once: the frame every property is read in. After the
+	// snapshot, which restores the revision, so the facts' entries follow it.
+	if err := loadFacts(state, *factSources, *factsRoot); err != nil {
 		log.Fatal(err)
 	}
 

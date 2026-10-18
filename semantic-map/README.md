@@ -142,6 +142,10 @@ semantic-map/
     │   ├── peers/              Multi-agent coordination (concrete in v1, NOT a contract)
     │   │   ├── peers.go        Registry + Descriptor + Client (HTTP /cost, /healthz, /offload)
     │   │   └── peers_test.go   Registry + httptest client coverage
+    │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)
+    │   │   ├── facts.go        Source iface + registry; Load() into the map; the host keys
+    │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
+    │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
     │   │   ├── autonomy.go     Levels, thresholds, the review loop, tier escalation, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
@@ -173,6 +177,7 @@ semantic-map/
     │   │   ├── learn.go        Paired estimator — relationships learn their own strength
     │   │   ├── query.go        State(Query) + Explain(id) — census-carrying views
     │   │   ├── journal.go      Bounded change log + DecisionBuilder (records inputs as read)
+    │   │   ├── facts.go        Fact — what the machine is (OS, CPU, memory, disk), journalled on change
     │   │   ├── persist.go      Versioned, owner-stamped snapshots (atomic write, refuses foreign)
     │   │   └── peer.go         PeerStore — other agents' maps, labelled and never merged
     │   └── profiles/           Profile factory
@@ -608,6 +613,9 @@ every sample, queryable and traceable.
 # what is this system doing right now
 curl -s localhost:8080/state | jq '.counts'
 
+# what the machine is: OS, CPU, memory, disk, read at startup
+curl -s localhost:8080/state | jq -r '.facts[] | "\(.key)\t\(.value) \(.unit // "")"'
+
 # how many property pairs discovery is testing, of how many it could
 curl -s localhost:8080/state | jq '.discovery'
 
@@ -923,6 +931,8 @@ See `scenarios/` for five seed scenario files to drive `-script` with a known gr
 | `-state-file`            | `""`    | Path to persist the map and its journal. Empty keeps everything in memory, so a restart returns the agent to cold start on a system it has already watched. A snapshot naming a different owner is refused. |
 | `-save-interval`         | `1m`    | Snapshot cadence when `-state-file` is set. A snapshot is also written synchronously on shutdown, so this bounds what an unclean exit loses. |
 | `-journal-size`          | `0`     | Change and decision entries held in memory (`0` = default 2000). The journal reports how many it dropped, so an absence is not read as "nothing happened". |
+| `-facts`                 | `host`  | Sources of the machine's facts — OS, kernel, CPU model and cores, memory, swap, disk, boot time — read once at startup into the map, and carried by every `GET /state` and every review decision. `none` reads none. A fact read again with a different value is journalled as `fact.changed`. |
+| `-facts-root`            | `""`    | Where the machine's filesystem is mounted, for an agent in a container reading its host (such as `/host`). Empty reads the agent's own. |
 | `-ingest-scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `-peer-state-poll`       | `30s`   | How often to fetch each peer's map. `0` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `-peer-state-stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |

@@ -127,6 +127,8 @@ type Evidence struct {
 	// Neighbours are other candidates sharing an end with this one: a property that
 	// correlates with many others is more likely following load than driving anything.
 	Neighbours []types.CandidateEdge
+	// Facts are the machine both ends belong to: its cores, memory, OS.
+	Facts []statemap.Fact
 }
 
 // Verdict is a decision model's answer.
@@ -357,7 +359,7 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	b := st.Decide(id, "review candidate "+c.CandidateID)
 	from, _ := b.Property(c.FromID)
 	to, _ := b.Property(c.ToID)
-	ev := Evidence{Candidate: *c, From: from, To: to, Neighbours: neighbours(c, pending)}
+	ev := Evidence{Candidate: *c, From: from, To: to, Neighbours: neighbours(c, pending), Facts: b.Facts()}
 	ev.Candidate.Caveats = append([]string(nil), c.Caveats...)
 	ev.Candidate.Review = nil
 	b.Input("candidate", ev.Candidate)

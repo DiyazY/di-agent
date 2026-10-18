@@ -462,6 +462,9 @@ type Map struct {
 	properties    map[string]*Property
 	relationships map[string]*Relationship
 
+	// facts are what the machine is, read rather than observed; see Fact.
+	facts map[string]Fact
+
 	// latest holds the most recent observation per property, windows the paired
 	// observations per relationship. Together they are the estimator's memory: the map
 	// learns strengths itself rather than recording an estimate computed elsewhere, so

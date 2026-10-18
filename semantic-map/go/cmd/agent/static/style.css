@@ -565,3 +565,8 @@ dialog .hint { font-size: 11.5px; color: var(--ink-muted); line-height: 1.5; }
  * so learning is visible as it happens rather than only in a number. */
 #graph path.flowing { animation: flow 1.1s linear infinite; }
 @keyframes flow { to { stroke-dashoffset: -28; } }
+
+/* A drawer row whose part of the map is highlighted on the canvas, in the
+   highlight's colour: a candidate is a relationship that would be discovered. */
+table.grid tbody tr.pointed { background: color-mix(in srgb, var(--prov-discovered) 14%, transparent); }
+table.grid tbody tr.pointed td:first-child { box-shadow: inset 3px 0 0 var(--prov-discovered); }

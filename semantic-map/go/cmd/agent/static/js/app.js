@@ -118,6 +118,7 @@ function ask({ title, fields, hint, ok = 'Apply' }) {
 const graph = new GraphView(document.getElementById('graph'), {
   tooltip,
   onSelect: (sel) => inspector.show(sel),
+  onHighlightCleared: () => drawer.unpoint(),
 });
 
 const inspector = new Inspector(document.getElementById('inspector'), {
@@ -136,6 +137,7 @@ const drawer = new Drawer(document.getElementById('drawer'), {
   ask,
   refresh: () => tick(),
   selectProperty: (id) => graph.select({ type: 'property', id }),
+  highlight: (spec) => graph.highlight(spec),
   filterSubject: (subject) => {
     const input = document.getElementById('search');
     input.value = subject;
@@ -357,6 +359,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     document.getElementById('search').focus();
   } else if (e.key === 'Escape' && !dialog.open) {
+    graph.highlight(null);
     graph.select(null);
   } else if (e.key === ' ' && e.target === document.body) {
     e.preventDefault();

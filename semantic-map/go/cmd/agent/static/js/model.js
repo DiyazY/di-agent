@@ -103,6 +103,9 @@ export class Model {
   get relationships() { return this.view?.relationships || []; }
   get counts() { return this.view?.counts || {}; }
   get owner() { return this.view?.owner || ''; }
+  /** What the machine is — OS, CPU, memory, disk — as the agent read it at startup. */
+  get facts() { return this.view?.facts || []; }
+  fact(key) { return this.facts.find((f) => f.key === key) || null; }
   get revision() { return this.view?.revision || 0; }
 
   property(id) { return this.properties.find((p) => p.id === id) || null; }
@@ -198,12 +201,37 @@ export const fmt = {
     return Number.isNaN(d.getTime()) ? '—'
       : d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   },
+  bytes(n) {
+    if (n === null || n === undefined) return '—';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${i ? n.toFixed(1) : n} ${units[i]}`;
+  },
   /** A value shown with its unit, and normalised only when a range was declared. */
   value(p) {
     const v = fmt.num(p.value, 3);
     return p.unit ? `${v} ${p.unit}` : v;
   },
 };
+
+/** A fact's value as read: bytes in binary units, anything else as given. */
+export function factValue(f) {
+  if (f.number !== undefined && f.unit === 'bytes') return fmt.bytes(f.number);
+  if (f.number !== undefined && f.unit) return `${f.value} ${f.unit}`;
+  return f.value;
+}
+
+/** The machine in one line, for its enclosure: name, then how much of it there is. */
+export function machineSummary(model) {
+  const f = (k) => model.fact(k);
+  const parts = [model.owner || f('hostname')?.value || 'this machine'];
+  if (f('cpu_cores')) parts.push(`${f('cpu_cores').value} cores`);
+  if (f('memory_total')) parts.push(fmt.bytes(f('memory_total').number));
+  if (f('disk_total')) parts.push(`${fmt.bytes(f('disk_total').number)} disk`);
+  if (f('os')) parts.push(f('os').value);
+  return parts.join(' · ');
+}
 
 export function escapeHTML(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => (
