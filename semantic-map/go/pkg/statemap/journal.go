@@ -78,6 +78,11 @@ type Decision struct {
 	Assumptions map[string]float64 `json:"assumptions,omitempty"`
 	Excluded    []string           `json:"excluded,omitempty"`
 
+	// Inputs are what the decision read that is not a property or a relationship:
+	// a candidate's evidence, the text a model was given, a model's answer. Copied in
+	// like the rest.
+	Inputs map[string]any `json:"inputs,omitempty"`
+
 	// Rationale is the human-readable form of the same content.
 	Rationale string `json:"rationale"`
 
@@ -273,6 +278,7 @@ type DecisionBuilder struct {
 	rationale   []string
 	assumptions map[string]float64
 	excluded    []string
+	inputs      map[string]any
 }
 
 // Decide starts a decision record pinned to the map's current revision.
@@ -382,6 +388,15 @@ func (b *DecisionBuilder) Assume(id string, v float64) {
 // Exclude records a subject or property taken to its floor.
 func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
 
+// Input records something else the decision read, under a name. v must be a value
+// the caller will not change afterwards: a copy, a string, a number.
+func (b *DecisionBuilder) Input(name string, v any) {
+	if b.inputs == nil {
+		b.inputs = map[string]any{}
+	}
+	b.inputs[name] = v
+}
+
 // Commit records the decision in the journal and returns it.
 func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 	parts := make([]string, 0, len(b.rationale)+2)
@@ -414,6 +429,7 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		RelationshipsRead: b.rels,
 		Assumptions:       assumptions,
 		Excluded:          b.excluded,
+		Inputs:            b.inputs,
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}
