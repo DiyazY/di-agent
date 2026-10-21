@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -6,7 +7,9 @@ import time
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaTimeoutError
 
-from switchboard import ConsumerRequest, allocate_power
+from switchboard import ConsumerRequest, allocate_power, summarize_source_health
+
+logger = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 # Topic the switchboard publishes per-consumer allocations to.
@@ -22,6 +25,18 @@ STEP_INTERVAL_S = float(os.environ.get("STEP_INTERVAL_S", "1"))
 # A genset or consumer is dropped from the allocation if no message was seen
 # within this many seconds (treated as offline).
 STALE_TIMEOUT_S = float(os.environ.get("STALE_TIMEOUT_S", "5"))
+
+
+def _deserialize_value(raw_value: bytes) -> dict | None:
+    try:
+        value = json.loads(raw_value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        logger.warning("Ignoring malformed Kafka payload")
+        return None
+    if not isinstance(value, dict):
+        logger.warning("Ignoring Kafka payload that is not an object")
+        return None
+    return value
 
 
 def _make_producer() -> KafkaProducer:
@@ -43,7 +58,7 @@ def _make_consumer(*topics: str) -> KafkaConsumer:
             return KafkaConsumer(
                 *topics,
                 bootstrap_servers=KAFKA_BROKERS,
-                value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+                value_deserializer=_deserialize_value,
                 auto_offset_reset="latest",
                 group_id=None,
             )
@@ -84,6 +99,7 @@ class SwitchboardController:
         self._battery_thread: threading.Thread | None = None
         self._request_thread: threading.Thread | None = None
         self._allocation_thread: threading.Thread | None = None
+        self._errors: list[str] = []
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -121,40 +137,72 @@ class SwitchboardController:
 
     def get_status(self) -> dict:
         with self._lock:
+            gensets = {
+                genset_id: {
+                    "power_kw": power_kw,
+                    "co2_kg_per_s": co2_kg_per_s,
+                    "nox_kg_per_s": nox_kg_per_s,
+                    "stale": self._is_stale(received_at),
+                }
+                for genset_id, (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
+                in self._genset_power_kw.items()
+            }
+            batteries = {
+                battery_id: {
+                    "power_kw": power_kw,
+                    "stale": self._is_stale(received_at),
+                }
+                for battery_id, (power_kw, received_at) in self._battery_power_kw.items()
+            }
+            consumers = {
+                consumer_id: {
+                    "requested_power_kw": requested_power_kw,
+                    "priority": priority,
+                    "allocated_power_kw": self._last_allocations.get(consumer_id, 0.0),
+                    "stale": self._is_stale(received_at),
+                }
+                for consumer_id, (requested_power_kw, priority, received_at)
+                in self._consumer_requests.items()
+            }
             return {
                 "switchboard_id": self.switchboard_id,
                 "available_supply_kw": self._get_available_supply_kw(),
                 "total_demand_kw": self._get_total_demand_kw(),
                 "total_co2_kg_per_s": self._get_total_co2_kg_per_s(),
                 "total_nox_kg_per_s": self._get_total_nox_kg_per_s(),
-                "gensets": {
-                    genset_id: {
-                        "power_kw": power_kw,
-                        "co2_kg_per_s": co2_kg_per_s,
-                        "nox_kg_per_s": nox_kg_per_s,
-                        "stale": self._is_stale(received_at),
-                    }
-                    for genset_id, (power_kw, co2_kg_per_s, nox_kg_per_s, received_at)
-                    in self._genset_power_kw.items()
-                },
-                "batteries": {
-                    battery_id: {
-                        "power_kw": power_kw,
-                        "stale": self._is_stale(received_at),
-                    }
-                    for battery_id, (power_kw, received_at) in self._battery_power_kw.items()
-                },
-                "consumers": {
-                    consumer_id: {
-                        "requested_power_kw": requested_power_kw,
-                        "priority": priority,
-                        "allocated_power_kw": self._last_allocations.get(consumer_id, 0.0),
-                        "stale": self._is_stale(received_at),
-                    }
-                    for consumer_id, (requested_power_kw, priority, received_at)
-                    in self._consumer_requests.items()
+                "gensets": gensets,
+                "batteries": batteries,
+                "consumers": consumers,
+                "source_health": summarize_source_health(gensets, batteries, consumers),
+                "data_quality": {
+                    "total_sources": len(gensets) + len(batteries),
+                    "stale_sources": sum(1 for item in gensets.values() if item["stale"]) + sum(1 for item in batteries.values() if item["stale"]),
+                    "total_consumers": len(consumers),
+                    "stale_consumers": sum(1 for item in consumers.values() if item["stale"]),
                 },
             }
+
+    def get_health(self) -> dict:
+        threads = {
+            "genset_consumer": self._genset_thread,
+            "battery_consumer": self._battery_thread,
+            "request_consumer": self._request_thread,
+            "allocation": self._allocation_thread,
+        }
+        with self._lock:
+            errors = list(self._errors)
+        thread_status = {
+            name: thread is not None and thread.is_alive() for name, thread in threads.items()
+        }
+        healthy = all(thread_status.values()) and not errors
+        return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+
+    def _record_error(self, message: str) -> None:
+        with self._lock:
+            self._errors.append(message)
+
+    def _send(self, topic: str, *, key: str, value: dict) -> None:
+        self._producer.send(topic, key=key, value=value).get(timeout=5)
 
     def _is_stale(self, received_at: float) -> bool:
         return time.time() - received_at > STALE_TIMEOUT_S
@@ -164,60 +212,78 @@ class SwitchboardController:
             for record in self._genset_consumer:
                 if self._stop_event.is_set():
                     break
-                value = record.value
-                genset_id = value.get("genset_id", record.key)
-                power_kw = value.get("power_kw")
-                if power_kw is None:
-                    continue
-                co2_kg_per_s = float(value.get("co2_kg_per_s", 0.0))
-                nox_kg_per_s = float(value.get("nox_kg_per_s", 0.0))
-                with self._lock:
-                    self._genset_power_kw[genset_id] = (
-                        float(power_kw),
-                        co2_kg_per_s,
-                        nox_kg_per_s,
-                        time.time(),
-                    )
+                try:
+                    value = record.value
+                    if value is None:
+                        continue
+                    genset_id = value.get("genset_id", record.key)
+                    power_kw = value.get("power_kw")
+                    if power_kw is None:
+                        continue
+                    co2_kg_per_s = float(value.get("co2_kg_per_s", 0.0))
+                    nox_kg_per_s = float(value.get("nox_kg_per_s", 0.0))
+                    with self._lock:
+                        self._genset_power_kw[genset_id] = (
+                            float(power_kw),
+                            co2_kg_per_s,
+                            nox_kg_per_s,
+                            time.time(),
+                        )
+                except Exception as error:
+                    logger.warning("Ignoring malformed genset telemetry: %s", error)
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Genset consumer stopped unexpectedly")
+                self._record_error("genset_consumer stopped unexpectedly")
 
     def _consume_battery_telemetry(self) -> None:
         try:
             for record in self._battery_consumer:
                 if self._stop_event.is_set():
                     break
-                value = record.value
-                battery_id = value.get("battery_id", record.key)
-                power_kw = value.get("power_kw")
-                if power_kw is None:
-                    continue
-                with self._lock:
-                    self._battery_power_kw[battery_id] = (float(power_kw), time.time())
+                try:
+                    value = record.value
+                    if value is None:
+                        continue
+                    battery_id = value.get("battery_id", record.key)
+                    power_kw = value.get("power_kw")
+                    if power_kw is None:
+                        continue
+                    with self._lock:
+                        self._battery_power_kw[battery_id] = (float(power_kw), time.time())
+                except Exception as error:
+                    logger.warning("Ignoring malformed battery telemetry: %s", error)
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Battery consumer stopped unexpectedly")
+                self._record_error("battery_consumer stopped unexpectedly")
 
     def _consume_requests(self) -> None:
         try:
             for record in self._request_consumer:
                 if self._stop_event.is_set():
                     break
-                value = record.value
-                consumer_id = value.get("consumer_id", record.key)
-                requested_power_kw = value.get("requested_power_kw")
-                if consumer_id is None or requested_power_kw is None:
-                    continue
-                priority = int(value.get("priority", 1))
-                with self._lock:
-                    self._consumer_requests[consumer_id] = (
-                        float(requested_power_kw),
-                        priority,
-                        time.time(),
-                    )
+                try:
+                    value = record.value
+                    if value is None:
+                        continue
+                    consumer_id = value.get("consumer_id", record.key)
+                    requested_power_kw = value.get("requested_power_kw")
+                    if consumer_id is None or requested_power_kw is None:
+                        continue
+                    priority = int(value.get("priority", 1))
+                    with self._lock:
+                        self._consumer_requests[consumer_id] = (
+                            float(requested_power_kw),
+                            priority,
+                            time.time(),
+                        )
+                except Exception as error:
+                    logger.warning("Ignoring malformed consumer request: %s", error)
         except Exception:
             if not self._stop_event.is_set():
-                raise
+                logger.exception("Request consumer stopped unexpectedly")
+                self._record_error("request_consumer stopped unexpectedly")
 
     def _get_available_supply_kw(self) -> float:
         """Sum of power output from gensets and batteries whose telemetry
@@ -261,6 +327,13 @@ class SwitchboardController:
         )
 
     def _run(self) -> None:
+        try:
+            self._run_loop()
+        except Exception:
+            logger.exception("Allocation worker stopped unexpectedly")
+            self._record_error("allocation worker stopped unexpectedly")
+
+    def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             with self._lock:
                 available_supply_kw = self._get_available_supply_kw()
@@ -281,7 +354,7 @@ class SwitchboardController:
                 self._last_allocations = allocations
 
             for request in active_requests:
-                message = {
+                payload = {
                     "switchboard_id": self.switchboard_id,
                     "consumer_id": request.consumer_id,
                     "timestamp": timestamp,
@@ -292,7 +365,16 @@ class SwitchboardController:
                     "total_co2_kg_per_s": total_co2_kg_per_s,
                     "total_nox_kg_per_s": total_nox_kg_per_s,
                 }
-                self._producer.send(KAFKA_TOPIC, key=request.consumer_id, value=message)
+                message = {
+                    "event": "switchboard.telemetry",
+                    "schema_version": 1,
+                    "source_id": self.switchboard_id,
+                    "source_type": "switchboard",
+                    "timestamp": timestamp,
+                    "payload": payload,
+                }
+                message.update(payload)
+                self._send(KAFKA_TOPIC, key=request.consumer_id, value=message)
 
             allocated_str = ", ".join(
                 f"{cid}={power_kw:.1f}kW" for cid, power_kw in allocations.items()

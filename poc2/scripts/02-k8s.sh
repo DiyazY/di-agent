@@ -146,15 +146,23 @@ fi
 info "Waiting for all nodes to be Ready ..."
 timeout=300
 elapsed=0
+nodes_ready=false
 while [ "$elapsed" -lt "$timeout" ]; do
     ready_count=$(ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config get nodes --no-headers" | grep -c " Ready" || true)
     if [ "$ready_count" -eq "${#VMS[@]}" ]; then
         ok "All ${#VMS[@]} nodes are Ready"
+        nodes_ready=true
         break
     fi
     sleep 5
     elapsed=$((elapsed + 5))
 done
+
+if [ "$nodes_ready" != true ]; then
+    err "Timed out after ${timeout}s waiting for all ${#VMS[@]} nodes to become Ready"
+    ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config get nodes -o wide" || true
+    exit 1
+fi
 
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config get nodes -o wide"
 ok "Cluster bootstrap complete. Control-plane: $CONTROL_PLANE_VM, workers: ${WORKER_VMS[*]:-none}"

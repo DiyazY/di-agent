@@ -125,7 +125,7 @@ for round in $(seq 1 "$ROUNDS"); do
         fi
         vm="${VMS[$idx]}"
         ip="${IPS[$idx]}"
-        raw=$(curl -sf "http://${ip}:9090/cost?taskType=pod-scheduling&nodeID=master" 2>/dev/null || echo "{}")
+        raw=$(curl -sf "http://${ip}:9090/cost?task=pod-scheduling&node=master" 2>/dev/null || echo "{}")
         rc=$(json_get "$raw" "ResourceCost")
         conf=$(json_get "$raw" "Confidence")
         rc="${rc:-0.000}"
@@ -143,7 +143,7 @@ for round in $(seq 1 "$ROUNDS"); do
     busiest_ip=$(ip_for "$busiest_vm")
     rec_raw=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"task_type\":\"pod-scheduling\",\"source_node_id\":\"master\"}" \
+        -d "{\"TaskType\":\"pod-scheduling\",\"SourceNodeID\":\"master\"}" \
         "http://${busiest_ip}:9090/recommend" 2>/dev/null || echo "{}")
 
     peer_id=$(json_get "$rec_raw" "PeerID")
@@ -199,20 +199,27 @@ for p in peers:
             # Set absolute trust to 0.15 — below the default min-trust floor of 0.5
             # so diag-1 stops recommending diag-2 and routes to diag-3 instead.
             info "Setting trust for $DRAIN_TARGET_VM (id=$drain_peer_id) on $DRAIN_HOST to 0.15 ..."
-            drain_resp=$(curl -sf -X POST \
-                -H "Content-Type: application/json" \
-                -d '{"value": 0.15}' \
-                "http://${drain_ip}:9090/peers/${drain_peer_id}/trust" 2>/dev/null || echo "{}")
-            drain_err=$(json_get "$drain_resp" "error")
-            if [ -n "$drain_err" ] && [ "$drain_err" != "null" ] && [ "$drain_err" != "" ]; then
-                err "  Trust drain failed: $drain_err"
+            drain_applied=false
+            if drain_resp=$(curl -sf -X POST \
+                    -H "Content-Type: application/json" \
+                    -d '{"value": 0.15}' \
+                    "http://${drain_ip}:9090/peers/${drain_peer_id}/trust" 2>/dev/null); then
+                drain_err=$(json_get "$drain_resp" "error")
+                if [ -n "$drain_err" ] && [ "$drain_err" != "null" ] && [ "$drain_err" != "" ]; then
+                    err "  Trust drain failed: $drain_err"
+                else
+                    drain_applied=true
+                    ok "  Trust drain applied: $DRAIN_TARGET_VM (id=$drain_peer_id) trust=0.15 on $DRAIN_HOST"
+                fi
             else
-                ok "  Trust drain applied: $DRAIN_TARGET_VM (id=$drain_peer_id) trust=0.15 on $DRAIN_HOST"
+                err "  Trust drain request failed for $DRAIN_TARGET_VM on $DRAIN_HOST"
             fi
-            if [ "${#VMS[@]}" -ge 4 ]; then
-                announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[3]} to win next rounds"
-            else
-                announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect other eligible peers to win next rounds"
+            if [ "$drain_applied" = true ]; then
+                if [ "${#VMS[@]}" -ge 3 ]; then
+                    announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect ${VMS[2]} to win next rounds"
+                else
+                    announce "Trust drain: $DRAIN_TARGET_VM trust=0.15 (< min-trust 0.5) → expect other eligible peers to win next rounds"
+                fi
             fi
         fi
         echo ""

@@ -13,7 +13,7 @@
 {{- $_ := set $ids $svc (append (index $ids $svc) $id) }}
 {{- end }}
 {{- end }}
-{{- $configJson := printf "{\"gensetIds\":%s,\"propulsionIds\":%s,\"batteryIds\":%s,\"auxloadIds\":%s}" ((index $ids "genset") | toJson) ((index $ids "propulsion") | toJson) ((index $ids "battery") | toJson) ((index $ids "auxload") | toJson) }}
+{{- $configJson := printf "{\"gensetIds\":%s,\"propulsionIds\":%s,\"batteryIds\":%s,\"auxloadIds\":%s,\"shorePower\":true}" ((index $ids "genset") | toJson) ((index $ids "propulsion") | toJson) ((index $ids "battery") | toJson) ((index $ids "auxload") | toJson) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,6 +29,7 @@ spec:
     metadata:
       labels:
         app: playground
+      {{- include "diagent.podAnnotations" . | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" .Values.playground.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
@@ -52,6 +53,8 @@ spec:
               value: {{ index $locations "auxload" | quote }}
             - name: SWITCHBOARD_UPSTREAM
               value: {{ .Values.playground.switchboardUpstream | quote }}
+            - name: SHORE_POWER_UPSTREAM
+              value: "shore-power:8000"
             - name: CONFIG_JSON
               value: {{ $configJson | quote }}
           resources:

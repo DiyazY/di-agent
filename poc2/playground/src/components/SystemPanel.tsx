@@ -3,10 +3,15 @@ import {
   fetchHealth,
   fetchStatus,
   fetchSwitchboardStatus,
+  setAnomalyEnabled,
   setLoad,
   SystemName,
   SystemStatus,
 } from "../api";
+
+// Anomaly mode is only wired up for systems whose telemetry simulator
+// applies a fault pattern when enabled (see each service's sensors.py).
+const ANOMALY_CAPABLE_SYSTEMS: SystemName[] = ["battery", "genset", "propulsion"];
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -74,16 +79,39 @@ export default function SystemPanel({ system, id }: Props) {
     }
   };
 
+  const handleToggleAnomaly = async () => {
+    setSubmitting(true);
+    try {
+      await setAnomalyEnabled(system, id, !status?.anomaly_enabled);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const anomalyCapable = ANOMALY_CAPABLE_SYSTEMS.includes(system);
+
   return (
     <div className="panel">
       <h2>
         <span
           className={`status-dot ${
-            healthy === null ? "" : healthy ? "ok" : "error"
+            healthy === null
+              ? ""
+              : !healthy
+              ? "error"
+              : status?.anomaly_enabled
+              ? "anomaly"
+              : "ok"
           }`}
         />
         {id}
       </h2>
+      {/* Which physical component the instance simulates (e.g. the battery
+          model), when the service reports one in /status. */}
+      {typeof status?.name === "string" && <p className="model-name">{status.name}</p>}
 
       <div className="metric-row">
         <span>Current load</span>
@@ -113,6 +141,27 @@ export default function SystemPanel({ system, id }: Props) {
           <strong>
             {status?.soc !== undefined ? `${(status.soc * 100).toFixed(1)}%` : "--"}
           </strong>
+        </div>
+      )}
+      {system === "battery" && (
+        <div className="metric-row">
+          <span>{status?.time_to_full_hr !== undefined ? "Time to full" : "Time to empty"}</span>
+          <strong>
+            {status?.time_to_empty_hr !== undefined
+              ? `${status.time_to_empty_hr.toFixed(1)} h`
+              : status?.time_to_full_hr !== undefined
+              ? `${status.time_to_full_hr.toFixed(1)} h`
+              : "stable"}
+          </strong>
+        </div>
+      )}
+
+      {anomalyCapable && (
+        <div className="metric-row">
+          <span>Anomaly mode</span>
+          <button onClick={handleToggleAnomaly} disabled={submitting}>
+            {status?.anomaly_enabled ? "Disable" : "Enable"}
+          </button>
         </div>
       )}
 

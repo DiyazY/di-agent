@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from controller import SwitchboardController
 
@@ -18,8 +18,11 @@ app = FastAPI(title="Switchboard Control API", lifespan=lifespan)
 
 
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+def health(response: Response) -> dict:
+    health_data = controller.get_health()
+    if health_data["status"] != "ok":
+        response.status_code = 503
+    return health_data
 
 
 @app.get("/status")

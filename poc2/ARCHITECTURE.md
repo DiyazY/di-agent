@@ -2,247 +2,226 @@
 
 ## Purpose
 
-PoC2 is a controlled distributed test environment for the di-agent idea: multiple agents run on separate machines, observe different workloads, exchange trust information, and choose routing or scheduling partners based on both cost and trust.
+PoC2 is a local distributed lab for testing the `di-agent` idea in a controllable environment. The goal is not to deploy a production cluster; it is to let several agent instances run on separate VM nodes, observe different workloads, exchange peer trust, and demonstrate how routing decisions change when one peer becomes less trusted.
 
-This is more than a Kubernetes demo. It is a reference architecture for observing how a multi-agent coordination system behaves when:
+This architecture is deliberately layered so each part of the system remains observable:
 
-- nodes start with similar priors,
-- workloads differ across machines,
-- trust between peers changes over time,
-- a recommendation system must route around a degraded or untrusted peer.
+- VM infrastructure creates the cluster nodes,
+- Kubernetes schedules the service stack,
+- the telemetry pipeline moves workload data into InfluxDB,
+- the `di-agent` process runs on each VM as a peer node,
+- the demo coordinator exercises trust-aware routing behavior.
 
-## High-level system view
+## High-level architecture
 
-The deployment stack has five layers:
+The system has five layers:
 
 1. Infrastructure layer
-   - libvirt/QEMU VMs created by Terraform
-   - Ubuntu cloud images and VM networking
+   - libvirt/QEMU VM fleet created by Terraform
+   - Ubuntu cloud image and networking from the libvirt default network
 
-2. Control-plane layer
-   - kubeadm cluster
-   - one control-plane VM and worker VMs
+2. Cluster layer
+   - Kubernetes control plane + worker nodes
+   - cluster bootstrap done by `scripts/02-k8s.sh`
 
-3. Messaging and data layer
-   - Kafka as the event backbone
-   - InfluxDB as the time-series store
-   - Grafana as observability front-end
+3. Runtime service layer
+   - Kafka for event transport
+   - InfluxDB for time-series storage
+   - Grafana for dashboards
+   - switchboard, genset, battery, propulsion, auxload, and telemetry-writer services
 
 4. Agent layer
-   - a di-agent process per worker node
-   - peers discovered over HTTP
-   - trust and recommendation APIs exposed by the agent
+   - one `di-agent` pod per worker VM
+   - direct peer-to-peer communication over VM IP addresses
+   - trust registration and routing recommendation APIs exposed by the agent
 
-5. Workload simulation layer
-   - artificial generators such as genset and propulsion telemetry
-   - coordinator script that drives the demo behavior
+5. Demo and observation layer
+   - `scripts/coordinator.sh` probes `/cost` and `/recommend`
+   - trust values are intentionally reduced to simulate degraded peers
+   - the result is observable rerouting behavior
 
-## Deployment pattern
+## Deployment model
 
-The deployment is orchestrated by a shell-script pipeline rather than a single declarative stack. Each script performs a distinct step:
+PoC2 uses a two-part deployment strategy:
 
-- `01-provision.sh`: terraform init + plan + apply for VM creation
-- `02-k8s.sh`: bootstrap Kubernetes with kubeadm
-- `03-kafka.sh`: deploy a single-node KRaft Kafka broker
-- `04-agent.sh`: build the di-agent binary and deploy it to each worker node as a pod
-- `05-peers.sh`: register peer URLs and set trust values
-- `06-genset.sh`, `06a-switchboard.sh`, `06b-propulsion.sh`, `06c-battery.sh` and `06d-auxload.sh`: generate telemetry workloads for one or more gensets, a central switchboard, one or more propulsion consumers, one or more batteries, and one or more auxiliary (hotel) loads
-- `07-influxdb.sh`: create the time-series database
-- `07b-telemetry-writer.sh`: stream Kafka messages into InfluxDB
-- `08-grafana.sh`: provision Grafana with an InfluxDB datasource
+### 1) Helm chart for the system services
 
-The `Makefile` simply groups these steps into a standard operating sequence.
+The chart under `helm/di-agent-system` manages the shared runtime services:
+
+- Kafka
+- InfluxDB
+- Grafana
+- genset
+- battery
+- propulsion
+- auxload
+- switchboard
+- telemetry-writer
+- playground
+
+The chart wraps all of these in one release but does not include the `di-agent` itself.
+
+### 2) Direct pod deployment for the agent mesh
+
+`/scripts/03-agent.sh` handles the `di-agent` runtime separately:
+
+- builds the Go binary from the `semantic-map` project,
+- builds a Docker image,
+- imports the image into each worker VM's containerd runtime,
+- creates a Kubernetes `Deployment` per VM,
+- applies `nodeSelector` so each pod lands on its expected host,
+- uses `hostNetwork: true` so each agent can reach the others over VM networking.
+
+This split matters: the workload and telemetry services are cluster-native; the agent peers are host-native VM processes that behave like edge nodes in the same lab.
 
 ## Infrastructure architecture
 
-The VM environment is created in `main.tf`.
+`main.tf` creates the VM fleet. The important responsibilities are:
 
-### Terraform responsibilities
+- create a libvirt storage pool
+- download the Ubuntu 22.04 cloud image
+- clone VM disks based on that image
+- inject cloud-init data for SSH and hostname configuration
+- create one libvirt domain per VM
+- attach each VM to the default libvirt network
+- give the first VM a slightly higher resource allocation so it acts as the control plane
 
-`main.tf` does the following:
+The cluster is intentionally small and local. There is no production HA or external managed service layer.
 
-- creates a libvirt storage pool
-- downloads the Ubuntu 22.04 cloud image into that pool
-- clones a base disk for each VM
-- creates cloud-init disks for SSH and network bootstrapping
-- defines `libvirt_domain` resources for each VM
-- assigns one interface to the default libvirt network
-- sets the first VM to a slightly larger CPU allocation, which matches the control-plane role
+## Cluster architecture
 
-This gives the lab a small cluster without requiring external cloud resources.
+`scripts/02-k8s.sh` builds the Kubernetes cluster. The pattern is straightforward:
 
-## Kubernetes architecture
+- resolve each VM IP via `virsh`
+- install required packages and kernel settings
+- initialize the control plane on the first VM
+- install the pod network
+- join remaining VMs as workers
+- write a local kubeconfig for `kubectl`
 
-The cluster is created over the VM set using kubeadm. The script `02-k8s.sh` does the following:
+The design assumption is simple: control-plane + workers on a local VM network, no external load balancer, no external storage, and no complicated service mesh.
 
-- resolves each VM IP from `virsh`
-- installs container runtime and Kubernetes packages
-- enables the required kernel modules and sysctls
-- initializes kubeadm on the first VM as the control plane
-- installs Flannel as the pod network
-- joins remaining VMs as workers
-- writes a local kubeconfig for cluster access
+## Runtime service interaction
 
-The result is a simple control-plane + workers cluster that is easy to reason about and enough for the local PoC.
+The data plane is implemented as a classic event stream plus time-series store:
 
-## Message and telemetry architecture
-
-The data-plane is built around Kafka and InfluxDB.
+```text
+workload generators -> Kafka -> telemetry-writer -> InfluxDB -> Grafana
+```
 
 ### Kafka
 
-Kafka is deployed with a single broker in KRaft mode. The manifest in `config/kafka-deployment.yaml` sets:
+Kafka is a single-broker KRaft deployment. It serves as the system event backbone. The Helm templates in `helm/di-agent-system/templates/kafka.yaml` define the service and broker configuration. The relevant design point is that all application services talk to it by cluster DNS name:
 
-- host networking
-- a single-node broker/controller configuration
-- one topic for genset telemetry and one for propulsion telemetry
-- a static `CLUSTER_ID` and `KAFKA_NODE_ID`
+- `kafka.<namespace>.svc.cluster.local:9092`
 
-Because the broker runs on a VM and the other components also use host networking, each component can reach the broker by direct host IP rather than by Kubernetes service discovery.
+### Workload simulators
 
-### data producers
+The services in `system/` model power-system components rather than generic application load:
 
-The workload simulators are containerized Python services in `system/genset/`, `system/battery/`, `system/propulsion/`, and `system/auxiliary-load/`.
+- `genset`: source of electrical generation
+- `battery`: source/storage device
+- `propulsion`: power consumer
+- `auxiliary-load`: another power consumer
+- `switchboard`: central allocation authority
 
-Their behavior is intentionally simple:
+These components generate and consume telemetry, and the switchboard decides who gets power based on priority and available supply.
 
-- they expose a lightweight HTTP API (`/status`, `/load`, `/health`)
-- they adjust a simulated load ratio over time
-- they emit telemetry records to Kafka with timestamps and physical metrics
+### Telemetry writer
 
-The genset, battery, propulsion, and auxiliary-load workloads are not just monitoring tools; they model a real system under load. The genset and battery are power sources feeding the bus (the battery also tracks its own state of charge and stops discharging once empty); propulsion and the auxiliary load are consumers drawing from it, both with an adjustable target load ratio via API, representing e.g. a variable hotel load (HVAC, lighting, galley, ...).
-
-### switchboard
-
-`system/switchboard/` is the central power-management authority between power sources (genset, battery) and consumers (propulsion, auxiliary load). Rather than every consumer summing raw source telemetry itself (which only works for one source talking to one consumer), the switchboard is the single place that:
-
-- consumes `genset.telemetry` from every genset and `battery.telemetry` from every battery, summing both into total available bus supply
-- consumes `switchboard.requests` from every consumer (e.g. propulsion, auxiliary load), each carrying a requested power and a load-shedding priority
-- every tick, allocates the available supply across consumers in priority order — high-priority consumers are served first, and low-priority ones are shed if supply can't cover total demand
-- publishes each consumer's grant to `switchboard.telemetry`, and exposes the full picture (per-source supply, per-consumer request/allocation) over `/status`
-
-This is the same role a physical switchboard plays on a vessel: it is the shared busbar all generators and batteries feed and all loads draw from, with a power-management layer that decides who gets power when supply is short. It also makes the topology genuinely multi-source/multi-consumer: adding a second genset, a battery, or a second propulsion drive only means pointing them at the same switchboard, with no consumer needing to know how many sources exist.
-
-### telemetry writer
-
-`system/telemetry-writer/main.py` is the bridge between Kafka and InfluxDB.
-
-It:
-
-- subscribes to one or more Kafka topics
-- deserializes JSON payloads
-- maps each payload to a measurement schema
-- writes points into InfluxDB using the proper tags and fields
-
-This is the part that converts raw event streams from machine simulation into time-series data that Grafana can visualize.
+`system/telemetry-writer` consumes the Kafka topics and maps them to InfluxDB measurements. This bridge is essential because the simulation services publish machine-readable events, while Grafana expects a time-series database.
 
 ### InfluxDB and Grafana
 
-InfluxDB is deployed as a single-node time-series database. Grafana is then provisioned with an InfluxDB datasource, using the token and bucket settings defined in the config environment.
+The chart provisions InfluxDB and Grafana and preconfigures Grafana's datasource to point at InfluxDB. This allows the operator to observe system health and telemetry without separate manual config.
 
-This combination makes the system visible: the lifecycle is
+The practical requirement is simple: the InfluxDB credentials must exist before `helm install` or the chart will fail to initialize the datasource.
 
-- generator emits telemetry
-- Kafka stores and distributes the event stream
-- telemetry writer writes to InfluxDB
-- Grafana renders the metrics
+## Agent and trust architecture
 
-## Agent architecture
+The `di-agent` layer is the heart of the experiment.
 
-Each worker VM runs a di-agent pod. In `scripts/04-agent.sh`, the build process does the following:
+### Agent placement
 
-- builds the Go agent binary from the semantic-map project
-- creates a Docker image for the agent
-- imports the image into the worker node's containerd
-- deploys one `Deployment` per VM
-- schedules each pod to its own host via `nodeSelector`
-- passes environment variables such as `NODE_ID`, `REGIME`, and `KAFKA_BROKERS`
+Each worker VM hosts one agent pod. The pod runs with `hostNetwork: true` and is pinned to the VM hostname via `nodeSelector`. This lets the agent:
 
-The important part is the hostNetworking and node targeting: each agent can reach the others directly on the VM network, which matches the peer-to-peer coordination scenario.
+- interact with local runtime configuration,
+- reach other agent nodes directly over the VM network,
+- behave as a peer endpoint rather than a normal in-cluster service.
 
-## Peer and trust model
+### Peer registration
 
-The peer registration flow is defined in `scripts/05-peers.sh`.
+`scripts/04-peers.sh` resolves each VM IP, calls `POST /peers` on each target agent, and then issues `POST /peers/{id}/trust` to assign an explicit trust value. The result is a dense mesh where each agent knows about all the others.
 
-### Registration
-
-For each VM, the script does this:
-
-- resolves all peer IPs
-- calls `POST /peers` on the target agent
-- extracts the derived peer ID from the response
-- calls `POST /peers/{id}/trust` to set an explicit trust value
-
-This creates a mesh where each node knows the others and the system has a non-trivial trust value to reason over.
+This is important because the trust model is not implicit. It is explicit, observable, and adjustable.
 
 ### Routing experiment
 
-The coordinator script `scripts/coordinator.sh` is the demonstration layer that exercises the peer logic.
+`scripts/coordinator.sh` is the demonstration layer. It repeatedly:
 
-For each round, it:
+- queries `/cost` from each agent,
+- selects the highest-cost node,
+- calls `/recommend` on that node,
+- evaluates the recommendation,
+- reduces trust for one peer mid-run,
+- observes how the routing recommendation changes as trust falls.
 
-- queries `/cost` on the agents
-- picks the node with the highest resource cost
-- calls `/recommend` on that node
-- inspects the recommendations and expected savings
-- optionally drains trust for a peer mid-run by setting trust to a value below the minimum threshold
+This is the actual proof-of-concept behavior: the system is not merely measuring load; it is showing that trust-aware routing can redirect decisions when a peer becomes unreliable.
 
-This creates the desired effect: as trust falls, a previously recommended peer becomes ineligible, and the system reroutes to another peer.
+## Dependency and configuration boundaries
 
-## Execution sequence in one view
+This project has a few hard boundaries that matter in practice:
+
+- Terraform is only responsible for VM creation.
+- Kubernetes bootstrap is separate from application deployment.
+- The custom app images are built and pushed to a registry before the Helm chart is installed.
+- The `di-agent` binary is built from the `semantic-map` Go sources and deployed separately.
+- The telemetry service credentials are required before chart deployment.
+
+These boundaries keep the lab understandable: one step creates the nodes, one step creates the cluster, one step deploys services, and one step deploys the peer agent mesh.
+
+## Execution flow
+
+The real operational flow is:
 
 ```text
 Terraform -> VM fleet
-      -> kubeadm cluster
-      -> Kafka broker
-      -> di-agent pods
-      -> peer registration
-      -> workload simulators
-      -> Kafka stream
-      -> InfluxDB
-      -> Grafana
-      -> coordinator demo
+  -> kubeadm/k3s/KubeEdge cluster
+  -> image build + registry push
+  -> Helm chart deployment
+  -> agent deployment on each worker VM
+  -> peer registration and trust assignment
+  -> workload telemetry into Kafka
+  -> telemetry writer to InfluxDB
+  -> Grafana dashboarding
+  -> coordinator trust-drain demonstration
 ```
 
-The design is intentionally layered so each system boundary remains visible and debuggable.
+## Why this architecture is valid for the PoC
 
-## Why this architecture matters
+This design is intentionally simple enough to debug. Every critical behavior remains visible:
 
-PoC2 is designed to validate an operational claim of the di-agent project:
+- the machines are explicit VM nodes,
+- Kubernetes handles service scheduling,
+- the agent mesh is direct and host-level,
+- telemetry is streamed through Kafka,
+- trust changes are made visible through a coordinator loop.
 
-- agents start in similar states,
-- their local observations diverge under different workloads,
-- trust and routing therefore diverge too,
-- and recommendation logic responds to that drift in a way that can be observed and measured.
+That makes this PoC valuable as a local testbed for distributed trust-aware routing logic without making the runtime opaque.
 
-This is not a production cluster setup. It is a lab proving ground for a distributed coordination policy that depends on local context plus peer trust.
+## Key files to understand the architecture
 
-## Key files
+- `main.tf`: VM lifecycle and node shape
+- `scripts/02-k8s.sh`: cluster construction
+- `scripts/03-agent.sh`: per-node agent deployment
+- `scripts/04-peers.sh`: peer + trust registration
+- `scripts/coordinator.sh`: trust-aware routing experiment
+- `helm/di-agent-system/values.yaml`: runtime service defaults and secret references
+- `helm/di-agent-system/templates/`: deployed workloads and their wiring
+- `system/*`: generators and telemetry consumers
 
-- `main.tf`: VM creation
-- `variables.tf`: configuration variables
-- `providers.tf`: libvirt provider
-- `Makefile`: orchestration entrypoints
-- `scripts/*.sh`: workflow scripts
-- `config/*.yaml`: rendered Kubernetes manifests
-- `system/*`: workload and bridge implementations
+## Operational caveat
 
-## Operational notes
+This is a lab environment, not a production cluster. The service network is intentionally direct, host networking is used for the agent mesh, and the VM setup assumes a small local libvirt environment with a default network and known SSH key paths.
 
-- The default assumption is a small local cluster on top of libvirt.
-- Host networking is used intentionally so the components can talk to each other directly.
-- The scripts assume a specific SSH key path and VM naming convention (`ubuntu-vm1`, `ubuntu-vm2`, ...).
-- The environment is meant for demonstration and iteration, not for deployment to a production private network.
-
-## End state
-
-When the PoC is fully active, the user can observe all of the following:
-
-- a Kubernetes cluster with multiple worker nodes
-- multiple di-agent instances with peer knowledge
-- real-time or near-real-time telemetry generated by the workloads
-- metrics in InfluxDB
-- dashboards in Grafana
-- evidence that routing decisions change when one peer loses trust
-
-That end-to-end path is the actual purpose of PoC2.
+That is the correct architecture for PoC2: simple enough to reproduce, explicit enough to debug, and close enough to the target coordination problem to test the behavior that matters.
