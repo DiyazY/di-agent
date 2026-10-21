@@ -43,9 +43,12 @@ provision:
 k8s:
 	@bash $(SCRIPTS)/02-k8s.sh $(VMS)
 
-# Build and push all chart-managed service images to $(REGISTRY):$(TAG).
+# Build and push chart-managed service images to $(REGISTRY):$(TAG).
+# Override IMAGES to build/push only a subset, e.g.:
+#   make images IMAGES="genset propulsion"
+IMAGES ?=
 images:
-	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/build-push-images.sh
+	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/build-push-images.sh $(IMAGES)
 
 helm-lint:
 	@helm lint $(HELM_CHART)
@@ -67,10 +70,10 @@ helm-status:
 	@helm status $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 agent:
-	@bash $(SCRIPTS)/04-agent.sh $(VMS)
+	@bash $(SCRIPTS)/03-agent.sh $(VMS)
 
 peers:
-	@bash $(SCRIPTS)/05-peers.sh $(VMS)
+	@bash $(SCRIPTS)/04-peers.sh $(VMS)
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
@@ -114,7 +117,7 @@ status:
 		echo "=== $(vm) ==="; \
 		ip=$$(virsh domifaddr $(vm) --source lease 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1); \
 		if [ -n "$$ip" ]; then \
-			curl -s "http://$$ip:8080/cost" 2>/dev/null || echo "Agent not responding on $(vm)"; \
+			curl -s "http://$$ip:9090/cost" 2>/dev/null || echo "Agent not responding on $(vm)"; \
 		else \
 			echo "VM $(vm) not running or no IP assigned"; \
 		fi; \
@@ -152,10 +155,11 @@ help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
 	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
+	@echo "                 telemetry-writer/playground images to REGISTRY (default $(REGISTRY))"
+	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
-	@echo "                 telemetry-writer/playground images to REGISTRY (default $(REGISTRY))"
-	@echo "  helm-install - helm upgrade --install the di-agent-system chart (kafka..playground)"
+	@echo "  helm-install - helm upgrade --install the di-agent-system chart (requires external credentials)"
 	@echo "  helm-upgrade - Alias for helm-install"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"
 	@echo "  helm-status  - helm status of the di-agent-system release"
