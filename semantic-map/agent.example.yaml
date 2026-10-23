@@ -147,7 +147,7 @@ loops:
               exit: 0.05
               enter_for: 1m0s
               exit_for: 3m0s
-              step: 0.1
+              step: 0.25
               min_effect: 0.03
               victim_share: 0.05
               settle: 2m0s

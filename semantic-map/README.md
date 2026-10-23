@@ -751,7 +751,7 @@ loops:
       - action: memory.high
         enter: 0.20     # memory stall of a pod within its request, not limiting itself
         exit: 0.05
-        step: 0.10      # each step lowers memory.high by a tenth
+        step: 0.25      # each step lowers memory.high by a quarter of what the pod uses
 actuation:
   ledger: ""            # "": actions.json beside persist.file
 policy:

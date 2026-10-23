@@ -375,3 +375,38 @@ func TestPlanCPUUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestTheDefaultMemoryLeverCanPlanAtEnter: at the default memory lever's enter
+// threshold, a usage-basis step on a pod whose share of the node's memory usage
+// is 0.7 clears min_effect; one at 0.4 does not, and is refused for it.
+func TestTheDefaultMemoryLeverCanPlanAtEnter(t *testing.T) {
+	var lever spec.Lever
+	for _, l := range spec.Default().Loops.Relief.Levers {
+		if l.Action == actuators.MemoryHighDescriptor.Action {
+			lever = l
+		}
+	}
+	d := actuators.MemoryHighDescriptor
+	act := actuators.Static(d, nil, func(runtime.Workload) (float64, bool) { return 0, false })
+	const nodeMem = 0.5
+	for _, c := range []struct {
+		ratio float64 // the pod's share over node usage
+		plan  bool
+	}{{0.7, true}, {0.4, false}} {
+		m := newMap(t, func() time.Time { return t0 })
+		record(t, m, d.Relieves, "", lever.Enter, t0)
+		record(t, m, d.Usage, "", nodeMem, t0)
+		if err := m.RecordFacts("test", []statemap.Fact{statemap.NumberFact(d.Capacity, 8<<30, d.Unit)}); err != nil {
+			t.Fatal(err)
+		}
+		share := c.ratio * nodeMem
+		cands := []Candidate{{Subject: "pod:a", Share: share, Basis: BasisUsage}}
+		p, ok, why := MakePlan(ctx, m, act, cands, []runtime.Workload{pod("pod:a")}, defaultPolicy(t, nil), lever, one)
+		if ok != c.plan {
+			t.Errorf("share/usage %.1f at enter %.2f: plan %v (%+v, %q); want plan %v", c.ratio, lever.Enter, ok, p, why, c.plan)
+		}
+		if !c.plan && !strings.Contains(why, "min_effect") {
+			t.Errorf("share/usage %.1f: refused %q; want min_effect", c.ratio, why)
+		}
+	}
+}

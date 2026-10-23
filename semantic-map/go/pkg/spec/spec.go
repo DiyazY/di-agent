@@ -318,7 +318,7 @@ func defaultLevers() []Lever {
 		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}, {
 		Action: "memory.high", Enter: 0.20, Exit: 0.05, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
-		Step: 0.10, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
+		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}}
 }
 
