@@ -730,6 +730,10 @@ fraction.
 | `memory_pressure_ratio` | —         | worse    | PSI `memory.some` stall share of the window (cgroup `memory.pressure`); unrouted |
 | `cpu_steal_ratio`       | —         | worse    | node only: share of CPU time the hypervisor spent elsewhere (`/proc/stat` steal); unrouted |
 | `cpu_contention_ratio`  | —         | worse    | `cpu.some` stall less the cgroup's own `throttled_usec`, per subject; the node's is the worst waiting of a pod owed CPU it does not get — its weighted fair share of the pods' CPUs (`cpu.weight`, capped by its `cpu.max`), by water-filling (`owedContention`) — not a BestEffort pod's or a unit's, whose waiting is not the runtime's to relieve, and not a pod's past its share, which waits on its own threads; unrouted; relief's signal (§16) |
+| `memory_contention_ratio` | —       | worse    | node only: the worst `memory_pressure_ratio` of a pod promised memory (not BestEffort, not a unit) that is not limiting itself (its `memory.events` `high` and `max` did not rise this window) and, when the runtime's requests are known, is within its memory request (`memory.current` ≤ request); 0 when no pod counts, absent until a pod has a memory stall reading; unrouted; the memory lever's trigger |
+| `memory_events_high`    | —         | worse    | per subject: times over `memory.high` in the window (`memory.events` `high` delta), `count` on [0, 1e9]; none for the node; unrouted |
+| `memory_events_max`     | —         | worse    | per subject: times at `memory.max` in the window (`memory.events` `max` delta), `count` on [0, 1e9]; unrouted |
+| `memory_oom_kills`      | —         | worse    | per subject: processes OOM-killed in the window (`memory.events` `oom_kill` delta), `count` on [0, 1e9]; unrouted |
 
 The catalogue names the types a collector or a test can reference; it is not the
 limit of what the map accepts. The set of `MetricType`s the map actually admits is

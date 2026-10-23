@@ -8,17 +8,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"go.yaml.in/yaml/v3"
 )
 
 // Env is what every collector is built with: the node it observes, the agent's
-// collection interval, and where it logs. Logf may be nil, which discards.
+// collection interval, and where it logs. Logf may be nil, which discards. Requests is
+// the pods' memory requests the cgroup collector counts memory contention against; nil
+// drops that condition.
 type Env struct {
 	NodeID   string
 	Interval time.Duration
 	Logf     func(format string, args ...any)
+	Requests *minimal.Requests
 }
 
 // Factory builds the collector of one registered type. It decodes its own config

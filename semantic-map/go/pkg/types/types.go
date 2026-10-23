@@ -245,6 +245,11 @@ type OutcomeSimulation struct {
 //	CPUStealRatio        share of CPU time the hypervisor gave to others (node-level)
 //	CPUContentionRatio   PSI cpu.some stall less the cgroup's own throttled time; the
 //	                     node's is the worst-off subject's (cgroup collector)
+//	MemoryContentionRatio node only: the worst PSI memory.some stall of a promised pod
+//	                     within its memory request and not limiting itself
+//	MemoryEventsHigh     memory.events high: times over memory.high in the window (count)
+//	MemoryEventsMax      memory.events max: times at memory.max in the window (count)
+//	MemoryOOMKills       memory.events oom_kill: OOM kills in the window (count)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -269,6 +274,12 @@ const (
 	MemoryPressureRatio MetricType = "memory_pressure_ratio"
 	CPUStealRatio       MetricType = "cpu_steal_ratio"
 	CPUContentionRatio  MetricType = "cpu_contention_ratio"
+	// MemoryContentionRatio is node-level, on [0,1].
+	MemoryContentionRatio MetricType = "memory_contention_ratio"
+	// The memory.events counts are per subject, per window, on [0, 1e9].
+	MemoryEventsHigh    MetricType = "memory_events_high"
+	MemoryEventsMax     MetricType = "memory_events_max"
+	MemoryOOMKills      MetricType = "memory_oom_kills"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"
