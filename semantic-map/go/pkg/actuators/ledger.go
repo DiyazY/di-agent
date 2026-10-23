@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -159,8 +160,9 @@ func (l *Ledger) For(action string) []Entry {
 	return out
 }
 
-// saveLocked writes the ledger to a temp file beside the real one, syncs it and
-// renames it over, so a crash leaves the old file or the new, never half of one.
+// saveLocked writes the ledger to a temp file beside the real one, syncs it,
+// renames it over and syncs the directory, so a crash leaves the old file or the
+// new, never half of one, and a change recorded stays recorded.
 func (l *Ledger) saveLocked() error {
 	if l.saveErr != nil {
 		return l.saveErr
@@ -205,5 +207,26 @@ func (l *Ledger) saveLocked() error {
 		os.Remove(tmp.Name())
 		return fmt.Errorf("ledger %s: %w", l.path, err)
 	}
+	if err := syncDir(filepath.Dir(l.path)); err != nil {
+		return fmt.Errorf("ledger %s: syncing its directory: %w", l.path, err)
+	}
 	return nil
+}
+
+// syncDir makes a rename into dir durable: until the directory is synced, a
+// crash may leave the old name pointing at the old file. A platform that cannot
+// sync a directory (EINVAL) has nothing more to give.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	if errors.Is(err, syscall.EINVAL) {
+		return nil
+	}
+	return err
 }
