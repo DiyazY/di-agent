@@ -178,7 +178,9 @@ func TestBuiltinCgroupCountsAgainstEnvRequests(t *testing.T) {
 	mustWrite(t, filepath.Join(pod, "cpu.stat"), "usage_usec 500000\nnr_periods 10\nnr_throttled 1\n")
 	mustWrite(t, filepath.Join(pod, "memory.current"), "268435456\n")
 	psi := func(total int) {
-		mustWrite(t, filepath.Join(pod, "memory.pressure"), "some avg10=0 avg60=0 avg300=0 total="+strconv.Itoa(total)+"\n")
+		for _, d := range []string{root, pod} {
+			mustWrite(t, filepath.Join(d, "memory.pressure"), "some avg10=0 avg60=0 avg300=0 total="+strconv.Itoa(total)+"\n")
+		}
 	}
 	for _, tc := range []struct {
 		name   string

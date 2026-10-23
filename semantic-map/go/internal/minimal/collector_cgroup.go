@@ -75,9 +75,10 @@ import (
 // promised memory (not BestEffort, not a unit) that is not limiting itself — its
 // memory_events_high and memory_events_max did not rise — and, when CgroupOptions.Requests
 // holds the pods' requests, is within its memory request (memory.current ≤ request). It is
-// 0 when no pod counts, and absent until some pod has a memory stall reading, so a kernel
-// without memory PSI reports nothing rather than a calm node. Like cpu_contention_ratio it
-// needs subjects.
+// emitted for every window in which the node itself has a memory_pressure_ratio, and is 0
+// when no pod counts (none promised, all new this window, all excluded): a fresh 0 is what
+// lets a relief step taken on it be released. A node without memory PSI reports nothing
+// rather than a calm node. Like cpu_contention_ratio it needs subjects.
 //
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
 // hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
@@ -313,6 +314,12 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	if !c.opts.Subjects {
 		return out, nil
 	}
+	// The node's memory contention is reported for every window the node itself has a
+	// memory stall reading for, so relief sees a fresh 0 when no pod counts.
+	rootMemPSI := false
+	for _, s := range out {
+		rootMemPSI = rootMemPSI || s.MetricType == types.MemoryPressureRatio
+	}
 	seen := map[string]bool{}
 	var promised []podCPU // pods promised CPU: the node's contention is theirs
 	var memPods []podMem  // pods promised memory with a memory stall reading this window
@@ -408,7 +415,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	if worst, ok := owedContention(promised, c.podCPUs()); ok {
 		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
 	}
-	if len(memPods) > 0 {
+	if rootMemPSI {
 		var req map[string]float64
 		var haveReq bool
 		if c.opts.Requests != nil {

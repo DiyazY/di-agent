@@ -48,7 +48,8 @@ type podMem struct {
 // help it; a pod using more than it requested was promised only its request, so its stall
 // is the share it took past it. With requests unknown (haveReq false: no runtime, or none
 // listed yet) the request condition is dropped; with them known, a pod with no request, or
-// whose memory.current is unread, is not counted. No counted pod is 0.
+// whose memory.current is unread, is not counted. No counted pod — none given, or every one
+// excluded — is 0, a reading in its own right rather than the absence of one.
 func memoryContention(pods []podMem, req map[string]float64, haveReq bool) float64 {
 	worst := 0.0
 	for _, p := range pods {
