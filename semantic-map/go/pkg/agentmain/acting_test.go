@@ -26,7 +26,8 @@ func actingMux(t *testing.T) *http.ServeMux {
 func f64(v float64) *float64 { return &v }
 
 // actingMuxWith is the acting routes over a dry-run runtime, acting as the agent
-// does under it, with a relief loop when withLoop is set. pod:a is frozen and has
+// does under it with relief enabled (both default levers), with the relief loops
+// when withLoop is set; the loop returned is cpu.limit's. pod:a is frozen and has
 // no CPU limit; pod:b has a limit of 1 core.
 func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *runtime.DryRun, *actuators.Acting) {
 	t.Helper()
@@ -45,6 +46,7 @@ func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *
 		t.Fatal(err)
 	}
 	s.Node.ID = "n1"
+	s.Loops.Relief.Enabled = true
 	acting, _, err := buildActing(s, rt, t.Logf)
 	if err != nil {
 		t.Fatal(err)
@@ -199,8 +201,11 @@ func TestPauseAndResume(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET /relief = %d: %s", rec.Code, rec.Body)
 		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || len(st.Levers) != 1 {
-			t.Fatalf("GET /relief = %s (%v); want one lever", rec.Body, err)
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || len(st.Levers) != 2 {
+			t.Fatalf("GET /relief = %s (%v); want both default levers", rec.Body, err)
+		}
+		if st.Levers[0].Paused != st.Levers[1].Paused {
+			t.Fatalf("GET /relief = %s; pause and resume act on every lever", rec.Body)
 		}
 		return st.Levers[0].Paused
 	}

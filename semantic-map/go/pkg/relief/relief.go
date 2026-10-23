@@ -219,6 +219,9 @@ func (l *Loop) Pause() { l.mu.Lock(); l.paused = true; l.mu.Unlock() }
 // Resume undoes Pause.
 func (l *Loop) Resume() { l.mu.Lock(); l.paused = false; l.mu.Unlock() }
 
+// Lever is the lever the loop acts by, as the spec gave it.
+func (l *Loop) Lever() spec.Lever { return l.c }
+
 // Status is the loop now.
 func (l *Loop) Status() Status {
 	l.mu.Lock()

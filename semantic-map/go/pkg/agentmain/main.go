@@ -266,8 +266,11 @@ func Main() {
 	// Collectors are built after the map so a refused entry stops the daemon before it
 	// serves anything; a broken collector found later is isolated by the supervisor
 	// and reported at GET /collectors instead.
-	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf},
-		cfg.Sources.Collectors)
+	// The pods' memory requests, which memory contention counts a pod against: stored
+	// by the refresh started once the runtime is built, read by the cgroup collector.
+	requests := &minimal.Requests{}
+	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf,
+		Requests: requests}, cfg.Sources.Collectors)
 	if err != nil {
 		log.Fatalf("collectors: %v", err)
 	}
@@ -378,6 +381,9 @@ func Main() {
 		}
 		log.Printf("relief: %s acting every %s through runtime %s%s", l.Status().Action, cfg.Loops.Relief.Interval, rt.Name(), dry)
 		go l.Start(ctx)
+	}
+	if startRequestsLoop(ctx, cfg.Runtime.Kind, rt, requests, log.Printf) {
+		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)

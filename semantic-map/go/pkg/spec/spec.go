@@ -309,12 +309,27 @@ type Lever struct {
 	Expiry      time.Duration `yaml:"expiry"`
 }
 
-// defaultLevers is the levers relief has unless the file names its own.
+// defaultLevers is the levers relief has unless the file names its own: CPU
+// and memory, each relieving its own kind of node contention. Their actions are
+// the only ones a lever may name (LeverActions).
 func defaultLevers() []Lever {
 	return []Lever{{
 		Action: "cpu.limit", Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
 		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
+	}, {
+		Action: "memory.high", Enter: 0.20, Exit: 0.05, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Step: 0.10, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}}
+}
+
+// LeverActions are the actions a lever may name: those with a default lever,
+// which a lever in the file starts from.
+func LeverActions() []string {
+	var out []string
+	for _, l := range defaultLevers() {
+		out = append(out, l.Action)
+	}
+	return out
 }
 
 // UnmarshalYAML starts a lever from the default lever for its action, so a file
@@ -856,6 +871,11 @@ func (s Spec) Validate() error {
 		switch {
 		case c.Action == "":
 			errs = append(errs, fmt.Errorf("%s.action is empty", name))
+		case !slices.Contains(LeverActions(), c.Action):
+			// Decoded from nothing, its every threshold would be refused too, and
+			// those are not what is wrong with it.
+			errs = append(errs, fmt.Errorf("%s %s: unknown action (known: %s)", name, c.Action, strings.Join(LeverActions(), ", ")))
+			continue
 		case seenLever[c.Action]:
 			errs = append(errs, fmt.Errorf("%s %s: duplicate action: one lever per action", name, c.Action))
 		}

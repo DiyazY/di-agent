@@ -37,7 +37,12 @@ func ledgerPath(ledger, persistFile string) string {
 
 // buildActing builds the action of every lever in the spec, on rt's workloads,
 // with the ledger of what it changed. A lever whose action no actuator performs
-// refuses start. On a dry run (loops.relief.dry_run, by default exactly when
+// refuses start. The actuators are built only while relief is enabled: an agent
+// that changes nothing needs none, and one that cannot be built on this node (no
+// cgroup v2, or the kubelet managing memory.high) then refuses start, naming its
+// lever. Each is built after the ledger is opened and given its entries, so it
+// can tell a setting the agent made before a restart from one it did not. On a
+// dry run (loops.relief.dry_run, by default exactly when
 // runtime.kind is dry-run) every actuator is wrapped in actuators.DryRun and the
 // ledger is kept in memory: nothing reaches the system, so evidence is false and
 // there is nothing to remember across a restart. Otherwise the ledger is a file;
@@ -68,10 +73,14 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 	env := actuators.Env{NodeID: cfg.Node.ID, CgroupRoot: collectors.CgroupRoot(cfg.Sources.Collectors),
 		Runtime: rt, Logf: logf, Held: ledger.For}
 	var as []actuators.Actuator
-	for _, l := range cfg.Loops.Relief.Levers {
+	levers := cfg.Loops.Relief.Levers
+	if !cfg.Loops.Relief.Enabled {
+		levers = nil
+	}
+	for i, l := range levers {
 		a, err := actuators.Build(l.Action, env)
 		if err != nil {
-			return nil, false, fmt.Errorf("loops.relief %s: %w", l.Action, err)
+			return nil, false, fmt.Errorf("loops.relief.levers[%d] %s: %w", i, l.Action, err)
 		}
 		if dry {
 			a = actuators.DryRun(a)

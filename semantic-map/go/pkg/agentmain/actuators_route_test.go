@@ -44,7 +44,10 @@ func TestActuatorsRoute(t *testing.T) {
 	}
 
 	all := read("/actuators")
-	if len(all) != 1 || all[0].Descriptor.Action != "cpu.limit" || all[0].Descriptor.Unit != "cores" ||
+	if len(all) != 2 || all[1].Descriptor.Action != "memory.high" || len(all[1].Held) != 0 {
+		t.Fatalf("actuators %+v; want memory.high beside cpu.limit, holding nothing", all)
+	}
+	if all[0].Descriptor.Action != "cpu.limit" || all[0].Descriptor.Unit != "cores" ||
 		all[0].Descriptor.Relieves != "cpu_contention_ratio" || all[0].Can != nil {
 		t.Fatalf("actuators %+v; want cpu.limit's descriptor, with no can without a subject", all)
 	}
@@ -53,11 +56,11 @@ func TestActuatorsRoute(t *testing.T) {
 	}
 
 	one := read("/actuators?subject=pod:me")
-	if len(one) != 1 || one[0].Can == nil || *one[0].Can != "the agent itself" || len(one[0].Held) != 0 {
+	if len(one) != 2 || one[0].Can == nil || *one[0].Can != "the agent itself" || len(one[0].Held) != 0 {
 		t.Fatalf("pod:me %+v; want can naming why not, and nothing held on it", one)
 	}
 	one = read("/actuators?subject=pod:b")
-	if len(one) != 1 || one[0].Can == nil || *one[0].Can != "" || len(one[0].Held) != 1 {
+	if len(one) != 2 || one[0].Can == nil || *one[0].Can != "" || len(one[0].Held) != 1 {
 		t.Fatalf("pod:b %+v; want can empty (it can) and its held change", one)
 	}
 	if rec := get(mux, "/actuators?subject=pod:nope"); rec.Code != http.StatusNotFound {
@@ -77,9 +80,12 @@ func TestBuildActing(t *testing.T) {
 	}
 	s := spec.Default()
 	s.Node.ID = "n1"
+	s.Loops.Relief.Enabled = true
 	// The runtime the agent is told it has; named{dry} below answers as a real one.
+	// cpu.limit alone: memory.high on a real runtime needs a cgroup v2 tree.
 	real := s
 	real.Runtime.Kind = "kubernetes"
+	real.Loops.Relief.Levers = s.Loops.Relief.Levers[:1]
 
 	t.Run("dry-run changes nothing and keeps the ledger in memory", func(t *testing.T) {
 		s := s

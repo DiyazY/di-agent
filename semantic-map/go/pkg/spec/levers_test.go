@@ -7,14 +7,17 @@ import (
 	"time"
 )
 
-// TestLeversDefaults: relief has one lever by default, cpu.limit with today's
-// thresholds; dry_run follows the runtime; the ledger path is Task 4's rule; the
+// TestLeversDefaults: relief has two levers by default, cpu.limit with today's
+// thresholds and memory.high beside it; dry_run follows the runtime; the ledger path is Task 4's rule; the
 // policy allows both actions and floors each.
 func TestLeversDefaults(t *testing.T) {
 	d := Default()
 	want := []Lever{{
 		Action: "cpu.limit", Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
 		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
+	}, {
+		Action: "memory.high", Enter: 0.20, Exit: 0.05, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Step: 0.10, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}}
 	if !reflect.DeepEqual(d.Loops.Relief.Levers, want) {
 		t.Errorf("levers = %+v, want %+v", d.Loops.Relief.Levers, want)
@@ -68,16 +71,32 @@ func TestLeverDuplicateRefused(t *testing.T) {
 	}
 }
 
+// TestAnUnknownLeverActionIsOneError: a lever whose action has no default lever
+// is a misspelling or an actuator this spec knows nothing of; it is refused once,
+// naming the actions there are, not as a list of thresholds it never set.
+func TestAnUnknownLeverActionIsOneError(t *testing.T) {
+	_, err := Parse([]byte("loops: {relief: {levers: [{action: cpu.limit}, {action: cpu.limt}]}}"))
+	want := "loops.relief.levers[1] cpu.limt: unknown action (known: cpu.limit, memory.high)"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	for _, other := range []string{".enter", ".exit", ".settle", ".expiry", "policy.defaults.floor"} {
+		if strings.Contains(err.Error(), "levers[1]"+other) || strings.Contains(err.Error(), other+" has no") {
+			t.Errorf("err = %v; want only the unknown action, not %s", err, other)
+		}
+	}
+}
+
 // TestLeverChecksNameTheLever: the checks CPURelief had are made per lever, and
 // say which.
 func TestLeverChecksNameTheLever(t *testing.T) {
 	for doc, want := range map[string]string{
-		"loops: {relief: {levers: [{action: cpu.limit, exit: 0.3}]}}":                  "loops.relief.levers[0].exit",
-		"loops: {relief: {levers: [{action: cpu.limit, settle: 2m, expiry: 1m}]}}":     "loops.relief.levers[0].expiry",
-		"loops: {relief: {levers: [{action: cpu.limit}, {action: x, enter: 1.5}]}}":    "loops.relief.levers[1].enter",
-		"loops: {relief: {levers: [{action: cpu.limit}, {action: x, enter_for: 1m}]}}": "loops.relief.levers[1].exit_for",
-		"loops: {relief: {levers: [{action: cpu.limit, entre: 0.3}]}}":                 "entre",
-		"policy: {defaults: {floor: {cpu.limit: {min: 0.1, of_original: 0.5, x: 1}}}}": "x",
+		"loops: {relief: {levers: [{action: cpu.limit, exit: 0.3}]}}":                           "loops.relief.levers[0].exit",
+		"loops: {relief: {levers: [{action: cpu.limit, settle: 2m, expiry: 1m}]}}":              "loops.relief.levers[0].expiry",
+		"loops: {relief: {levers: [{action: cpu.limit}, {action: memory.high, enter: 1.5}]}}":   "loops.relief.levers[1].enter",
+		"loops: {relief: {levers: [{action: cpu.limit}, {action: memory.high, exit_for: 0s}]}}": "loops.relief.levers[1].exit_for",
+		"loops: {relief: {levers: [{action: cpu.limit, entre: 0.3}]}}":                          "entre",
+		"policy: {defaults: {floor: {cpu.limit: {min: 0.1, of_original: 0.5, x: 1}}}}":          "x",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: err = %v, want one naming %s", doc, err, want)

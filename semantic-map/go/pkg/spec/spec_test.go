@@ -13,7 +13,7 @@ func TestDefaultsAreTodaysFlags(t *testing.T) {
 	if d.Node.Addr != ":8080" {
 		t.Errorf("Node.Addr = %q", d.Node.Addr)
 	}
-	if len(d.Loops.Relief.Levers) != 1 || d.Loops.Relief.Levers[0].Enter != 0.25 {
+	if len(d.Loops.Relief.Levers) != 2 || d.Loops.Relief.Levers[0].Enter != 0.25 {
 		t.Errorf("Relief.Levers = %+v", d.Loops.Relief.Levers)
 	}
 	if d.Loops.Relief.Enabled {

@@ -27,7 +27,7 @@ func TestLeverUnknownActionRefused(t *testing.T) {
 	s.Node.ID = "n1"
 	l := s.Loops.Relief.Levers[0]
 	l.Action = "memory.hgh"
-	s.Loops.Relief.Levers = append(s.Loops.Relief.Levers, l)
+	s.Loops.Relief.Levers = []spec.Lever{s.Loops.Relief.Levers[0], l}
 	_, _, err = buildActing(s, rt, t.Logf)
 	want := "loops.relief.levers[1] memory.hgh: no such actuator (registered: " + strings.Join(actuators.Names(), ", ") + ")"
 	if err == nil || err.Error() != want {
@@ -44,6 +44,7 @@ func TestTheLedgerIsWhereTheSpecSays(t *testing.T) {
 	}
 	s := spec.Default()
 	s.Node.ID, s.Runtime.Kind = "n1", "kubernetes"
+	s.Loops.Relief.Enabled, s.Loops.Relief.Levers = true, s.Loops.Relief.Levers[:1]
 	s.Actuation.Ledger = filepath.Join(t.TempDir(), "elsewhere.json")
 	acting, evidence, err := buildActing(s, named{dry}, t.Logf)
 	if err != nil || !evidence {
@@ -68,6 +69,7 @@ func TestDryRunOnARealRuntime(t *testing.T) {
 	}
 	s := spec.Default()
 	s.Node.ID, s.Runtime.Kind = "n1", "kubernetes"
+	s.Loops.Relief.Enabled, s.Loops.Relief.Levers = true, s.Loops.Relief.Levers[:1]
 	yes := true
 	s.Loops.Relief.DryRun = &yes
 	s.Actuation.Ledger = filepath.Join(t.TempDir(), "ledger.json")
@@ -91,7 +93,7 @@ func TestReliefRouteListsLevers(t *testing.T) {
 	s.Node.ID = "n1"
 	second := s.Loops.Relief.Levers[0]
 	second.Action = "cpu.limit.second"
-	s.Loops.Relief.Levers = append(s.Loops.Relief.Levers, second)
+	s.Loops.Relief.Levers = []spec.Lever{s.Loops.Relief.Levers[0], second}
 	rt, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1", Spec: s.Runtime})
 	if err != nil {
 		t.Fatal(err)
