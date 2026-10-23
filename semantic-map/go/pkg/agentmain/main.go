@@ -330,17 +330,14 @@ func Main() {
 	if err != nil {
 		log.Fatalf("actuation in %s: %v", *configPath, err)
 	}
-	var reliefLoop *relief.Loop
+	var reliefLoops []*relief.Loop
 	if cfg.Loops.Relief.Enabled {
-		cpu, _ := acting.Actuator("cpu.limit")
-		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, Descriptor: cpu.Describe(), NodeID: cfg.Node.ID,
-			Runtime: rt, Acting: acting, Policy: pol, Map: state, Logf: log.Printf,
-			Evidence: evidence, Candidates: sm})
+		reliefLoops, err = buildRelief(cfg, rt, acting, pol, state, evidence, sm, log.Printf)
 		if err != nil {
-			log.Fatalf("loops.relief in %s: %v", *configPath, err)
+			log.Fatalf("%s: %v", *configPath, err)
 		}
 	}
-	registerActingRoutes(mux, rt, acting, pol, reliefLoop)
+	registerActingRoutes(mux, rt, acting, pol, reliefLoops)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
@@ -374,9 +371,13 @@ func Main() {
 	// Lifecycle is time-based, so something has to advance it. Without this loop
 	// map.stale_after and map.retire_after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
-	if reliefLoop != nil {
-		log.Printf("relief: acting every %s through runtime %s", cfg.Loops.Relief.Interval, rt.Name())
-		go reliefLoop.Start(ctx)
+	for _, l := range reliefLoops {
+		dry := ""
+		if !evidence {
+			dry = ", as a dry run"
+		}
+		log.Printf("relief: %s acting every %s through runtime %s%s", l.Status().Action, cfg.Loops.Relief.Interval, rt.Name(), dry)
+		go l.Start(ctx)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)

@@ -16,10 +16,12 @@ import (
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
-// Status is the loop at a glance: where the node stands, what is in flight, and
-// how often the loop's predictions have held. Cooling lists workloads the loop
-// will not act on before the time given.
+// Status is the loop at a glance: the action it takes, where the node stands,
+// what is in flight, and how often the loop's predictions have held. Cooling
+// lists workloads the loop will not act on before the time given, whichever
+// lever's doing that is.
 type Status struct {
+	Action          string               `json:"action"`
 	Phase           Phase                `json:"phase"`
 	Paused          bool                 `json:"paused"`
 	Runtime         string               `json:"runtime"` // what the changes go through: dry-run changes nothing
@@ -73,7 +75,10 @@ type Action struct {
 
 // Config is what a Loop is built from. Descriptor is the action the loop takes:
 // the node property it relieves, the per-workload usage it moves, its unit and
-// the capacity fact that turns a share into that unit. Runtime lists the
+// the capacity fact that turns a share into that unit; Lever is its thresholds,
+// for the same action, and Interval how often it looks. Budget is the hourly
+// limit and the cooldowns it shares with the node's other levers; nil is one of
+// its own, at the policy defaults' max_actions_per_hour. Runtime lists the
 // workloads; Acting changes them through the descriptor's actuator and holds the
 // ledger of what it changed. Evidence says the changes really reach the system,
 // so an action's outcome is evidence about it: only then do outcomes feed the
@@ -81,7 +86,9 @@ type Action struct {
 // and what pressure did after it is the workload's own doing. Candidates is the
 // discovery queue interventions settle; nil settles nothing.
 type Config struct {
-	Relief     spec.Relief
+	Interval   time.Duration
+	Lever      spec.Lever
+	Budget     *Budget
 	Descriptor actuators.Descriptor
 	NodeID     string
 	Runtime    runtime.Runtime
@@ -106,11 +113,12 @@ type Config struct {
 // HTTP handler is never blocked behind a slow orchestrator, and they always see
 // state between two steps, never in the middle of one.
 type Loop struct {
-	cfg   Config
-	c     spec.CPURelief
-	d     actuators.Descriptor
-	act   actuators.Actuator // the descriptor's, from Acting
-	epoch int64
+	cfg    Config
+	c      spec.Lever
+	d      actuators.Descriptor
+	budget *Budget
+	act    actuators.Actuator // the descriptor's, from Acting
+	epoch  int64
 
 	effects effects       // what acting on each workload has done; safe on its own
 	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
@@ -125,10 +133,8 @@ type Loop struct {
 	since       time.Time // when the current phase began
 	paused      bool
 	inFlight    *Action
-	kept        []*Action // oldest first; release reverts from the end
-	history     []*Action // oldest first, at most historySize
-	acted       []time.Time
-	cooling     map[string]time.Time
+	kept        []*Action            // oldest first; release reverts from the end
+	history     []*Action            // oldest first, at most historySize
 	released    map[string]time.Time // when each workload was last released
 	cycles      map[string]int       // throttle/release cycles within backoffWindow
 	lastRelease time.Time            // the last release revert, for one per Settle
@@ -155,8 +161,10 @@ func New(c Config) (*Loop, error) {
 		return nil, errors.New("relief: no policy")
 	case c.Map == nil:
 		return nil, errors.New("relief: no state map")
-	case c.Relief.Interval <= 0:
-		return nil, fmt.Errorf("relief: interval %s must be positive", c.Relief.Interval)
+	case c.Interval <= 0:
+		return nil, fmt.Errorf("relief: interval %s must be positive", c.Interval)
+	case c.Lever.Action != c.Descriptor.Action:
+		return nil, fmt.Errorf("relief: lever for %q, descriptor for %q", c.Lever.Action, c.Descriptor.Action)
 	}
 	act, ok := c.Acting.Actuator(c.Descriptor.Action)
 	if !ok {
@@ -168,11 +176,15 @@ func New(c Config) (*Loop, error) {
 	if c.Logf == nil {
 		c.Logf = func(string, ...any) {}
 	}
+	if c.Budget == nil {
+		c.Budget = NewBudget(c.Policy.Defaults().MaxActionsPerHour)
+	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Relief.CPU, d: c.Descriptor, act: act, epoch: now.Unix(), timeout: max(c.Relief.Interval, minCallTimeout),
-		trigger: NewTrigger(c.Relief.CPU), phase: Calm, since: now,
-		cooling: map[string]time.Time{}, released: map[string]time.Time{}, cycles: map[string]int{},
+		cfg: c, c: c.Lever, d: c.Descriptor, budget: c.Budget, act: act, epoch: now.Unix(),
+		timeout: max(c.Interval, minCallTimeout),
+		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
+		released: map[string]time.Time{}, cycles: map[string]int{},
 	}, nil
 }
 
@@ -182,13 +194,13 @@ func New(c Config) (*Loop, error) {
 const minCallTimeout = 10 * time.Second
 
 // Start reconciles with what the ledger says this node changed, then ticks
-// every Relief.Interval until ctx ends. A failed reconcile is retried by every
+// every Interval until ctx ends. A failed reconcile is retried by every
 // tick until it succeeds, and nothing is applied before then.
 func (l *Loop) Start(ctx context.Context) {
 	if err := l.Reconcile(ctx); err != nil {
 		l.cfg.Logf("relief: %v (no change is made until it succeeds)", err)
 	}
-	t := time.NewTicker(l.cfg.Relief.Interval)
+	t := time.NewTicker(l.cfg.Interval)
 	defer t.Stop()
 	for {
 		select {
@@ -212,7 +224,7 @@ func (l *Loop) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
-	st := Status{Phase: l.trigger.Phase(), Paused: l.paused, Runtime: l.cfg.Runtime.Name(),
+	st := Status{Action: l.d.Action, Phase: l.trigger.Phase(), Paused: l.paused, Runtime: l.cfg.Runtime.Name(),
 		Actions: l.nActs, Kept: l.nKept, Reverted: l.nReverted, Refused: l.nRefused}
 	if l.inFlight != nil {
 		a := copyAction(l.inFlight)
@@ -226,13 +238,8 @@ func (l *Loop) Status() Status {
 	if judged := l.nKept + l.nReverted; judged > 0 {
 		st.PredictionsHeld = float64(l.nKept) / float64(judged)
 	}
-	for s, until := range l.cooling {
-		if now.Before(until) {
-			if st.Cooling == nil {
-				st.Cooling = map[string]time.Time{}
-			}
-			st.Cooling[s] = until
-		}
+	if c := l.budget.coolingAll(l.d.Action, now); len(c) > 0 {
+		st.Cooling = c
 	}
 	return st
 }
@@ -260,7 +267,7 @@ func (l *Loop) Actions() []Action {
 // change whose workload the runtime no longer lists.
 //
 // The whole pass, every runtime call in it, is bounded by the loop's timeout
-// (Relief.Interval, at least 10s), so an orchestrator that stops answering
+// (Interval, at least 10s), so an orchestrator that stops answering
 // cannot hold the pass lock and with it every manual revert.
 func (l *Loop) Tick(ctx context.Context) {
 	l.pass.Lock()
@@ -365,9 +372,10 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 // kept, for release. Expired ones are kept in force for the caller's expire to
 // give back, so one the actuator will not yet give back is retried every tick.
 // Another node's changes, and another action's, are never touched here. Each
-// unexpired change counts toward the hourly limit from the time the journal says
-// it was made, or from now when the journal no longer has it, so a restart does
-// not hand the loop a fresh budget.
+// unexpired change counts toward the shared hourly limit from the time the
+// journal says it was made, or from now when the journal no longer has it, so a
+// restart does not hand the loops a fresh budget, and holds the other levers off
+// its workload for its cooldown from then.
 func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	ws, err := l.cfg.Runtime.Workloads(ctx)
 	if err != nil {
@@ -421,7 +429,6 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 
 	var expired, resumed []*Action
-	var acts []time.Time
 	for _, e := range held {
 		if live[e.Subject] != nil {
 			continue
@@ -441,14 +448,13 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			if d, ok := l.cfg.Map.Journal().Decision(e.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
 				at = d.At
 			}
-			acts = append(acts, at)
+			l.budget.Spend(at)
+			l.budget.coolExcept(a.Subject, l.d.Action, at.Add(a.cooldown))
 		}
 	}
 	sort.SliceStable(resumed, func(i, j int) bool { return resumed[i].Entry.Expires.Before(resumed[j].Entry.Expires) })
 
 	l.mu.Lock()
-	l.acted = append(l.acted, acts...)
-	sort.Slice(l.acted, func(i, j int) bool { return l.acted[i].Before(l.acted[j]) })
 	for _, a := range expired {
 		a.Outcome = OutcomeKept
 		l.history = appendHistory(l.history, a)
@@ -509,26 +515,19 @@ func (l *Loop) pressure(now time.Time) (float64, time.Time, bool) {
 }
 
 // relieve takes one step when nothing is in flight. The eligible workloads are
-// the actionable ones not cooling down, including one already capped, which is
-// stepped again from its current cap. The hourly limit is checked before
-// anything is estimated, and attribution that found no plan is not repeated
+// the actionable ones not cooling down for this lever, including one already
+// capped, which is stepped again from its current cap. The hourly limit is
+// checked before anything is estimated: the count is every lever's, and the
+// limit is each workload's own max_actions_per_hour, so a rule's override holds
+// for its workloads against the one shared count. It is checked again, and spent,
+// in one step just before the change, since another lever may have spent it
+// since. Attribution that found no plan is not repeated
 // until Settle has passed or the eligible workloads change, because each
 // estimate is a journalled decision and asking the same question every tick
 // would bury the journal in identical answers.
 func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, workloads func() ([]runtime.Workload, bool)) {
 	l.mu.Lock()
 	busy := l.inFlight != nil
-	cutoff := now.Add(-time.Hour)
-	for len(l.acted) > 0 && !l.acted[0].After(cutoff) {
-		l.acted = l.acted[1:]
-	}
-	inHour := len(l.acted)
-	cooling := make(map[string]bool)
-	for s, until := range l.cooling {
-		if now.Before(until) {
-			cooling[s] = true
-		}
-	}
 	kept := make(map[string]*Action, len(l.kept))
 	for _, a := range l.kept {
 		kept[a.Subject] = a
@@ -538,6 +537,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	if busy {
 		return
 	}
+	inHour := l.budget.Count(now)
+	cooling := l.budget.coolingAll(l.d.Action, now)
 	ws, ok := workloads()
 	if !ok {
 		return
@@ -548,7 +549,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	var limitedSubject string
 	var unanchored []*Action
 	for _, w := range ws {
-		if cooling[w.Subject] || !actionable(w, l.act, pol) {
+		if _, ok := cooling[w.Subject]; ok || !actionable(w, l.act, pol) {
 			continue
 		}
 		if k := kept[w.Subject]; k != nil && k.origin == nil {
@@ -607,6 +608,13 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	}
 	eff := pol.For(targetOf(w))
 	k := kept[plan.Subject]
+	if !l.budget.take(now, eff.Settings.MaxActionsPerHour) {
+		// Another lever spent the last of the hour since the check above.
+		l.refuse(fmt.Sprintf("max_actions_per_hour %d reached", eff.Settings.MaxActionsPerHour),
+			map[string]any{"rule": eff.Rule, "policy": eff, "subject": plan.Subject,
+				"actions_last_hour": l.budget.Count(now)})
+		return
+	}
 
 	id := l.id("act")
 	b := l.cfg.Map.Decide(id, fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
@@ -616,6 +624,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	shares := workloadShares(l.cfg.Map, l.d.Usage)
 	entry, err := l.cfg.Acting.Apply(ctx, w, l.d.Action, plan.To, now.Add(l.c.Expiry), id)
 	if err != nil {
+		l.budget.refund(now)
 		r := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
 		r.Input("plan", plan)
 		r.Input("policy", eff)
@@ -624,8 +633,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		r.Note("the actuator refused the change; cooling %s down for %s", plan.Subject, eff.Settings.Cooldown)
 		r.Note("the change may have taken effect regardless; the next pass reconciles the ledger with what the workload reads as")
 		r.Commit(map[string]any{"refused": "actuator: " + err.Error()})
+		l.budget.Cool(plan.Subject, now.Add(eff.Settings.Cooldown))
 		l.mu.Lock()
-		l.cooling[plan.Subject] = now.Add(eff.Settings.Cooldown)
 		l.nRefused++
 		l.mu.Unlock()
 		// A failed Apply can still have taken effect, as a resize whose call timed
@@ -678,7 +687,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		l.history = appendHistory(l.history, a)
 	}
 	l.inFlight = a
-	l.acted = append(l.acted, now)
+	l.budget.coolExcept(plan.Subject, l.d.Action, now.Add(eff.Settings.Cooldown))
 	l.nActs++
 	l.noted, l.noPlanAt = "", time.Time{}
 }
@@ -714,10 +723,12 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	b.Commit(map[string]any{"refused": why})
 }
 
-// id names the next decision: relief-<kind>-<loop start>-<n>.
+// id names the next decision: relief-<kind>-<action>-<loop start>-<n>. The
+// action keeps two levers' loops, started in the same second, from naming two
+// decisions alike.
 func (l *Loop) id(kind string) string {
 	l.seq++
-	return fmt.Sprintf("relief-%s-%d-%d", kind, l.epoch, l.seq)
+	return fmt.Sprintf("relief-%s-%s-%d-%d", kind, l.d.Action, l.epoch, l.seq)
 }
 
 // liveLocked is every action still in force. Caller holds mu.

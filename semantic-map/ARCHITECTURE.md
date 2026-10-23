@@ -2249,7 +2249,7 @@ The map answers what a system is doing; acting is the agent changing that system
 
 **Kill switch.** `POST /relief/pause` stops the loop making and releasing changes. It does not abandon what is in flight: a paused loop still verifies, reverts a failed action, and gives back what expires, because pausing should never leave a harmful change stranded. An operator can revert one action by hand (outcome `manual`). With relief disabled in the spec the routes answer `404`; the loop does not exist.
 
-**The dead-agent bound.** An agent that is gone for good cannot revert anything, and an external janitor is out of scope. What it leaves behind is bounded by the policy floor: no workload is ever cut below `floor.cpu_cores` or `floor.of_original` of its original limit, so the worst a dead agent can have done is the floor, and that bound is the stated guarantee.
+**The dead-agent bound.** An agent that is gone for good cannot revert anything, and an external janitor is out of scope. What it leaves behind is bounded by the policy floor: no workload is ever cut below its action's `floor.<action>.min` or `floor.<action>.of_original` of its original setting, so the worst a dead agent can have done is the floor, and that bound is the stated guarantee.
 
 ### Learning from outcomes
 

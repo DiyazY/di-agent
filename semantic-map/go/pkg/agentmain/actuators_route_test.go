@@ -77,6 +77,9 @@ func TestBuildActing(t *testing.T) {
 	}
 	s := spec.Default()
 	s.Node.ID = "n1"
+	// The runtime the agent is told it has; named{dry} below answers as a real one.
+	real := s
+	real.Runtime.Kind = "kubernetes"
 
 	t.Run("dry-run changes nothing and keeps the ledger in memory", func(t *testing.T) {
 		s := s
@@ -95,7 +98,7 @@ func TestBuildActing(t *testing.T) {
 	})
 
 	t.Run("a real runtime keeps the ledger beside persist.file", func(t *testing.T) {
-		s := s
+		s := real
 		s.Persist.File = filepath.Join(t.TempDir(), "state.json")
 		acting, evidence, err := buildActing(s, named{dry}, t.Logf)
 		if err != nil || !evidence {
@@ -111,7 +114,7 @@ func TestBuildActing(t *testing.T) {
 	})
 
 	t.Run("an unwritable ledger refuses relief", func(t *testing.T) {
-		s := s
+		s := real
 		blocker := filepath.Join(t.TempDir(), "file")
 		if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 			t.Fatal(err)
@@ -130,11 +133,14 @@ func TestBuildActing(t *testing.T) {
 }
 
 func TestLedgerPath(t *testing.T) {
-	if got := ledgerPath("/data/state.json"); got != "/data/actions.json" {
+	if got := ledgerPath("", "/data/state.json"); got != "/data/actions.json" {
 		t.Errorf("ledgerPath = %s", got)
 	}
-	if got := ledgerPath(""); got != "/var/lib/di-agent/actions.json" {
-		t.Errorf("ledgerPath(\"\") = %s", got)
+	if got := ledgerPath("", ""); got != "/var/lib/di-agent/actions.json" {
+		t.Errorf("ledgerPath(\"\", \"\") = %s", got)
+	}
+	if got := ledgerPath("/l/ledger.json", "/data/state.json"); got != "/l/ledger.json" {
+		t.Errorf("ledgerPath with actuation.ledger = %s", got)
 	}
 }
 
@@ -180,8 +186,8 @@ func TestADryRunReliefLoopActsOnAMapWorkload(t *testing.T) {
 		t.Fatal(err)
 	}
 	cpu, _ := acting.Actuator("cpu.limit")
-	loop, err := relief.New(relief.Config{Relief: s.Loops.Relief, Descriptor: cpu.Describe(), NodeID: "n1",
-		Runtime: rt, Acting: acting, Policy: pol, Map: m, Now: clock, Logf: t.Logf})
+	loop, err := relief.New(relief.Config{Interval: s.Loops.Relief.Interval, Lever: s.Loops.Relief.Levers[0],
+		Descriptor: cpu.Describe(), NodeID: "n1", Runtime: rt, Acting: acting, Policy: pol, Map: m, Now: clock, Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}

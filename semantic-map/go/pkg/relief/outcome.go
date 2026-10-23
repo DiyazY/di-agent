@@ -215,7 +215,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Worklo
 			l.inFlight = nil
 		}
 		l.kept = append(l.kept, a)
-		l.cooling[a.Subject] = now.Add(cooldown)
+		l.budget.Cool(a.Subject, now.Add(cooldown))
 		l.mu.Unlock()
 		return
 	}
@@ -348,7 +348,7 @@ func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Durat
 	}
 	l.kept = removeAction(l.kept, a)
 	if cooldown > 0 {
-		l.cooling[a.Subject] = now.Add(cooldown)
+		l.budget.Cool(a.Subject, now.Add(cooldown))
 	}
 }
 

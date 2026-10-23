@@ -32,19 +32,20 @@ const Redaction = "[redacted]"
 
 // Spec is everything one agent is told about itself.
 type Spec struct {
-	Node    Node         `yaml:"node"`
-	Profile Profile      `yaml:"profile"`
-	Sources Sources      `yaml:"sources"`
-	Facts   []FactSource `yaml:"facts"`
-	Map     MapSpec      `yaml:"map"`
-	Persist Persist      `yaml:"persist"`
-	Peers   Peers        `yaml:"peers"`
-	Domain  Domain       `yaml:"domain"`
-	Explain Explain      `yaml:"explain"`
-	Runtime RuntimeSpec  `yaml:"runtime"`
-	Loops   Loops        `yaml:"loops"`
-	Policy  PolicySpec   `yaml:"policy"`
-	Groups  Groups       `yaml:"groups"`
+	Node      Node         `yaml:"node"`
+	Profile   Profile      `yaml:"profile"`
+	Sources   Sources      `yaml:"sources"`
+	Facts     []FactSource `yaml:"facts"`
+	Map       MapSpec      `yaml:"map"`
+	Persist   Persist      `yaml:"persist"`
+	Peers     Peers        `yaml:"peers"`
+	Domain    Domain       `yaml:"domain"`
+	Explain   Explain      `yaml:"explain"`
+	Runtime   RuntimeSpec  `yaml:"runtime"`
+	Actuation Actuation    `yaml:"actuation"`
+	Loops     Loops        `yaml:"loops"`
+	Policy    PolicySpec   `yaml:"policy"`
+	Groups    Groups       `yaml:"groups"`
 }
 
 // Groups says how the node's subjects are grouped: pods by a label an operator sets,
@@ -209,6 +210,13 @@ type RuntimeSpec struct {
 	Node       string `yaml:"node"`
 }
 
+// Actuation is where the agent keeps the record of what it changed. Ledger
+// empty is actions.json beside persist.file (/var/lib/di-agent/actions.json when
+// that is empty too).
+type Actuation struct {
+	Ledger string `yaml:"ledger"`
+}
+
 // Loops are the agent's autonomous activities.
 type Loops struct {
 	Review Review `yaml:"review"`
@@ -259,23 +267,37 @@ type Reasoning struct {
 	Timeout time.Duration `yaml:"timeout"`
 }
 
-// Relief is the loop that throttles a workload when the node's CPU stays hot.
+// Relief is the relief loops: one per lever, each relieving one kind of node
+// pressure through one action. DryRun nil is the runtime's say, a dry run
+// exactly when runtime.kind is dry-run; true on a runtime that changes the
+// system decides, records and verifies without changing anything.
 type Relief struct {
 	Enabled  bool          `yaml:"enabled"`
 	Interval time.Duration `yaml:"interval"`
-	CPU      CPURelief     `yaml:"cpu"`
+	DryRun   *bool         `yaml:"dry_run"`
+	Levers   []Lever       `yaml:"levers"`
 }
 
-// CPURelief tunes CPU relief. Enter and Exit are levels of node CPU contention,
-// cpu_contention_ratio in [0,1]: the share of time some workload waited for a CPU
+// IsDryRun reports whether relief changes nothing on a runtime of this kind.
+func (r Relief) IsDryRun(runtimeKind string) bool {
+	if r.DryRun != nil {
+		return *r.DryRun
+	}
+	return runtimeKind == "dry-run"
+}
+
+// Lever tunes the relief of one action. Enter and Exit are levels of the node
+// pressure the action's actuator relieves, a share in [0,1] (for cpu.limit,
+// cpu_contention_ratio: the share of time some workload waited for a CPU
 // another was using — PSI stall less the workload's own throttling, not
-// utilisation — with Exit below Enter so a hot node is not
-// released the moment it cools by a hair. MinEffect is a planning floor: a step
-// whose predicted drop in contention is below it is not taken. It is not the bar a
-// step is judged by afterwards: verify keeps a step whose observed drop is at
-// least half the drop it predicted, and reverts it otherwise. Expiry must be
-// longer than Settle, or a change would be given back before it is judged.
-type CPURelief struct {
+// utilisation), with Exit below Enter so a hot node is not released the moment
+// it cools by a hair. MinEffect is a planning floor: a step whose predicted drop
+// in pressure is below it is not taken. It is not the bar a step is judged by
+// afterwards: verify keeps a step whose observed drop is at least half the drop
+// it predicted, and reverts it otherwise. Expiry must be longer than Settle, or a
+// change would be given back before it is judged.
+type Lever struct {
+	Action      string        `yaml:"action"`
 	Enter       float64       `yaml:"enter"`
 	Exit        float64       `yaml:"exit"`
 	EnterFor    time.Duration `yaml:"enter_for"`
@@ -287,44 +309,90 @@ type CPURelief struct {
 	Expiry      time.Duration `yaml:"expiry"`
 }
 
-// Floor is the least a limit may be cut to: an absolute number of cores, or a
-// share of the workload's original limit, whichever is higher. A rule names
-// either bound or both; the one it leaves out is the default's.
-type Floor struct {
-	CPUCores   *float64 `yaml:"cpu_cores,omitempty" json:"cpu_cores,omitempty"`
+// defaultLevers is the levers relief has unless the file names its own.
+func defaultLevers() []Lever {
+	return []Lever{{
+		Action: "cpu.limit", Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
+	}}
+}
+
+// UnmarshalYAML starts a lever from the default lever for its action, so a file
+// names only what it changes, and refuses a key a lever does not have: a lever
+// is decoded on its own, outside the strict pass that catches every other
+// misspelt key.
+func (l *Lever) UnmarshalYAML(n *yaml.Node) error {
+	type plain Lever
+	errs := unknownFields(n, reflect.TypeOf(plain{}), "spec.Lever")
+	var p plain
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value != "action" {
+				continue
+			}
+			for _, d := range defaultLevers() {
+				if d.Action == n.Content[i+1].Value {
+					p = plain(d)
+				}
+			}
+		}
+	}
+	if err := n.Decode(&p); err != nil {
+		var te *yaml.TypeError
+		if !errors.As(err, &te) {
+			return err
+		}
+		errs = append(errs, te.Errors...)
+	}
+	*l = Lever(p)
+	if len(errs) > 0 {
+		return &yaml.TypeError{Errors: errs}
+	}
+	return nil
+}
+
+// unknownFields is an error, in the decoder's own words, for each key of the
+// mapping n that is not a yaml field of t.
+func unknownFields(n *yaml.Node, t reflect.Type, name string) []string {
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	known := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		k, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
+		known[k] = true
+	}
+	var out []string
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k := n.Content[i]; !known[k.Value] {
+			out = append(out, fmt.Sprintf("line %d: field %s not found in type %s", k.Line, k.Value, name))
+		}
+	}
+	return out
+}
+
+// Bound is the least one action may cut a setting to: an absolute value in the
+// actuator's unit, or a share of the workload's original setting, whichever is
+// higher. For an action whose original may be unset, as memory.high's, the
+// original is the usage when the agent first acted.
+type Bound struct {
+	Min        *float64 `yaml:"min,omitempty" json:"min,omitempty"`
 	OfOriginal *float64 `yaml:"of_original,omitempty" json:"of_original,omitempty"`
 }
 
-// NewFloor is a floor with both bounds set.
-func NewFloor(cpuCores, ofOriginal float64) *Floor {
-	return &Floor{CPUCores: &cpuCores, OfOriginal: &ofOriginal}
+// NewBound is a bound with both values set.
+func NewBound(min, ofOriginal float64) Bound {
+	return Bound{Min: &min, OfOriginal: &ofOriginal}
 }
 
-// Values is the two bounds, zero for one not set.
-func (f *Floor) Values() (cpuCores, ofOriginal float64) {
-	if f == nil {
-		return 0, 0
-	}
-	if f.CPUCores != nil {
-		cpuCores = *f.CPUCores
-	}
-	if f.OfOriginal != nil {
-		ofOriginal = *f.OfOriginal
-	}
-	return cpuCores, ofOriginal
-}
-
-// Over is f with every bound it leaves unset taken from base, as a new floor
-// that shares nothing with either.
-func (f *Floor) Over(base *Floor) *Floor {
-	out := &Floor{}
-	for _, src := range []*Floor{base, f} {
-		if src == nil {
-			continue
-		}
-		if src.CPUCores != nil {
-			v := *src.CPUCores
-			out.CPUCores = &v
+// over is b with every value it leaves unset taken from base, sharing nothing
+// with either.
+func (b Bound) over(base Bound) Bound {
+	var out Bound
+	for _, src := range []Bound{base, b} {
+		if src.Min != nil {
+			v := *src.Min
+			out.Min = &v
 		}
 		if src.OfOriginal != nil {
 			v := *src.OfOriginal
@@ -334,11 +402,44 @@ func (f *Floor) Over(base *Floor) *Floor {
 	return out
 }
 
+// Floor is the bound of each action, by action name. A rule names the actions
+// and bounds it changes; every one it leaves out is the default's.
+type Floor map[string]Bound
+
+// Values is the action's two bounds, zero for one not set or an action the floor
+// does not name.
+func (f Floor) Values(action string) (min, ofOriginal float64) {
+	b := f[action]
+	if b.Min != nil {
+		min = *b.Min
+	}
+	if b.OfOriginal != nil {
+		ofOriginal = *b.OfOriginal
+	}
+	return min, ofOriginal
+}
+
+// Over is f with every action and bound it leaves unset taken from base, as a
+// new floor that shares nothing with either. Both nil is nil.
+func (f Floor) Over(base Floor) Floor {
+	if f == nil && base == nil {
+		return nil
+	}
+	out := make(Floor, len(base)+len(f))
+	for a, b := range base {
+		out[a] = b.over(Bound{})
+	}
+	for a, b := range f {
+		out[a] = b.over(out[a])
+	}
+	return out
+}
+
 // Settings is what a policy permits. A rule's zero values inherit the defaults.
 type Settings struct {
 	Allow             []string      `yaml:"allow" json:"allow"`
 	Deny              []string      `yaml:"deny" json:"deny"`
-	Floor             *Floor        `yaml:"floor" json:"floor"`
+	Floor             Floor         `yaml:"floor,omitempty" json:"floor"`
 	MaxActionsPerHour int           `yaml:"max_actions_per_hour" json:"max_actions_per_hour"`
 	Cooldown          time.Duration `yaml:"cooldown" json:"cooldown"`
 }
@@ -348,7 +449,7 @@ type Settings struct {
 type settingsJSON struct {
 	Allow             []string `json:"allow"`
 	Deny              []string `json:"deny"`
-	Floor             *Floor   `json:"floor"`
+	Floor             Floor    `json:"floor"`
 	MaxActionsPerHour int      `json:"max_actions_per_hour"`
 	Cooldown          string   `json:"cooldown"`
 }
@@ -471,22 +572,18 @@ func Default() Spec {
 					Tools: slices.Clone(autonomy.DefaultTools),
 				},
 			},
-			Relief: Relief{
-				Interval: 15 * time.Second,
-				CPU: CPURelief{
-					Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
-					Step: 0.25, MinEffect: 0.03, VictimShare: 0.05,
-					Settle: 2 * time.Minute, Expiry: time.Hour,
-				},
-			},
+			Relief: Relief{Interval: 15 * time.Second, Levers: defaultLevers()},
 		},
 		Groups: Groups{Interval: 30 * time.Second,
 			LabelKeys: []string{"di-agent/group", "app.kubernetes.io/part-of"},
 			Units:     map[string][]string{"system": {"*"}}},
 		Policy: PolicySpec{
 			Defaults: Settings{
-				Allow: []string{"cpu.limit"}, Deny: []string{"evict"},
-				Floor:             NewFloor(0.1, 0.5),
+				Allow: []string{"cpu.limit", "memory.high"}, Deny: []string{"evict"},
+				Floor: Floor{
+					"cpu.limit":   NewBound(0.1, 0.5),
+					"memory.high": NewBound(64<<20, 0),
+				},
 				MaxActionsPerHour: 6, Cooldown: 10 * time.Minute,
 			},
 			Rules: []Rule{
@@ -533,6 +630,12 @@ func Parse(b []byte) (Spec, error) {
 	// the operator wrote.
 	if err := doc.Decode(&s); err != nil {
 		return Spec{}, fmt.Errorf("spec: %w", err)
+	}
+	// A floor's bound is decoded whole, so the defaults' floor is overlaid on the
+	// built-in one per action and per bound, as a rule's is on the defaults'. A
+	// floor written null is left so, for Validate to refuse.
+	if f := s.Policy.Defaults.Floor; f != nil {
+		s.Policy.Defaults.Floor = f.Over(Default().Policy.Defaults.Floor)
 	}
 	if err := s.Validate(); err != nil {
 		return Spec{}, err
@@ -661,12 +764,12 @@ func Load(path string) (Spec, error) {
 	return s, nil
 }
 
-// PolicyActions are the names a policy's allow and deny lists may hold. They are
-// the registered actuators' actions (cpu.limit, which a test in
-// pkg/runtime/kubernetes holds to this list), named here because those packages
-// import this one. "evict" is reserved: no actuator performs it, and the default
+// PolicyActions are the names a policy's allow and deny lists and its floors may
+// hold. They are the actuators' actions (cpu.limit and memory.high; a test in
+// pkg/runtime/kubernetes holds every registered one to this list), named here
+// because those packages import this one. "evict" is reserved: no actuator performs it, and the default
 // policy denies it so that one that one day can will not do so by default.
-var PolicyActions = []string{"cpu.limit", "evict"}
+var PolicyActions = []string{"cpu.limit", "evict", "memory.high"}
 
 // WorkloadKinds are the subject kinds, the part of a workload's subject before
 // the colon, that a policy rule's match.kind may name: the kinds of the
@@ -693,17 +796,30 @@ func (s Spec) Validate() error {
 			errs = append(errs, fmt.Errorf("%s = %v, want a duration of zero or more", name, d))
 		}
 	}
-	// floor checks an effective floor: both bounds set, and each in range.
-	floor := func(name string, f *Floor) {
-		if f == nil || f.CPUCores == nil || f.OfOriginal == nil {
-			errs = append(errs, fmt.Errorf("%s must set both cpu_cores and of_original", name))
-			return
+	// floor checks an effective floor: every action it names is an action, with
+	// both bounds set and each in range.
+	floor := func(name string, f Floor) {
+		actions := make([]string, 0, len(f))
+		for a := range f {
+			actions = append(actions, a)
 		}
-		if *f.CPUCores < 0 {
-			errs = append(errs, fmt.Errorf("%s.cpu_cores = %v, want zero or more", name, *f.CPUCores))
-		}
-		if *f.OfOriginal <= 0 || *f.OfOriginal > 1 {
-			errs = append(errs, fmt.Errorf("%s.of_original = %v, want a value in (0,1]", name, *f.OfOriginal))
+		slices.Sort(actions)
+		for _, a := range actions {
+			b, at := f[a], name+"."+a
+			if !slices.Contains(PolicyActions, a) {
+				errs = append(errs, fmt.Errorf("%s: %q is not an action, want one of %s", name, a, strings.Join(PolicyActions, ", ")))
+				continue
+			}
+			if b.Min == nil || b.OfOriginal == nil {
+				errs = append(errs, fmt.Errorf("%s must set both min and of_original", at))
+				continue
+			}
+			if *b.Min < 0 {
+				errs = append(errs, fmt.Errorf("%s.min = %v, want zero or more", at, *b.Min))
+			}
+			if *b.OfOriginal < 0 || *b.OfOriginal > 1 {
+				errs = append(errs, fmt.Errorf("%s.of_original = %v, want a value in [0,1]", at, *b.OfOriginal))
+			}
 		}
 	}
 
@@ -728,22 +844,42 @@ func (s Spec) Validate() error {
 
 	r := s.Loops.Relief
 	positive("loops.relief.interval", r.Interval)
-	c := r.CPU
-	share("loops.relief.cpu.enter", c.Enter)
-	share("loops.relief.cpu.exit", c.Exit)
-	share("loops.relief.cpu.step", c.Step)
-	share("loops.relief.cpu.min_effect", c.MinEffect)
-	share("loops.relief.cpu.victim_share", c.VictimShare)
-	if c.Exit >= c.Enter {
-		errs = append(errs, fmt.Errorf("loops.relief.cpu.exit = %v must be below enter = %v", c.Exit, c.Enter))
+	if r.DryRun != nil && !*r.DryRun && s.Runtime.Kind == "dry-run" {
+		errs = append(errs, errors.New("loops.relief.dry_run = false, but runtime.kind dry-run changes nothing: name a runtime that does, or leave dry_run unset"))
 	}
-	positive("loops.relief.cpu.enter_for", c.EnterFor)
-	positive("loops.relief.cpu.exit_for", c.ExitFor)
-	positive("loops.relief.cpu.settle", c.Settle)
-	positive("loops.relief.cpu.expiry", c.Expiry)
-	if c.Expiry <= c.Settle {
-		// A change that expires before it settles is given back before it is judged.
-		errs = append(errs, fmt.Errorf("loops.relief.cpu.expiry = %v must be longer than settle = %v", c.Expiry, c.Settle))
+	if r.Enabled && len(r.Levers) == 0 {
+		errs = append(errs, errors.New("loops.relief.levers is empty: relief enabled has nothing to act through"))
+	}
+	seenLever := map[string]bool{}
+	for i, c := range r.Levers {
+		name := fmt.Sprintf("loops.relief.levers[%d]", i)
+		switch {
+		case c.Action == "":
+			errs = append(errs, fmt.Errorf("%s.action is empty", name))
+		case seenLever[c.Action]:
+			errs = append(errs, fmt.Errorf("%s %s: duplicate action: one lever per action", name, c.Action))
+		}
+		seenLever[c.Action] = true
+		share(name+".enter", c.Enter)
+		share(name+".exit", c.Exit)
+		share(name+".step", c.Step)
+		share(name+".min_effect", c.MinEffect)
+		share(name+".victim_share", c.VictimShare)
+		if c.Exit >= c.Enter {
+			errs = append(errs, fmt.Errorf("%s.exit = %v must be below enter = %v", name, c.Exit, c.Enter))
+		}
+		positive(name+".enter_for", c.EnterFor)
+		positive(name+".exit_for", c.ExitFor)
+		positive(name+".settle", c.Settle)
+		positive(name+".expiry", c.Expiry)
+		if c.Expiry <= c.Settle {
+			// A change that expires before it settles is given back before it is judged.
+			errs = append(errs, fmt.Errorf("%s.expiry = %v must be longer than settle = %v", name, c.Expiry, c.Settle))
+		}
+		if _, ok := s.Policy.Defaults.Floor[c.Action]; c.Action != "" && s.Policy.Defaults.Floor != nil && !ok {
+			// Without a floor of its own an action could cut a workload to its actuator's minimum.
+			errs = append(errs, fmt.Errorf("policy.defaults.floor has no %s, the action of %s", c.Action, name))
+		}
 	}
 
 	// actions checks that every name in an allow or deny list is an action the
@@ -761,6 +897,9 @@ func (s Spec) Validate() error {
 	if s.Policy.Defaults.MaxActionsPerHour < 0 {
 		errs = append(errs, fmt.Errorf("policy.defaults.max_actions_per_hour = %d, want zero or more", s.Policy.Defaults.MaxActionsPerHour))
 	}
+	if s.Policy.Defaults.Floor == nil {
+		errs = append(errs, errors.New("policy.defaults.floor is empty: every action needs the least it may cut to"))
+	}
 	floor("policy.defaults.floor", s.Policy.Defaults.Floor)
 	for i, rule := range s.Policy.Rules {
 		name := fmt.Sprintf("policy.rules[%d]", i)
@@ -771,7 +910,7 @@ func (s Spec) Validate() error {
 			// A misspelt kind matches nothing, so the rule would silently never apply.
 			errs = append(errs, fmt.Errorf("%s.match.kind = %q, want one of %s", name, k, strings.Join(WorkloadKinds, ", ")))
 		}
-		if rule.Floor != nil && s.Policy.Defaults.Floor != nil {
+		if rule.Floor != nil {
 			// What is checked is the floor the rule takes effect with: its own bounds
 			// over the defaults'.
 			floor(name+".floor", rule.Floor.Over(s.Policy.Defaults.Floor))

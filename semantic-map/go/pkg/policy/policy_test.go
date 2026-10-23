@@ -11,7 +11,7 @@ import (
 func defaults() spec.Settings {
 	return spec.Settings{
 		Allow: []string{"cpu.limit"}, Deny: []string{"evict"},
-		Floor:             spec.NewFloor(0.1, 0.5),
+		Floor:             spec.Floor{"cpu.limit": spec.NewBound(0.1, 0.5)},
 		MaxActionsPerHour: 6, Cooldown: 10 * time.Minute,
 	}
 }
@@ -27,33 +27,42 @@ func mustNew(t *testing.T, p spec.PolicySpec) *Policy {
 
 func TestTheFirstMatchSuppliesSettings(t *testing.T) {
 	pol := mustNew(t, spec.PolicySpec{Defaults: defaults(), Rules: []spec.Rule{
-		{Match: spec.Match{Name: "batch-*"}, Settings: spec.Settings{Floor: &spec.Floor{CPUCores: f64(0.5)}}},
-		{Match: spec.Match{Name: "batch-x"}, Settings: spec.Settings{Floor: &spec.Floor{CPUCores: f64(0.9)}}},
+		{Match: spec.Match{Name: "batch-*"}, Settings: spec.Settings{Floor: spec.Floor{"cpu.limit": {Min: f64(0.5)}}}},
+		{Match: spec.Match{Name: "batch-x"}, Settings: spec.Settings{Floor: spec.Floor{"cpu.limit": {Min: f64(0.9)}}}},
 	}})
 	e := pol.For(Target{Kind: "pod", Name: "batch-x"})
-	if e.Rule != 0 || *e.Settings.Floor.CPUCores != 0.5 {
+	if lo, _ := e.Settings.Floor.Values("cpu.limit"); e.Rule != 0 || lo != 0.5 {
 		t.Fatalf("rule %d floor %v, want rule 0 floor 0.5", e.Rule, e.Settings.Floor)
 	}
 }
 
 func TestUnsetFieldsComeFromDefaults(t *testing.T) {
 	pol := mustNew(t, spec.PolicySpec{Defaults: defaults(), Rules: []spec.Rule{
-		{Match: spec.Match{Name: "a"}, Settings: spec.Settings{Floor: &spec.Floor{CPUCores: f64(0.5)}}},
+		{Match: spec.Match{Name: "a"}, Settings: spec.Settings{Floor: spec.Floor{"cpu.limit": {Min: f64(0.5)}}}},
 	}})
 	e := pol.For(Target{Kind: "pod", Name: "a"})
 	if e.Settings.Cooldown != 10*time.Minute || e.Settings.MaxActionsPerHour != 6 || !e.Allows("cpu.limit") {
 		t.Fatalf("defaults not inherited: %+v", e.Settings)
 	}
 	none := pol.For(Target{Kind: "pod", Name: "zzz"})
-	if none.Rule != -1 || *none.Settings.Floor.CPUCores != 0.1 {
+	if lo, _ := none.Settings.Floor.Values("cpu.limit"); none.Rule != -1 || lo != 0.1 {
 		t.Fatalf("unmatched should be defaults: %+v", none)
 	}
 }
 
-func TestFloorIsNeverNil(t *testing.T) {
-	e := mustNew(t, spec.PolicySpec{}).For(Target{Kind: "pod", Name: "a"})
-	if e.Settings.Floor == nil {
-		t.Fatal("floor nil")
+// TestEveryBoundIsSet: a reader of an effective floor never meets a nil bound,
+// whichever bounds the defaults and the rule left out.
+func TestEveryBoundIsSet(t *testing.T) {
+	pol := mustNew(t, spec.PolicySpec{Defaults: spec.Settings{Floor: spec.Floor{"cpu.limit": {Min: f64(0.1)}}},
+		Rules: []spec.Rule{{Match: spec.Match{Name: "a"}, Settings: spec.Settings{Floor: spec.Floor{"memory.high": {OfOriginal: f64(0.5)}}}}}})
+	e := pol.For(Target{Kind: "pod", Name: "a"})
+	if len(e.Settings.Floor) != 2 {
+		t.Fatalf("floor %v; want both actions", e.Settings.Floor)
+	}
+	for a, b := range e.Settings.Floor {
+		if b.Min == nil || b.OfOriginal == nil {
+			t.Errorf("%s: %+v has a nil bound", a, b)
+		}
 	}
 }
 
@@ -123,9 +132,9 @@ func TestABadGlobIsRefused(t *testing.T) {
 	}
 }
 
-// floorOf is the effective floor's two bounds.
-func floorOf(e Effective) (cores, ofOriginal float64) {
-	return e.Settings.Floor.Values()
+// floorOf is the effective cpu.limit floor's two bounds.
+func floorOf(e Effective) (min, ofOriginal float64) {
+	return e.Settings.Floor.Values("cpu.limit")
 }
 
 func f64(v float64) *float64 { return &v }
@@ -146,15 +155,15 @@ func TestARuleFloorMergesFieldByField(t *testing.T) {
 policy:
   rules:
     - match: {name: "batch-*"}
-      floor: {cpu_cores: 0.5}
+      floor: {cpu.limit: {min: 0.5}}
     - match: {name: "web-*"}
-      floor: {of_original: 0.8}
+      floor: {cpu.limit: {of_original: 0.8}}
 `)
 	if c, o := floorOf(pol.For(Target{Kind: "pod", Name: "batch-x"})); c != 0.5 || o != 0.5 {
-		t.Errorf("batch-x floor = {cpu_cores %v, of_original %v}, want {0.5, 0.5}", c, o)
+		t.Errorf("batch-x floor = {min %v, of_original %v}, want {0.5, 0.5}", c, o)
 	}
 	if c, o := floorOf(pol.For(Target{Kind: "pod", Name: "web-x"})); c != 0.1 || o != 0.8 {
-		t.Errorf("web-x floor = {cpu_cores %v, of_original %v}, want {0.1, 0.8}", c, o)
+		t.Errorf("web-x floor = {min %v, of_original %v}, want {0.1, 0.8}", c, o)
 	}
 }
 
@@ -168,7 +177,7 @@ func TestMissingDefaultFreezes(t *testing.T) {
 policy:
   rules:
     - match: {name: "batch-*"}
-      floor: {cpu_cores: 0.5}
+      floor: {cpu.limit: {min: 0.5}}
 `))
 	if len(got) != 2 || !strings.Contains(got[0], "di-agent/freeze") || !strings.Contains(got[1], "system-node-critical") {
 		t.Fatalf("missing %v; want both default freeze rules named", got)

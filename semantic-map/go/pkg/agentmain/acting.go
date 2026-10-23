@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
@@ -20,47 +22,86 @@ import (
 // persist.file is empty and names no directory to keep it beside.
 const defaultLedger = "/var/lib/di-agent/actions.json"
 
-// ledgerPath is where the ledger of the agent's changes is kept: actions.json
-// beside the state snapshot, so the two survive a restart together.
-func ledgerPath(persistFile string) string {
-	if persistFile == "" {
+// ledgerPath is where the ledger of the agent's changes is kept: actuation.ledger
+// when set, else actions.json beside the state snapshot, so the two survive a
+// restart together.
+func ledgerPath(ledger, persistFile string) string {
+	switch {
+	case ledger != "":
+		return ledger
+	case persistFile == "":
 		return defaultLedger
 	}
 	return filepath.Join(filepath.Dir(persistFile), "actions.json")
 }
 
-// buildActing builds the actions the agent can take on rt's workloads, with the
-// ledger of what it changed. Under the dry-run runtime every actuator is wrapped
-// in actuators.DryRun and the ledger is kept in memory: nothing reaches the
-// system, so evidence is false and there is nothing to remember across a
-// restart. Otherwise the ledger is a file; one that cannot be opened refuses
-// start while relief is enabled, since a change the agent cannot record it could
-// never give back, and is kept in memory otherwise, where no change is made.
+// buildActing builds the action of every lever in the spec, on rt's workloads,
+// with the ledger of what it changed. A lever whose action no actuator performs
+// refuses start. On a dry run (loops.relief.dry_run, by default exactly when
+// runtime.kind is dry-run) every actuator is wrapped in actuators.DryRun and the
+// ledger is kept in memory: nothing reaches the system, so evidence is false and
+// there is nothing to remember across a restart. Otherwise the ledger is a file;
+// one that cannot be opened refuses start while relief is enabled, since a change
+// the agent cannot record it could never give back, and is kept in memory
+// otherwise, where no change is made.
 func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (acting *actuators.Acting, evidence bool, err error) {
-	dry := rt.Name() == "dry-run"
+	registered := actuators.Names()
+	for i, l := range cfg.Loops.Relief.Levers {
+		if !slices.Contains(registered, l.Action) {
+			return nil, false, fmt.Errorf("loops.relief.levers[%d] %s: no such actuator (registered: %s)", i, l.Action, strings.Join(registered, ", "))
+		}
+	}
+	dry := cfg.Loops.Relief.IsDryRun(cfg.Runtime.Kind)
 	ledger := actuators.MemoryLedger()
 	if !dry {
-		path := ledgerPath(cfg.Persist.File)
+		path := ledgerPath(cfg.Actuation.Ledger, cfg.Persist.File)
 		l, err := actuators.OpenLedger(path)
 		switch {
 		case err == nil:
 			ledger = l
 		case cfg.Loops.Relief.Enabled:
-			return nil, false, fmt.Errorf("loops.relief needs a writable ledger of its changes (beside persist.file, or %s): %w", defaultLedger, err)
+			return nil, false, fmt.Errorf("loops.relief needs a writable ledger of its changes (actuation.ledger, else beside persist.file, else %s): %w", defaultLedger, err)
 		default:
 			logf("actuation: %v; relief is off, so the agent changes nothing and keeps no ledger on disk", err)
 		}
 	}
 	env := actuators.Env{NodeID: cfg.Node.ID, CgroupRoot: collectors.CgroupRoot(cfg.Sources.Collectors),
 		Runtime: rt, Logf: logf, Held: ledger.For}
-	a, err := actuators.Build("cpu.limit", env)
-	if err != nil {
-		return nil, false, err
+	var as []actuators.Actuator
+	for _, l := range cfg.Loops.Relief.Levers {
+		a, err := actuators.Build(l.Action, env)
+		if err != nil {
+			return nil, false, fmt.Errorf("loops.relief %s: %w", l.Action, err)
+		}
+		if dry {
+			a = actuators.DryRun(a)
+		}
+		as = append(as, a)
 	}
-	if dry {
-		a = actuators.DryRun(a)
+	return actuators.NewActing(cfg.Node.ID, ledger, as...), !dry, nil
+}
+
+// buildRelief builds one relief loop per lever, in lever order, sharing one
+// Budget: max_actions_per_hour from the default policy is one count for every
+// lever, and a workload one lever acts on cools down for the others.
+func buildRelief(cfg spec.Spec, rt runtime.Runtime, acting *actuators.Acting, pol *policy.Policy, m *statemap.Map,
+	evidence bool, cands relief.Candidates, logf func(string, ...any)) ([]*relief.Loop, error) {
+	budget := relief.NewBudget(pol.Defaults().MaxActionsPerHour)
+	var loops []*relief.Loop
+	for i, l := range cfg.Loops.Relief.Levers {
+		a, ok := acting.Actuator(l.Action)
+		if !ok {
+			return nil, fmt.Errorf("loops.relief.levers[%d] %s: no actuator built for it", i, l.Action)
+		}
+		loop, err := relief.New(relief.Config{Interval: cfg.Loops.Relief.Interval, Lever: l, Budget: budget,
+			Descriptor: a.Describe(), NodeID: cfg.Node.ID, Runtime: rt, Acting: acting, Policy: pol, Map: m,
+			Logf: logf, Evidence: evidence, Candidates: cands})
+		if err != nil {
+			return nil, fmt.Errorf("loops.relief.levers[%d] %s: %w", i, l.Action, err)
+		}
+		loops = append(loops, loop)
 	}
-	return actuators.NewActing(cfg.Node.ID, ledger, a), !dry, nil
+	return loops, nil
 }
 
 // targetOf is the workload as the policy sees it: its kind is the subject's part
@@ -116,10 +157,10 @@ func can(acting *actuators.Acting, w runtime.Workload) map[string]string {
 // to: every workload the runtime lists with the policy that governs it and what
 // each action says of it, the same answer for one workload with the rule behind
 // it, and the actions themselves with the changes the agent holds. The relief
-// routes show the loop and are its kill switch; loop is nil when the spec leaves
-// relief off, and they then say so rather than not exist.
-func registerActingRoutes(mux *http.ServeMux, rt runtime.Runtime, acting *actuators.Acting, pol *policy.Policy, loop *relief.Loop) {
-	registerReliefRoutes(mux, loop)
+// routes show the loops and are their kill switch; loops is empty when the spec
+// leaves relief off, and they then say so rather than not exist.
+func registerActingRoutes(mux *http.ServeMux, rt runtime.Runtime, acting *actuators.Acting, pol *policy.Policy, loops []*relief.Loop) {
+	registerReliefRoutes(mux, loops)
 	registerActuatorsRoute(mux, rt, acting)
 
 	mux.HandleFunc("GET /workloads", func(w http.ResponseWriter, r *http.Request) {
@@ -168,13 +209,26 @@ func registerActingRoutes(mux *http.ServeMux, rt runtime.Runtime, acting *actuat
 	})
 }
 
+// reliefView is GET /relief: each lever's loop, in lever order.
+type reliefView struct {
+	Levers []relief.Status `json:"levers"`
+}
+
 // registerReliefRoutes wires GET /relief, GET /relief/actions and the three
-// operator controls: pause, resume and revert one action. Pause stops new
-// changes and releases; it does not abandon a change in force.
-func registerReliefRoutes(mux *http.ServeMux, loop *relief.Loop) {
+// operator controls: pause, resume and revert one action. Pause and resume act
+// on every lever; pause stops new changes and releases, and does not abandon a
+// change in force. A revert finds its action in whichever lever holds it.
+func registerReliefRoutes(mux *http.ServeMux, loops []*relief.Loop) {
+	status := func() reliefView {
+		v := reliefView{Levers: make([]relief.Status, 0, len(loops))}
+		for _, l := range loops {
+			v.Levers = append(v.Levers, l.Status())
+		}
+		return v
+	}
 	handle := func(pattern string, mutates bool, h func(w http.ResponseWriter, r *http.Request)) {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			if loop == nil {
+			if len(loops) == 0 {
 				writeError(w, http.StatusNotFound, "relief is not enabled in the spec (loops.relief.enabled)")
 				return
 			}
@@ -187,25 +241,45 @@ func registerReliefRoutes(mux *http.ServeMux, loop *relief.Loop) {
 			h(w, r)
 		})
 	}
-	handle("GET /relief", false, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, loop.Status()) })
-	handle("GET /relief/actions", false, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, loop.Actions()) })
+	handle("GET /relief", false, func(w http.ResponseWriter, r *http.Request) { writeJSON(w, status()) })
+	handle("GET /relief/actions", false, func(w http.ResponseWriter, r *http.Request) {
+		var out []relief.Action
+		for _, l := range loops {
+			out = append(out, l.Actions()...)
+		}
+		// Each loop's are newest first; across levers, by when each last acted.
+		sort.SliceStable(out, func(i, j int) bool { return out[i].ActedAt.After(out[j].ActedAt) })
+		if out == nil {
+			out = []relief.Action{}
+		}
+		writeJSON(w, out)
+	})
 	handle("POST /relief/pause", true, func(w http.ResponseWriter, r *http.Request) {
-		loop.Pause()
-		writeJSON(w, loop.Status())
+		for _, l := range loops {
+			l.Pause()
+		}
+		writeJSON(w, status())
 	})
 	handle("POST /relief/resume", true, func(w http.ResponseWriter, r *http.Request) {
-		loop.Resume()
-		writeJSON(w, loop.Status())
+		for _, l := range loops {
+			l.Resume()
+		}
+		writeJSON(w, status())
 	})
 	handle("POST /relief/actions/{id}/revert", true, func(w http.ResponseWriter, r *http.Request) {
-		err := loop.Revert(r.Context(), r.PathValue("id"))
-		switch {
-		case errors.Is(err, relief.ErrNoAction):
-			writeError(w, http.StatusNotFound, err.Error())
-		case err != nil:
-			writeError(w, http.StatusBadGateway, err.Error())
-		default:
-			writeJSON(w, loop.Status())
+		id := r.PathValue("id")
+		for _, l := range loops {
+			err := l.Revert(r.Context(), id)
+			switch {
+			case errors.Is(err, relief.ErrNoAction):
+				continue
+			case err != nil:
+				writeError(w, http.StatusBadGateway, err.Error())
+			default:
+				writeJSON(w, status())
+			}
+			return
 		}
+		writeError(w, http.StatusNotFound, fmt.Sprintf("%v: %s", relief.ErrNoAction, id))
 	})
 }

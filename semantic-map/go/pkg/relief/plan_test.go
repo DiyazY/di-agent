@@ -44,7 +44,7 @@ var ctx = context.Background()
 
 // reliefCfg is the spec's defaults, so a test reads against the numbers an
 // operator gets.
-func reliefCfg() spec.CPURelief { return spec.Default().Loops.Relief.CPU }
+func reliefCfg() spec.Lever { return spec.Default().Loops.Relief.Levers[0] }
 
 // defaultPolicy is the spec's default policy with the hourly limit and
 // cooldown a test may want to change.
@@ -217,7 +217,7 @@ func TestTheStepRespectsTheFloors(t *testing.T) {
 	}
 
 	// A floor at or above usage leaves no step to take.
-	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = spec.NewFloor(0.4, 0) })
+	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = spec.Floor{"cpu.limit": spec.NewBound(0.4, 0)} })
 	if _, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, high, c), ws, high, c, one); ok || !strings.Contains(why, "floor") {
 		t.Fatalf("ok=%v why=%q; want refused at the floor", ok, why)
 	}

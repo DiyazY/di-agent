@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultsAreTodaysFlags(t *testing.T) {
@@ -12,8 +13,8 @@ func TestDefaultsAreTodaysFlags(t *testing.T) {
 	if d.Node.Addr != ":8080" {
 		t.Errorf("Node.Addr = %q", d.Node.Addr)
 	}
-	if d.Loops.Relief.CPU.Enter != 0.25 {
-		t.Errorf("Relief.CPU.Enter = %v", d.Loops.Relief.CPU.Enter)
+	if len(d.Loops.Relief.Levers) != 1 || d.Loops.Relief.Levers[0].Enter != 0.25 {
+		t.Errorf("Relief.Levers = %+v", d.Loops.Relief.Levers)
 	}
 	if d.Loops.Relief.Enabled {
 		t.Error("relief must default to off")
@@ -46,15 +47,15 @@ func TestAnEmptyFileIsTheDefault(t *testing.T) {
 }
 
 func TestAFileOverlaysTheDefaults(t *testing.T) {
-	got, err := Parse([]byte("loops: {relief: {cpu: {enter: 0.4}}}"))
+	got, err := Parse([]byte("loops: {relief: {interval: 30s}}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Loops.Relief.CPU.Enter != 0.4 {
-		t.Errorf("Enter = %v", got.Loops.Relief.CPU.Enter)
+	if got.Loops.Relief.Interval != 30*time.Second {
+		t.Errorf("Interval = %v", got.Loops.Relief.Interval)
 	}
-	if got.Loops.Relief.CPU.Exit != 0.10 {
-		t.Errorf("Exit = %v, want the default 0.10", got.Loops.Relief.CPU.Exit)
+	if got.Loops.Relief.Levers[0].Exit != 0.10 {
+		t.Errorf("Exit = %v, want the default 0.10", got.Loops.Relief.Levers[0].Exit)
 	}
 }
 
@@ -70,7 +71,7 @@ func TestEnvironmentIsExpanded(t *testing.T) {
 }
 
 func TestUnknownKeysAreRefused(t *testing.T) {
-	_, err := Parse([]byte("loops: {relief: {cpu: {entre: 0.3}}}"))
+	_, err := Parse([]byte("loops: {relief: {levers: [{action: cpu.limit, entre: 0.3}]}}"))
 	if err == nil || !strings.Contains(err.Error(), "entre") {
 		t.Fatalf("err = %v, want one naming entre", err)
 	}
@@ -78,24 +79,24 @@ func TestUnknownKeysAreRefused(t *testing.T) {
 
 func TestInvalidValuesAreRefused(t *testing.T) {
 	for name, doc := range map[string]string{
-		"exit above enter":    "loops: {relief: {cpu: {exit: 0.3}}}",
-		"of_original zero":    "policy: {defaults: {floor: {of_original: 0}}}",
-		"threshold above 1":   "loops: {relief: {cpu: {enter: 1.5}}}",
-		"zero settle":         "loops: {relief: {cpu: {settle: 0s}}}",
+		"exit above enter":    "loops: {relief: {levers: [{action: cpu.limit, exit: 0.3}]}}",
+		"of_original over 1":  "policy: {defaults: {floor: {cpu.limit: {of_original: 1.5}}}}",
+		"threshold above 1":   "loops: {relief: {levers: [{action: cpu.limit, enter: 1.5}]}}",
+		"zero settle":         "loops: {relief: {levers: [{action: cpu.limit, settle: 0s}]}}",
 		"unknown level":       "loops: {review: {level: sometimes}}",
 		"negative cooldown":   "policy: {defaults: {cooldown: -1m}}",
 		"zero relief period":  "loops: {relief: {interval: 0s}}",
 		"defaults floor null": "policy: {defaults: {floor: null}}",
-		"rule of_original 0":  "policy: {rules: [{match: {name: a}, floor: {of_original: 0}}]}",
-		"rule cores negative": "policy: {rules: [{match: {name: a}, floor: {cpu_cores: -1}}]}",
-		"expiry under settle": "loops: {relief: {cpu: {settle: 2m, expiry: 1m}}}",
-		"expiry at settle":    "loops: {relief: {cpu: {settle: 2m, expiry: 2m}}}",
+		"rule of_original 2":  "policy: {rules: [{match: {name: a}, floor: {cpu.limit: {of_original: 2}}}]}",
+		"rule cores negative": "policy: {rules: [{match: {name: a}, floor: {cpu.limit: {min: -1}}}]}",
+		"expiry under settle": "loops: {relief: {levers: [{action: cpu.limit, settle: 2m, expiry: 1m}]}}",
+		"expiry at settle":    "loops: {relief: {levers: [{action: cpu.limit, settle: 2m, expiry: 2m}]}}",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	_, err := Parse([]byte("loops: {relief: {cpu: {exit: 0.3}}}"))
+	_, err := Parse([]byte("loops: {relief: {levers: [{action: cpu.limit, exit: 0.3}]}}"))
 	if err == nil || !strings.Contains(err.Error(), "exit") {
 		t.Errorf("err = %v, want one mentioning exit", err)
 	}
@@ -153,9 +154,9 @@ func TestALabelMatchTakesOneOrMany(t *testing.T) {
 // field, so the effective floor is what is validated.
 func TestARuleFloorNamesOneBound(t *testing.T) {
 	for _, doc := range []string{
-		"policy: {rules: [{match: {name: \"batch-*\"}, floor: {cpu_cores: 0.5}}]}",
-		"policy: {rules: [{match: {name: \"batch-*\"}, floor: {of_original: 0.8}}]}",
-		"policy: {defaults: {floor: {cpu_cores: 0.2}}}",
+		"policy: {rules: [{match: {name: \"batch-*\"}, floor: {cpu.limit: {min: 0.5}}}]}",
+		"policy: {rules: [{match: {name: \"batch-*\"}, floor: {cpu.limit: {of_original: 0.8}}}]}",
+		"policy: {defaults: {floor: {cpu.limit: {min: 0.2}}}}",
 	} {
 		if _, err := Parse([]byte(doc)); err != nil {
 			t.Errorf("%s: %v", doc, err)
@@ -188,7 +189,7 @@ func TestANullishVariableIsNotTheDefault(t *testing.T) {
 		if err != nil || got.Explain.APIKey != v {
 			t.Errorf("KEY=%q: APIKey = %q, err %v; want %q", v, got.Explain.APIKey, err, v)
 		}
-		if _, err := Parse([]byte("loops:\n  relief:\n    cpu:\n      enter: ${KEY}\n")); err == nil {
+		if _, err := Parse([]byte("loops:\n  relief:\n    levers:\n      - action: cpu.limit\n        enter: ${KEY}\n")); err == nil {
 			t.Errorf("KEY=%q: enter loaded; want it refused, not left at its default", v)
 		}
 	}
@@ -234,9 +235,9 @@ func TestAVariableIsAValueNotYAML(t *testing.T) {
 		t.Errorf("api_key %q, url %q; want the value verbatim and url untouched", got.Explain.APIKey, got.Explain.URL)
 	}
 	t.Setenv("SHARE", "0.4")
-	got, err = Parse([]byte("loops:\n  relief:\n    cpu:\n      enter: ${SHARE}\n"))
-	if err != nil || got.Loops.Relief.CPU.Enter != 0.4 {
-		t.Fatalf("enter = %v, err %v; want a number read from a variable", got.Loops.Relief.CPU.Enter, err)
+	got, err = Parse([]byte("loops:\n  relief:\n    levers:\n      - action: cpu.limit\n        enter: ${SHARE}\n"))
+	if err != nil || got.Loops.Relief.Levers[0].Enter != 0.4 {
+		t.Fatalf("enter = %v, err %v; want a number read from a variable", got.Loops.Relief.Levers, err)
 	}
 }
 
@@ -272,8 +273,8 @@ func TestPolicyNamesAreKnown(t *testing.T) {
 func TestErrorsNameTheLineAsWritten(t *testing.T) {
 	t.Setenv("SHARE", "high")
 	for doc, want := range map[string]string{
-		"# ${DI_AGENT_UNSET_D}\n\nloops:\n\n  relief:\n    cpu:\n      entre: 0.3\n": "line 7",
-		"# comment\n\nloops:\n\n  relief:\n    cpu:\n      enter: ${SHARE}\n":        "line 7",
+		"# ${DI_AGENT_UNSET_D}\n\nloops:\n\n  relief:\n    levers:\n      - action: cpu.limit\n        entre: 0.3\n": "line 8",
+		"# comment\n\nloops:\n\n  relief:\n    levers:\n      - action: cpu.limit\n        enter: ${SHARE}\n":        "line 8",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v, want one at %s", err, want)

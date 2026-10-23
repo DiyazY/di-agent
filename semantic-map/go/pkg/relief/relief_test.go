@@ -45,6 +45,7 @@ type fixture struct {
 	noRelate   bool       // the shares relate to nothing: the map cannot rank or predict
 	evidence   bool       // outcomes feed the map, as on a runtime that really changes it
 	candidates Candidates // what the loop settles candidates through; nil for none
+	budget     *Budget    // shared with another loop; nil for the loop's own
 	// wrap is the runtime and actuator the loop sees, over the dry run and cpu.limit.
 	wrap func(*runtime.DryRun, actuators.Actuator) (runtime.Runtime, actuators.Actuator)
 }
@@ -174,9 +175,8 @@ func newHarness(t *testing.T, f fixture) *harness {
 		rt2, act2 = f.wrap(h.rt, h.actuator)
 	}
 	relief := spec.Default().Loops.Relief
-	relief.Enabled = true
 	l, err := New(Config{
-		Relief: relief, Descriptor: cpu, NodeID: "n1", Runtime: rt2,
+		Interval: relief.Interval, Lever: relief.Levers[0], Budget: f.budget, Descriptor: cpu, NodeID: "n1", Runtime: rt2,
 		Acting: actuators.NewActing("n1", h.ledger, act2), Policy: defaultPolicy(t, f.policy), Map: h.m,
 		Now: h.clock, Logf: t.Logf, Evidence: f.evidence, Candidates: f.candidates,
 	})

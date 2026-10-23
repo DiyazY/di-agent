@@ -88,7 +88,7 @@ func share(m *statemap.Map, usage, subject string) (float64, bool) {
 // A workload using less than VictimShare is left out whatever its own pressure:
 // one that waits a lot but uses little is suffering the contention, not causing
 // it.
-func Attribute(m *statemap.Map, a actuators.Actuator, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief) []Candidate {
+func Attribute(m *statemap.Map, a actuators.Actuator, ws []runtime.Workload, pol *policy.Policy, c spec.Lever) []Candidate {
 	d := a.Describe()
 	var byMap, byUsage []Candidate
 	for _, w := range ws {
@@ -143,8 +143,8 @@ func influencedBy(res statemap.EstimateResult, source string) bool {
 //
 // Current usage, from, is the candidate's share times the node's capacity fact,
 // in the action's Unit. The step is Step below it, bounded by the actuator's Min
-// and the policy floor: never below Floor.CPUCores, never below Floor.OfOriginal
-// of the original setting (the one a reads now, or current usage when there is
+// and the policy floor for the action: never below its min, never below its
+// of_original share of the original setting (the one a reads now, or current usage when there is
 // none), and never below the workload's request of the action's resource. It
 // must also go below the setting a reads now and the limit the workload lists,
 // or it is no step. A Basis "map" candidate is predicted by
@@ -152,7 +152,7 @@ func influencedBy(res statemap.EstimateResult, source string) bool {
 // the map cannot predict, by its share of the node's pressure per unit of
 // usage, times the fraction of its usage the step actually cuts. effect scales a prediction by what acting on the subject has done before
 // against predictions of the same basis; 1 means no history.
-func MakePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject, basis string) float64) (p Plan, ok bool, why string) {
+func MakePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.Lever, effect func(subject, basis string) float64) (p Plan, ok bool, why string) {
 	return makePlan(ctx, m, a, cands, ws, pol, c, effect, nil)
 }
 
@@ -161,7 +161,7 @@ func MakePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 // it, which is what the of_original floor is a share of. A workload's current
 // setting is then the agent's own cap, and a step that would not go below it is
 // no step.
-func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.CPURelief, effect func(subject, basis string) float64, originals map[string]float64) (p Plan, ok bool, why string) {
+func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands []Candidate, ws []runtime.Workload, pol *policy.Policy, c spec.Lever, effect func(subject, basis string) float64, originals map[string]float64) (p Plan, ok bool, why string) {
 	d := a.Describe()
 	n, ok := capacity(m, d)
 	if !ok {
@@ -194,7 +194,7 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 		} else if curSet {
 			original = cur
 		}
-		floorMin, floorShare := eff.Settings.Floor.Values()
+		floorMin, floorShare := eff.Settings.Floor.Values(d.Action)
 		to := math.Max(from*(1-c.Step), math.Max(d.Min, math.Max(floorMin, floorShare*original)))
 		res := w.Resources[d.Resource]
 		if res.Request != nil {

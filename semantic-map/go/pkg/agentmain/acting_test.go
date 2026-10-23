@@ -50,16 +50,16 @@ func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *
 		t.Fatal(err)
 	}
 	var loop *relief.Loop
+	var loops []*relief.Loop
 	if withLoop {
-		cpu, _ := acting.Actuator("cpu.limit")
-		loop, err = relief.New(relief.Config{Relief: s.Loops.Relief, Descriptor: cpu.Describe(), NodeID: "n1",
-			Runtime: rt, Acting: acting, Policy: pol, Map: statemap.New(statemap.Config{Owner: "n1"}, nil)})
+		loops, err = buildRelief(s, rt, acting, pol, statemap.New(statemap.Config{Owner: "n1"}, nil), false, nil, t.Logf)
 		if err != nil {
 			t.Fatal(err)
 		}
+		loop = loops[0]
 	}
 	mux := http.NewServeMux()
-	registerActingRoutes(mux, rt, acting, pol, loop)
+	registerActingRoutes(mux, rt, acting, pol, loops)
 	return mux, loop, dr, acting
 }
 
@@ -191,16 +191,18 @@ func TestPauseAndResume(t *testing.T) {
 	mux, _, _, _ := actingMuxWith(t, true)
 	paused := func() bool {
 		var st struct {
-			Paused bool `json:"paused"`
+			Levers []struct {
+				Paused bool `json:"paused"`
+			} `json:"levers"`
 		}
 		rec := get(mux, "/relief")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET /relief = %d: %s", rec.Code, rec.Body)
 		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
-			t.Fatal(err)
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || len(st.Levers) != 1 {
+			t.Fatalf("GET /relief = %s (%v); want one lever", rec.Body, err)
 		}
-		return st.Paused
+		return st.Levers[0].Paused
 	}
 	if paused() {
 		t.Fatal("a new loop is paused")

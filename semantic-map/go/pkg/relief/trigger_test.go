@@ -9,8 +9,8 @@ import (
 
 var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-func cfg() spec.CPURelief {
-	return spec.CPURelief{Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute}
+func cfg() spec.Lever {
+	return spec.Lever{Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute}
 }
 
 // feed observes a fresh reading every 5s from start for d, inclusive of both
