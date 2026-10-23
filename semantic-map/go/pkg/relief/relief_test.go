@@ -1594,3 +1594,45 @@ func TestDropsBeforeAFailedSaveAreJournalled(t *testing.T) {
 		t.Fatalf("%d gone decisions; want the drop that happened journalled", len(g))
 	}
 }
+
+// TestAnUnlistedCPULimitChangeIsTakenUpAndGivenBack: after a restart, a cpu.limit
+// change whose pod the listing has lost but the actuator still finds by subject
+// is taken up, not dropped, and given back through its subject at expiry.
+func TestAnUnlistedCPULimitChangeIsTakenUpAndGivenBack(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}, flaky: true})
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(10 * time.Minute), DecisionID: "relief-act-1-1"})
+	h.fl.set(func(f *flaky) { f.hide["pod:b"] = true })
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.applied()["pod:b"]; !ok || len(h.decisions("gone")) != 0 {
+		t.Fatalf("applied %v, gone %d; want pod:b taken up, not dropped", h.applied(), len(h.decisions("gone")))
+	}
+	h.until(20*time.Minute, 0.05, "pod:b given back", func() bool { _, ok := h.applied()["pod:b"]; return !ok })
+	if h.limit("pod:b") != nil {
+		t.Fatalf("pod:b limit %v; want none, its original", *h.limit("pod:b"))
+	}
+	if a := h.action("pod:b"); a.Outcome == OutcomeGone {
+		t.Fatalf("pod:b %+v; want given back, not gone", a)
+	}
+}
+
+// TestAnUnreadEntryWhoseWorkloadLeftIsGone: an entry that could not be read and
+// whose workload the actuator no longer finds at its expiry is journalled gone.
+func TestAnUnreadEntryWhoseWorkloadLeftIsGone(t *testing.T) {
+	h, _ := blindHarness(t, false, "pod:b")
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(5 * time.Minute), DecisionID: "relief-act-1-2"})
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.rt.Remove("pod:b")
+	h.until(10*time.Minute, 0.05, "pod:b closed", func() bool { _, ok := h.applied()["pod:b"]; return !ok })
+	if a := h.action("pod:b"); a.Outcome != OutcomeGone {
+		t.Fatalf("pod:b %+v; want gone", a)
+	}
+	if st := h.l.Status(); len(st.Unread) != 0 {
+		t.Fatalf("unread %+v; want none", st.Unread)
+	}
+}
