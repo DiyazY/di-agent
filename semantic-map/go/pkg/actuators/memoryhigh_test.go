@@ -324,14 +324,16 @@ func TestMemoryHighRejectsUnsafeIdentity(t *testing.T) {
 	for _, c := range cases {
 		w := mhWL("burstable")
 		w.UID, w.QoS = c.uid, c.qos
-		if _, _, err := a.Read(ctx, w); !errors.Is(err, ErrGone) {
+		// A workload without a valid identity is the caller's error, not a pod
+		// that left: nothing may forget a change on its say-so.
+		if _, _, err := a.Read(ctx, w); !errors.Is(err, ErrInvalidIdentity) || errors.Is(err, ErrGone) {
 			t.Errorf("%s: Read err = %v", c.name, err)
 		}
-		if err := a.Set(ctx, w, 1<<30, true); !errors.Is(err, ErrGone) {
+		if err := a.Set(ctx, w, 1<<30, true); !errors.Is(err, ErrInvalidIdentity) || errors.Is(err, ErrGone) {
 			t.Errorf("%s: Set err = %v", c.name, err)
 		}
 		if c.qos != "besteffort" {
-			if got := a.Check(w); got != "pod cgroup not found" {
+			if got := a.Check(w); got != "invalid pod identity" {
 				t.Errorf("%s: Check = %q", c.name, got)
 			}
 		}
@@ -368,5 +370,34 @@ func TestMemoryHighSetRefusesUnsafeValue(t *testing.T) {
 	}
 	if err := a.Set(context.Background(), mhWL("burstable"), MemoryHighDescriptor.Min, true); err != nil {
 		t.Errorf("Set(Min): %v", err)
+	}
+}
+
+// TestMemoryHighRevertWithoutIdentityKeepsTheEntry: a revert through a workload
+// named only by its subject cannot find the pod, and must not be taken for one
+// that left: the entry stays, and the cap with it, for a revert that can.
+func TestMemoryHighRevertWithoutIdentityKeepsTheEntry(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
+	a := mhNew(t, root)
+	l := MemoryLedger()
+	acting := NewActing("n1", l, a)
+	ctx := context.Background()
+	e, err := acting.Apply(ctx, mhWL("burstable"), "memory.high", 128<<20, time.Now().Add(time.Hour), "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = acting.Revert(ctx, runtime.Workload{Subject: e.Subject}, e)
+	if err == nil || errors.Is(err, ErrGone) {
+		t.Fatalf("Revert by subject only: %v; want an error that is not ErrGone", err)
+	}
+	if len(l.All()) != 1 {
+		t.Fatalf("ledger %+v; want the entry kept", l.All())
+	}
+	if err := acting.Revert(ctx, mhWL("burstable"), e); err != nil {
+		t.Fatal(err)
+	}
+	if got := mhRead(t, filepath.Join(d, "memory.high")); got != "max" || len(l.All()) != 0 {
+		t.Fatalf("after revert: memory.high %q, ledger %+v", got, l.All())
 	}
 }

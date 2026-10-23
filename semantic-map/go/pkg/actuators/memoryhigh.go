@@ -97,7 +97,10 @@ func (a *MemoryHigh) Check(w runtime.Workload) string {
 		return "no memory request"
 	}
 	dir, err := a.podDir(w)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrInvalidIdentity):
+		return "invalid pod identity"
+	case err != nil:
 		return "pod cgroup not found"
 	}
 	cur, err := readInt(filepath.Join(dir, "memory.current"))
@@ -174,15 +177,17 @@ func (a *MemoryHigh) podDirs(uid, qos string) []string {
 	}
 }
 
-// podDir is the pod's cgroup directory, or ErrGone when neither layout has it.
+// podDir is the pod's cgroup directory: ErrInvalidIdentity when w has no valid
+// UID and QoS class to find it by, which is the caller's error and says nothing
+// of the pod, and ErrGone when the identity is valid and neither layout has it.
 func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
 	if !podUID.MatchString(w.UID) {
-		return "", fmt.Errorf("%s has no valid pod uid %q: %w", w.Subject, w.UID, ErrGone)
+		return "", fmt.Errorf("%s has no valid pod uid %q: %w", w.Subject, w.UID, ErrInvalidIdentity)
 	}
 	switch w.QoS {
 	case "guaranteed", "burstable", "besteffort":
 	default:
-		return "", fmt.Errorf("%s has no valid qos %q: %w", w.Subject, w.QoS, ErrGone)
+		return "", fmt.Errorf("%s has no valid qos %q: %w", w.Subject, w.QoS, ErrInvalidIdentity)
 	}
 	for _, d := range a.podDirs(w.UID, w.QoS) {
 		if st, err := os.Stat(d); err == nil && st.IsDir() {

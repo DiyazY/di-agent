@@ -18,6 +18,13 @@ import (
 // caller can tell a vanished workload from a failing actuator.
 var ErrGone = errors.New("workload is gone")
 
+// ErrInvalidIdentity is returned by Read and Set when the workload given lacks
+// what the actuator needs to find it, such as a pod's UID and QoS class. It is
+// the caller's error, never a sign the workload left: Acting keeps the entry of a
+// revert that fails with it, so the change stays recorded for a revert that can
+// address the workload.
+var ErrInvalidIdentity = errors.New("invalid workload identity")
+
 // Descriptor says what an action does, in terms the agent can reason about
 // without knowing the actuator.
 type Descriptor struct {

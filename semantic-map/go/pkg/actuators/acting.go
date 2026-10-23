@@ -198,6 +198,16 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 	return nil
 }
 
+// Forget drops the ledger's entry for (action, subject) without touching the
+// system: for a change whose workload the runtime no longer lists, which an
+// actuator cannot reach to give back. It is the caller's judgement that the
+// workload left; Revert never forgets on an error but ErrGone.
+func (a *Acting) Forget(action, subject string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ledger.Delete(action, subject)
+}
+
 // Held reconciles this node's ledger entries of action against the workloads now
 // listed. An entry whose workload is no longer listed, or whose setting no longer
 // reads as what was applied, is dropped and deleted from the ledger; the rest are

@@ -10,6 +10,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 func TestBudgetCountsTheLastHour(t *testing.T) {
@@ -90,12 +91,13 @@ func TestBudgetCooldown(t *testing.T) {
 	}
 }
 
-// memory is a second lever for the loop tests: cpu.limit's descriptor under
-// another action, so it relieves the same pressure through a change of its own.
-var memory = func() actuators.Descriptor { d := cpu; d.Action = "memory.high"; return d }()
+// memory is a second lever for the loop tests: the memory.high action's own
+// descriptor, relieving memory contention through memory usage.
+var memory = actuators.MemoryHighDescriptor
 
 // second is a loop on the harness's map, runtime and ledger that acts through
-// memory, sharing budget with the harness's own loop.
+// memory, sharing budget with the harness's own loop. Each pod's memory share is
+// its CPU share, related to memory contention as strongly.
 func (h *harness) second(budget *Budget) *Loop {
 	h.t.Helper()
 	return h.secondWith(budget, actuators.Static(memory, nil, func(runtime.Workload) (float64, bool) { return 0, false }))
@@ -104,8 +106,29 @@ func (h *harness) second(budget *Budget) *Loop {
 // secondWith is second acting through act, whose Describe must be memory.
 func (h *harness) secondWith(budget *Budget, act actuators.Actuator) *Loop {
 	h.t.Helper()
-	lever := spec.Default().Loops.Relief.Levers[0]
-	lever.Action = memory.Action
+	t := h.t
+	record(t, h.m, memory.Usage, "", 0.8, h.now)
+	record(t, h.m, memory.Relieves, "", 0, h.now)
+	if err := h.m.RecordFacts("test", []statemap.Fact{statemap.NumberFact(memory.Capacity, 8<<30, memory.Unit)}); err != nil {
+		t.Fatal(err)
+	}
+	for s, share := range h.shares {
+		from := memory.Usage + "@" + s
+		record(t, h.m, from, s, share, h.now)
+		r := statemap.Relationship{From: from, To: memory.Relieves, Sign: 1, Label: "drives"}
+		if err := h.m.DeclareRelationship(r); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.m.AssertRelationshipStrength(statemap.RelationshipID(r.From, r.To, r.Label), h.strength, "test", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var lever spec.Lever
+	for _, l := range spec.Default().Loops.Relief.Levers {
+		if l.Action == memory.Action {
+			lever = l
+		}
+	}
 	l, err := New(Config{Interval: tick, Lever: lever, Descriptor: memory, NodeID: "n1", Runtime: h.rt,
 		Acting: actuators.NewActing("n1", h.ledger, act), Policy: h.l.cfg.Policy, Map: h.m,
 		Now: h.clock, Logf: h.t.Logf, Budget: budget})
@@ -115,10 +138,12 @@ func (h *harness) secondWith(budget *Budget, act actuators.Actuator) *Loop {
 	return l
 }
 
-// both steps both loops at pressure p for d: the harness's first.
+// both steps both loops at pressure p for d, CPU and memory alike: the
+// harness's first.
 func (h *harness) both(l2 *Loop, d time.Duration, p float64) {
 	h.t.Helper()
 	for i := time.Duration(0); i < d; i += tick {
+		record(h.t, h.m, memory.Relieves, "", p, h.now.Add(tick))
 		h.step(p)
 		l2.Tick(h.ctx)
 	}
@@ -138,8 +163,6 @@ func (h *harness) actsBy(action string) []string {
 func leverPolicy(max int) func(*spec.PolicySpec) {
 	return func(ps *spec.PolicySpec) {
 		ps.Defaults.MaxActionsPerHour = max
-		// memory here is in cores, as cpu.limit is.
-		ps.Defaults.Floor["memory.high"] = spec.NewBound(0.1, 0.5)
 	}
 }
 
@@ -302,7 +325,7 @@ func TestDecisionsAreWordedFromTheDescriptor(t *testing.T) {
 		h.both(l2, tick, 0.5)
 	}
 	h.both(l2, 3*time.Minute, 0.5) // neither helped: both are reverted
-	byAction := map[string]int{}
+	byAction, acts := map[string]int{}, map[string]int{}
 	for _, d := range h.m.Journal().Decisions(0) {
 		if !strings.HasPrefix(d.ID, "relief-") {
 			continue
@@ -315,9 +338,21 @@ func TestDecisionsAreWordedFromTheDescriptor(t *testing.T) {
 				byAction[action]++
 			}
 		}
-		if strings.HasPrefix(d.ID, "relief-act-") && !strings.Contains(d.Question, cpu.Relieves) {
-			t.Errorf("%s asks %q; want the pressure it relieves, %s", d.ID, d.Question, cpu.Relieves)
+		for _, lever := range []actuators.Descriptor{cpu, memory} {
+			if !strings.HasPrefix(d.ID, "relief-act-"+lever.Action+"-") {
+				continue
+			}
+			acts[lever.Action]++
+			if !strings.Contains(d.Question, lever.Relieves) {
+				t.Errorf("%s asks %q; want the pressure it relieves, %s", d.ID, d.Question, lever.Relieves)
+			}
 		}
+	}
+	if acts[cpu.Action] == 0 || acts[memory.Action] == 0 {
+		t.Errorf("act decisions by action: %v; want each lever's", acts)
+	}
+	if memory.Relieves == cpu.Relieves {
+		t.Fatalf("the memory lever relieves %s, as cpu.limit does; want its own descriptor", memory.Relieves)
 	}
 	if byAction["cpu.limit"] == 0 || byAction["memory.high"] == 0 {
 		t.Errorf("questions naming each action: %v; want both levers' decisions named by their action", byAction)

@@ -31,6 +31,8 @@ type harness struct {
 	fl       *flaky // what the loop sees, when the fixture asks for a flaky one
 	l        *Loop
 	ctx      context.Context
+	shares   map[string]float64 // each pod's share, as the fixture gave it
+	strength float64            // of each share's relationship to pressure
 
 	mu sync.Mutex // guards now against readers on other goroutines; written only by the test
 }
@@ -154,14 +156,14 @@ func newHarness(t *testing.T, f fixture) *harness {
 	}
 	h.rt = rt.(*runtime.DryRun)
 	h.actuator = inventory{Actuator: cpuActuator(nil), rt: h.rt}
+	h.shares, h.strength = f.shares, f.strength
+	if h.strength == 0 {
+		h.strength = 1
+	}
 	for s, share := range f.shares {
 		record(t, h.m, usage(s), s, share, h.now)
-		strength := f.strength
-		if strength == 0 {
-			strength = 1
-		}
 		if !f.noRelate {
-			relate(t, h.m, s, strength)
+			relate(t, h.m, s, h.strength)
 		}
 		h.rt.Put(pod(s))
 	}

@@ -313,26 +313,8 @@ func (l *Loop) Tick(ctx context.Context) {
 	phase, paused := l.phase, l.paused
 	l.mu.Unlock()
 
-	l.expire(ctx, now)
-
-	var (
-		ws     []runtime.Workload
-		listed bool
-		failed bool
-	)
-	workloads := func() ([]runtime.Workload, bool) {
-		if !listed && !failed {
-			var err error
-			if ws, err = l.cfg.Runtime.Workloads(ctx); err != nil {
-				l.cfg.Logf("relief: listing workloads: %v", err)
-				failed = true
-			} else {
-				listed = true
-			}
-		}
-		return ws, listed
-	}
-
+	workloads := l.lister(ctx)
+	l.expire(ctx, now, workloads)
 	l.verify(ctx, now, pressure, at, fresh, workloads)
 	if paused || !fresh {
 		return
@@ -343,7 +325,7 @@ func (l *Loop) Tick(ctx context.Context) {
 		}
 		return
 	}
-	l.release(ctx, now, pressure, phase)
+	l.release(ctx, now, pressure, phase, workloads)
 }
 
 // Reconcile takes up the changes the ledger says this node made with this
@@ -359,7 +341,7 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 	if err := l.reconcile(ctx, now); err != nil {
 		return err
 	}
-	l.expire(ctx, now)
+	l.expire(ctx, now, l.lister(ctx))
 	return nil
 }
 
@@ -484,9 +466,10 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 var ErrNoAction = errors.New("no such action in force")
 
 // Revert undoes an action by hand and cools its workload down, as an operator
-// overriding the loop. Only an action still in force can be reverted. An
-// actuator that does not answer within the loop's timeout is an error, and the
-// action stays in force.
+// overriding the loop. Only an action still in force can be reverted, and it is
+// given back through the workload the runtime lists. A runtime that cannot be
+// listed, or an actuator that does not answer, within the loop's timeout is an
+// error, and the action stays in force.
 func (l *Loop) Revert(ctx context.Context, id string) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
@@ -503,7 +486,7 @@ func (l *Loop) Revert(ctx context.Context, id string) error {
 	if a == nil {
 		return fmt.Errorf("%w: %s", ErrNoAction, id)
 	}
-	return l.giveBack(ctx, l.cfg.Now(), a, OutcomeManual, "manual", a.cooldown)
+	return l.giveBack(ctx, l.cfg.Now(), a, OutcomeManual, "manual", a.cooldown, l.lister(ctx))
 }
 
 // pressure is node pressure, when it was read, and whether it is fresh. The
