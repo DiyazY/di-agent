@@ -519,9 +519,10 @@ func (l *Loop) pressure(now time.Time) (float64, time.Time, bool) {
 // capped, which is stepped again from its current cap. The hourly limit is
 // checked before anything is estimated: the count is every lever's, and the
 // limit is each workload's own max_actions_per_hour, so a rule's override holds
-// for its workloads against the one shared count. It is checked again, and spent,
-// in one step just before the change, since another lever may have spent it
-// since. Attribution that found no plan is not repeated
+// for its workloads against the one shared count. Just before the change the
+// count and the workload are reserved together in the Budget, so a lever ticking
+// at the same moment can neither spend the same last action nor act on the same
+// workload while this change is still going through. Attribution that found no plan is not repeated
 // until Settle has passed or the eligible workloads change, because each
 // estimate is a journalled decision and asking the same question every tick
 // would bury the journal in identical answers.
@@ -608,11 +609,19 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	}
 	eff := pol.For(targetOf(w))
 	k := kept[plan.Subject]
-	if !l.budget.take(now, eff.Settings.MaxActionsPerHour) {
-		// Another lever spent the last of the hour since the check above.
+	// The count and the workload are had in one step, before the change rather than
+	// after it lands: another lever may have taken either since the checks above,
+	// or take the workload while this change is still on its way.
+	switch ok, why := l.budget.reserve(l.d.Action, plan.Subject, now, eff.Settings.MaxActionsPerHour,
+		now.Add(eff.Settings.Cooldown)); {
+	case ok:
+	case why == reserveLimit:
 		l.refuse(fmt.Sprintf("max_actions_per_hour %d reached", eff.Settings.MaxActionsPerHour),
 			map[string]any{"rule": eff.Rule, "policy": eff, "subject": plan.Subject,
 				"actions_last_hour": l.budget.Count(now)})
+		return
+	default:
+		// Another lever has just acted on it; the next pass plans without it.
 		return
 	}
 
@@ -624,6 +633,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	shares := workloadShares(l.cfg.Map, l.d.Usage)
 	entry, err := l.cfg.Acting.Apply(ctx, w, l.d.Action, plan.To, now.Add(l.c.Expiry), id)
 	if err != nil {
+		// The action is given back; the hold on the workload stands, and Cool below
+		// extends it to this lever too.
 		l.budget.refund(now)
 		r := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
 		r.Input("plan", plan)
@@ -687,7 +698,6 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		l.history = appendHistory(l.history, a)
 	}
 	l.inFlight = a
-	l.budget.coolExcept(plan.Subject, l.d.Action, now.Add(eff.Settings.Cooldown))
 	l.nActs++
 	l.noted, l.noPlanAt = "", time.Time{}
 }

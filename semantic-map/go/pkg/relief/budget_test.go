@@ -1,7 +1,9 @@
 package relief
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,18 +35,34 @@ func TestBudgetCountsTheLastHour(t *testing.T) {
 	}
 }
 
-func TestBudgetTakeIsAtomic(t *testing.T) {
+func TestBudgetReserveIsAtomic(t *testing.T) {
 	b := NewBudget(1)
-	if !b.take(t0, 1) || b.take(t0, 1) {
-		t.Fatal("take let two acts through a limit of one")
+	until := t0.Add(10 * time.Minute)
+	if ok, _ := b.reserve("cpu.limit", "pod:a", t0, 1, until); !ok {
+		t.Fatal("a new budget refused")
+	}
+	if ok, why := b.reserve("cpu.limit", "pod:b", t0, 1, until); ok || why != reserveLimit {
+		t.Fatalf("reserve let two acts through a limit of one (%v, %q)", ok, why)
 	}
 	b.refund(t0)
-	if !b.take(t0, 1) {
+	if ok, _ := b.reserve("cpu.limit", "pod:b", t0, 1, until); !ok {
 		t.Fatal("a refunded act still counts")
 	}
-	// A rule's own limit, above the default, is what take is asked against.
-	if !b.take(t0, 3) {
-		t.Fatal("take ignored the limit it was given")
+	// A rule's own limit, above the default, is what reserve is asked against.
+	if ok, _ := b.reserve("cpu.limit", "pod:c", t0, 3, until); !ok {
+		t.Fatal("reserve ignored the limit it was given")
+	}
+	// The reservation cooled pod:a for every other lever, and not for its own.
+	if ok, why := b.reserve("memory.high", "pod:a", t0, 6, until); ok || why != reserveCooling {
+		t.Fatalf("another lever reserved pod:a (%v, %q); want it cooling", ok, why)
+	}
+	if ok, _ := b.reserve("cpu.limit", "pod:a", t0, 6, until); !ok {
+		t.Fatal("the lever that acted was held off its own change")
+	}
+	// A refused reservation spent nothing: pod:b, pod:c and pod:a again count, the
+	// refunded first one does not.
+	if n := b.Count(t0); n != 3 {
+		t.Fatalf("count %d; want the three reservations that stand", n)
 	}
 }
 
@@ -80,7 +98,12 @@ var memory = func() actuators.Descriptor { d := cpu; d.Action = "memory.high"; r
 // memory, sharing budget with the harness's own loop.
 func (h *harness) second(budget *Budget) *Loop {
 	h.t.Helper()
-	act := actuators.Static(memory, nil, func(runtime.Workload) (float64, bool) { return 0, false })
+	return h.secondWith(budget, actuators.Static(memory, nil, func(runtime.Workload) (float64, bool) { return 0, false }))
+}
+
+// secondWith is second acting through act, whose Describe must be memory.
+func (h *harness) secondWith(budget *Budget, act actuators.Actuator) *Loop {
+	h.t.Helper()
 	lever := spec.Default().Loops.Relief.Levers[0]
 	lever.Action = memory.Action
 	l, err := New(Config{Interval: tick, Lever: lever, Descriptor: memory, NodeID: "n1", Runtime: h.rt,
@@ -176,5 +199,93 @@ func TestLeversShareCooldown(t *testing.T) {
 	}
 	if st := l2.Status(); st.Action != "memory.high" {
 		t.Errorf("status action %q", st.Action)
+	}
+}
+
+// slowSet is an actuator whose first Set waits for release, after saying so on
+// entered: a change on its way through a slow orchestrator.
+type slowSet struct {
+	actuators.Actuator
+	once     sync.Once
+	entered  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	subjects []string // every Set, by subject
+}
+
+func newSlowSet(a actuators.Actuator) *slowSet {
+	return &slowSet{Actuator: a, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *slowSet) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	b.mu.Lock()
+	b.subjects = append(b.subjects, w.Subject)
+	b.mu.Unlock()
+	first := false
+	b.once.Do(func() { first = true })
+	if first {
+		close(b.entered)
+		<-b.release
+	}
+	return b.Actuator.Set(ctx, w, v, set)
+}
+
+func (b *slowSet) sets() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.subjects...)
+}
+
+// TestLeversDoNotStackWhileOneIsApplying: the shared cooldown is reserved with
+// the hourly count before the change, not after it lands. While cpu.limit's change
+// to pod:a is still inside the orchestrator, memory.high, ticking at the same
+// moment with pod:a its only candidate, finds pod:a cooling and changes nothing.
+func TestLeversDoNotStackWhileOneIsApplying(t *testing.T) {
+	budget := NewBudget(6)
+	var cpuSlow *slowSet
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, policy: leverPolicy(6), budget: budget,
+		wrap: func(rt *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			cpuSlow = newSlowSet(a)
+			return rt, cpuSlow
+		}})
+	mem := newSlowSet(actuators.Static(memory, nil, func(runtime.Workload) (float64, bool) { return 0, false }))
+	close(mem.release) // memory.high's Set, if it came, would not wait
+	l2 := h.secondWith(budget, mem)
+
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		h.advance(tick)
+		record(t, h.m, contention, "", 0.5, h.now)
+		tickDone := make(chan struct{})
+		go func() { h.l.Tick(h.ctx); close(tickDone) }()
+		select {
+		case <-tickDone:
+			l2.Tick(h.ctx)
+			continue
+		case <-cpuSlow.entered:
+		}
+		// cpu.limit is inside Set on pod:a; memory.high ticks now, in Relieving too.
+		l2.Tick(h.ctx)
+		close(cpuSlow.release)
+		<-tickDone
+		close(done)
+		break
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("cpu.limit never reached its Set")
+	}
+	if got := cpuSlow.sets(); len(got) != 1 || got[0] != "pod:a" {
+		t.Fatalf("cpu.limit set %v; want pod:a once", got)
+	}
+	if got := mem.sets(); len(got) != 0 {
+		t.Fatalf("memory.high set %v while cpu.limit's change to pod:a was in flight; want nothing", got)
+	}
+	if n := len(h.actsBy("memory.high")); n != 0 {
+		t.Fatalf("memory.high journalled %d acts", n)
+	}
+	if n := budget.Count(h.now); n != 1 {
+		t.Fatalf("budget count %d; want only cpu.limit's act", n)
 	}
 }

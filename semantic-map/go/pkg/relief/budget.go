@@ -63,21 +63,38 @@ func (b *Budget) spendLocked(at time.Time) {
 	b.acted[i] = at
 }
 
-// take spends an action at now if fewer than max were taken in the hour before,
-// in one step, so two levers acting at once cannot both take the last one. max
-// is the workload's own max_actions_per_hour, which a policy rule may set above
-// or below the default.
-func (b *Budget) take(now time.Time, max int) bool {
+// Why reserve refused: the hourly count is spent, or another lever holds the
+// workload.
+const (
+	reserveLimit   = "limit"
+	reserveCooling = "cooling"
+)
+
+// reserve is the one step a lever takes before it changes a workload: under one
+// lock it checks that fewer than max actions were taken in the hour before now
+// and that no other lever holds subject, then spends an action at now and holds
+// every other lever off subject until until. Two levers ticking at once cannot
+// both pass, so neither the last action of the hour nor a workload is had twice,
+// however long the change then takes to go through. max is the workload's own
+// max_actions_per_hour, which a policy rule may set above or below the default.
+// why is reserveLimit or reserveCooling when it refuses.
+func (b *Budget) reserve(action, subject string, now time.Time, max int, until time.Time) (ok bool, why string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, cooling := b.coolingForLocked(action, subject, now); cooling {
+		return false, reserveCooling
+	}
 	if b.countLocked(now) >= max {
-		return false
+		return false, reserveLimit
 	}
 	b.spendLocked(now)
-	return true
+	b.coolExceptLocked(subject, action, until)
+	return true, ""
 }
 
-// refund gives back an action take spent at at, for a change that was not made.
+// refund gives back the action reserve spent at at, for a change that was not
+// made. The hold on the workload stands: a failed change still cools it, as a
+// refusal does.
 func (b *Budget) refund(at time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -98,6 +115,10 @@ func (b *Budget) Cool(subject string, until time.Time) { b.coolExcept(subject, "
 func (b *Budget) coolExcept(subject, except string, until time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.coolExceptLocked(subject, except, until)
+}
+
+func (b *Budget) coolExceptLocked(subject, except string, until time.Time) {
 	c := b.cool[subject]
 	if c == nil {
 		c = map[string]time.Time{}
