@@ -147,7 +147,7 @@ func TestReconcileDropsChangedUnderneath(t *testing.T) {
 	a.Apply(ctx, wl("keep"), "fake", 5, time.Time{}, "")
 	a.Apply(ctx, wl("chg"), "fake", 5, time.Time{}, "")
 	f.vals["chg"] = 7
-	held, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("keep"), wl("chg")})
+	held, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("keep"), wl("chg")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestReconcileDropsGoneWorkload(t *testing.T) {
 	ctx := context.Background()
 	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
 	f.gone["s"] = true
-	held, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("x")})
+	held, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("x")})
 	if err != nil || len(held) != 0 || len(dropped) != 1 || len(a.ledger.All()) != 0 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
 	}
@@ -179,7 +179,7 @@ func TestReconcileKeepsAnUnlistedWorkloadTheActuatorFinds(t *testing.T) {
 	a := NewActing("n", MemoryLedger(), f)
 	ctx := context.Background()
 	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
-	held, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("x")})
+	held, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("x")})
 	if err != nil || len(held) != 1 || len(dropped) != 0 || len(a.ledger.All()) != 1 {
 		t.Fatalf("held %+v dropped %+v err %v; want it held", held, dropped, err)
 	}
@@ -193,7 +193,7 @@ func TestReconcileRefusesAnEmptyListing(t *testing.T) {
 	ctx := context.Background()
 	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
 	f.gone["s"] = true
-	if _, _, _, err := a.Held(ctx, "fake", nil); err == nil || len(a.ledger.All()) != 1 {
+	if _, _, _, err := held4(a, ctx, "fake", nil); err == nil || len(a.ledger.All()) != 1 {
 		t.Fatalf("err %v ledger %+v; want a refusal and the entry kept", err, a.ledger.All())
 	}
 }
@@ -203,7 +203,7 @@ func TestReconcileIgnoresOtherNode(t *testing.T) {
 	l := MemoryLedger()
 	l.Put(Entry{Action: "fake", Subject: "s", Applied: 5, NodeID: "other"})
 	a := NewActing("n", l, f)
-	held, dropped, _, err := a.Held(context.Background(), "fake", nil)
+	held, dropped, _, err := held4(a, context.Background(), "fake", nil)
 	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
 	}
@@ -218,7 +218,7 @@ func TestActingConcurrent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			a.Apply(context.Background(), wl(fmt.Sprint("s", i)), "fake", float64(i+1), time.Time{}, "")
-			a.Held(context.Background(), "fake", nil)
+			held4(a, context.Background(), "fake", nil)
 		}(i)
 	}
 	wg.Wait()
@@ -280,7 +280,7 @@ func TestApplyRecordsReadBackValue(t *testing.T) {
 	if err != nil || e.Applied != 8192 {
 		t.Fatalf("%+v %v", e, err)
 	}
-	held, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
+	held, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("s")})
 	if err != nil || len(held) != 1 || len(dropped) != 0 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
 	}
@@ -290,11 +290,11 @@ func TestReconcileSkipsAnActionWithNoActuator(t *testing.T) {
 	l := MemoryLedger()
 	l.Put(Entry{Action: "removed", Subject: "s", Applied: 5, NodeID: "n"})
 	a := NewActing("n", l, newMem())
-	held, dropped, _, err := a.Held(context.Background(), "removed", nil)
+	held, dropped, _, err := held4(a, context.Background(), "removed", nil)
 	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("held %+v dropped %+v err %v; want the entry kept, neither held nor dropped", held, dropped, err)
 	}
-	held, dropped, _, err = a.Held(context.Background(), "fake", nil)
+	held, dropped, _, err = held4(a, context.Background(), "fake", nil)
 	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("held %+v dropped %+v err %v; want the entry kept, neither held nor dropped", held, dropped, err)
 	}
@@ -310,7 +310,7 @@ func TestReconcileKeepsAnEntryWhoseReadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.fail = true
-	held, dropped, failed, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
+	held, dropped, failed, err := held4(a, ctx, "fake", []runtime.Workload{wl("s")})
 	if err != nil || len(held) != 0 || len(dropped) != 0 || len(failed) != 1 || failed[0].Entry.Subject != "s" || failed[0].Err == nil {
 		t.Fatalf("held %+v dropped %+v failed %+v err %v; want s failed with its error", held, dropped, failed, err)
 	}
@@ -411,7 +411,7 @@ func TestASetThatTimedOutAfterTakingEffectIsAdopted(t *testing.T) {
 		if len(got) != 1 || got[0].Pending || got[0].Applied != 5 || got[0].Original != 10 || !got[0].OriginalSet {
 			t.Fatalf("further=%v: ledger %+v; want the change adopted, with the first original", further, got)
 		}
-		held, dropped, _, err := a.Held(context.Background(), "fake", []runtime.Workload{wl("s")})
+		held, dropped, _, err := held4(a, context.Background(), "fake", []runtime.Workload{wl("s")})
 		if err != nil || len(held) != 1 || len(dropped) != 0 {
 			t.Fatalf("further=%v: held %+v dropped %+v err %v", further, held, dropped, err)
 		}
@@ -436,22 +436,23 @@ func TestAFailedSetThatChangedNothingRestoresThePriorEntry(t *testing.T) {
 }
 
 // TestHeldResolvesAPendingEntry: an entry written ahead and never committed, as
-// after a crash, is settled by what reads back.
+// after a crash, is settled by what reads back. One that reads as before its
+// Apply is not judged by Held: it is returned as NeverTook and left pending, and
+// ResolveNeverTook settles it, back to the step before or to none.
 func TestHeldResolvesAPendingEntry(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name    string
-		e       Entry
-		value   float64
-		held    bool
-		dropped bool
-		left    int // entries left in the ledger
-		applied float64
+		name      string
+		e         Entry
+		value     float64
+		neverTook bool
+		left      int // entries left in the ledger once settled
+		applied   float64
 	}{
-		{"first step, crashed before Set", Entry{Original: 10, OriginalSet: true, Applied: 5}, 10, false, false, 0, 0},
-		{"first step, crashed after Set", Entry{Original: 10, OriginalSet: true, Applied: 5}, 5, true, false, 1, 5},
-		{"further step, crashed before Set", Entry{Original: 10, OriginalSet: true, Applied: 5, PrevApplied: 7, PrevSet: true}, 7, true, false, 1, 7},
-		{"further step, crashed after Set", Entry{Original: 10, OriginalSet: true, Applied: 5, PrevApplied: 7, PrevSet: true}, 5, true, false, 1, 5},
+		{"first step, crashed before Set", Entry{Original: 10, OriginalSet: true, Applied: 5}, 10, true, 0, 0},
+		{"first step, crashed after Set", Entry{Original: 10, OriginalSet: true, Applied: 5}, 5, false, 1, 5},
+		{"further step, crashed before Set", Entry{Original: 10, OriginalSet: true, Applied: 5, PrevApplied: 7, PrevSet: true}, 7, true, 1, 7},
+		{"further step, crashed after Set", Entry{Original: 10, OriginalSet: true, Applied: 5, PrevApplied: 7, PrevSet: true}, 5, false, 1, 5},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -461,9 +462,20 @@ func TestHeldResolvesAPendingEntry(t *testing.T) {
 			c.e.Action, c.e.Subject, c.e.NodeID, c.e.Pending = "fake", "s", "n", true
 			l.Put(c.e)
 			a := NewActing("n", l, f)
-			held, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
-			if err != nil || (len(held) == 1) != c.held || (len(dropped) == 1) != c.dropped || len(l.All()) != c.left {
-				t.Fatalf("held %+v dropped %+v err %v ledger %+v", held, dropped, err, l.All())
+			r, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
+			if err != nil || len(r.Dropped) != 0 || (len(r.NeverTook) == 1) != c.neverTook || (len(r.Held) == 1) == c.neverTook {
+				t.Fatalf("reconciled %+v err %v", r, err)
+			}
+			if c.neverTook {
+				if got := l.All(); len(got) != 1 || got[0] != c.e {
+					t.Fatalf("ledger %+v; want the entry left pending for the caller", got)
+				}
+				if _, err := a.ResolveNeverTook(r.NeverTook[0]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(l.All()) != c.left {
+				t.Fatalf("ledger %+v; want %d entries", l.All(), c.left)
 			}
 			if c.left == 1 {
 				if e := l.All()[0]; e.Pending || e.Applied != c.applied || e.PrevSet {
@@ -501,7 +513,7 @@ func TestAQuantisedValueWhoseReadBackFailedIsSettledByHeld(t *testing.T) {
 	if err != nil || !e.Pending {
 		t.Fatalf("%+v %v; want the change left pending", e, err)
 	}
-	held, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
+	held, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("s")})
 	if err != nil || len(held) != 1 || held[0].Applied != 8192 || held[0].Pending || len(dropped) != 0 {
 		t.Fatalf("held %+v dropped %+v err %v; want the quantised value adopted", held, dropped, err)
 	}
@@ -520,7 +532,7 @@ func TestHeldReconcilesEachEntryOnItsOwn(t *testing.T) {
 	}
 	f.fail["b"] = true
 	f.gone["c"] = true
-	held, dropped, failed, err := a.Held(ctx, "fake", []runtime.Workload{wl("a"), wl("b"), wl("c")})
+	held, dropped, failed, err := held4(a, ctx, "fake", []runtime.Workload{wl("a"), wl("b"), wl("c")})
 	if err != nil || len(held) != 1 || held[0].Subject != "a" || len(dropped) != 1 || dropped[0].Subject != "c" ||
 		len(failed) != 1 || failed[0].Entry.Subject != "b" {
 		t.Fatalf("held %+v dropped %+v failed %+v err %v", held, dropped, failed, err)
@@ -547,7 +559,7 @@ func TestHeldTouchesOnlyItsAction(t *testing.T) {
 	l := MemoryLedger()
 	l.Put(Entry{Action: "other", Subject: "s", Applied: 5, NodeID: "n"})
 	a := NewActing("n", l, newMem())
-	if _, dropped, _, err := a.Held(context.Background(), "fake", nil); err != nil || len(dropped) != 0 || len(l.All()) != 1 {
+	if _, dropped, _, err := held4(a, context.Background(), "fake", nil); err != nil || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("dropped %+v err %v ledger %+v; another action's entry must be left alone", dropped, err, l.All())
 	}
 }
@@ -747,7 +759,7 @@ func TestHeldReturnsWhatItDroppedBeforeASaveFailed(t *testing.T) {
 	}
 	boom := errors.New("disk full")
 	l.FailSaves(1, boom)
-	_, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("x")})
+	_, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("x")})
 	if !errors.Is(err, boom) || len(dropped) != 1 || len(l.All()) != 2 {
 		t.Fatalf("dropped %+v err %v ledger %+v; want the one deleted before the failure returned with it", dropped, err, l.All())
 	}
@@ -756,4 +768,14 @@ func TestHeldReturnsWhatItDroppedBeforeASaveFailed(t *testing.T) {
 			t.Fatalf("%s returned as dropped and still in the ledger", e.Subject)
 		}
 	}
+}
+
+// held4 is Held's result as held, dropped (their entries), failed and err.
+func held4(a *Acting, ctx context.Context, action string, ws []runtime.Workload) ([]Entry, []Entry, []Unread, error) {
+	r, err := a.Held(ctx, action, ws)
+	var dropped []Entry
+	for _, d := range r.Dropped {
+		dropped = append(dropped, d.Entry)
+	}
+	return r.Held, dropped, r.Failed, err
 }

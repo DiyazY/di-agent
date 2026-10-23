@@ -308,14 +308,14 @@ func TestMemoryHighPodRestartReadsMax(t *testing.T) {
 	if _, err := act.Apply(ctx, w, "memory.high", 256<<20, time.Now().Add(time.Hour), "d1"); err != nil {
 		t.Fatal(err)
 	}
-	if held, dropped, _, err := act.Held(ctx, "memory.high", []runtime.Workload{w}); err != nil || len(held) != 1 || len(dropped) != 0 {
+	if held, dropped, _, err := held4(act, ctx, "memory.high", []runtime.Workload{w}); err != nil || len(held) != 1 || len(dropped) != 0 {
 		t.Fatalf("before restart: held=%v dropped=%v err=%v", held, dropped, err)
 	}
 	if err := os.RemoveAll(d); err != nil {
 		t.Fatal(err)
 	}
 	mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
-	held, dropped, _, err := act.Held(ctx, "memory.high", []runtime.Workload{w})
+	held, dropped, _, err := held4(act, ctx, "memory.high", []runtime.Workload{w})
 	if err != nil || len(held) != 0 || len(dropped) != 1 {
 		t.Fatalf("after restart: held=%v dropped=%v err=%v", held, dropped, err)
 	}
@@ -547,17 +547,17 @@ func TestHeldAsksTheActuatorAboutAnUnlistedPod(t *testing.T) {
 		t.Fatal(err)
 	}
 	other := runtime.Workload{Subject: "pod:ffff0000-0000-0000-0000-000000000000", UID: "ffff0000-0000-0000-0000-000000000000", QoS: "burstable"}
-	held, dropped, _, err := acting.Held(ctx, "memory.high", []runtime.Workload{other})
+	held, dropped, _, err := held4(acting, ctx, "memory.high", []runtime.Workload{other})
 	if err != nil || len(held) != 1 || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("cgroup there: held %+v dropped %+v err %v; want it held", held, dropped, err)
 	}
-	if _, _, _, err := acting.Held(ctx, "memory.high", nil); err == nil || len(l.All()) != 1 {
+	if _, _, _, err := held4(acting, ctx, "memory.high", nil); err == nil || len(l.All()) != 1 {
 		t.Fatalf("empty listing: err %v ledger %+v; want a refusal and the ledger unchanged", err, l.All())
 	}
 	if err := os.RemoveAll(d); err != nil {
 		t.Fatal(err)
 	}
-	held, dropped, _, err = acting.Held(ctx, "memory.high", []runtime.Workload{other})
+	held, dropped, _, err = held4(acting, ctx, "memory.high", []runtime.Workload{other})
 	if err != nil || len(held) != 0 || len(dropped) != 1 || len(l.All()) != 0 {
 		t.Fatalf("cgroup gone: held %+v dropped %+v err %v; want it dropped", held, dropped, err)
 	}

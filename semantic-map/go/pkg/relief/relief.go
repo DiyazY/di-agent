@@ -164,6 +164,7 @@ type Loop struct {
 	noPlanKey    string               // the eligible workloads it found none among
 	unread       map[string]*Unread   // by subject: ledger entries whose setting could not be read at the latest reconcile
 	reconcileErr string               // why the latest reconcile failed, "" when it succeeded
+	awaiting     map[string]bool      // subjects whose pending change may yet land; read again every pass. Touched only under pass
 	nActs        int
 	nKept        int
 	nReverted    int
@@ -310,7 +311,7 @@ func (l *Loop) Tick(ctx context.Context) {
 		if err := l.reconcile(ctx, now); err != nil {
 			l.cfg.Logf("relief: %v (no change is made until it succeeds)", err)
 		}
-	case l.hasUnread():
+	case l.hasUnread() || len(l.awaiting) > 0:
 		// Entries that could not be read are retried every tick.
 		if err := l.reconcile(ctx, now); err != nil {
 			l.cfg.Logf("relief: retrying the changes that could not be read: %v", err)
@@ -401,7 +402,8 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return l.reconcileFailed(fmt.Errorf("relief: listing workloads: %w", err))
 	}
-	held, dropped, failed, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
+	rec, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
+	held, dropped, failed := rec.Held, rec.Dropped, rec.Failed
 	if err != nil {
 		// Changes dropped before the failure are gone from the ledger: record them.
 		l.mu.Lock()
@@ -419,7 +421,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	for _, a := range l.liveLocked() {
 		live[a.Subject] = a
 	}
-	busy := l.inFlight != nil
+	busy, inFlight := l.inFlight != nil, l.inFlight
 	prevUnread := l.unread
 	unread := map[string]*Unread{}
 	for _, f := range failed {
@@ -439,6 +441,21 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	taken := func(e actuators.Entry) *Action { return l.taken(e, cooldowns(e.Subject)) }
 
 	l.journalDropped(now, ws, dropped, prevUnread)
+
+	// A pending change that still reads as before its Apply may yet land, as a
+	// resize the kubelet applies a moment later: while its action is in flight
+	// within Settle it stays pending and is read again next pass. Past that, or
+	// with no action of this loop's to wait for, it never took.
+	awaiting := map[string]bool{}
+	for _, e := range rec.NeverTook {
+		a := live[e.Subject]
+		if a != nil && a == inFlight && !a.Resumed && now.Sub(a.ActedAt) < l.c.Settle {
+			awaiting[e.Subject] = true
+			continue
+		}
+		l.neverTook(now, e, a)
+	}
+	l.awaiting = awaiting
 
 	var expired, resumed []*Action
 	for _, e := range held {
@@ -490,23 +507,13 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 	l.mu.Unlock()
 	l.reconciled = true
-	// A step whose failed Apply kept its spend and that is now neither held,
-	// dropped nor unread never took: its spend is given back.
-	settled := map[string]bool{}
+	// A kept spend is settled by the verdict on its change: in force (held) or
+	// dropped keeps it, and never took (neverTook) gives it back.
 	for _, e := range held {
-		settled[e.Subject] = true
+		delete(l.spentFor, e.Subject)
 	}
-	for _, e := range dropped {
-		settled[e.Subject] = true
-	}
-	for s, at := range l.spentFor {
-		switch {
-		case l.hasUnreadFor(s):
-			continue
-		case !settled[s]:
-			l.budget.refund(at)
-		}
-		delete(l.spentFor, s)
+	for _, d := range dropped {
+		delete(l.spentFor, d.Subject)
 	}
 	for _, a := range resumed {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
@@ -514,11 +521,58 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// neverTook closes a pending change that still reads as before its Apply: the
+// ledger's entry is settled (a further step's back to the step before, a first
+// step's deleted), the hourly spend it took is given back, the verdict is
+// journalled, and its action, if one holds it, is closed as not applied, or put
+// back at its earlier step.
+func (l *Loop) neverTook(now time.Time, e actuators.Entry, a *Action) {
+	restored, err := l.cfg.Acting.ResolveNeverTook(e)
+	if err != nil {
+		l.cfg.Logf("relief: settling the change to %s that never took: %v", e.Subject, err)
+		return
+	}
+	if at, ok := l.spentFor[e.Subject]; ok {
+		l.budget.refund(at)
+		delete(l.spentFor, e.Subject)
+	} else if a != nil && !a.Resumed {
+		l.budget.refund(a.ActedAt)
+	}
+	b := l.cfg.Map.Decide(l.id(OutcomeNotApplied), fmt.Sprintf("did the change to %s's %s through %s take?", e.Subject, l.d.Resource, l.d.Action))
+	b.Input("entry", e)
+	if restored.Action != "" {
+		b.Input("restored", restored)
+	}
+	b.Note("the setting still reads as before the change: it never took, and there is nothing to give back; its hourly action is given back")
+	b.Commit(map[string]any{OutcomeNotApplied: e.Subject})
+	if a == nil {
+		return
+	}
+	if restored.Action == "" {
+		l.end(now, a, OutcomeNotApplied, a.cooldown)
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if p := a.prev; p != nil {
+		id := a.ID
+		*a = *p
+		a.ID = id
+	}
+	a.Entry, a.Outcome, a.revertPending, a.RevertAttempts, a.LastError = restored, OutcomeKept, false, 0, ""
+	if l.inFlight == a {
+		l.inFlight = nil
+		l.kept = append(removeAction(l.kept, a), a)
+	}
+	// As after a step that did not help: not tried again at once.
+	l.budget.Cool(a.Subject, now.Add(a.cooldown))
+}
+
 // journalDropped journals each change Held dropped from the ledger as gone, with
 // why, closing the action in force that held it; one given back from its record
 // while unreadable (prevUnread) is closed as expired instead, its give-back now
 // confirmed.
-func (l *Loop) journalDropped(now time.Time, ws []runtime.Workload, dropped []actuators.Entry, prevUnread map[string]*Unread) {
+func (l *Loop) journalDropped(now time.Time, ws []runtime.Workload, dropped []actuators.Dropped, prevUnread map[string]*Unread) {
 	if len(dropped) == 0 {
 		return
 	}
@@ -529,9 +583,10 @@ func (l *Loop) journalDropped(now time.Time, ws []runtime.Workload, dropped []ac
 		live[a.Subject] = a
 	}
 	l.mu.Unlock()
-	for _, e := range dropped {
+	for _, d := range dropped {
+		e := d.Entry
 		why := "the actuator no longer finds the workload"
-		if hasSubject(ws, e.Subject) {
+		if !d.Gone {
 			why = "its setting no longer reads as what the agent applied: changed underneath, as by a restart or another hand"
 		}
 		a := live[e.Subject]
@@ -565,13 +620,6 @@ func (l *Loop) taken(e actuators.Entry, cooldown time.Duration) *Action {
 		a.ID = l.id("act")
 	}
 	return a
-}
-
-// hasUnreadFor reports whether subject's entry could not be read.
-func (l *Loop) hasUnreadFor(subject string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.unread[subject] != nil
 }
 
 // reconcileFailed records a reconcile that failed as a whole (the listing failed

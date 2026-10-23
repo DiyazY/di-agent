@@ -14,12 +14,13 @@ import (
 // What became of an action. An action with no outcome is in flight: applied
 // and waiting for Settle to pass so its effect can be judged.
 const (
-	OutcomeKept     = "kept"     // it helped; the cap stays until release or expiry
-	OutcomeReverted = "reverted" // it did not help and was undone
-	OutcomeReleased = "released" // pressure ended and the cap was given back
-	OutcomeExpired  = "expired"  // it outlived its expiry and was given back
-	OutcomeGone     = "gone"     // the workload left; there was nothing to give back
-	OutcomeManual   = "manual"   // an operator undid it
+	OutcomeKept       = "kept"        // it helped; the cap stays until release or expiry
+	OutcomeReverted   = "reverted"    // it did not help and was undone
+	OutcomeReleased   = "released"    // pressure ended and the cap was given back
+	OutcomeExpired    = "expired"     // it outlived its expiry and was given back
+	OutcomeGone       = "gone"        // the workload left; there was nothing to give back
+	OutcomeManual     = "manual"      // an operator undid it
+	OutcomeNotApplied = "not_applied" // it never took effect: still read as before once Settle had passed
 )
 
 const (
@@ -464,6 +465,7 @@ func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Durat
 	defer l.mu.Unlock()
 	a.Outcome, a.revertPending = outcome, false
 	a.RevertAttempts, a.LastError = 0, ""
+	delete(l.spentFor, a.Subject) // a closed change's kept spend is settled
 	if l.inFlight == a {
 		l.inFlight = nil
 	}

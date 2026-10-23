@@ -1636,3 +1636,155 @@ func TestAnUnreadEntryWhoseWorkloadLeftIsGone(t *testing.T) {
 		t.Fatalf("unread %+v; want none", st.Unread)
 	}
 }
+
+// lands is an actuator whose Set takes effect only after k more reads, as a
+// kubelet that applies an accepted resize a moment later; k < 0 never lands.
+type lands struct {
+	actuators.Actuator
+	mu      sync.Mutex
+	k       int
+	next    []int // k for each next Set, then k
+	left    int
+	pending *struct {
+		w   runtime.Workload
+		v   float64
+		set bool
+	}
+}
+
+func (l *lands) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pending = &struct {
+		w   runtime.Workload
+		v   float64
+		set bool
+	}{w, v, set}
+	if len(l.next) > 0 {
+		l.k, l.next = l.next[0], l.next[1:]
+	}
+	l.left = l.k
+	return nil
+}
+
+func (l *lands) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	l.mu.Lock()
+	if p := l.pending; p != nil && p.w.Subject == w.Subject && l.k >= 0 {
+		if l.left == 0 {
+			l.pending = nil
+			l.mu.Unlock()
+			if err := l.Actuator.Set(ctx, p.w, p.v, p.set); err != nil {
+				return 0, false, err
+			}
+			return l.Actuator.Read(ctx, w)
+		}
+		l.left--
+	}
+	l.mu.Unlock()
+	return l.Actuator.Read(ctx, w)
+}
+
+func landsHarness(t *testing.T, k int) (*harness, *lands) {
+	var ln *lands
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			ln = &lands{Actuator: a, k: k}
+			return d, ln
+		}})
+	return h, ln
+}
+
+// TestACutThatLandsLateIsKept: a cut applied and read back as before is kept
+// pending while it is in flight, and is committed at the cut when it lands: the
+// ledger never loses it while it may be in force.
+func TestACutThatLandsLateIsKept(t *testing.T) {
+	h, _ := landsHarness(t, 4)
+	h.act("pod:a")
+	cut := h.applied()["pod:a"].Applied
+	for i := 0; i < 6; i++ {
+		h.step(0.5)
+		if _, ok := h.applied()["pod:a"]; !ok {
+			t.Fatalf("tick %d: the entry left the ledger while the cut was on its way", i)
+		}
+	}
+	e := h.applied()["pod:a"]
+	if e.Pending || e.Applied != cut || h.limit("pod:a") == nil || *h.limit("pod:a") != cut {
+		t.Fatalf("entry %+v, limit %v; want the cut %v committed once it landed", e, h.limit("pod:a"), cut)
+	}
+	if a := h.action("pod:a"); a.Entry.Pending || a.Entry.Applied != cut {
+		t.Fatalf("action entry %+v; want it in step with the ledger", a.Entry)
+	}
+}
+
+// TestACutThatNeverLandsIsClosed: a cut that still reads as before once its
+// settle has passed never took: the action is closed as not applied, its entry
+// deleted and its hourly spend given back, all explicitly.
+func TestACutThatNeverLandsIsClosed(t *testing.T) {
+	h, _ := landsHarness(t, -1)
+	h.act("pod:a")
+	h.until(10*time.Minute, 0.5, "the action closed", func() bool { return h.action("pod:a").Outcome != "" })
+	if a := h.action("pod:a"); a.Outcome != OutcomeNotApplied {
+		t.Fatalf("pod:a %+v; want not applied", a)
+	}
+	if len(h.ledger.All()) != 0 || h.l.budget.Count(h.now) != 0 {
+		t.Fatalf("ledger %+v, count %d; want the entry gone and the spend given back", h.ledger.All(), h.l.budget.Count(h.now))
+	}
+	if n := len(h.decisions("not_applied")); n != 1 {
+		t.Fatalf("%d not_applied decisions; want the verdict journalled", n)
+	}
+}
+
+// TestAFurtherStepThatNeverLandsGoesBackAndIsRefunded: a further step that
+// still reads as the step before once Settle has passed never took: the ledger
+// goes back to the earlier step, the action stays kept at it, and the further
+// step's hourly spend is given back.
+func TestAFurtherStepThatNeverLandsGoesBackAndIsRefunded(t *testing.T) {
+	h, ln := landsHarness(t, 0)
+	h.act("pod:a")
+	first := h.applied()["pod:a"].Applied
+	h.until(10*time.Minute, 0.44, "the first step kept", func() bool { return h.action("pod:a").Outcome == OutcomeKept })
+	ln.mu.Lock()
+	ln.next = []int{-1} // the further step never lands
+	ln.mu.Unlock()
+	before := h.l.budget.Count(h.now)
+	h.until(time.Hour, 0.44, "a further step", func() bool {
+		record(h.t, h.m, usage("pod:a"), "pod:a", 0.28, h.clock())
+		e := h.applied()["pod:a"]
+		return e.Pending && e.Applied < first
+	})
+	if n := h.l.budget.Count(h.now); n != before+1 {
+		t.Fatalf("count %d; want the further step spent (%d)", n, before+1)
+	}
+	h.until(10*time.Minute, 0.44, "the further step settled", func() bool { return !h.applied()["pod:a"].Pending })
+	if e := h.applied()["pod:a"]; e.Applied != first {
+		t.Fatalf("entry %+v; want it back at the first step %v", e, first)
+	}
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept || a.Entry.Applied != first {
+		t.Fatalf("action %+v; want it kept at the first step", a)
+	}
+	if n := h.l.budget.Count(h.now); n != before {
+		t.Fatalf("count %d; want the further step's spend given back (%d)", n, before)
+	}
+}
+
+// TestAClosedChangeClearsItsKeptSpend: a change whose failed Apply kept its
+// spend, once closed, leaves nothing behind for a later reconcile to refund or
+// keep: its spend stays counted, once.
+func TestAClosedChangeClearsItsKeptSpend(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			return d, &lyingSet{Actuator: a, fail: 1}
+		}})
+	h.act("pod:a")
+	h.l.Pause()
+	h.until(2*time.Hour, 0.5, "expiry", func() bool { return len(h.ledger.All()) == 0 })
+	if len(h.l.spentFor) != 0 {
+		t.Fatalf("spentFor %v after the change closed; want it settled", h.l.spentFor)
+	}
+	n := h.l.budget.Count(h.now.Add(-30 * time.Minute))
+	h.l.reconciled = false
+	h.step(0.5)
+	if got := h.l.budget.Count(h.now.Add(-30 * time.Minute)); got != n {
+		t.Fatalf("count %d → %d after a later reconcile; a closed change's spend must not move", n, got)
+	}
+}

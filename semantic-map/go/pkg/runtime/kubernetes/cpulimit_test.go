@@ -341,7 +341,7 @@ func TestACutTheKubeletAppliesLateIsKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 10; i++ {
-		held, dropped, _, err := acting.Held(ctx, "cpu.limit", []runtime.Workload{w})
+		held, dropped, _, err := held4(acting, ctx, "cpu.limit", []runtime.Workload{w})
 		if err != nil || len(dropped) != 0 {
 			t.Fatalf("held %+v dropped %+v err %v; the cut must never be dropped", held, dropped, err)
 		}
@@ -388,4 +388,14 @@ func TestAGiveBackTheKubeletAppliesLateKeepsTheEntry(t *testing.T) {
 	if p := getPod(t, cs, "a"); p.Status.ContainerStatuses[0].Resources.Limits.Cpu().MilliValue() != 1000 {
 		t.Fatalf("status %v; want the original 1 core applied", p.Status.ContainerStatuses[0].Resources.Limits)
 	}
+}
+
+// held4 is Held's result as held, dropped (their entries), failed and err.
+func held4(a *actuators.Acting, ctx context.Context, action string, ws []runtime.Workload) ([]actuators.Entry, []actuators.Entry, []actuators.Unread, error) {
+	r, err := a.Held(ctx, action, ws)
+	var dropped []actuators.Entry
+	for _, d := range r.Dropped {
+		dropped = append(dropped, d.Entry)
+	}
+	return r.Held, dropped, r.Failed, err
 }

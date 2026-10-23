@@ -314,6 +314,35 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 	return nil
 }
 
+// Reconciled is what Held found of one action's entries: Held are in force as
+// recorded, or adopted from what reads back; Dropped are deleted from the
+// ledger, with what was read; NeverTook are pending entries whose setting still
+// reads as before their Apply, left pending in the ledger for the caller to keep
+// (a change that may still land) or to settle with ResolveNeverTook; Failed
+// could not be read, and are left untouched.
+type Reconciled struct {
+	Held      []Entry
+	Dropped   []Dropped
+	NeverTook []Entry
+	Failed    []Unread
+}
+
+// Dropped is an entry Held deleted, with why: Gone when the actuator no longer
+// finds the workload, else the setting that read back (Read, ReadSet) instead of
+// what was applied.
+type Dropped struct {
+	Entry
+	Read    float64
+	ReadSet bool
+	Gone    bool
+}
+
+// ReadsOriginal reports whether a dropped entry read back as its Original: the
+// setting the agent gave back, rather than one someone else made.
+func (d Dropped) ReadsOriginal() bool {
+	return !d.Gone && same(d.Read, d.ReadSet, d.Original, d.OriginalSet)
+}
+
 // Held reconciles this node's ledger entries of action against the workloads now
 // listed. The listing does not decide that a workload left; the actuator does:
 // an entry whose workload is not listed is read through a workload named only by
@@ -324,26 +353,27 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 // this node holds entries of action is refused, and nothing is changed: an empty
 // listing on a node that was changing workloads is a listing problem until proven
 // otherwise. A pending entry, one an Apply wrote ahead and never committed, is
-// resolved by what reads back: the setting from before that Apply means the
-// change never took, and the entry before it is restored (a further step's, now
-// held) or none (a first step's, neither held nor dropped); any other setting
-// is adopted as Applied and held; none at all is dropped. Entries of other nodes
-// and other actions are not touched, and neither is anything when this Acting
-// has no actuator for action, as when its lever was removed from the config.
+// resolved by what reads back: any setting other than the one from before its
+// Apply is adopted as Applied and held, none at all is dropped, and the setting
+// from before is not judged here: the change may yet land, as a resize the
+// kubelet applies a moment later, so the entry is left pending and returned in
+// NeverTook, for the caller to keep or to settle. Entries of other nodes and
+// other actions are not touched, and neither is anything when this Acting has no
+// actuator for action, as when its lever was removed from the config.
 //
 // Each entry is reconciled on its own: one whose Read fails with anything but
-// ErrGone is returned in failed, with the error, and left in the ledger
-// untouched, for the caller to retry; the rest are held or dropped as above. An
-// error is returned only when nothing could be reconciled: an empty listing, or a
-// ledger that could not be saved; a save that fails partway through the
-// deletions returns the entries already dropped with it, for the caller to
-// record.
-func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload) (held, dropped []Entry, failed []Unread, err error) {
+// ErrGone is returned in Failed, with the error, and left in the ledger
+// untouched, for the caller to retry. An error is returned only when nothing
+// could be reconciled: an empty listing, or a ledger that could not be saved; a
+// save that fails partway through the deletions returns the entries already
+// dropped with it, for the caller to record.
+func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload) (Reconciled, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var r Reconciled
 	x, ok := a.actuators[action]
 	if !ok {
-		return nil, nil, nil, nil
+		return r, nil
 	}
 	bySubject := make(map[string]runtime.Workload, len(ws))
 	for _, w := range ws {
@@ -356,11 +386,11 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 		}
 	}
 	if len(ws) == 0 && len(mine) > 0 {
-		return nil, nil, nil, fmt.Errorf("the runtime lists no workload while this node holds %d %s change(s): "+
+		return r, fmt.Errorf("the runtime lists no workload while this node holds %d %s change(s): "+
 			"taken for a listing problem, nothing is dropped", len(mine), action)
 	}
-	var puts []Entry // entries rewritten: restored or adopted
-	var gone []Entry // entries deleted: dropped, or a first step that never took
+	var puts []Entry // entries rewritten: adopted
+	var drops []Dropped
 	for _, e := range mine {
 		w, listed := bySubject[e.Subject]
 		if !listed {
@@ -369,53 +399,61 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 		v, set, rerr := x.Read(ctx, w)
 		switch {
 		case errors.Is(rerr, ErrGone):
-			gone, dropped = append(gone, e), append(dropped, e)
+			drops = append(drops, Dropped{Entry: e, Gone: true})
 			continue
 		case rerr != nil:
-			failed = append(failed, Unread{Entry: e, Err: fmt.Errorf("%s: read %s: %w", e.Subject, e.Action, rerr)})
+			r.Failed = append(r.Failed, Unread{Entry: e, Err: fmt.Errorf("%s: read %s: %w", e.Subject, e.Action, rerr)})
 			continue
 		}
 		if !e.Pending {
 			if set && closeTo(v, e.Applied) {
-				held = append(held, e)
+				r.Held = append(r.Held, e)
 			} else {
-				gone, dropped = append(gone, e), append(dropped, e)
+				drops = append(drops, Dropped{Entry: e, Read: v, ReadSet: set})
 			}
 			continue
 		}
 		bv, bset := before(e)
 		switch {
-		case same(v, set, bv, bset) && e.PrevSet:
-			r := committed(e, e.PrevApplied)
-			puts, held = append(puts, r), append(held, r)
 		case same(v, set, bv, bset):
-			gone = append(gone, e)
+			r.NeverTook = append(r.NeverTook, e)
 		case set:
-			r := committed(e, v)
-			puts, held = append(puts, r), append(held, r)
+			c := committed(e, v)
+			puts, r.Held = append(puts, c), append(r.Held, c)
 		default:
-			gone, dropped = append(gone, e), append(dropped, e)
+			drops = append(drops, Dropped{Entry: e, Read: v, ReadSet: set})
 		}
 	}
 	for _, e := range puts {
 		if err := a.ledger.Put(e); err != nil {
-			return nil, nil, nil, err
+			return Reconciled{}, err
 		}
 	}
-	isDropped := map[string]bool{}
-	for _, e := range dropped {
-		isDropped[e.Subject] = true
-	}
-	var done []Entry // dropped and deleted so far
-	for _, e := range gone {
-		if err := a.ledger.Delete(e.Action, e.Subject); err != nil {
-			return nil, done, nil, err // what was dropped is the caller's to record
+	for _, d := range drops {
+		if err := a.ledger.Delete(d.Action, d.Subject); err != nil {
+			return Reconciled{Dropped: r.Dropped}, err // what was dropped is the caller's to record
 		}
-		if isDropped[e.Subject] {
-			done = append(done, e)
-		}
+		r.Dropped = append(r.Dropped, d)
 	}
-	return held, dropped, failed, nil
+	return r, nil
+}
+
+// ResolveNeverTook settles a pending entry Held returned in NeverTook, once the
+// caller judges the change will not land: a further step's entry goes back to
+// the step before it, which is returned, and a first step's is deleted (the
+// zero Entry). An entry that has changed in the ledger since is left alone.
+func (a *Acting) ResolveNeverTook(e Entry) (Entry, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cur, ok := a.entry(e.Action, e.Subject)
+	if !ok || cur != e {
+		return Entry{}, fmt.Errorf("%s: %s entry changed since it was read; not settled", e.Subject, e.Action)
+	}
+	if e.PrevSet {
+		c := committed(e, e.PrevApplied)
+		return c, a.ledger.Put(c)
+	}
+	return Entry{}, a.ledger.Delete(e.Action, e.Subject)
 }
 
 // Unread is a ledger entry Held could not read the setting of, with why.
