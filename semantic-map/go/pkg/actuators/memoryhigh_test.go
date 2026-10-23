@@ -3,6 +3,7 @@ package actuators
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,7 +202,7 @@ func TestMemoryHighCheck(t *testing.T) {
 
 func TestMemoryHighPodRestartReadsMax(t *testing.T) {
 	root := mhRoot(t)
-	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
 	a := mhNew(t, root)
 	w := mhWL("burstable")
 	act := NewActing("n", MemoryLedger(), a)
@@ -215,7 +216,7 @@ func TestMemoryHighPodRestartReadsMax(t *testing.T) {
 	if err := os.RemoveAll(d); err != nil {
 		t.Fatal(err)
 	}
-	mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+	mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
 	held, dropped, err := act.Held(ctx, "memory.high", []runtime.Workload{w})
 	if err != nil || len(held) != 0 || len(dropped) != 1 {
 		t.Fatalf("after restart: held=%v dropped=%v err=%v", held, dropped, err)
@@ -297,5 +298,75 @@ func TestMemoryHighRegistered(t *testing.T) {
 	}
 	if _, err := Build("memory.high", Env{Runtime: nameRT{"kubernetes"}, CgroupRoot: t.TempDir()}); err == nil {
 		t.Fatal("real build on non-v2 root succeeded")
+	}
+}
+
+func TestMemoryHighRejectsUnsafeIdentity(t *testing.T) {
+	root := mhRoot(t)
+	mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
+	decoy := filepath.Join(root, "decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mhWrite(t, filepath.Join(decoy, "memory.high"), "max")
+	mhWrite(t, filepath.Join(decoy, "memory.current"), "209715200")
+	a := mhNew(t, root)
+	ctx := context.Background()
+	cases := []struct{ name, uid, qos string }{
+		{"traversal", "../../decoy", "burstable"},
+		{"traversal into pod parent", "../" + "../decoy", "besteffort"},
+		{"slash", "a/b", "burstable"},
+		{"empty uid", "", "burstable"},
+		{"upper case uid", strings.ToUpper(mhUID), "burstable"},
+		{"unknown qos", mhUID, "../decoy"},
+		{"empty qos", mhUID, ""},
+	}
+	for _, c := range cases {
+		w := mhWL("burstable")
+		w.UID, w.QoS = c.uid, c.qos
+		if _, _, err := a.Read(ctx, w); !errors.Is(err, ErrGone) {
+			t.Errorf("%s: Read err = %v", c.name, err)
+		}
+		if err := a.Set(ctx, w, 1<<30, true); !errors.Is(err, ErrGone) {
+			t.Errorf("%s: Set err = %v", c.name, err)
+		}
+		if c.qos != "besteffort" {
+			if got := a.Check(w); got != "pod cgroup not found" {
+				t.Errorf("%s: Check = %q", c.name, got)
+			}
+		}
+		if got := mhRead(t, filepath.Join(decoy, "memory.high")); got != "max" {
+			t.Fatalf("%s: decoy changed to %q", c.name, got)
+		}
+	}
+}
+
+func TestMemoryHighCheckUnreadableUsage(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+	a := mhNew(t, root)
+	if got := a.Check(mhWL("burstable")); got != "memory usage unreadable" {
+		t.Errorf("missing: %q", got)
+	}
+	mhWrite(t, filepath.Join(d, "memory.current"), "lots")
+	if got := a.Check(mhWL("burstable")); got != "memory usage unreadable" {
+		t.Errorf("unparsable: %q", got)
+	}
+}
+
+func TestMemoryHighSetRefusesUnsafeValue(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+	a := mhNew(t, root)
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), 0, -1, MemoryHighDescriptor.Min - 1} {
+		if err := a.Set(context.Background(), mhWL("burstable"), v, true); err == nil {
+			t.Errorf("Set(%v) succeeded", v)
+		}
+		if got := mhRead(t, filepath.Join(d, "memory.high")); got != "max" {
+			t.Fatalf("Set(%v) wrote %q", v, got)
+		}
+	}
+	if err := a.Set(context.Background(), mhWL("burstable"), MemoryHighDescriptor.Min, true); err != nil {
+		t.Errorf("Set(Min): %v", err)
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -98,7 +100,11 @@ func (a *MemoryHigh) Check(w runtime.Workload) string {
 	if err != nil {
 		return "pod cgroup not found"
 	}
-	if cur, err := readInt(filepath.Join(dir, "memory.current")); err == nil && float64(cur) <= *req {
+	cur, err := readInt(filepath.Join(dir, "memory.current"))
+	if err != nil {
+		return "memory usage unreadable"
+	}
+	if float64(cur) <= *req {
 		return "within its memory request: protected, not a culprit"
 	}
 	return ""
@@ -123,6 +129,9 @@ func (a *MemoryHigh) Read(_ context.Context, w runtime.Workload) (float64, bool,
 // Set writes v bytes to the pod's memory.high, or max when set is false. The
 // kernel rounds to a page; the ledger records what Read gives back.
 func (a *MemoryHigh) Set(_ context.Context, w runtime.Workload, v float64, set bool) error {
+	if set && (math.IsNaN(v) || math.IsInf(v, 0) || v < MemoryHighDescriptor.Min) {
+		return fmt.Errorf("%s: memory.high of %v bytes refused: not a number, or below the %v byte floor", w.Subject, v, MemoryHighDescriptor.Min)
+	}
 	dir, err := a.podDir(w)
 	if err != nil {
 		return err
@@ -146,6 +155,10 @@ func (a *MemoryHigh) Set(_ context.Context, w runtime.Workload, v float64, set b
 	return f.Close()
 }
 
+// podUID is the canonical Kubernetes pod UID: a lower-case hex UUID. Anything
+// else never goes into a path.
+var podUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 // podDirs lists where a pod's cgroup may be, cgroupfs layout first, then systemd.
 func (a *MemoryHigh) podDirs(uid, qos string) []string {
 	u := strings.ReplaceAll(uid, "-", "_")
@@ -163,8 +176,13 @@ func (a *MemoryHigh) podDirs(uid, qos string) []string {
 
 // podDir is the pod's cgroup directory, or ErrGone when neither layout has it.
 func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
-	if w.UID == "" {
-		return "", fmt.Errorf("%s has no uid: %w", w.Subject, ErrGone)
+	if !podUID.MatchString(w.UID) {
+		return "", fmt.Errorf("%s has no valid pod uid %q: %w", w.Subject, w.UID, ErrGone)
+	}
+	switch w.QoS {
+	case "guaranteed", "burstable", "besteffort":
+	default:
+		return "", fmt.Errorf("%s has no valid qos %q: %w", w.Subject, w.QoS, ErrGone)
 	}
 	for _, d := range a.podDirs(w.UID, w.QoS) {
 		if st, err := os.Stat(d); err == nil && st.IsDir() {
