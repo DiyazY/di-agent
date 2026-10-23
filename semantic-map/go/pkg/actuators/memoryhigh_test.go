@@ -401,3 +401,49 @@ func TestMemoryHighRevertWithoutIdentityKeepsTheEntry(t *testing.T) {
 		t.Fatalf("after revert: memory.high %q, ledger %+v", got, l.All())
 	}
 }
+
+// TestMemoryHighRefusesAReadOnlyTree: an actuator that could never write
+// memory.high refuses to build, naming the root and that it is read-only, rather
+// than refusing every step: with a pod, by opening its memory.high for writing;
+// with none yet, by the kubepods directory's write access.
+func TestMemoryHighRefusesAReadOnlyTree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through file modes")
+	}
+	t.Run("a pod's memory.high", func(t *testing.T) {
+		root := mhRoot(t)
+		d := mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+		if err := os.Chmod(filepath.Join(d, "memory.high"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewMemoryHigh(Env{CgroupRoot: root})
+		if err == nil || !strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), "read-only") {
+			t.Fatalf("err %v; want a refusal naming %s and read-only", err, root)
+		}
+		if got := mhRead(t, filepath.Join(d, "memory.high")); got != "max" {
+			t.Fatalf("the probe changed memory.high to %q", got)
+		}
+	})
+	t.Run("no pod yet", func(t *testing.T) {
+		root := mhRoot(t)
+		kp := filepath.Join(root, "kubepods")
+		if err := os.MkdirAll(kp, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(kp, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(kp, 0o755) })
+		_, err := NewMemoryHigh(Env{CgroupRoot: root})
+		if err == nil || !strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), "read-only") {
+			t.Fatalf("err %v; want a refusal naming %s and read-only", err, root)
+		}
+	})
+	t.Run("writable", func(t *testing.T) {
+		root := mhRoot(t)
+		mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+		if _, err := NewMemoryHigh(Env{CgroupRoot: root}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}

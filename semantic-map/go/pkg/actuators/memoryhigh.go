@@ -78,7 +78,43 @@ func NewMemoryHigh(env Env) (Actuator, error) {
 	if err := a.refuseManaged(held); err != nil {
 		return nil, err
 	}
+	if err := a.probeWritable(); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// probeWritable refuses a tree the agent could never write memory.high in, as
+// the DaemonSet's read-only /host: better a refused start naming the lever than
+// every step refused one by one. With a pod cgroup present its memory.high is
+// opened for writing and closed, nothing written; with none that has the file,
+// the kubepods directory (else the root) must be writable.
+func (a *MemoryHigh) probeWritable() error {
+	readOnly := func(path string, err error) error {
+		return fmt.Errorf("memory.high cannot be written under %s: read-only (%s: %w); mount the cgroup tree writable or drop the action", a.root, path, err)
+	}
+	for _, p := range a.pods() {
+		f := filepath.Join(p.dir, "memory.high")
+		h, err := os.OpenFile(f, os.O_WRONLY, 0) // no O_TRUNC, no O_CREATE: nothing changes
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue // a pod cgroup on its way out
+		case err != nil:
+			return readOnly(f, err)
+		}
+		return h.Close()
+	}
+	dir := a.root
+	for _, d := range []string{filepath.Join(a.root, "kubepods"), filepath.Join(a.root, "kubepods.slice")} {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			dir = d
+			break
+		}
+	}
+	if err := writable(dir); err != nil {
+		return readOnly(dir, err)
+	}
+	return nil
 }
 
 func (a *MemoryHigh) Describe() Descriptor { return MemoryHighDescriptor }
@@ -197,9 +233,12 @@ func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
 	return "", fmt.Errorf("%s: no cgroup: %w", w.Subject, ErrGone)
 }
 
-// refuseManaged errors on the first pod or container cgroup whose memory.high is
-// not max and whose pod the agent does not hold.
-func (a *MemoryHigh) refuseManaged(held map[string]bool) error {
+// podCgroup is one pod's cgroup directory, with the pod's UID.
+type podCgroup struct{ dir, uid string }
+
+// pods lists the pod cgroups under the root, in both drivers' layouts.
+func (a *MemoryHigh) pods() []podCgroup {
+	var out []podCgroup
 	groups := []struct{ parent, podPrefix, suffix string }{
 		{filepath.Join(a.root, "kubepods"), "pod", ""},
 		{filepath.Join(a.root, "kubepods", "burstable"), "pod", ""},
@@ -222,22 +261,30 @@ func (a *MemoryHigh) refuseManaged(held map[string]bool) error {
 			if g.suffix != "" {
 				uid = strings.ReplaceAll(uid, "_", "-")
 			}
-			if held["pod:"+uid] {
-				continue
-			}
-			pod := filepath.Join(g.parent, n)
-			if err := managedBy(pod); err != nil {
-				return err
-			}
-			kids, err := os.ReadDir(pod)
-			if err != nil {
-				continue
-			}
-			for _, k := range kids {
-				if k.IsDir() {
-					if err := managedBy(filepath.Join(pod, k.Name())); err != nil {
-						return err
-					}
+			out = append(out, podCgroup{dir: filepath.Join(g.parent, n), uid: uid})
+		}
+	}
+	return out
+}
+
+// refuseManaged errors on the first pod or container cgroup whose memory.high is
+// not max and whose pod the agent does not hold.
+func (a *MemoryHigh) refuseManaged(held map[string]bool) error {
+	for _, p := range a.pods() {
+		if held["pod:"+p.uid] {
+			continue
+		}
+		if err := managedBy(p.dir); err != nil {
+			return err
+		}
+		kids, err := os.ReadDir(p.dir)
+		if err != nil {
+			continue
+		}
+		for _, k := range kids {
+			if k.IsDir() {
+				if err := managedBy(filepath.Join(p.dir, k.Name())); err != nil {
+					return err
 				}
 			}
 		}

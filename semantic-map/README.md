@@ -176,11 +176,12 @@ semantic-map/
     │   ├── runtime/            Runtime contract: the node's workloads and their resources (inventory only); registry + `dry-run` implementation
     │   │   └── kubernetes/     The `kubernetes` runtime: this node's pods; the `cpu.limit` actuator, a pod's CPU limit changed in place through the pod `resize` subresource
     │   ├── actuators/          Actuator contract: one action's Descriptor, Check, Read, Set; registry, the ledger, Acting, DryRun and Static
-    │   │   ├── actuators.go    Descriptor + Actuator + Env + Register/Build/Names + ErrGone
+    │   │   ├── actuators.go    Descriptor + Actuator + Env + Register/Build/Names + ErrGone, ErrInvalidIdentity
     │   │   ├── ledger.go       Entry + Ledger: every change the agent holds and what it replaced; OpenLedger (atomic file) / MemoryLedger
-    │   │   ├── acting.go       Acting: Apply (records the original first), Revert, Held (reconcile against the workloads listed)
+    │   │   ├── acting.go       Acting: Apply (records the original first), Revert, Forget, Held (reconcile against the workloads listed), Unbuilt
     │   │   ├── dryrun.go       DryRun: wraps an actuator so Set changes nothing outside the process
-    │   │   ├── memoryhigh.go   The `memory.high` actuator: a pod's cgroup v2 memory.high, a soft cap the kernel enforces by reclaim; Build refuses no cgroup v2, or the kubelet managing memory.high (MemoryQoS)
+    │   │   ├── memoryhigh.go   The `memory.high` actuator: a pod's cgroup v2 memory.high, a soft cap the kernel enforces by reclaim; Build refuses no cgroup v2, the kubelet managing memory.high (MemoryQoS), or a tree it cannot write
+    │   │   ├── writable_*.go   Whether a directory may be written (access W_OK on unix; nothing to ask elsewhere)
     │   │   └── static.go       Static: an actuator over in-memory values, the stand-in where the runtime is dry-run
     │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)
     │   │   ├── facts.go        Source iface + registry; Load() into the map; the host keys

@@ -420,13 +420,13 @@ The agent checks both at start and refuses to start, naming the lever, when eith
 
    and the kubelet configuration has no `featureGates: {MemoryQoS: true}`.
 
-It also needs to write the pod cgroups: the agent runs as root or with write access to them. The DaemonSet mounts the node at `/host` **read-only**, so there `memory.high` changes fail and are refused one by one until the cgroup tree is mounted writable.
+It also needs to write the pod cgroups: the agent runs as root or with write access to them. At start the actuator opens an existing pod cgroup's `memory.high` for writing (writing nothing), or, with no pod yet, checks that `kubepods` is on a writable mount, and refuses start naming the lever, the root and `read-only` when it cannot. The DaemonSet mounts the node at `/host` **read-only**, so there the memory lever refuses start until the cgroup tree is mounted writable (or the lever is removed).
 
 ### What it writes
 
 - Only the **pod-level** `memory.high`: `<root>/kubepods/<qos>/pod<uid>/memory.high` (cgroupfs driver; `pod<uid>` directly under `kubepods` for a Guaranteed pod), or `kubepods.slice/kubepods-<qos>.slice/kubepods-<qos>-pod<uid>.slice/memory.high` (systemd driver). The value is bytes, never below `policy.defaults.floor.memory.high.min` (64 MiB) or the actuator's own 64 MiB.
 - The kernel enforces it by reclaiming and throttling the pod's allocations above it. Nothing is killed: the agent **never writes `memory.max`**, and never a container's file.
-- It is undone by writing `max`, on a revert, a release, or expiry (`expiry`, 1h by default). A pod that restarts gets a new cgroup at `max`, and the agent drops its entry.
+- It is undone by writing `max`, on a revert, a release, or expiry (`expiry`, 1h by default). A pod that is replaced (new UID) gets a new cgroup at `max`, and the agent drops its entry. A change is given back through the pod the runtime lists, which is how the agent finds its cgroup: in a pass where the runtime cannot be listed nothing is given back, and the change stays in force until a pass that can list (a manual revert then fails with `502`, and can be retried).
 
 ### The ledger
 
@@ -445,6 +445,11 @@ loops:
 ```
 
 The memory lever then no longer runs, and gives back nothing it set earlier: first revert its changes (`GET /relief/actions`, then `POST /relief/actions/<id>/revert` with `Content-Type: application/json`) or let them expire. To keep it off one workload, deny `memory.high` in a `policy.rules` entry matching it; to stop all relief, `POST /relief/pause`.
+
+**Turning relief off (`enabled: false`) or removing a lever leaves that lever's changes in force, past their expiry, until reverted by hand**: no loop runs for the action, so nothing gives them back. At start the agent logs each one — `actuation: warning: memory.high on pod:<uid> (applied <bytes>, expires <time>) is in the ledger and not given back: no lever runs for this action` — and `GET /actuators` lists them under their action with `"built": false`. To give one back by hand:
+
+1. Undo the setting: write `max` to the pod's `memory.high` (the paths under *What it writes*), or, for `cpu.limit`, put back the pod's CPU limit (the entry's `original`; `original_set: false` means it had none).
+2. Then either delete the entry from the ledger with the agent stopped, or turn the lever back on and let the next start reconcile: an entry whose setting no longer reads as what the agent applied is dropped, and one still in force and past its expiry is given back.
 
 ---
 
