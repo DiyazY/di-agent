@@ -250,3 +250,56 @@ func TestNoRequestsOnTheDryRun(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// memTree is a cgroup v2 root with one burstable pod whose memory.high reads
+// high, and a spec on kubernetes with relief on over it, the ledger at ledger.
+func memTree(t *testing.T, high, extra string) (s spec.Spec, root, podDir, ledger string) {
+	t.Helper()
+	root = t.TempDir()
+	const uid = "1234abcd-0000-1111-2222-333344445555"
+	podDir = filepath.Join(root, "kubepods", "burstable", "pod"+uid)
+	if err := os.MkdirAll(podDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, v := range map[string]string{
+		filepath.Join(root, "cgroup.controllers"): "cpu memory\n",
+		filepath.Join(podDir, "memory.high"):      high + "\n",
+	} {
+		if err := os.WriteFile(name, []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledger = filepath.Join(t.TempDir(), "actions.json")
+	s, err := spec.Parse([]byte("runtime: {kind: kubernetes}\nloops: {relief: {enabled: true" + extra + "}}\n" +
+		"sources: {collectors: [{name: cgroup, type: cgroup, config: {root: " + root + "}}]}\n" +
+		"actuation: {ledger: " + ledger + "}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Node.ID = "n1"
+	return s, root, podDir, ledger
+}
+
+// TestADryRunOnAReadOnlyTreeStarts: dry_run on kubernetes never writes, so a
+// read-only cgroup tree, as the DaemonSet's /host, does not refuse start; a real
+// run on it still does.
+func TestADryRunOnAReadOnlyTreeStarts(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through file modes")
+	}
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _, pod, _ := memTree(t, "max", ", dry_run: true")
+	if err := os.Chmod(filepath.Join(pod, "memory.high"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := buildActing(s, named{dry}, t.Logf); err != nil {
+		t.Fatalf("dry run refused on a read-only tree: %v", err)
+	}
+	s.Loops.Relief.DryRun = nil
+	if _, _, err := buildActing(s, named{dry}, t.Logf); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("real run: err %v; want the read-only refusal", err)
+	}
+}

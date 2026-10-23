@@ -60,6 +60,9 @@ type Env struct {
 	Logf       func(format string, args ...any)
 	// Held returns the ledger's outstanding entries for an action. May be nil.
 	Held func(action string) []Entry
+	// DryRun says the actuator will be wrapped in DryRun and never write: a
+	// factory skips what only writing needs, as a write probe, and nothing else.
+	DryRun bool
 }
 
 // Factory builds the actuator of one registered action.

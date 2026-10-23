@@ -63,7 +63,8 @@ type MemoryHigh struct{ root string }
 // is not cgroup v2, and one where memory.high is already set by someone else:
 // with the kubelet's MemoryQoS on, the kubelet owns the file, would overwrite
 // what the agent sets, and the agent could not tell its own value from the
-// kubelet's. A pod the agent holds (env.Held) may differ from max.
+// kubelet's. A pod the agent holds (env.Held) may differ from max. It refuses a
+// tree it could not write memory.high in, unless env.DryRun says it never will.
 func NewMemoryHigh(env Env) (Actuator, error) {
 	if _, err := os.Stat(filepath.Join(env.CgroupRoot, "cgroup.controllers")); err != nil {
 		return nil, fmt.Errorf("memory.high needs cgroup v2: %s has no cgroup.controllers: %w", env.CgroupRoot, err)
@@ -86,8 +87,10 @@ func NewMemoryHigh(env Env) (Actuator, error) {
 	if err := a.refuseManaged(held); err != nil {
 		return nil, err
 	}
-	if err := a.probeWritable(); err != nil {
-		return nil, err
+	if !env.DryRun { // a dry run never writes, so a read-only tree is no reason to refuse it
+		if err := a.probeWritable(); err != nil {
+			return nil, err
+		}
 	}
 	return a, nil
 }

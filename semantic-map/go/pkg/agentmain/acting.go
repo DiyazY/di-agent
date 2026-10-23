@@ -73,7 +73,7 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 		}
 	}
 	env := actuators.Env{NodeID: cfg.Node.ID, CgroupRoot: collectors.CgroupRoot(cfg.Sources.Collectors),
-		Runtime: rt, Logf: logf, Held: ledger.For}
+		Runtime: rt, Logf: logf, Held: ledger.For, DryRun: dry}
 	var as []actuators.Actuator
 	levers := cfg.Loops.Relief.Levers
 	if !cfg.Loops.Relief.Enabled {

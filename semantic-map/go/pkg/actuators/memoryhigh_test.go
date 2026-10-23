@@ -608,3 +608,26 @@ func TestMemoryHighRefusesAReadOnlyTree(t *testing.T) {
 		}
 	})
 }
+
+// TestMemoryHighDryRunSkipsTheWriteProbe: an actuator that will be wrapped in a
+// dry run never writes, so a read-only tree, as the DaemonSet's /host, does not
+// refuse it; every other precondition still applies.
+func TestMemoryHighDryRunSkipsTheWriteProbe(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through file modes")
+	}
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+	if err := os.Chmod(filepath.Join(d, "memory.high"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewMemoryHigh(Env{CgroupRoot: root}); err == nil {
+		t.Fatal("a read-only tree built without DryRun")
+	}
+	if _, err := NewMemoryHigh(Env{CgroupRoot: root, DryRun: true}); err != nil {
+		t.Fatalf("dry run refused on a read-only tree: %v", err)
+	}
+	if _, err := NewMemoryHigh(Env{CgroupRoot: t.TempDir(), DryRun: true}); err == nil {
+		t.Fatal("dry run built without cgroup v2")
+	}
+}

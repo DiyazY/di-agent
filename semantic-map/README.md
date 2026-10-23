@@ -783,7 +783,7 @@ kubectl apply -f deploy/kubernetes/rbac.yaml
 kubectl apply -f deploy/kubernetes/daemonset.yaml
 ```
 
-The DaemonSet keeps the map on the node, in `/var/lib/di-agent` (a `hostPath`), so it survives the pod being restarted or upgraded; a drain sends SIGTERM and the agent saves before it exits. The node's filesystem is mounted read-only at `/host`, where the agent reads the node's cgroups, pod logs and facts (`facts[].root: /host`), so the map describes the node and not the container. It tolerates every taint, so control-plane and tainted nodes run an agent too, and ships with `loops.relief.enabled: false`.
+The DaemonSet keeps the map on the node, in `/var/lib/di-agent` (a `hostPath`), so it survives the pod being restarted or upgraded; a drain sends SIGTERM and the agent saves before it exits. The node's filesystem is mounted read-only at `/host`, where the agent reads the node's cgroups, pod logs and facts (`facts[].root: /host`), so the map describes the node and not the container. It tolerates every taint, so control-plane and tainted nodes run an agent too, and ships with `loops.relief.enabled: false`. With relief on, the memory lever needs the cgroup tree writable and refuses start on the read-only `/host` mount, except on a dry run (`loops.relief.dry_run: true`), which never writes.
 
 The agent's own pod must carry its UID in `POD_UID`, from the downward API, or the agent refuses to start in-cluster: it is how the agent recognises itself among the pods it may cap.
 
