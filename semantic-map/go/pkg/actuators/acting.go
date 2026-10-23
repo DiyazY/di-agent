@@ -50,6 +50,25 @@ func (a *Acting) Descriptors() []Descriptor {
 	return out
 }
 
+// Unbuilt lists the ledger's entries, on any node, whose action this Acting has
+// no actuator for, as when relief is off or the action's lever was removed: no
+// one gives them back. Sorted by action, then soonest-expiring first.
+func (a *Acting) Unbuilt() []Entry {
+	var out []Entry
+	for _, e := range a.ledger.All() {
+		if _, ok := a.actuators[e.Action]; !ok {
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Action != out[j].Action {
+			return out[i].Action < out[j].Action
+		}
+		return out[i].Expires.Before(out[j].Expires)
+	})
+	return out
+}
+
 // Entries lists the ledger's entries of action, on any node, soonest-expiring first.
 func (a *Acting) Entries(action string) []Entry { return a.ledger.For(action) }
 

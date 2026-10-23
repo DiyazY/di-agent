@@ -8,12 +8,17 @@ import (
 )
 
 // actuatorView is one action of GET /actuators: what it does, and the changes the
-// agent holds through it. Can is present only for ?subject=: why the action
-// cannot apply to that workload, "" when it can.
+// agent holds through it. Built is false for an action the ledger holds changes
+// of and no lever runs (relief off, or the lever removed): it has no descriptor
+// and no can, and nothing gives its changes back. Can is present only for
+// ?subject= on a built action: why the action cannot apply to that workload, ""
+// when it can.
 type actuatorView struct {
-	Descriptor actuators.Descriptor `json:"descriptor"`
-	Held       []actuators.Entry    `json:"held"`
-	Can        *string              `json:"can,omitempty"`
+	Action     string                `json:"action"`
+	Built      bool                  `json:"built"`
+	Descriptor *actuators.Descriptor `json:"descriptor,omitempty"`
+	Held       []actuators.Entry     `json:"held"`
+	Can        *string               `json:"can,omitempty"`
 }
 
 // registerActuatorsRoute serves the actions the agent can take, each with the
@@ -41,7 +46,7 @@ func registerActuatorsRoute(mux *http.ServeMux, rt runtime.Runtime, acting *actu
 		}
 		out := []actuatorView{}
 		for _, d := range acting.Descriptors() {
-			v := actuatorView{Descriptor: d, Held: []actuators.Entry{}}
+			v := actuatorView{Action: d.Action, Built: true, Descriptor: &d, Held: []actuators.Entry{}}
 			for _, e := range acting.Entries(d.Action) {
 				if subject == "" || e.Subject == subject {
 					v.Held = append(v.Held, e)
@@ -53,6 +58,16 @@ func registerActuatorsRoute(mux *http.ServeMux, rt runtime.Runtime, acting *actu
 				v.Can = &why
 			}
 			out = append(out, v)
+		}
+		// Changes no lever gives back, one row per action, after the built ones.
+		for _, e := range acting.Unbuilt() {
+			if subject != "" && e.Subject != subject {
+				continue
+			}
+			if n := len(out); n == 0 || out[n-1].Built || out[n-1].Action != e.Action {
+				out = append(out, actuatorView{Action: e.Action, Held: []actuators.Entry{}})
+			}
+			out[len(out)-1].Held = append(out[len(out)-1].Held, e)
 		}
 		writeJSON(w, out)
 	})

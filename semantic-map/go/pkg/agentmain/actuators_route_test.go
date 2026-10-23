@@ -3,6 +3,7 @@ package agentmain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -206,5 +207,81 @@ func TestADryRunReliefLoopActsOnAMapWorkload(t *testing.T) {
 	held := acting.Entries("cpu.limit")
 	if len(held) != 1 || held[0].Subject != "pod:a" || held[0].OriginalSet || held[0].Applied != 1.2000000000000002 {
 		t.Fatalf("held %+v; want pod:a stepped from 1.6 to 1.2 cores, with no limit before", held)
+	}
+}
+
+// TestALedgerEntryWithNoLeverIsWarnedAndShown: a change in the ledger whose
+// action no built actuator performs, as after relief was turned off or its lever
+// removed, is not given back by anything. Start says so, naming the change, and
+// GET /actuators shows it, so it is not in force unseen.
+func TestALedgerEntryWithNoLeverIsWarnedAndShown(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(t.TempDir(), "actions.json")
+	l, err := actuators.OpenLedger(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	held := actuators.Entry{Action: "memory.high", Subject: "pod:x", NodeID: "n1", Applied: 314572800, Expires: expires, DecisionID: "d1"}
+	if err := l.Put(held); err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string]func(*spec.Spec){
+		"relief off":    func(s *spec.Spec) { s.Loops.Relief.Enabled = false },
+		"lever removed": func(s *spec.Spec) { s.Loops.Relief.Levers = s.Loops.Relief.Levers[:1] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := spec.Default()
+			s.Node.ID = "n1"
+			s.Runtime.Kind = "kubernetes"
+			s.Loops.Relief.Enabled = true
+			s.Actuation.Ledger = ledgerPath
+			edit(&s)
+			var logs []string
+			logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+			acting, _, err := buildActing(s, named{dry}, logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			warned := false
+			for _, m := range logs {
+				if strings.Contains(m, "memory.high") && strings.Contains(m, "pod:x") && strings.Contains(m, "314572800") &&
+					strings.Contains(m, expires.Format(time.RFC3339)) && strings.Contains(m, "not given back: no lever runs for this action") {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Errorf("logs %q; want a warning naming the change and that no lever gives it back", logs)
+			}
+			mux := http.NewServeMux()
+			registerActuatorsRoute(mux, dry, acting)
+			rec := get(mux, "/actuators")
+			var out []struct {
+				Action     string                `json:"action"`
+				Descriptor *actuators.Descriptor `json:"descriptor"`
+				Built      bool                  `json:"built"`
+				Held       []actuators.Entry     `json:"held"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+				t.Fatal(err)
+			}
+			var found bool
+			for _, v := range out {
+				if v.Action == "memory.high" {
+					found = true
+					if v.Built || v.Descriptor != nil || len(v.Held) != 1 || v.Held[0].Subject != "pod:x" {
+						t.Errorf("memory.high %+v; want its held change, not built, no descriptor", v)
+					}
+				} else if !v.Built || v.Descriptor == nil || v.Descriptor.Action != v.Action {
+					t.Errorf("%+v; want a built action with its descriptor", v)
+				}
+			}
+			if !found {
+				t.Errorf("GET /actuators %s; want the memory.high change shown", rec.Body)
+			}
+		})
 	}
 }

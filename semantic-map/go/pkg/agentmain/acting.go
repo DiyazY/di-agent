@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/collectors"
@@ -87,7 +89,12 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 		}
 		as = append(as, a)
 	}
-	return actuators.NewActing(cfg.Node.ID, ledger, as...), !dry, nil
+	acting = actuators.NewActing(cfg.Node.ID, ledger, as...)
+	for _, e := range acting.Unbuilt() {
+		logf("actuation: warning: %s on %s (applied %s, expires %s) is in the ledger and not given back: no lever runs for this action; "+
+			"it stays in force until reverted by hand (OPERATING.md §10)", e.Action, e.Subject, strconv.FormatFloat(e.Applied, 'f', -1, 64), e.Expires.Format(time.RFC3339))
+	}
+	return acting, !dry, nil
 }
 
 // buildRelief builds one relief loop per lever, in lever order, sharing one
