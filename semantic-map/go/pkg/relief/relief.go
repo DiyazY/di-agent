@@ -85,13 +85,13 @@ type Action struct {
 	originRefused bool          // a further step was refused for want of origin, and journalled
 }
 
-// Config is what a Loop is built from. Descriptor is the action the loop takes:
-// the node property it relieves, the per-workload usage it moves, its unit and
-// the capacity fact that turns a share into that unit; Lever is its thresholds,
-// for the same action, and Interval how often it looks. Budget is the hourly
+// Config is what a Loop is built from. Lever is the action the loop takes and
+// its thresholds, and Interval how often it looks; the action's descriptor (the
+// node property it relieves, the per-workload usage it moves, its unit and the
+// capacity fact that turns a share into that unit) is its actuator's, in Acting. Budget is the hourly
 // limit and the cooldowns it shares with the node's other levers; nil is one of
 // its own, at the policy defaults' max_actions_per_hour. Runtime lists the
-// workloads; Acting changes them through the descriptor's actuator and holds the
+// workloads; Acting changes them through the lever's actuator and holds the
 // ledger of what it changed. Evidence says the changes really reach the system,
 // so an action's outcome is evidence about it: only then do outcomes feed the
 // map, the learned effects and the discovery queue. A dry run changes nothing,
@@ -102,7 +102,6 @@ type Config struct {
 	Interval   time.Duration
 	Lever      spec.Lever
 	Budget     *Budget
-	Descriptor actuators.Descriptor
 	NodeID     string
 	Runtime    runtime.Runtime
 	Acting     *actuators.Acting
@@ -171,20 +170,18 @@ func New(c Config) (*Loop, error) {
 		return nil, errors.New("relief: no runtime")
 	case c.Acting == nil:
 		return nil, errors.New("relief: no acting")
-	case c.Descriptor.Action == "":
-		return nil, errors.New("relief: no action descriptor")
+	case c.Lever.Action == "":
+		return nil, errors.New("relief: the lever names no action")
 	case c.Policy == nil:
 		return nil, errors.New("relief: no policy")
 	case c.Map == nil:
 		return nil, errors.New("relief: no state map")
 	case c.Interval <= 0:
 		return nil, fmt.Errorf("relief: interval %s must be positive", c.Interval)
-	case c.Lever.Action != c.Descriptor.Action:
-		return nil, fmt.Errorf("relief: lever for %q, descriptor for %q", c.Lever.Action, c.Descriptor.Action)
 	}
-	act, ok := c.Acting.Actuator(c.Descriptor.Action)
+	act, ok := c.Acting.Actuator(c.Lever.Action)
 	if !ok {
-		return nil, fmt.Errorf("relief: no actuator for action %q", c.Descriptor.Action)
+		return nil, fmt.Errorf("relief: no actuator for action %q", c.Lever.Action)
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -197,7 +194,7 @@ func New(c Config) (*Loop, error) {
 	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Lever, d: c.Descriptor, budget: c.Budget, act: act, epoch: now.Unix(),
+		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act, epoch: now.Unix(),
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
 		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spentFor: map[string]bool{},

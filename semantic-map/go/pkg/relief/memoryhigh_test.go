@@ -124,7 +124,7 @@ func (h *memHarness) newLoop() *Loop {
 		h.t.Fatal(err)
 	}
 	cpuAct := actuators.Static(kubernetes.CPULimitDescriptor, nil, func(runtime.Workload) (float64, bool) { return 0, false })
-	l, err := New(Config{Interval: spec.Default().Loops.Relief.Interval, Lever: h.lever, Descriptor: act.Describe(), NodeID: "n1", Runtime: h.rt,
+	l, err := New(Config{Interval: spec.Default().Loops.Relief.Interval, Lever: h.lever, NodeID: "n1", Runtime: h.rt,
 		Acting: actuators.NewActing("n1", h.ledger, act, cpuAct), Policy: defaultPolicy(h.t, nil), Map: h.m,
 		Now: h.clock, Logf: h.t.Logf})
 	if err != nil {

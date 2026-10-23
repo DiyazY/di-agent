@@ -178,7 +178,7 @@ func newHarness(t *testing.T, f fixture) *harness {
 	}
 	relief := spec.Default().Loops.Relief
 	l, err := New(Config{
-		Interval: relief.Interval, Lever: relief.Levers[0], Budget: f.budget, Descriptor: cpu, NodeID: "n1", Runtime: rt2,
+		Interval: relief.Interval, Lever: relief.Levers[0], Budget: f.budget, NodeID: "n1", Runtime: rt2,
 		Acting: actuators.NewActing("n1", h.ledger, act2), Policy: defaultPolicy(t, f.policy), Map: h.m,
 		Now: h.clock, Logf: t.Logf, Evidence: f.evidence, Candidates: f.candidates,
 	})
@@ -1436,5 +1436,26 @@ func TestARefusedChangeIsRefunded(t *testing.T) {
 	h.until(2*time.Hour, 0.5, "a refused change", func() bool { return h.l.Status().Refused > 0 })
 	if n := h.l.budget.Count(h.now); n != 0 || len(h.ledger.All()) != 0 {
 		t.Fatalf("hourly count %d, ledger %+v; want the slot given back, nothing in force", n, h.ledger.All())
+	}
+}
+
+// TestTheDescriptorIsTheActuators: a loop takes its descriptor from the
+// actuator of its lever's action, so the two cannot disagree; a lever with no
+// actuator is refused, naming the action.
+func TestTheDescriptorIsTheActuators(t *testing.T) {
+	h := newHarness(t, fixture{})
+	lever := spec.Default().Loops.Relief.Levers[0]
+	cfg := Config{Interval: tick, Lever: lever, NodeID: "n1", Runtime: h.rt,
+		Acting: actuators.NewActing("n1", h.ledger, h.actuator), Policy: h.l.cfg.Policy, Map: h.m}
+	l, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New without a separate descriptor: %v", err)
+	}
+	if got := l.Status().Action; got != cpu.Action {
+		t.Fatalf("action %q; want %q", got, cpu.Action)
+	}
+	cfg.Acting = actuators.NewActing("n1", h.ledger)
+	if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), lever.Action) {
+		t.Fatalf("err %v; want a refusal naming %s", err, lever.Action)
 	}
 }

@@ -131,12 +131,8 @@ func buildRelief(cfg spec.Spec, rt runtime.Runtime, acting *actuators.Acting, po
 	budget := relief.NewBudget(pol.Defaults().MaxActionsPerHour)
 	var loops []*relief.Loop
 	for i, l := range cfg.Loops.Relief.Levers {
-		a, ok := acting.Actuator(l.Action)
-		if !ok {
-			return nil, fmt.Errorf("loops.relief.levers[%d] %s: no actuator built for it", i, l.Action)
-		}
 		loop, err := relief.New(relief.Config{Interval: cfg.Loops.Relief.Interval, Lever: l, Budget: budget,
-			Descriptor: a.Describe(), NodeID: cfg.Node.ID, Runtime: rt, Acting: acting, Policy: pol, Map: m,
+			NodeID: cfg.Node.ID, Runtime: rt, Acting: acting, Policy: pol, Map: m,
 			Logf: logf, Evidence: evidence, DryRun: cfg.Loops.Relief.IsDryRun(cfg.Runtime.Kind), Candidates: cands})
 		if err != nil {
 			return nil, fmt.Errorf("loops.relief.levers[%d] %s: %w", i, l.Action, err)

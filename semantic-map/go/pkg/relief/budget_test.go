@@ -129,7 +129,7 @@ func (h *harness) secondWith(budget *Budget, act actuators.Actuator) *Loop {
 			lever = l
 		}
 	}
-	l, err := New(Config{Interval: tick, Lever: lever, Descriptor: memory, NodeID: "n1", Runtime: h.rt,
+	l, err := New(Config{Interval: tick, Lever: lever, NodeID: "n1", Runtime: h.rt,
 		Acting: actuators.NewActing("n1", h.ledger, act), Policy: h.l.cfg.Policy, Map: h.m,
 		Now: h.clock, Logf: h.t.Logf, Budget: budget})
 	if err != nil {

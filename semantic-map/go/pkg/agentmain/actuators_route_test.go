@@ -192,9 +192,8 @@ func TestADryRunReliefLoopActsOnAMapWorkload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cpu, _ := acting.Actuator("cpu.limit")
 	loop, err := relief.New(relief.Config{Interval: s.Loops.Relief.Interval, Lever: s.Loops.Relief.Levers[0],
-		Descriptor: cpu.Describe(), NodeID: "n1", Runtime: rt, Acting: acting, Policy: pol, Map: m, Now: clock, Logf: t.Logf})
+		NodeID: "n1", Runtime: rt, Acting: acting, Policy: pol, Map: m, Now: clock, Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}
