@@ -21,3 +21,6 @@ terraform.*
 tfplan
 
 *.env
+# Local secrets
+.env
+poc2/data

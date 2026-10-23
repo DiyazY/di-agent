@@ -65,6 +65,17 @@ export default function SwitchboardPanel() {
         </strong>
       </div>
 
+      {status?.data_quality && (
+        <div className="metric-row">
+          <span>Data health</span>
+          <strong>
+            {status.data_quality.stale_sources === 0 && status.data_quality.stale_consumers === 0
+              ? "healthy"
+              : `${status.data_quality.stale_sources + status.data_quality.stale_consumers} stale`}
+          </strong>
+        </div>
+      )}
+
       {status && Object.keys(status.gensets ?? {}).length > 0 && (
         <ul className="entry-list">
           {Object.entries(status.gensets).map(([id, genset]) => (

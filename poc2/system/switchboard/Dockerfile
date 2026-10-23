@@ -5,14 +5,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY switchboard.py controller.py main.py .
+COPY switchboard.py controller.py main.py modbus_client.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
     KAFKA_TOPIC=switchboard.telemetry \
-    GENSET_KAFKA_TOPIC=genset.telemetry \
-    BATTERY_KAFKA_TOPIC=battery.telemetry \
     REQUEST_KAFKA_TOPIC=switchboard.requests \
-    STEP_INTERVAL_S=1
+    STEP_INTERVAL_S=1 \
+    GENSET_MODBUS_TARGETS= \
+    BATTERY_MODBUS_TARGETS= \
+    MODBUS_POLL_INTERVAL_S=2
 
 EXPOSE 8000
 

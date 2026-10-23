@@ -15,10 +15,10 @@ def build_auxiliary_engine() -> EngineDualFuel:
         name="Wartsila 8V31DF",
         rated_power=4800,
         rated_speed=750,
-        bsfc_curve=np.asarray([[0.25, 0.50, 0.75, 1.0], [176.5, 196.5, 196.5, 176.5]]).transpose(),
-        bspfc_curve=np.asarray([[0.25, 0.50, 0.75, 1.0], [176.5, 196.5, 196.5, 176.5]]).transpose(),
+        bsfc_curve=np.asarray([[0.5, 0.75, 0.85, 1.0], [153.5, 145.9, 144.2, 142.8]]).transpose(),
         fuel_type=TypeFuel.NATURAL_GAS,
         fuel_origin=FuelOrigin.BIO,
+        bspfc_curve=np.asarray([[0.5, 0.75, 0.85, 1.0], [8.8, 6.0, 5.6, 4.7]]).transpose(),
         pilot_fuel_type=TypeFuel.LFO,
         pilot_fuel_origin=FuelOrigin.BIO,
         engine_cycle_type=EngineCycleType.OTTO,
@@ -34,7 +34,7 @@ def build_generator() -> ElectricMachine:
         rated_speed=750,
         power_type=TypePower.POWER_SOURCE,
         switchboard_id=1,
-        eff_curve=np.asarray([[1.0, 0.75, 0.5, 0.25], [0.95, 0.94, 0.92, 0.88]]).transpose(),
+        eff_curve=np.asarray([[0.25, 0.5, 0.75, 0.85, 1.0], [0.915, 0.951, 0.962, 0.964, 0.9602]]).transpose(),
     )
 
 

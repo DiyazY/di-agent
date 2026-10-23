@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 from controller import GensetController
@@ -16,15 +17,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Genset Control API", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)
 
 
 class LoadRequest(BaseModel):
     load_ratio: float = Field(..., ge=0.0, le=1.0, description="Target load ratio, 0.0-1.0")
 
 
+class AnomalyRequest(BaseModel):
+    enabled: bool = Field(..., description="Whether anomaly mode is active")
+
+
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+def health(response: Response) -> dict:
+    health_data = controller.get_health()
+    if health_data["status"] != "ok":
+        response.status_code = 503
+    return health_data
 
 
 @app.get("/status")
@@ -48,3 +57,14 @@ def set_load(request: LoadRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"target_load_ratio": request.load_ratio}
+
+
+@app.get("/anomaly")
+def get_anomaly() -> dict:
+    return {"anomaly_enabled": controller.get_status()["anomaly_enabled"]}
+
+
+@app.post("/anomaly")
+def set_anomaly(request: AnomalyRequest) -> dict:
+    controller.set_anomaly_enabled(request.enabled)
+    return {"anomaly_enabled": request.enabled}

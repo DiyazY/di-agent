@@ -3,13 +3,14 @@
 # templates in this chart set a nodeSelector unless you populate one below.
 
 global:
-  # Prefixed onto every chart-built image's repository (genset, switchboard,
-  # propulsion, battery, auxload, telemetry-writer, playground). Public
-  # images (kafka, influxdb, grafana) are referenced by their full upstream
-  # repository path and are not affected by this value.
-  imageRegistry: ghcr.io/unlabs-dev
+  # Prefixed onto every chart-built image's repository. Public images (kafka,
+  # influxdb, grafana) are referenced by their upstream repository and are
+  # not affected by this value.
+  imageRegistry: ghcr.io/chuducanh242002
   imageTag: latest
-  imagePullPolicy: IfNotPresent
+  # Always is required so pods actually re-pull ":latest" on restart instead
+  # of reusing a node's cached image.
+  imagePullPolicy: Always
   # e.g. [{ name: ghcr-creds }] if the registry above is private.
   imagePullSecrets: []
   # Applied to every pod in this chart unless overridden per-service below.
@@ -23,32 +24,72 @@ kafka:
   port: 9092
   controllerPort: 9093
   clusterId: ZGlhZ2VudC1rYWZrYS0
+  logRetentionHours: "168"
+  logRetentionBytes: "1073741824"
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
+  nodeSelector: {}
+  resources: {}
+
+datasetCollector:
+  enabled: true
+  image:
+    repository: dataset-collector
+    tag: ""
+  kafkaTopic: dataset.telemetry
+  groupId: dataset-collector
+  maxActiveSeries: 2000
+  nodeSelector: {}
+  resources: {}
+
+agent:
+  # The default multi-node agent fleet is deployed by scripts/03-agent.sh.
+  # Enable this only for a single agent managed entirely by this Helm release.
+  enabled: false
+  image:
+    repository: di-agent
+    tag: ""
+  port: 9090
+  regime: stable
+  profile: edge-minimal
+  collectInterval: 5s
+  proposer: "false"
   nodeSelector: {}
   resources: {}
 
 genset:
+  enabled: false
   image:
     repository: genset
     tag: ""
   count: 4
   kafkaTopic: genset.telemetry
+  # Modbus TCP port exposed alongside the REST API, mirroring a real genset
+  # controller's link to a vessel's power management system.
+  modbusPort: 5020
   nodeSelector: {}
   resources: {}
 
 switchboard:
+  enabled: false
   image:
     repository: switchboard
     tag: ""
   # Topic the switchboard publishes per-consumer allocations to; must match
   # propulsion.allocationKafkaTopic / auxload.allocationKafkaTopic below.
   kafkaTopic: switchboard.telemetry
-  gensetKafkaTopic: genset.telemetry
-  batteryKafkaTopic: battery.telemetry
   requestKafkaTopic: switchboard.requests
+  # Interval (seconds) the switchboard polls each genset/battery Modbus TCP
+  # server at, mirroring a PMS's field-bus supervision loop. Read-only:
+  # never feeds the Kafka-derived allocation logic (see GET /modbus).
+  modbusPollIntervalS: 2
   nodeSelector: {}
   resources: {}
 
 propulsion:
+  enabled: false
   image:
     repository: propulsion
     tag: ""
@@ -58,19 +99,40 @@ propulsion:
   allocationKafkaTopic: switchboard.telemetry
   # One priority per instance; recycled round-robin if fewer than `count`.
   priorities: [1]
+  # Modbus TCP port exposed alongside the REST API.
+  modbusPort: 5020
   nodeSelector: {}
   resources: {}
 
 battery:
+  enabled: false
   image:
     repository: battery
     tag: ""
-  count: 1
+  count: 2
   kafkaTopic: battery.telemetry
+  # One battery model key per instance (see system/battery/battery.py);
+  # recycled round-robin if fewer than `count`.
+  models: [ayk-lfp, leclanche-mrs2]
+  # Modbus TCP port exposed alongside the REST API.
+  modbusPort: 5020
+  nodeSelector: {}
+  resources: {}
+
+shorePower:
+  enabled: false
+  image:
+    repository: shore-power
+    tag: ""
+  kafkaTopic: shore_power.telemetry
+  ratedPowerKw: "1000"
+  # DNS name (Service:port) of the battery instance to charge while connected.
+  batteryUrl: "http://battery-1:8000"
   nodeSelector: {}
   resources: {}
 
 auxload:
+  enabled: false
   image:
     repository: auxload
     tag: ""
@@ -82,6 +144,21 @@ auxload:
   nodeSelector: {}
   resources: {}
 
+navigation:
+  enabled: false
+  image:
+    repository: navigation
+    tag: ""
+  kafkaTopic: navigation.telemetry
+  # Actisense-ASCII NMEA 2000 gateway TCP port (canboat n2kd convention).
+  n2kGatewayPort: 2597
+  vesselName: vessel-1
+  initialSpeedKnots: "8"
+  # Time acceleration: 60 -> one simulated minute per wall second.
+  timeScale: "60"
+  nodeSelector: {}
+  resources: {}
+
 influxdb:
   image:
     repository: influxdb
@@ -89,20 +166,114 @@ influxdb:
   port: 8086
   org: di-agent
   bucket: telemetry
-  adminUser: admin
-  # Change these before deploying anywhere beyond a local/throwaway cluster;
-  # prefer passing via `--set` or a separate untracked values file rather
-  # than committing real credentials here.
-  adminPassword: admin12345
-  adminToken: change-me-too
+  retention: 30d
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
+  # Pre-create this Secret in the release namespace. Required keys are
+  # admin-user, admin-password, and admin-token.
+  existingSecret: influxdb-credentials
+  nodeSelector: {}
+  resources: {}
+
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16"
+  port: 5432
+  database: engine
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: local-path
+  # Pre-create this Secret in the release namespace. Required keys are
+  # username and password.
+  existingSecret: postgres-credentials
+  ingest:
+    # Post-install/upgrade Job that downloads the CSVs and COPYs them in.
+    enabled: true
+    image:
+      repository: data-ingest
+      tag: ""
+    # Secret with key data-url holding the SharePoint share link (DATA_URL).
+    dataUrlSecret: data-url
+    resources: {}
   nodeSelector: {}
   resources: {}
 
 telemetryWriter:
+  enabled: true
   image:
     repository: telemetry-writer
     tag: ""
   kafkaGroupId: telemetry-writer
+  logEveryNMessages: 50
+  strictValidation: true
+  nodeSelector: {}
+  resources: {}
+
+telemetryWriterCloud:
+  # Disabled by default: a second telemetry-writer instance that reads the
+  # mirrored topics back out of Azure Event Hubs and writes them into a
+  # cloud-hosted InfluxDB, making the cloud store eventually consistent with
+  # the edge one. Only meaningful when telemetryCloudSync.target is
+  # "eventhub" (IoT Hub device messages aren't a Kafka-consumable stream).
+  enabled: false
+  image:
+    repository: telemetry-writer
+    tag: ""
+  kafkaGroupId: telemetry-writer-cloud
+  logEveryNMessages: 50
+  strictValidation: true
+  influxdb:
+    url: ""
+    org: di-agent
+    bucket: telemetry
+    # Pre-create this Secret in the release namespace with an "admin-token" key.
+    existingSecret: influxdb-cloud-credentials
+  nodeSelector: {}
+  resources: {}
+
+telemetryCloudSync:
+  # Disabled by default: mirrors the telemetry Kafka topics to the cloud for
+  # eventual sync. Enable once `target` and its matching secret below are set.
+  enabled: false
+  image:
+    repository: telemetry-cloud-sync
+    tag: ""
+  kafkaGroupId: telemetry-cloud-sync
+  logEveryNMessages: 50
+  retryBackoffSeconds: 5
+  # "eventhub" mirrors to Azure Event Hubs over its Kafka-compatible
+  # endpoint. "iothub" sends each service's telemetry as device-to-cloud
+  # messages through a per-service Azure IoT Hub device identity.
+  target: iothub
+  eventHub:
+    # e.g. my-namespace.servicebus.windows.net
+    namespaceFqdn: "di-agent-system.servicebus.windows.net"
+    # Pre-create this Secret in the release namespace with a
+    # "connection-string" key (Event Hubs namespace or event-hub-level SAS
+    # connection string).
+    existingSecret: eventhub-credentials
+    # Optional JSON mapping of local Kafka topic name -> Event Hub name, e.g.
+    # '{"genset.telemetry":"genset-telemetry"}'. Defaults to using the local
+    # topic name as the Event Hub name.
+    topicMap: "{}"
+  iotHub:
+    # Pre-create this Secret in the release namespace with one connection
+    # string key per device below (each pre-registered as its own IoT Hub
+    # device identity, e.g. via `az iot hub device-identity create`).
+    existingSecret: iothub-credentials
+    devices:
+      genset: genset-connection-string
+      propulsion: propulsion-connection-string
+      battery: battery-connection-string
+      auxload: auxload-connection-string
+      shorePower: shore-power-connection-string
+      switchboard: switchboard-connection-string
+      dataset: dataset-connection-string
   nodeSelector: {}
   resources: {}
 
@@ -111,16 +282,59 @@ grafana:
     repository: grafana/grafana
     tag: latest
   port: 3000
-  adminUser: admin
-  adminPassword: admin12345
+  # Pre-create this Secret in the release namespace. Required keys are
+  # admin-user and admin-password.
+  existingSecret: grafana-credentials
+  nodeSelector: {}
+  resources: {}
+
+prometheus:
+  image:
+    repository: prom/prometheus
+    tag: latest
+  port: 9090
+  scrapeInterval: 15s
+  retention: 15d
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
   nodeSelector: {}
   resources: {}
 
 playground:
+  enabled: false
   image:
     repository: playground
     tag: ""
   nodePort: 30080
   switchboardUpstream: "switchboard:8000"
+  nodeSelector: {}
+  resources: {}
+  # Sidecar that scrapes nginx's stub_status and re-exposes it as
+  # Prometheus /metrics on port 9113 (see templates/playground.yaml).
+  metricsExporter:
+    image:
+      repository: nginx/nginx-prometheus-exporter
+      tag: latest
+    resources: {}
+
+streamer:
+  enabled: true
+  image:
+    repository: replay-streamer
+    tag: ""
+  # Both modes use the selected run's PostgreSQL signal statistics and metadata.
+  mode: synthetic
+  runId: 1000rpm_150kW_0001
+  # Every source of the run (short + long_*) is streamed together, aligned by t.
+  # One "point" is one time step: every active signal emits one sample.
+  intervalMs: 1000
+  pointsPerInterval: 1
+  loop: true
+  readAheadRows: 1000
+  randomSeed: 1
+  kafkaTopic: dataset.telemetry
+  kafkaGroupId: replay-streamer-control
   nodeSelector: {}
   resources: {}

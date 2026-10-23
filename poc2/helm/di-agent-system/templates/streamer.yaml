@@ -1,0 +1,104 @@
+{{- if .Values.streamer.enabled }}
+{{- if not .Values.postgres.enabled }}
+{{- fail "streamer.enabled requires postgres.enabled=true" }}
+{{- end }}
+{{- if not (has .Values.streamer.mode (list "real" "synthetic")) }}
+{{- fail "streamer.mode must be either real or synthetic" }}
+{{- end }}
+{{- if or (lt (.Values.streamer.intervalMs | int) 10) (gt (.Values.streamer.intervalMs | int) 3600000) }}
+{{- fail "streamer.intervalMs must be between 10 and 3600000" }}
+{{- end }}
+{{- if or (lt (.Values.streamer.pointsPerInterval | int) 1) (gt (.Values.streamer.pointsPerInterval | int) 10000) }}
+{{- fail "streamer.pointsPerInterval must be between 1 and 10000" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: replay-streamer
+  labels:
+    app: replay-streamer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: replay-streamer
+  template:
+    metadata:
+      labels:
+        app: replay-streamer
+      {{- include "diagent.podAnnotations" (dict "root" . "promPort" "8000") | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.streamer.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: replay-streamer
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.streamer.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.database | quote }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: password
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.streamer.kafkaTopic | quote }}
+            - name: MODE
+              value: {{ .Values.streamer.mode | quote }}
+            - name: RUN_ID
+              value: {{ .Values.streamer.runId | quote }}
+            - name: INTERVAL_MS
+              value: {{ .Values.streamer.intervalMs | quote }}
+            - name: POINTS_PER_INTERVAL
+              value: {{ .Values.streamer.pointsPerInterval | quote }}
+            - name: LOOP
+              value: {{ .Values.streamer.loop | quote }}
+            - name: READ_AHEAD_ROWS
+              value: {{ .Values.streamer.readAheadRows | quote }}
+            - name: RANDOM_SEED
+              value: {{ .Values.streamer.randomSeed | quote }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 8000
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.streamer.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: replay-streamer
+  labels:
+    app: replay-streamer
+spec:
+  selector:
+    app: replay-streamer
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+{{- end }}

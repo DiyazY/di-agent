@@ -5,13 +5,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY genset.py controller.py main.py .
+COPY genset.py controller.py main.py modbus_server.py sensors.py .
 
 ENV KAFKA_BROKERS=localhost:9092 \
     KAFKA_TOPIC=genset.telemetry \
     STEP_INTERVAL_S=1 \
-    RAMP_RATE_PER_S=0.05
+    RAMP_RATE_PER_S=0.05 \
+    MODBUS_HOST=0.0.0.0 \
+    MODBUS_PORT=5020
 
-EXPOSE 8000
+EXPOSE 8000 5020
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

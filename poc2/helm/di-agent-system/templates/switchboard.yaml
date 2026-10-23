@@ -1,3 +1,4 @@
+{{- if .Values.switchboard.enabled }}
 # Single switchboard instance: aggregates genset/battery supply and
 # consumer (propulsion/auxload) requests, and publishes each consumer's
 # power allocation.
@@ -16,6 +17,7 @@ spec:
     metadata:
       labels:
         app: switchboard
+      {{- include "diagent.podAnnotations" (dict "root" . "promPort" "8000") | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" .Values.switchboard.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
@@ -33,12 +35,14 @@ spec:
               value: "kafka:{{ .Values.kafka.port }}"
             - name: KAFKA_TOPIC
               value: {{ .Values.switchboard.kafkaTopic | quote }}
-            - name: GENSET_KAFKA_TOPIC
-              value: {{ .Values.switchboard.gensetKafkaTopic | quote }}
-            - name: BATTERY_KAFKA_TOPIC
-              value: {{ .Values.switchboard.batteryKafkaTopic | quote }}
             - name: REQUEST_KAFKA_TOPIC
               value: {{ .Values.switchboard.requestKafkaTopic | quote }}
+            - name: GENSET_MODBUS_TARGETS
+              value: {{ include "diagent.modbusTargets" (dict "prefix" "genset" "count" .Values.genset.count "port" .Values.genset.modbusPort) | quote }}
+            - name: BATTERY_MODBUS_TARGETS
+              value: {{ include "diagent.modbusTargets" (dict "prefix" "battery" "count" .Values.battery.count "port" .Values.battery.modbusPort) | quote }}
+            - name: MODBUS_POLL_INTERVAL_S
+              value: {{ .Values.switchboard.modbusPollIntervalS | quote }}
           resources:
             {{- toYaml .Values.switchboard.resources | nindent 12 }}
 ---
@@ -54,3 +58,4 @@ spec:
   ports:
     - port: 8000
       targetPort: 8000
+{{- end }}

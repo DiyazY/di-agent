@@ -1,0 +1,72 @@
+{{- if .Values.datasetCollector.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dataset-collector
+  labels:
+    app: dataset-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dataset-collector
+  template:
+    metadata:
+      labels:
+        app: dataset-collector
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.datasetCollector.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dataset-collector
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.datasetCollector.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.datasetCollector.kafkaTopic | quote }}
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.datasetCollector.groupId | quote }}
+            - name: MAX_ACTIVE_SERIES
+              value: {{ .Values.datasetCollector.maxActiveSeries | quote }}
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.datasetCollector.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dataset-collector
+  labels:
+    app: dataset-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: dataset-collector
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}

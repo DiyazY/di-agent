@@ -1,0 +1,104 @@
+# Kafka consumer that mirrors telemetry topics to the cloud (Azure Event
+# Hubs or Azure IoT Hub, per .Values.telemetryCloudSync.target) for eventual
+# sync. No externally-exposed port (consumer only). Disabled unless
+# .Values.telemetryCloudSync.enabled is true.
+{{- if .Values.telemetryCloudSync.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-cloud-sync
+  labels:
+    app: telemetry-cloud-sync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-cloud-sync
+  template:
+    metadata:
+      labels:
+        app: telemetry-cloud-sync
+      {{- include "diagent.podAnnotations" (dict "root" .) | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryCloudSync.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telemetry-cloud-sync
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.telemetryCloudSync.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: SYNC_KAFKA_TOPICS
+              value: {{ printf "%s,%s,%s,%s,%s,%s,%s" .Values.genset.kafkaTopic .Values.propulsion.kafkaTopic .Values.battery.kafkaTopic .Values.auxload.kafkaTopic .Values.shorePower.kafkaTopic .Values.propulsion.allocationKafkaTopic .Values.streamer.kafkaTopic | quote }}
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.telemetryCloudSync.kafkaGroupId | quote }}
+            - name: LOG_EVERY_N_MESSAGES
+              value: {{ .Values.telemetryCloudSync.logEveryNMessages | quote }}
+            - name: RETRY_BACKOFF_S
+              value: {{ .Values.telemetryCloudSync.retryBackoffSeconds | quote }}
+            - name: SYNC_TARGET
+              value: {{ .Values.telemetryCloudSync.target | quote }}
+            {{- if eq .Values.telemetryCloudSync.target "iothub" }}
+            - name: IOTHUB_TOPIC_ENV_MAP
+              value: {{ printf "{%s}" (join "," (list
+                  (printf "%q:%q" .Values.genset.kafkaTopic "IOTHUB_CONN_GENSET")
+                  (printf "%q:%q" .Values.propulsion.kafkaTopic "IOTHUB_CONN_PROPULSION")
+                  (printf "%q:%q" .Values.battery.kafkaTopic "IOTHUB_CONN_BATTERY")
+                  (printf "%q:%q" .Values.auxload.kafkaTopic "IOTHUB_CONN_AUXLOAD")
+                  (printf "%q:%q" .Values.shorePower.kafkaTopic "IOTHUB_CONN_SHOREPOWER")
+                  (printf "%q:%q" .Values.switchboard.kafkaTopic "IOTHUB_CONN_SWITCHBOARD")
+                  (printf "%q:%q" .Values.streamer.kafkaTopic "IOTHUB_CONN_DATASET")
+                )) | quote }}
+            - name: IOTHUB_CONN_GENSET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.genset }}
+            - name: IOTHUB_CONN_PROPULSION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.propulsion }}
+            - name: IOTHUB_CONN_BATTERY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.battery }}
+            - name: IOTHUB_CONN_AUXLOAD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.auxload }}
+            - name: IOTHUB_CONN_SHOREPOWER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.shorePower }}
+            - name: IOTHUB_CONN_SWITCHBOARD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.switchboard }}
+            - name: IOTHUB_CONN_DATASET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.iotHub.existingSecret }}
+                  key: {{ .Values.telemetryCloudSync.iotHub.devices.dataset }}
+            {{- else }}
+            - name: EVENTHUB_NAMESPACE_FQDN
+              value: {{ .Values.telemetryCloudSync.eventHub.namespaceFqdn | quote }}
+            - name: EVENTHUB_TOPIC_MAP
+              value: {{ .Values.telemetryCloudSync.eventHub.topicMap | quote }}
+            - name: EVENTHUB_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.eventHub.existingSecret }}
+                  key: connection-string
+            {{- end }}
+          resources:
+            {{- toYaml .Values.telemetryCloudSync.resources | nindent 12 }}
+{{- end }}

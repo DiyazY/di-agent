@@ -1,3 +1,4 @@
+{{- if .Values.propulsion.enabled }}
 # One Deployment + Service per propulsion instance (propulsion-1..N); each
 # requests power from, and is allocated power by, the switchboard.
 {{- range $i := until (.Values.propulsion.count | int) }}
@@ -22,6 +23,7 @@ spec:
       labels:
         app: propulsion
         propulsion-id: {{ $name }}
+      {{- include "diagent.podAnnotations" (dict "root" $ "promPort" "8000") | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" $.Values.propulsion.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
       {{- with $.Values.global.imagePullSecrets }}
@@ -34,6 +36,7 @@ spec:
           imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
           ports:
             - containerPort: 8000
+            - containerPort: {{ $.Values.propulsion.modbusPort }}
           env:
             - name: PROPULSION_ID
               value: {{ $name | quote }}
@@ -47,6 +50,8 @@ spec:
               value: {{ $.Values.propulsion.requestKafkaTopic | quote }}
             - name: ALLOCATION_KAFKA_TOPIC
               value: {{ $.Values.propulsion.allocationKafkaTopic | quote }}
+            - name: MODBUS_PORT
+              value: {{ $.Values.propulsion.modbusPort | quote }}
           resources:
             {{- toYaml $.Values.propulsion.resources | nindent 12 }}
 ---
@@ -61,7 +66,12 @@ spec:
   selector:
     propulsion-id: {{ $name }}
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
+    - name: modbus
+      port: {{ $.Values.propulsion.modbusPort }}
+      targetPort: {{ $.Values.propulsion.modbusPort }}
 ---
+{{- end }}
 {{- end }}
