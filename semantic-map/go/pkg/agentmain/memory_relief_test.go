@@ -10,10 +10,16 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/runtime"
+	"github.com/DiyazY/di-agent/pkg/runtime/kubernetes"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
@@ -301,5 +307,31 @@ func TestADryRunOnAReadOnlyTreeStarts(t *testing.T) {
 	s.Loops.Relief.DryRun = nil
 	if _, _, err := buildActing(s, named{dry}, t.Logf); err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("real run: err %v; want the read-only refusal", err)
+	}
+}
+
+// TestASidecarsRequestIsPartOfThePodsPromise: the memory contention signal
+// protects a pod within its request; the request the collector is given is the
+// whole pod's, sidecar included, so a victim using its main container's request
+// plus its sidecar's is still counted as protected.
+func TestASidecarsRequestIsPartOfThePodsPromise(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	mem := func(q string) corev1.ResourceList {
+		return corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(q)}
+	}
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "victim", Namespace: "default", UID: "uid-v"},
+		Spec: corev1.PodSpec{NodeName: "n1",
+			Containers:     []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: mem("256Mi")}}},
+			InitContainers: []corev1.Container{{Name: "proxy", RestartPolicy: &always, Resources: corev1.ResourceRequirements{Requests: mem("64Mi")}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, QOSClass: corev1.PodQOSBurstable},
+	}
+	rt := kubernetes.New(runtime.Env{NodeID: "n1", Spec: spec.RuntimeSpec{Kind: "kubernetes"}}, fake.NewSimpleClientset(p))
+	req := &minimal.Requests{}
+	(&requestsRefresher{rt: rt, req: req, logf: t.Logf}).refresh(context.Background())
+	got, ok := req.Load()
+	if !ok || got["uid-v"] != 320<<20 {
+		t.Fatalf("requests %v; want the victim's 320Mi, sidecar included", got)
 	}
 }

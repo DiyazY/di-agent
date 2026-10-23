@@ -216,8 +216,10 @@ func labelsOf(p corev1.Pod) map[string]string {
 	return l
 }
 
-// cpuOf sums the containers' CPU in cores. A limit is nil when any container has
-// none, because the pod as a whole is then unlimited.
+// cpuOf sums the app containers' CPU in cores. A request is kept when any
+// container has one; a limit is nil when any container has none, because the
+// pod as a whole is then unlimited. cpu.limit refuses a pod with sidecars or
+// pod-level resources (cannot), so only the app containers matter to it.
 func cpuOf(p corev1.Pod) runtime.Resource {
 	var req, lim int64 // millicores, summed exactly
 	var anyReq bool
@@ -245,13 +247,40 @@ func cpuOf(p corev1.Pod) runtime.Resource {
 	return r
 }
 
-// memoryOf sums the containers' memory in bytes, by the rule cpuOf applies to
-// CPU: a request is nil when any container has none, and so is a limit.
+// memoryOf is the pod's memory in bytes, as the pod cgroup memory.high acts on
+// holds it: the pod-level resources when the pod sets them, else the sum over
+// every container that keeps running, its native sidecars (restartable init
+// containers) included; an init container that runs to completion is over
+// before the pod's working set exists and is not counted. Unlike cpuOf, which
+// keeps a request when any container has one, a memory request is nil when any
+// counted container has none: memory.high must never cut a pod below a promise
+// it only partly knows. A limit is nil when any counted container has none, as
+// the pod as a whole is then unlimited.
 func memoryOf(p corev1.Pod) runtime.Resource {
+	var r runtime.Resource
+	if pl := p.Spec.Resources; pl != nil {
+		if q, ok := pl.Requests[corev1.ResourceMemory]; ok {
+			v := q.AsApproximateFloat64()
+			r.Request = &v
+		}
+		if q, ok := pl.Limits[corev1.ResourceMemory]; ok {
+			v := q.AsApproximateFloat64()
+			r.Limit = &v
+		}
+		if r.Request != nil || r.Limit != nil {
+			return r
+		}
+	}
+	cs := append([]corev1.Container(nil), p.Spec.Containers...)
+	for _, c := range p.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			cs = append(cs, c)
+		}
+	}
 	var req, lim float64
-	allReq := len(p.Spec.Containers) > 0
+	allReq := len(cs) > 0
 	allLim := allReq
-	for _, c := range p.Spec.Containers {
+	for _, c := range cs {
 		if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
 			req += q.AsApproximateFloat64()
 		} else {
@@ -263,7 +292,6 @@ func memoryOf(p corev1.Pod) runtime.Resource {
 			allLim = false
 		}
 	}
-	var r runtime.Resource
 	if allReq {
 		r.Request = &req
 	}

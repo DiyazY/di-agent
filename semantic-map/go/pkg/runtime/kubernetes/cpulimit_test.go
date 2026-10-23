@@ -178,3 +178,36 @@ func TestWorkloadsFillMemoryAndQoS(t *testing.T) {
 		t.Fatalf("cpu %+v", c)
 	}
 }
+
+func mem(q string) corev1.ResourceList {
+	return corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(q)}
+}
+
+// TestMemoryCountsSidecarsAndPodLevelResources: the pod cgroup memory.high acts
+// on holds every container that keeps running, so a native sidecar's (a
+// restartable init container's) request and limit are part of the pod's; an
+// init container that runs to completion is not. Pod-level resources, when set,
+// are the pod's.
+func TestMemoryCountsSidecarsAndPodLevelResources(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	p := burstable("a", "n1", "ua", "100m", "1")
+	p.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("64Mi")
+	p.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("128Mi")
+	p.Spec.InitContainers = []corev1.Container{
+		{Name: "proxy", RestartPolicy: &always, Resources: corev1.ResourceRequirements{Requests: mem("32Mi"), Limits: mem("64Mi")}},
+		{Name: "migrate", Resources: corev1.ResourceRequirements{Requests: mem("1Gi"), Limits: mem("1Gi")}},
+	}
+	r, _ := newRT("n1", p)
+	m := workload(t, r, "pod:ua").Resources["memory"]
+	if m.Request == nil || *m.Request != 96<<20 || m.Limit == nil || *m.Limit != 192<<20 {
+		t.Fatalf("memory %v / %v; want the sidecar counted: 96Mi request, 192Mi limit", m.Request, m.Limit)
+	}
+
+	q := burstable("b", "n1", "ub", "100m", "1")
+	q.Spec.Resources = &corev1.ResourceRequirements{Requests: mem("300Mi"), Limits: mem("512Mi")}
+	r, _ = newRT("n1", q)
+	m = workload(t, r, "pod:ub").Resources["memory"]
+	if m.Request == nil || *m.Request != 300<<20 || m.Limit == nil || *m.Limit != 512<<20 {
+		t.Fatalf("memory %v / %v; want the pod-level 300Mi / 512Mi", m.Request, m.Limit)
+	}
+}
