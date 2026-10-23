@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"sync"
 	"syscall"
@@ -215,8 +216,12 @@ func (l *Ledger) saveLocked() error {
 
 // syncDir makes a rename into dir durable: until the directory is synced, a
 // crash may leave the old name pointing at the old file. A platform that cannot
-// sync a directory (EINVAL) has nothing more to give.
+// sync a directory (EINVAL, or Windows, which cannot open one to flush) has
+// nothing more to give.
 func syncDir(dir string) error {
+	if goruntime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
