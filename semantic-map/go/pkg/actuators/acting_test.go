@@ -201,3 +201,58 @@ func TestDescriptorsSorted(t *testing.T) {
 		t.Fatalf("%+v", d)
 	}
 }
+
+func TestApplyRollsBackWhenLedgerSaveFails(t *testing.T) {
+	f := newMem()
+	f.vals["s"] = 10
+	l := MemoryLedger()
+	a := NewActing("n", l, f)
+	ctx := context.Background()
+	l.saveErr = errors.New("disk full")
+	if _, err := a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, ""); err == nil || !errors.Is(err, l.saveErr) {
+		t.Fatalf("err = %v", err)
+	}
+	if f.vals["s"] != 10 || len(l.All()) != 0 {
+		t.Fatalf("not restored: %v %+v", f.vals, l.All())
+	}
+	// With a prior entry, roll back to its Applied.
+	l.saveErr = nil
+	if _, err := a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	l.saveErr = errors.New("disk full")
+	if _, err := a.Apply(ctx, wl("s"), "fake", 3, time.Time{}, ""); err == nil {
+		t.Fatal("want error")
+	}
+	if f.vals["s"] != 5 {
+		t.Fatalf("want 5, got %v", f.vals["s"])
+	}
+	// No original: rollback removes the setting; a failing rollback is joined.
+	l.saveErr = errors.New("disk full")
+	if _, err := a.Apply(ctx, wl("t"), "fake", 7, time.Time{}, ""); err == nil {
+		t.Fatal("want error")
+	}
+	if _, set := f.vals["t"]; set {
+		t.Fatal("setting not removed")
+	}
+}
+
+type quantised struct{ *memAct }
+
+func (q quantised) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	return q.memAct.Set(ctx, w, float64(int64(v)/4096*4096), set)
+}
+
+func TestApplyRecordsReadBackValue(t *testing.T) {
+	f := quantised{newMem()}
+	a := NewActing("n", MemoryLedger(), f)
+	ctx := context.Background()
+	e, err := a.Apply(ctx, wl("s"), "fake", 10000, time.Time{}, "")
+	if err != nil || e.Applied != 8192 {
+		t.Fatalf("%+v %v", e, err)
+	}
+	held, dropped, err := a.Held(ctx, []runtime.Workload{wl("s")})
+	if err != nil || len(held) != 1 || len(dropped) != 0 {
+		t.Fatalf("%+v %+v %v", held, dropped, err)
+	}
+}

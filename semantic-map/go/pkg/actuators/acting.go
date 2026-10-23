@@ -60,7 +60,8 @@ func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	e := Entry{Action: action, Subject: w.Subject, DecisionID: decisionID, Applied: v, Expires: expires, NodeID: a.nodeID}
-	if prev, held := a.entry(action, w.Subject); held {
+	prev, held := a.entry(action, w.Subject)
+	if held {
 		e.Original, e.OriginalSet = prev.Original, prev.OriginalSet
 	} else {
 		orig, set, err := x.Read(ctx, w)
@@ -72,7 +73,20 @@ func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v
 	if err := x.Set(ctx, w, v, true); err != nil {
 		return Entry{}, fmt.Errorf("%s: set %s: %w", w.Subject, action, err)
 	}
+	// An actuator may quantise what it stores; the ledger holds what is in force.
+	if got, set, err := x.Read(ctx, w); err == nil && set {
+		e.Applied = got
+	}
 	if err := a.ledger.Put(e); err != nil {
+		// The change is in force but unrecorded, so the agent could never undo
+		// it: put back what the setting was before this Apply.
+		backV, backSet := e.Original, e.OriginalSet
+		if held {
+			backV, backSet = prev.Applied, true
+		}
+		if rerr := x.Set(ctx, w, backV, backSet); rerr != nil {
+			return Entry{}, errors.Join(err, fmt.Errorf("%s: roll back %s: %w", w.Subject, action, rerr))
+		}
 		return Entry{}, err
 	}
 	return e, nil

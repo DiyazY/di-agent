@@ -39,6 +39,7 @@ type Ledger struct {
 
 	mu      sync.Mutex
 	entries map[ledgerKey]Entry
+	saveErr error // when set, saving fails with it; for tests
 }
 
 // MemoryLedger is a ledger that never touches disk.
@@ -144,6 +145,9 @@ func (l *Ledger) All() []Entry {
 // saveLocked writes the ledger to a temp file beside the real one, syncs it and
 // renames it over, so a crash leaves the old file or the new, never half of one.
 func (l *Ledger) saveLocked() error {
+	if l.saveErr != nil {
+		return l.saveErr
+	}
 	if l.path == "" {
 		return nil
 	}
