@@ -252,14 +252,17 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 // and other actions are not touched, and neither is anything when this Acting
 // has no actuator for action, as when its lever was removed from the config.
 //
-// Every entry is read before the ledger is changed: a Read that fails fails the
-// reconcile and changes nothing.
-func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload) (held []Entry, dropped []Entry, err error) {
+// Each entry is reconciled on its own: one whose Read fails with anything but
+// ErrGone is returned in failed, with the error, and left in the ledger
+// untouched, for the caller to retry; the rest are held or dropped as above. An
+// error is returned only when nothing could be reconciled: an empty listing, or a
+// ledger that could not be saved.
+func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload) (held, dropped []Entry, failed []Unread, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	x, ok := a.actuators[action]
 	if !ok {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	bySubject := make(map[string]runtime.Workload, len(ws))
 	for _, w := range ws {
@@ -272,7 +275,7 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 		}
 	}
 	if len(ws) == 0 && len(mine) > 0 {
-		return nil, nil, fmt.Errorf("the runtime lists no workload while this node holds %d %s change(s): "+
+		return nil, nil, nil, fmt.Errorf("the runtime lists no workload while this node holds %d %s change(s): "+
 			"taken for a listing problem, nothing is dropped", len(mine), action)
 	}
 	var puts []Entry // entries rewritten: restored or adopted
@@ -288,7 +291,8 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 			gone, dropped = append(gone, e), append(dropped, e)
 			continue
 		case rerr != nil:
-			return nil, nil, fmt.Errorf("%s: read %s: %w", e.Subject, e.Action, rerr)
+			failed = append(failed, Unread{Entry: e, Err: fmt.Errorf("%s: read %s: %w", e.Subject, e.Action, rerr)})
+			continue
 		}
 		if !e.Pending {
 			if set && closeTo(v, e.Applied) {
@@ -314,15 +318,21 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 	}
 	for _, e := range puts {
 		if err := a.ledger.Put(e); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	for _, e := range gone {
 		if err := a.ledger.Delete(e.Action, e.Subject); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return held, dropped, nil
+	return held, dropped, failed, nil
+}
+
+// Unread is a ledger entry Held could not read the setting of, with why.
+type Unread struct {
+	Entry Entry
+	Err   error
 }
 
 func (a *Acting) entry(action, subject string) (Entry, bool) {

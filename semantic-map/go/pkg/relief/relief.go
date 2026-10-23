@@ -32,8 +32,19 @@ type Status struct {
 	Reverted        int                  `json:"reverted"`
 	Refused         int                  `json:"refused"`
 	PredictionsHeld float64              `json:"predictions_held"` // kept / (kept+reverted)
-	Stuck           int                  `json:"stuck,omitempty"`  // changes in force whose undo the runtime has refused
+	Stuck           int                  `json:"stuck,omitempty"`  // changes in force whose undo the actuator has refused, or whose setting it cannot read
+	Unread          []Unread             `json:"unread,omitempty"` // the ledger's changes whose setting cannot be read, retried every tick
 	Cooling         map[string]time.Time `json:"cooling,omitempty"`
+}
+
+// Unread is a change the ledger holds whose setting the actuator could not read
+// at the latest reconcile: kept in the ledger untouched, retried every tick, and
+// given back from the ledger's record once its expiry has passed. Attempts counts
+// the reads that failed; Error is the latest.
+type Unread struct {
+	Entry    actuators.Entry `json:"entry"`
+	Error    string          `json:"error"`
+	Attempts int             `json:"attempts"`
 }
 
 // Action is the agent's change to one workload, with what it predicted and what
@@ -144,6 +155,7 @@ type Loop struct {
 	noted       string               // the last refusal journalled this episode
 	noPlanAt    time.Time            // when attribution last found no plan
 	noPlanKey   string               // the eligible workloads it found none among
+	unread      map[string]*Unread   // by subject: ledger entries whose setting could not be read at the latest reconcile
 	nActs       int
 	nKept       int
 	nReverted   int
@@ -187,7 +199,7 @@ func New(c Config) (*Loop, error) {
 		cfg: c, c: c.Lever, d: c.Descriptor, budget: c.Budget, act: act, epoch: now.Unix(),
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
-		released: map[string]time.Time{}, cycles: map[string]int{},
+		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{},
 	}, nil
 }
 
@@ -241,6 +253,11 @@ func (l *Loop) Status() Status {
 			st.Stuck++
 		}
 	}
+	for _, u := range l.unread {
+		st.Unread = append(st.Unread, *u)
+	}
+	sort.Slice(st.Unread, func(i, j int) bool { return st.Unread[i].Entry.Subject < st.Unread[j].Entry.Subject })
+	st.Stuck += len(st.Unread)
 	if judged := l.nKept + l.nReverted; judged > 0 {
 		st.PredictionsHeld = float64(l.nKept) / float64(judged)
 	}
@@ -281,9 +298,15 @@ func (l *Loop) Tick(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, l.timeout)
 	defer cancel()
 	now := l.cfg.Now()
-	if !l.reconciled {
+	switch {
+	case !l.reconciled:
 		if err := l.reconcile(ctx, now); err != nil {
 			l.cfg.Logf("relief: %v (no change is made until it succeeds)", err)
+		}
+	case l.hasUnread():
+		// Entries that could not be read are retried every tick.
+		if err := l.reconcile(ctx, now); err != nil {
+			l.cfg.Logf("relief: retrying the changes that could not be read: %v", err)
 		}
 	}
 	pressure, at, fresh := l.pressure(now)
@@ -371,7 +394,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("relief: listing workloads: %w", err)
 	}
-	held, dropped, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
+	held, dropped, failed, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
 	if err != nil {
 		return fmt.Errorf("relief: reconciling this node's changes: %w", err)
 	}
@@ -385,23 +408,24 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		live[a.Subject] = a
 	}
 	busy := l.inFlight != nil
+	unread := map[string]*Unread{}
+	for _, f := range failed {
+		e := f.Entry
+		if live[e.Subject] != nil {
+			continue // the action in force retries its own undo
+		}
+		u := &Unread{Entry: e, Error: f.Err.Error(), Attempts: 1}
+		if prev := l.unread[e.Subject]; prev != nil {
+			u.Attempts = prev.Attempts + 1
+		} else {
+			l.cfg.Logf("relief: %v; the change stays in force, is retried every tick, and is given back from the ledger once it expires", f.Err)
+		}
+		unread[e.Subject] = u
+	}
+	l.unread = unread
 	l.mu.Unlock()
 
-	// taken builds the action for a change found in the ledger rather than made here.
-	taken := func(e actuators.Entry) *Action {
-		a := &Action{ID: e.DecisionID, Subject: e.Subject, DecisionID: e.DecisionID, Entry: e,
-			Resumed: true, cooldown: cooldowns(e.Subject), Plan: Plan{Subject: e.Subject, To: e.Applied, Unit: l.d.Unit}}
-		if p, first, ok := l.journalledAct(e.DecisionID); ok {
-			a.Plan = p
-			if first != "" {
-				a.ID = first
-			}
-		}
-		if a.ID == "" {
-			a.ID = l.id("act")
-		}
-		return a
-	}
+	taken := func(e actuators.Entry) *Action { return l.taken(e, cooldowns(e.Subject)) }
 
 	for _, e := range dropped {
 		why := "the actuator no longer finds the workload"
@@ -465,6 +489,29 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// taken builds the action for a change found in the ledger rather than made here.
+func (l *Loop) taken(e actuators.Entry, cooldown time.Duration) *Action {
+	a := &Action{ID: e.DecisionID, Subject: e.Subject, DecisionID: e.DecisionID, Entry: e,
+		Resumed: true, cooldown: cooldown, Plan: Plan{Subject: e.Subject, To: e.Applied, Unit: l.d.Unit}}
+	if p, first, ok := l.journalledAct(e.DecisionID); ok {
+		a.Plan = p
+		if first != "" {
+			a.ID = first
+		}
+	}
+	if a.ID == "" {
+		a.ID = l.id("act")
+	}
+	return a
+}
+
+// hasUnread reports ledger entries whose setting could not be read.
+func (l *Loop) hasUnread() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.unread) > 0
 }
 
 // ErrNoAction is Revert's answer for an id that is not an action in force.
@@ -531,6 +578,11 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	}
 	inHour := l.budget.Count(now)
 	cooling := l.budget.coolingAll(l.d.Action, now)
+	l.mu.Lock()
+	for s := range l.unread {
+		cooling[s] = time.Time{} // a change of unknown setting is never stepped on
+	}
+	l.mu.Unlock()
 	ws, ok := workloads()
 	if !ok {
 		return

@@ -1267,32 +1267,123 @@ func TestAnotherLeversChangesAreLeftAlone(t *testing.T) {
 	}
 }
 
-// TestAReadErrorFailsTheReconcile: a held change whose setting cannot be read is
-// neither resumed nor dropped, and nothing is applied until it can be.
-func TestAReadErrorFailsTheReconcile(t *testing.T) {
-	var r *unreadable
-	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+// blind is an actuator that cannot read the subjects in noRead, nor set those
+// in noSet, as an API that answers for some pods and not others.
+type blind struct {
+	actuators.Actuator
+	mu     sync.Mutex
+	noRead map[string]bool
+	noSet  map[string]bool
+}
+
+func (b *blind) see(subject string) {
+	b.mu.Lock()
+	delete(b.noRead, subject)
+	delete(b.noSet, subject)
+	b.mu.Unlock()
+}
+
+func (b *blind) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	b.mu.Lock()
+	fail := b.noRead[w.Subject]
+	b.mu.Unlock()
+	if fail {
+		return 0, false, errors.New("api unavailable")
+	}
+	return b.Actuator.Read(ctx, w)
+}
+
+func (b *blind) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	b.mu.Lock()
+	fail := b.noSet[w.Subject]
+	b.mu.Unlock()
+	if fail {
+		return errors.New("api unavailable")
+	}
+	return b.Actuator.Set(ctx, w, v, set)
+}
+
+func blindHarness(t *testing.T, noSet bool, subjects ...string) (*harness, *blind) {
+	var b *blind
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3},
 		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
-			r = &unreadable{Actuator: a, fail: true}
-			return d, r
+			b = &blind{Actuator: a, noRead: map[string]bool{}, noSet: map[string]bool{}}
+			for _, s := range subjects {
+				b.noRead[s] = true
+				b.noSet[s] = noSet
+			}
+			return d, b
 		}})
-	h.rt.Put(pod("pod:b"))
+	return h, b
+}
+
+// TestAnUnreadableEntryDoesNotBlockTheRest: one entry whose setting cannot be
+// read is kept untouched and shown as stuck with its error; the others are
+// resumed and given back as usual, and the unreadable one is retried every tick
+// and given back from the ledger's record once its expiry has passed.
+func TestAnUnreadableEntryDoesNotBlockTheRest(t *testing.T) {
+	h, _ := blindHarness(t, false, "pod:b")
+	record(t, h.m, contention, "", 0.5, h.now)
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
+		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
 	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
-		Applied: 0.9, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
-	if err := h.l.Reconcile(h.ctx); err == nil {
-		t.Fatal("want the read error")
+		Applied: 0.9, Expires: h.now.Add(40 * time.Minute), DecisionID: "relief-act-1-2"})
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatalf("reconcile: %v; one unreadable entry must not fail the rest", err)
 	}
-	h.run(3*time.Minute, 0.5)
-	if _, ok := h.applied()["pod:a"]; ok {
-		t.Fatal("a change was made before the held ones were known")
+	st := h.l.Status()
+	if st.InFlight == nil || st.InFlight.Subject != "pod:a" {
+		t.Fatalf("in flight %+v; want pod:a resumed", st.InFlight)
 	}
-	if len(h.ledger.All()) != 1 {
-		t.Fatal("the unreadable entry was dropped")
+	if st.Stuck != 1 || len(st.Unread) != 1 || st.Unread[0].Entry.Subject != "pod:b" ||
+		!strings.Contains(st.Unread[0].Error, "api unavailable") {
+		t.Fatalf("status %+v; want pod:b stuck, listed with its error", st)
 	}
-	r.set(false)
-	h.step(0.5)
-	if f := h.l.Status().InFlight; f == nil || f.Subject != "pod:b" || !f.Resumed {
-		t.Fatalf("in flight %+v; want pod:b resumed once it reads", f)
+	h.run(2*time.Minute, 0.5)
+	if st := h.l.Status(); len(st.Unread) != 1 || st.Unread[0].Attempts < 8 {
+		t.Fatalf("unread %+v; want pod:b retried every tick", st.Unread)
+	}
+	h.until(time.Hour, 0.5, "pod:a given back at expiry", func() bool { _, ok := h.applied()["pod:a"]; return !ok })
+	if a := h.action("pod:a"); a.Outcome != OutcomeExpired {
+		t.Fatalf("pod:a %+v; want expired", a)
+	}
+	h.until(time.Hour, 0.5, "pod:b given back at expiry", func() bool { _, ok := h.applied()["pod:b"]; return !ok })
+	if h.limit("pod:b") != nil {
+		t.Fatalf("pod:b limit %v; want its original (none) back", *h.limit("pod:b"))
+	}
+	if a := h.action("pod:b"); a.Outcome != OutcomeExpired {
+		t.Fatalf("pod:b %+v; want expired", a)
+	}
+	if st := h.l.Status(); st.Stuck != 0 || len(st.Unread) != 0 {
+		t.Fatalf("status %+v; want nothing stuck", st)
+	}
+}
+
+// TestAnUnreadableEntryIsGivenBackOnceItCanBe: an entry that can be neither read
+// nor set stays in force past its expiry, stuck; once the actuator answers again
+// it is given back.
+func TestAnUnreadableEntryIsGivenBackOnceItCanBe(t *testing.T) {
+	h, b := blindHarness(t, true, "pod:b")
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(10 * time.Minute), DecisionID: "relief-act-1-2"})
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.run(15*time.Minute, 0.05)
+	if _, ok := h.applied()["pod:b"]; !ok {
+		t.Fatal("an entry that could not be set was dropped")
+	}
+	if st := h.l.Status(); st.Stuck != 1 || len(st.Unread) != 1 {
+		t.Fatalf("status %+v; want pod:b stuck past its expiry", st)
+	}
+	b.see("pod:b")
+	h.step(0.05)
+	h.step(0.05)
+	if _, ok := h.applied()["pod:b"]; ok || h.limit("pod:b") != nil {
+		t.Fatalf("applied %v limit %v; want pod:b given back once readable", h.applied(), h.limit("pod:b"))
+	}
+	if a := h.action("pod:b"); a.Outcome != OutcomeExpired {
+		t.Fatalf("pod:b %+v; want expired", a)
 	}
 }
 
