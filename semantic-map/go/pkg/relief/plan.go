@@ -198,7 +198,9 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 		to := math.Max(from*(1-c.Step), math.Max(d.Min, math.Max(floorMin, floorShare*original)))
 		res := w.Resources[d.Resource]
 		if res.Request != nil {
-			// A limit below the request is refused by the orchestrator, so the request is a floor.
+			// The request is a floor. For cpu.limit it is the orchestrator's: a limit
+			// below the request is refused. For memory.high it is a design choice: a
+			// pod is promised its request, so it is not cut below it.
 			to = math.Max(to, *res.Request)
 		}
 		if to >= from {

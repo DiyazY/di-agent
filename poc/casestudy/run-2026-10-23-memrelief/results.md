@@ -60,8 +60,8 @@ agent's `memory_contention_ratio` is defined (design §5) as the highest **memor
 protected pods. It read 0 correctly. This was not a defect in the agent's code, so no code change was made.
 
 What this means for the lever: on this kernel, `memory_contention_ratio` sees protected pods that stall on
-memory. That covers mapped working sets (executables, mmap'd data), reclaim stalls and anonymous pressure.
-It does not see a `read(2)`-based page-cache working set being displaced. The next VM attempt should use a
+memory. That is expected to cover mapped working sets (executables, mmap'd data), reclaim stalls and anonymous
+pressure — expected, not observed here: no run produced any of them on a protected pod. It does not see a `read(2)`-based page-cache working set being displaced. The next VM attempt should use a
 victim that maps its file (an mmap reader). Whether the signal should also count a protected pod's
 `io.pressure`, or its `workingset_refault_file` rate, is a design question for the spec, not a fix for this
 branch.
