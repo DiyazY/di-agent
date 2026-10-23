@@ -163,9 +163,37 @@ func TestReconcileDropsGoneWorkload(t *testing.T) {
 	a := NewActing("n", MemoryLedger(), f)
 	ctx := context.Background()
 	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
-	held, dropped, err := a.Held(ctx, "fake", nil)
+	f.gone["s"] = true
+	held, dropped, err := a.Held(ctx, "fake", []runtime.Workload{wl("x")})
 	if err != nil || len(held) != 0 || len(dropped) != 1 || len(a.ledger.All()) != 0 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
+	}
+}
+
+// TestReconcileKeepsAnUnlistedWorkloadTheActuatorFinds: a workload missing from
+// the listing is not taken for gone; the actuator is asked, and one it still
+// reads as applied is held.
+func TestReconcileKeepsAnUnlistedWorkloadTheActuatorFinds(t *testing.T) {
+	f := newMem()
+	a := NewActing("n", MemoryLedger(), f)
+	ctx := context.Background()
+	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
+	held, dropped, err := a.Held(ctx, "fake", []runtime.Workload{wl("x")})
+	if err != nil || len(held) != 1 || len(dropped) != 0 || len(a.ledger.All()) != 1 {
+		t.Fatalf("held %+v dropped %+v err %v; want it held", held, dropped, err)
+	}
+}
+
+// TestReconcileRefusesAnEmptyListing: no workload listed at all while this node
+// holds entries of the action is a listing problem until proven otherwise.
+func TestReconcileRefusesAnEmptyListing(t *testing.T) {
+	f := newMem()
+	a := NewActing("n", MemoryLedger(), f)
+	ctx := context.Background()
+	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
+	f.gone["s"] = true
+	if _, _, err := a.Held(ctx, "fake", nil); err == nil || len(a.ledger.All()) != 1 {
+		t.Fatalf("err %v ledger %+v; want a refusal and the entry kept", err, a.ledger.All())
 	}
 }
 

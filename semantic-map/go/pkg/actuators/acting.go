@@ -196,7 +196,8 @@ func same(v float64, set bool, w float64, wset bool) bool {
 
 // Revert gives back what e replaced and forgets it. A workload that is gone has
 // nothing to give back, so ErrGone also forgets the entry; it is still returned,
-// so the caller can tell a change given back from a workload that left.
+// so the caller can tell a change given back from a workload that left. Any
+// other error keeps the entry: only the actuator's ErrGone ever drops a change.
 func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error {
 	x, ok := a.actuators[e.Action]
 	if !ok {
@@ -217,20 +218,16 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 	return nil
 }
 
-// Forget drops the ledger's entry for (action, subject) without touching the
-// system: for a change whose workload the runtime no longer lists, which an
-// actuator cannot reach to give back. It is the caller's judgement that the
-// workload left; Revert never forgets on an error but ErrGone.
-func (a *Acting) Forget(action, subject string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.ledger.Delete(action, subject)
-}
-
 // Held reconciles this node's ledger entries of action against the workloads now
-// listed. An entry whose workload is no longer listed, or whose setting no longer
-// reads as what was applied, is dropped and deleted from the ledger; the rest are
-// held. A pending entry, one an Apply wrote ahead and never committed, is
+// listed. The listing does not decide that a workload left; the actuator does:
+// an entry whose workload is not listed is read through a workload named only by
+// its subject, which an actuator finds it by (memory.high by the UID in pod:<uid>,
+// cpu.limit by the subject itself). An entry the actuator answers ErrGone for, or
+// whose setting no longer reads as what was applied, is dropped and deleted from
+// the ledger; the rest are held. A listing that holds no workload at all while
+// this node holds entries of action is refused, and nothing is changed: an empty
+// listing on a node that was changing workloads is a listing problem until proven
+// otherwise. A pending entry, one an Apply wrote ahead and never committed, is
 // resolved by what reads back: the setting from before that Apply means the
 // change never took, and the entry before it is restored (a further step's, now
 // held) or none (a first step's, neither held nor dropped); any other setting
@@ -251,16 +248,22 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 	for _, w := range ws {
 		bySubject[w.Subject] = w
 	}
+	var mine []Entry
+	for _, e := range a.ledger.All() {
+		if e.NodeID == a.nodeID && e.Action == action {
+			mine = append(mine, e)
+		}
+	}
+	if len(ws) == 0 && len(mine) > 0 {
+		return nil, nil, fmt.Errorf("the runtime lists no workload while this node holds %d %s change(s): "+
+			"taken for a listing problem, nothing is dropped", len(mine), action)
+	}
 	var puts []Entry // entries rewritten: restored or adopted
 	var gone []Entry // entries deleted: dropped, or a first step that never took
-	for _, e := range a.ledger.All() {
-		if e.NodeID != a.nodeID || e.Action != action {
-			continue
-		}
+	for _, e := range mine {
 		w, listed := bySubject[e.Subject]
 		if !listed {
-			gone, dropped = append(gone, e), append(dropped, e)
-			continue
+			w = runtime.Workload{Subject: e.Subject}
 		}
 		v, set, rerr := x.Read(ctx, w)
 		switch {

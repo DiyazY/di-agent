@@ -2,6 +2,7 @@ package actuators
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -28,5 +29,24 @@ func TestDryRunRecordsWithoutSetting(t *testing.T) {
 	d.Set(ctx, wl("s"), 0, false)
 	if _, set, _ := d.Read(ctx, wl("s")); set {
 		t.Fatal("removal not recorded")
+	}
+}
+
+// TestDryRunAsksTheActuatorWhetherAWorkloadLeft: with the listing no longer
+// deciding that a workload left, a dry run asks the real actuator, so a change
+// recorded for a workload that has since left is gone in a dry run too.
+func TestDryRunAsksTheActuatorWhetherAWorkloadLeft(t *testing.T) {
+	f := newMem()
+	d := DryRun(f)
+	ctx := context.Background()
+	if err := d.Set(ctx, wl("s"), 4, true); err != nil {
+		t.Fatal(err)
+	}
+	f.gone["s"] = true
+	if _, _, err := d.Read(ctx, wl("s")); !errors.Is(err, ErrGone) {
+		t.Fatalf("Read err %v; want ErrGone", err)
+	}
+	if err := d.Set(ctx, wl("s"), 0, false); !errors.Is(err, ErrGone) {
+		t.Fatalf("Set err %v; want ErrGone", err)
 	}
 }

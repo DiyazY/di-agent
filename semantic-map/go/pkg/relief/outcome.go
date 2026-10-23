@@ -55,7 +55,7 @@ func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 	}
 	l.mu.Unlock()
 	for _, a := range due {
-		err := l.giveBack(ctx, now, a, OutcomeExpired, "expired", a.cooldown, workloads)
+		err := l.giveBack(ctx, now, a, OutcomeExpired, "expired", "the change expired", a.cooldown, workloads)
 		switch {
 		case errors.Is(err, errNoListing):
 			return // logged by the listing; every due change is retried next tick
@@ -95,21 +95,19 @@ func (l *Loop) lister(ctx context.Context) lister {
 
 // undo gives a's change back through the workload the runtime lists, so an
 // actuator that finds a workload by more than its subject, as memory.high finds
-// a pod's cgroup by its UID and QoS class, can find it. gone reports a workload
-// that left, with why; its change has then been let go of. errNoListing means
-// nothing was tried: the change stays in force for a later pass.
+// a pod's cgroup by its UID and QoS class, has all of it. A workload the runtime
+// does not list is given back through its subject alone, which an actuator
+// finds it by (memory.high by the UID in pod:<uid>): the listing does not decide
+// that a workload left, the actuator does. gone reports one the actuator answers
+// ErrGone for, with why; its entry has then been deleted. Any other refusal keeps
+// the entry, to be retried. errNoListing means nothing was tried: the change
+// stays in force for a later pass.
 func (l *Loop) undo(ctx context.Context, a *Action, workloads lister) (gone bool, why string, err error) {
 	ws, ok := workloads()
 	if !ok {
 		return false, "", errNoListing
 	}
-	w, listed := workload(ws, a.Subject)
-	if !listed {
-		if err := l.letGo(ctx, a); err != nil {
-			return false, "", err
-		}
-		return true, "the runtime no longer lists the workload", nil
-	}
+	w, _ := workload(ws, a.Subject)
 	err = l.cfg.Acting.Revert(ctx, w, a.Entry)
 	switch {
 	case errors.Is(err, actuators.ErrGone):
@@ -118,22 +116,6 @@ func (l *Loop) undo(ctx context.Context, a *Action, workloads lister) (gone bool
 		return false, "", err
 	}
 	return false, "", nil
-}
-
-// letGo gives up the change to a workload the runtime no longer lists. It is
-// reverted anyway, so an orchestrator that still has the workload gives the
-// change up; an actuator that cannot find the workload by its subject alone has
-// nothing left to give back to, as the runtime has no such workload, so its
-// entry is forgotten. Any other refusal keeps the entry, to be retried.
-func (l *Loop) letGo(ctx context.Context, a *Action) error {
-	err := l.cfg.Acting.Revert(ctx, bySubject(a.Subject), a.Entry)
-	switch {
-	case err == nil, errors.Is(err, actuators.ErrGone):
-		return nil
-	case errors.Is(err, actuators.ErrInvalidIdentity):
-		return l.cfg.Acting.Forget(a.Entry.Action, a.Subject)
-	}
-	return err
 }
 
 // undoFailed records that the actuator refused to undo a's change: counted and
@@ -179,12 +161,11 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	}
 	w, listed := workload(ws, a.Subject)
 	if !listed {
-		// The entry is dropped only once the change is let go of.
-		if err := l.letGo(ctx, a); err != nil {
-			l.undoFailed(a, "letting go of", err)
-			return
+		// Nothing to judge it against: the change is given back through its
+		// subject, and is gone only if the actuator says so.
+		if err := l.giveBack(ctx, now, a, OutcomeReleased, "release", "the runtime no longer lists the workload", a.cooldown, workloads); err != nil {
+			l.undoFailed(a, "giving back", err)
 		}
-		l.gone(now, a, "the runtime no longer lists the workload")
 		return
 	}
 	if a.revertPending {
@@ -379,11 +360,12 @@ func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase P
 	}
 }
 
-// giveBack reverts an action for a reason other than its verdict or a release:
-// expiry or an operator, through the workload the runtime lists. A workload that
-// is gone is recorded as such; one that cannot be listed is an error wrapping
-// errNoListing, and its change stays in force.
-func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, kind string, cooldown time.Duration, workloads lister) error {
+// giveBack reverts an action for a reason other than its verdict or a release
+// with pressure eased: expiry, an operator, or a workload the runtime no longer
+// lists, through undo. A workload that is gone is recorded as such; one that
+// cannot be listed is an error wrapping errNoListing, and its change stays in
+// force. reason is why it is given back, as the decision asks it.
+func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, kind, reason string, cooldown time.Duration, workloads lister) error {
 	gone, why, err := l.undo(ctx, a, workloads)
 	switch {
 	case err != nil:
@@ -392,11 +374,7 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 		l.gone(now, a, why)
 		return nil
 	}
-	question := l.giveBackAsk(a.Subject, "the change expired")
-	if outcome == OutcomeManual {
-		question = l.giveBackAsk(a.Subject, "an operator asked")
-	}
-	b := l.cfg.Map.Decide(l.id(kind), question)
+	b := l.cfg.Map.Decide(l.id(kind), l.giveBackAsk(a.Subject, reason))
 	b.Input("act", a.DecisionID)
 	b.Input("entry", a.Entry)
 	b.Note("cooling %s down for %s", a.Subject, cooldown)
@@ -449,7 +427,7 @@ func hasSubject(ws []runtime.Workload, subject string) bool {
 }
 
 // workload is the listed workload with subject, or one named only by it when ws
-// does not list it.
+// does not list it, which an actuator finds it by.
 func workload(ws []runtime.Workload, subject string) (runtime.Workload, bool) {
 	for _, w := range ws {
 		if w.Subject == subject {
@@ -459,9 +437,10 @@ func workload(ws []runtime.Workload, subject string) (runtime.Workload, bool) {
 	return bySubject(subject), false
 }
 
-// bySubject is a workload named only by its subject, for letting go of a change
-// to one the runtime no longer lists: an actuator that needs more to find it
-// answers ErrInvalidIdentity.
+// bySubject is a workload named only by its subject, for giving back a change
+// to one the runtime does not list: the actuator finds it by the subject, or
+// answers ErrGone, or, when the subject is not enough, ErrInvalidIdentity, which
+// keeps the entry.
 func bySubject(subject string) runtime.Workload { return runtime.Workload{Subject: subject} }
 
 // removeAction drops a from as without disturbing the order of the rest.

@@ -414,14 +414,16 @@ func TestMemoryHighRejectsUnsafeIdentity(t *testing.T) {
 		{"traversal", "../../decoy", "burstable"},
 		{"traversal into pod parent", "../" + "../decoy", "besteffort"},
 		{"slash", "a/b", "burstable"},
-		{"empty uid", "", "burstable"},
+		{"empty uid, subject traversal", "", "burstable"},
 		{"upper case uid", strings.ToUpper(mhUID), "burstable"},
 		{"unknown qos", mhUID, "../decoy"},
-		{"empty qos", mhUID, ""},
 	}
 	for _, c := range cases {
 		w := mhWL("burstable")
 		w.UID, w.QoS = c.uid, c.qos
+		if c.uid == "" {
+			w.Subject = "pod:../../decoy" // the UID a subject-only workload is found by
+		}
 		// A workload without a valid identity is the caller's error, not a pod
 		// that left: nothing may forget a change on its say-so.
 		if _, _, err := a.Read(ctx, w); !errors.Is(err, ErrInvalidIdentity) || errors.Is(err, ErrGone) {
@@ -471,10 +473,47 @@ func TestMemoryHighSetRefusesUnsafeValue(t *testing.T) {
 	}
 }
 
-// TestMemoryHighRevertWithoutIdentityKeepsTheEntry: a revert through a workload
-// named only by its subject cannot find the pod, and must not be taken for one
-// that left: the entry stays, and the cap with it, for a revert that can.
-func TestMemoryHighRevertWithoutIdentityKeepsTheEntry(t *testing.T) {
+// TestMemoryHighFindsAPodBySubject: a workload named only by its subject, as
+// the ledger records it, is found by the UID in the subject in every QoS class
+// and both drivers' layouts, so a change can be given back to a pod the runtime
+// no longer lists.
+func TestMemoryHighFindsAPodBySubject(t *testing.T) {
+	ctx := context.Background()
+	for _, systemd := range []bool{false, true} {
+		for _, qos := range []string{"guaranteed", "burstable", "besteffort"} {
+			root := mhRoot(t)
+			d := mhMkPod(t, root, qos, mhUID, systemd, "max", "")
+			a := mhNew(t, root)
+			w := runtime.Workload{Subject: "pod:" + mhUID}
+			if err := a.Set(ctx, w, 256<<20, true); err != nil {
+				t.Fatalf("systemd=%v qos=%s: %v", systemd, qos, err)
+			}
+			if v, set, err := a.Read(ctx, w); err != nil || !set || v != 256<<20 {
+				t.Fatalf("systemd=%v qos=%s: read %v %v %v", systemd, qos, v, set, err)
+			}
+			if got := mhRead(t, filepath.Join(d, "memory.high")); got != "268435456" {
+				t.Errorf("systemd=%v qos=%s: wrote %q", systemd, qos, got)
+			}
+		}
+	}
+	// Gone only when no QoS parent holds it and at least one is there.
+	root := mhRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "kubepods", "burstable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := mhNew(t, root)
+	if _, _, err := a.Read(ctx, runtime.Workload{Subject: "pod:" + mhUID}); !errors.Is(err, ErrGone) {
+		t.Fatalf("Read err %v; want ErrGone", err)
+	}
+	// A subject that is not a pod's is not a pod identity.
+	if _, _, err := a.Read(ctx, runtime.Workload{Subject: "unit:x"}); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("Read err %v; want ErrInvalidIdentity", err)
+	}
+}
+
+// TestMemoryHighRevertBySubjectGivesItBack: a revert through a workload named
+// only by its subject finds the pod and writes max.
+func TestMemoryHighRevertBySubjectGivesItBack(t *testing.T) {
 	root := mhRoot(t)
 	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
 	a := mhNew(t, root)
@@ -485,18 +524,42 @@ func TestMemoryHighRevertWithoutIdentityKeepsTheEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = acting.Revert(ctx, runtime.Workload{Subject: e.Subject}, e)
-	if err == nil || errors.Is(err, ErrGone) {
-		t.Fatalf("Revert by subject only: %v; want an error that is not ErrGone", err)
-	}
-	if len(l.All()) != 1 {
-		t.Fatalf("ledger %+v; want the entry kept", l.All())
-	}
-	if err := acting.Revert(ctx, mhWL("burstable"), e); err != nil {
+	if err := acting.Revert(ctx, runtime.Workload{Subject: e.Subject}, e); err != nil {
 		t.Fatal(err)
 	}
 	if got := mhRead(t, filepath.Join(d, "memory.high")); got != "max" || len(l.All()) != 0 {
 		t.Fatalf("after revert: memory.high %q, ledger %+v", got, l.All())
+	}
+}
+
+// TestHeldAsksTheActuatorAboutAnUnlistedPod: the listing does not decide that a
+// pod left. An entry whose pod is not listed is read through its subject: one
+// whose cgroup still holds the cap is held, one whose cgroup has left is
+// dropped. An empty listing while this node holds entries is refused.
+func TestHeldAsksTheActuatorAboutAnUnlistedPod(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
+	a := mhNew(t, root)
+	l := MemoryLedger()
+	acting := NewActing("n1", l, a)
+	ctx := context.Background()
+	if _, err := acting.Apply(ctx, mhWL("burstable"), "memory.high", 128<<20, time.Now().Add(time.Hour), "d1"); err != nil {
+		t.Fatal(err)
+	}
+	other := runtime.Workload{Subject: "pod:ffff0000-0000-0000-0000-000000000000", UID: "ffff0000-0000-0000-0000-000000000000", QoS: "burstable"}
+	held, dropped, err := acting.Held(ctx, "memory.high", []runtime.Workload{other})
+	if err != nil || len(held) != 1 || len(dropped) != 0 || len(l.All()) != 1 {
+		t.Fatalf("cgroup there: held %+v dropped %+v err %v; want it held", held, dropped, err)
+	}
+	if _, _, err := acting.Held(ctx, "memory.high", nil); err == nil || len(l.All()) != 1 {
+		t.Fatalf("empty listing: err %v ledger %+v; want a refusal and the ledger unchanged", err, l.All())
+	}
+	if err := os.RemoveAll(d); err != nil {
+		t.Fatal(err)
+	}
+	held, dropped, err = acting.Held(ctx, "memory.high", []runtime.Workload{other})
+	if err != nil || len(held) != 0 || len(dropped) != 1 || len(l.All()) != 0 {
+		t.Fatalf("cgroup gone: held %+v dropped %+v err %v; want it dropped", held, dropped, err)
 	}
 }
 

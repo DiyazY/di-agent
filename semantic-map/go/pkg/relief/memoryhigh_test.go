@@ -50,6 +50,8 @@ type memHarness struct {
 	ledger *actuators.Ledger
 	l      *Loop
 	rt     *pods
+	root   string
+	lever  spec.Lever
 	high   string // the pod's memory.high file
 	mu     sync.Mutex
 }
@@ -107,15 +109,37 @@ func newMemHarness(t *testing.T) *memHarness {
 			lever = l
 		}
 	}
-	cpuAct := actuators.Static(kubernetes.CPULimitDescriptor, nil, func(runtime.Workload) (float64, bool) { return 0, false })
-	h.rt = rt
-	h.l, err = New(Config{Interval: relief.Interval, Lever: lever, Descriptor: d, NodeID: "n1", Runtime: rt,
-		Acting: actuators.NewActing("n1", h.ledger, act, cpuAct), Policy: defaultPolicy(t, nil), Map: h.m,
-		Now: h.clock, Logf: t.Logf})
-	if err != nil {
-		t.Fatal(err)
-	}
+	h.rt, h.root, h.lever = rt, root, lever
+	h.l = h.newLoop()
 	return h
+}
+
+// newLoop is a memory.high loop over the harness's tree, ledger and runtime, as
+// a restarted agent builds it.
+func (h *memHarness) newLoop() *Loop {
+	h.t.Helper()
+	act, err := actuators.NewMemoryHigh(actuators.Env{NodeID: "n1", CgroupRoot: h.root, Held: h.ledger.For})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	cpuAct := actuators.Static(kubernetes.CPULimitDescriptor, nil, func(runtime.Workload) (float64, bool) { return 0, false })
+	l, err := New(Config{Interval: spec.Default().Loops.Relief.Interval, Lever: h.lever, Descriptor: act.Describe(), NodeID: "n1", Runtime: h.rt,
+		Acting: actuators.NewActing("n1", h.ledger, act, cpuAct), Policy: defaultPolicy(h.t, nil), Map: h.m,
+		Now: h.clock, Logf: h.t.Logf})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return l
+}
+
+// restart replaces the loop with a new one and reconciles it.
+func (h *memHarness) restart() *Loop {
+	h.t.Helper()
+	h.l = h.newLoop()
+	if err := h.l.Reconcile(context.Background()); err != nil {
+		h.t.Fatal(err)
+	}
+	return h.l
 }
 
 func (h *memHarness) clock() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now }
@@ -259,16 +283,93 @@ func TestMemoryHighManualRevertWithoutAListingFails(t *testing.T) {
 	h.givenBack(a.ID, OutcomeManual)
 }
 
-// TestMemoryHighOfAPodNoLongerListedIsGone: a pod the runtime stops listing is
-// gone, and its entry forgotten, though the actuator cannot find it by subject.
-func TestMemoryHighOfAPodNoLongerListedIsGone(t *testing.T) {
+// unlist makes the runtime list another pod in place of the memory hog, as a
+// listing that has lost it while its cgroup may still be there.
+func (h *memHarness) unlist() {
+	h.rt.mu.Lock()
+	h.rt.ws = []runtime.Workload{{Subject: "pod:ffff0000-0000-0000-0000-000000000000", Name: "other",
+		UID: "ffff0000-0000-0000-0000-000000000000", QoS: "burstable"}}
+	h.rt.mu.Unlock()
+}
+
+// TestMemoryHighOfAPodNoLongerListedIsGivenBack: the listing does not decide that
+// a pod left; the actuator does. A pod the runtime stops listing whose cgroup is
+// still there is found by the UID in its subject, its memory.high written back
+// to max, and the change closed as released, not gone.
+func TestMemoryHighOfAPodNoLongerListedIsGivenBack(t *testing.T) {
 	h := newMemHarness(t)
 	a := h.act()
-	h.rt.mu.Lock()
-	h.rt.ws = nil
-	h.rt.mu.Unlock()
+	h.unlist()
+	h.until(2*time.Hour, 0, "given back", func() bool {
+		o := outcomeOf(h.l, a.ID)
+		return o != "" && o != OutcomeKept
+	})
+	h.givenBack(a.ID, OutcomeReleased)
+}
+
+// TestMemoryHighOfAnUnlistedPodIsGivenBackAtExpiry: the expiry path too gives
+// back through the subject's UID, and closes the change as expired.
+func TestMemoryHighOfAnUnlistedPodIsGivenBackAtExpiry(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.until(2*time.Hour, 0.3, "a kept cap near expiry", func() bool {
+		return outcomeOf(h.l, a.ID) == OutcomeKept && !h.clock().Add(tick).Before(a.Entry.Expires)
+	})
+	h.unlist()
+	h.step(0.3)
+	h.givenBack(a.ID, OutcomeExpired)
+}
+
+// TestMemoryHighOfAPodWhoseCgroupLeftIsGone: unlisted and with its cgroup gone
+// from a QoS parent that is there, the pod has left: the change is gone.
+func TestMemoryHighOfAPodWhoseCgroupLeftIsGone(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.unlist()
+	if err := os.RemoveAll(filepath.Dir(h.high)); err != nil {
+		t.Fatal(err)
+	}
 	h.until(2*time.Hour, 0, "gone", func() bool { return outcomeOf(h.l, a.ID) == OutcomeGone })
 	if es := h.ledger.All(); len(es) != 0 {
 		t.Fatalf("ledger still holds %+v", es)
+	}
+}
+
+// TestMemoryHighReconcileOfAnUnlistedPodKeepsIt: after a restart, an entry
+// whose pod the runtime does not list but whose cgroup still holds the cap is
+// taken up, not dropped, and given back like any other.
+func TestMemoryHighReconcileOfAnUnlistedPodKeepsIt(t *testing.T) {
+	h := newMemHarness(t)
+	a := h.act()
+	h.unlist()
+	h2 := h.restart()
+	if es := h.ledger.All(); len(es) != 1 {
+		t.Fatalf("ledger %+v after reconcile; want the entry kept", es)
+	}
+	h.until(2*time.Hour, 0, "given back", func() bool { return len(h.ledger.All()) == 0 })
+	if got := h.file(); got != "max" {
+		t.Fatalf("memory.high %q; want max", got)
+	}
+	if o := outcomeOf(h2, a.ID); o == OutcomeGone {
+		t.Fatalf("outcome %q; want it given back, not gone", o)
+	}
+}
+
+// TestMemoryHighReconcileRefusesAnEmptyListing: a listing that holds no pod at
+// all on a node whose ledger holds caps is a listing problem until proven
+// otherwise: the reconcile fails and the ledger is unchanged.
+func TestMemoryHighReconcileRefusesAnEmptyListing(t *testing.T) {
+	h := newMemHarness(t)
+	h.act()
+	h.rt.mu.Lock()
+	h.rt.ws = nil
+	h.rt.mu.Unlock()
+	before := h.ledger.All()
+	l2 := h.newLoop()
+	if err := l2.Reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile on an empty listing succeeded")
+	}
+	if got := h.ledger.All(); len(got) != 1 || got[0] != before[0] {
+		t.Fatalf("ledger %+v; want %+v unchanged", got, before)
 	}
 }

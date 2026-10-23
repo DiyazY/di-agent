@@ -751,7 +751,11 @@ func TestAnExpiredChangeThatWillNotRevertIsRetried(t *testing.T) {
 	}
 }
 
-func TestAnUnlistedWorkloadIsDroppedOnlyOnceTheRuntimeLetsGo(t *testing.T) {
+// TestAnUnlistedWorkloadIsGivenBackNotDropped: a workload the runtime stops
+// listing is not taken for gone. Its change is given back through its subject,
+// retried while the actuator refuses, and closed as released once it goes
+// through: the actuator still had the workload, so it was not gone.
+func TestAnUnlistedWorkloadIsGivenBackNotDropped(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, flaky: true})
 	h.act("pod:a")
 	h.fl.set(func(f *flaky) { f.hide["pod:a"], f.setErr = true, 1 })
@@ -763,8 +767,8 @@ func TestAnUnlistedWorkloadIsDroppedOnlyOnceTheRuntimeLetsGo(t *testing.T) {
 		t.Fatal("setup: the revert did not fail")
 	}
 	h.step(0.5)
-	if a := h.action("pod:a"); a.Outcome != "gone" {
-		t.Fatalf("pod:a %+v; want gone once the revert went through", a)
+	if a := h.action("pod:a"); a.Outcome != OutcomeReleased {
+		t.Fatalf("pod:a %+v; want released once the revert went through", a)
 	}
 	if _, ok := h.applied()["pod:a"]; ok {
 		t.Fatal("the runtime still holds the change")

@@ -217,23 +217,39 @@ func (a *MemoryHigh) podDirs(uid, qos string) []string {
 	}
 }
 
-// podDir is the pod's cgroup directory: ErrInvalidIdentity when w has no valid
-// UID and QoS class to find it by, which is the caller's error and says nothing
-// of the pod. ErrGone only when no layout has the pod's directory and the QoS
-// parent it would be in is there: a missing parent says the root is wrong, not
-// that the pod left, and any error but "does not exist" (EACCES, EIO) is
+// podDir is the pod's cgroup directory. The pod is found by w's UID and QoS
+// class, as the runtime lists them; a workload named only by its subject, as the
+// ledger records a change to a pod the runtime no longer lists, is found by the
+// UID in a pod:<uid> subject in every QoS class. ErrInvalidIdentity when there is
+// no valid UID or QoS class to find it by, which is the caller's error and says
+// nothing of the pod. ErrGone only when no layout has the pod's directory and a
+// QoS parent it would be in is there: a missing parent says the root is wrong,
+// not that the pod left, and any error but "does not exist" (EACCES, EIO) is
 // returned as it is. Unknown is never gone.
 func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
-	if !podUID.MatchString(w.UID) {
-		return "", fmt.Errorf("%s has no valid pod uid %q: %w", w.Subject, w.UID, ErrInvalidIdentity)
+	uid := w.UID
+	if uid == "" {
+		if u, ok := strings.CutPrefix(w.Subject, "pod:"); ok {
+			uid = u
+		}
 	}
+	if !podUID.MatchString(uid) {
+		return "", fmt.Errorf("%s has no valid pod uid %q: %w", w.Subject, uid, ErrInvalidIdentity)
+	}
+	qoses := []string{w.QoS}
 	switch w.QoS {
 	case "guaranteed", "burstable", "besteffort":
+	case "":
+		qoses = []string{"guaranteed", "burstable", "besteffort"}
 	default:
 		return "", fmt.Errorf("%s has no valid qos %q: %w", w.Subject, w.QoS, ErrInvalidIdentity)
 	}
+	var dirs []string
+	for _, q := range qoses {
+		dirs = append(dirs, a.podDirs(uid, q)...)
+	}
 	parent := false
-	for _, d := range a.podDirs(w.UID, w.QoS) {
+	for _, d := range dirs {
 		st, err := os.Stat(d)
 		switch {
 		case err == nil && st.IsDir():
@@ -251,7 +267,7 @@ func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
 		}
 	}
 	if !parent {
-		return "", fmt.Errorf("%s: no cgroup, and no %s QoS parent for it under %s: the cgroup root may be wrong", w.Subject, w.QoS, a.root)
+		return "", fmt.Errorf("%s: no cgroup, and no QoS parent for it under %s: the cgroup root may be wrong", w.Subject, a.root)
 	}
 	return "", fmt.Errorf("%s: no cgroup: %w", w.Subject, ErrGone)
 }

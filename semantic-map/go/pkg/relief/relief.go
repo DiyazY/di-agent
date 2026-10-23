@@ -348,10 +348,12 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// reconcile is Reconcile under the pass lock. Acting reads each held change back
-// against the workloads the runtime lists: one whose workload is no longer
-// listed, or whose setting no longer reads as what the agent applied, as after a
-// pod restart or another hand, is no longer the agent's and is journalled gone.
+// reconcile is Reconcile under the pass lock. Acting reads each held change back,
+// through the workload the runtime lists or, for one it does not list, through
+// its subject: one the actuator no longer finds, or whose setting no longer reads
+// as what the agent applied, as after a pod restart or another hand, is no longer
+// the agent's and is journalled gone. A listing with no workload at all while the
+// ledger holds this node's changes fails the reconcile.
 // Of the rest, the most recent unexpired change becomes the action in flight,
 // with its prediction taken from the decision that made it if the journal still
 // holds it. Verify keeps it either way: its baseline is read with the change in
@@ -402,7 +404,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 
 	for _, e := range dropped {
-		why := "the runtime no longer lists the workload"
+		why := "the actuator no longer finds the workload"
 		if hasSubject(ws, e.Subject) {
 			why = "its setting no longer reads as what the agent applied: changed underneath, as by a restart or another hand"
 		}
@@ -489,7 +491,7 @@ func (l *Loop) Revert(ctx context.Context, id string) error {
 	if a == nil {
 		return fmt.Errorf("%w: %s", ErrNoAction, id)
 	}
-	return l.giveBack(ctx, l.cfg.Now(), a, OutcomeManual, "manual", a.cooldown, l.lister(ctx))
+	return l.giveBack(ctx, l.cfg.Now(), a, OutcomeManual, "manual", "an operator asked", a.cooldown, l.lister(ctx))
 }
 
 // pressure is node pressure, when it was read, and whether it is fresh. The
