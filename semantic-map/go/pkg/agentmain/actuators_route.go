@@ -7,17 +7,20 @@ import (
 	"github.com/DiyazY/di-agent/pkg/runtime"
 )
 
-// actuatorView is one action of GET /actuators: what it does, and the changes the
-// agent holds through it. Built is false for an action the ledger holds changes
-// of and no lever runs (relief off, or the lever removed): it has no descriptor
-// and no can, and nothing gives its changes back. Can is present only for
-// ?subject= on a built action: why the action cannot apply to that workload, ""
-// when it can.
+// actuatorView is one action of GET /actuators: what it does, the changes the
+// agent holds through it and gives back (Held: this node's, of a built action),
+// and the changes the ledger holds of it that nothing in this agent gives back,
+// each with why (Unmanaged: another node's, an action no lever runs, or a real
+// run's while this one is dry). Built is false for an action the ledger holds
+// changes of and no lever runs (relief off, or the lever removed): it has no
+// descriptor and no can. Can is present only for ?subject= on a built action:
+// why the action cannot apply to that workload, "" when it can.
 type actuatorView struct {
 	Action     string                `json:"action"`
 	Built      bool                  `json:"built"`
 	Descriptor *actuators.Descriptor `json:"descriptor,omitempty"`
 	Held       []actuators.Entry     `json:"held"`
+	Unmanaged  []actuators.Unmanaged `json:"unmanaged"`
 	Can        *string               `json:"can,omitempty"`
 }
 
@@ -45,8 +48,9 @@ func registerActuatorsRoute(mux *http.ServeMux, rt runtime.Runtime, acting *actu
 			}
 		}
 		out := []actuatorView{}
+		row := map[string]int{}
 		for _, d := range acting.Descriptors() {
-			v := actuatorView{Action: d.Action, Built: true, Descriptor: &d, Held: []actuators.Entry{}}
+			v := actuatorView{Action: d.Action, Built: true, Descriptor: &d, Held: []actuators.Entry{}, Unmanaged: []actuators.Unmanaged{}}
 			for _, e := range acting.Entries(d.Action) {
 				if subject == "" || e.Subject == subject {
 					v.Held = append(v.Held, e)
@@ -57,17 +61,22 @@ func registerActuatorsRoute(mux *http.ServeMux, rt runtime.Runtime, acting *actu
 				why := a.Check(*wl)
 				v.Can = &why
 			}
+			row[d.Action] = len(out)
 			out = append(out, v)
 		}
-		// Changes no lever gives back, one row per action, after the built ones.
-		for _, e := range acting.Unbuilt() {
-			if subject != "" && e.Subject != subject {
+		// Changes nothing here gives back: under their built action, or one row
+		// per action no lever runs, after the built ones.
+		for _, u := range acting.Unmanaged() {
+			if subject != "" && u.Subject != subject {
 				continue
 			}
-			if n := len(out); n == 0 || out[n-1].Built || out[n-1].Action != e.Action {
-				out = append(out, actuatorView{Action: e.Action, Held: []actuators.Entry{}})
+			i, ok := row[u.Action]
+			if !ok {
+				i = len(out)
+				row[u.Action] = i
+				out = append(out, actuatorView{Action: u.Action, Held: []actuators.Entry{}, Unmanaged: []actuators.Unmanaged{}})
 			}
-			out[len(out)-1].Held = append(out[len(out)-1].Held, e)
+			out[i].Unmanaged = append(out[i].Unmanaged, u)
 		}
 		writeJSON(w, out)
 	})

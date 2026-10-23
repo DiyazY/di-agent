@@ -259,21 +259,14 @@ func TestALedgerEntryWithNoLeverIsWarnedAndShown(t *testing.T) {
 			mux := http.NewServeMux()
 			registerActuatorsRoute(mux, dry, acting)
 			rec := get(mux, "/actuators")
-			var out []struct {
-				Action     string                `json:"action"`
-				Descriptor *actuators.Descriptor `json:"descriptor"`
-				Built      bool                  `json:"built"`
-				Held       []actuators.Entry     `json:"held"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-				t.Fatal(err)
-			}
+			out := actuatorRows(t, rec.Body.Bytes())
 			var found bool
 			for _, v := range out {
 				if v.Action == "memory.high" {
 					found = true
-					if v.Built || v.Descriptor != nil || len(v.Held) != 1 || v.Held[0].Subject != "pod:x" {
-						t.Errorf("memory.high %+v; want its held change, not built, no descriptor", v)
+					if v.Built || v.Descriptor != nil || len(v.Held) != 0 || len(v.Unmanaged) != 1 || v.Unmanaged[0].Subject != "pod:x" ||
+						!strings.Contains(v.Unmanaged[0].Why, "no lever runs for this action") {
+						t.Errorf("memory.high %+v; want its change unmanaged, saying why, not built, no descriptor", v)
 					}
 				} else if !v.Built || v.Descriptor == nil || v.Descriptor.Action != v.Action {
 					t.Errorf("%+v; want a built action with its descriptor", v)
@@ -283,5 +276,136 @@ func TestALedgerEntryWithNoLeverIsWarnedAndShown(t *testing.T) {
 				t.Errorf("GET /actuators %s; want the memory.high change shown", rec.Body)
 			}
 		})
+	}
+}
+
+type actuatorRow struct {
+	Action     string                `json:"action"`
+	Descriptor *actuators.Descriptor `json:"descriptor"`
+	Built      bool                  `json:"built"`
+	Held       []actuators.Entry     `json:"held"`
+	Unmanaged  []actuators.Unmanaged `json:"unmanaged"`
+}
+
+func actuatorRows(t *testing.T, b []byte) []actuatorRow {
+	t.Helper()
+	var out []actuatorRow
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	return out
+}
+
+func rowOf(rows []actuatorRow, action string) actuatorRow {
+	for _, r := range rows {
+		if r.Action == action {
+			return r
+		}
+	}
+	return actuatorRow{}
+}
+
+func warnedOf(logs []string, parts ...string) bool {
+	for _, m := range logs {
+		ok := strings.Contains(m, "warning")
+		for _, p := range parts {
+			ok = ok && strings.Contains(m, p)
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAnotherNodesEntryIsWarnedAndShown: a ledger entry another node recorded
+// is never adopted; start warns of it, naming both nodes, and GET /actuators
+// shows it as unmanaged, apart from what this agent holds.
+func TestAnotherNodesEntryIsWarnedAndShown(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(t.TempDir(), "actions.json")
+	l, err := actuators.OpenLedger(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs := actuators.Entry{Action: "cpu.limit", Subject: "pod:x", NodeID: "n2", Applied: 0.5, Expires: time.Unix(100, 0).UTC(), DecisionID: "d1"}
+	if err := l.Put(theirs); err != nil {
+		t.Fatal(err)
+	}
+	s := spec.Default()
+	s.Node.ID, s.Runtime.Kind = "n1", "kubernetes"
+	s.Loops.Relief.Enabled = true
+	s.Loops.Relief.Levers = s.Loops.Relief.Levers[:1]
+	s.Actuation.Ledger = ledgerPath
+	var logs []string
+	acting, _, err := buildActing(s, named{dry}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warnedOf(logs, "pod:x", "recorded by node n2; this agent is n1; not managed") {
+		t.Errorf("logs %q; want a warning naming both nodes", logs)
+	}
+	mux := http.NewServeMux()
+	registerActuatorsRoute(mux, dry, acting)
+	row := rowOf(actuatorRows(t, get(mux, "/actuators").Body.Bytes()), "cpu.limit")
+	if !row.Built || len(row.Held) != 0 || len(row.Unmanaged) != 1 || row.Unmanaged[0].NodeID != "n2" ||
+		!strings.Contains(row.Unmanaged[0].Why, "recorded by node n2") {
+		t.Fatalf("cpu.limit %+v; want n2's change unmanaged, nothing held", row)
+	}
+}
+
+// TestADryRunShowsTheRealRunsChanges: a dry run on kubernetes opens the on-disk
+// ledger read-only: a cap a real run left in force is not taken for the
+// kubelet's, is warned of at start and shown by GET /actuators, and a dry-run
+// step never writes the file.
+func TestADryRunShowsTheRealRunsChanges(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _, pod, ledger := memTree(t, "500000000", ", dry_run: true")
+	l, err := actuators.OpenLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const subject = "pod:1234abcd-0000-1111-2222-333344445555"
+	if err := l.Put(actuators.Entry{Action: "memory.high", Subject: subject, Applied: 500000000, NodeID: "n1",
+		Expires: time.Unix(100, 0).UTC(), DecisionID: "d1"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs []string
+	acting, evidence, err := buildActing(s, named{dry}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	if err != nil {
+		t.Fatalf("dry run refused: %v; want the real run's cap recognised from the ledger", err)
+	}
+	if evidence {
+		t.Error("a dry run is evidence")
+	}
+	if !warnedOf(logs, subject, "held by a real run and not given back while dry_run is on") {
+		t.Errorf("logs %q; want a warning that the real run's change stays", logs)
+	}
+	mux := http.NewServeMux()
+	registerActuatorsRoute(mux, dry, acting)
+	row := rowOf(actuatorRows(t, get(mux, "/actuators").Body.Bytes()), "memory.high")
+	if !row.Built || len(row.Held) != 0 || len(row.Unmanaged) != 1 || row.Unmanaged[0].Subject != subject {
+		t.Fatalf("memory.high %+v; want the real run's change shown unmanaged", row)
+	}
+	w := runtime.Workload{Subject: "pod:other", Name: "other"}
+	if _, err := acting.Apply(context.Background(), w, "cpu.limit", 0.5, time.Now().Add(time.Hour), "dry-1"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(ledger)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("ledger file changed by a dry run (%v):\n%s\n→\n%s", err, before, after)
+	}
+	if b, _ := os.ReadFile(filepath.Join(pod, "memory.high")); strings.TrimSpace(string(b)) != "500000000" {
+		t.Fatalf("memory.high %q; want the real run's cap untouched", b)
 	}
 }

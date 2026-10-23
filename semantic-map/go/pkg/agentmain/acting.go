@@ -47,7 +47,11 @@ func ledgerPath(ledger, persistFile string) string {
 // dry run (loops.relief.dry_run, by default exactly when
 // runtime.kind is dry-run) every actuator is wrapped in actuators.DryRun and the
 // ledger is kept in memory: nothing reaches the system, so evidence is false and
-// there is nothing to remember across a restart. Otherwise the ledger is a file;
+// there is nothing to remember across a restart. A dry run on a runtime that can
+// change the system also reads the on-disk ledger, read-only, never writing it:
+// a real run's changes still in force are given to the actuators, so memory.high
+// does not take them for the kubelet's, and are warned of at start and shown by
+// GET /actuators, never given back. Otherwise the ledger is a file;
 // one that cannot be opened refuses start while relief is enabled, since a change
 // the agent cannot record it could never give back, and is kept in memory
 // otherwise, where no change is made.
@@ -60,8 +64,20 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 	}
 	dry := cfg.Loops.Relief.IsDryRun(cfg.Runtime.Kind)
 	ledger := actuators.MemoryLedger()
+	path := ledgerPath(cfg.Actuation.Ledger, cfg.Persist.File)
+	var real []actuators.Entry // a dry run's read-only view of what a real run left in force
+	if dry && cfg.Runtime.Kind != "dry-run" {
+		es, err := actuators.ReadLedger(path)
+		switch {
+		case err == nil:
+			real = es
+		case cfg.Loops.Relief.Enabled:
+			return nil, false, fmt.Errorf("loops.relief dry run: the ledger a real run keeps cannot be read: %w", err)
+		default:
+			logf("actuation: %v", err)
+		}
+	}
 	if !dry {
-		path := ledgerPath(cfg.Actuation.Ledger, cfg.Persist.File)
 		l, err := actuators.OpenLedger(path)
 		switch {
 		case err == nil:
@@ -72,8 +88,17 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 			logf("actuation: %v; relief is off, so the agent changes nothing and keeps no ledger on disk", err)
 		}
 	}
+	held := func(action string) []actuators.Entry {
+		out := ledger.For(action)
+		for _, e := range real {
+			if e.Action == action {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
 	env := actuators.Env{NodeID: cfg.Node.ID, CgroupRoot: collectors.CgroupRoot(cfg.Sources.Collectors),
-		Runtime: rt, Logf: logf, Held: ledger.For, DryRun: dry}
+		Runtime: rt, Logf: logf, Held: held, DryRun: dry}
 	var as []actuators.Actuator
 	levers := cfg.Loops.Relief.Levers
 	if !cfg.Loops.Relief.Enabled {
@@ -90,9 +115,10 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 		as = append(as, a)
 	}
 	acting = actuators.NewActing(cfg.Node.ID, ledger, as...)
-	for _, e := range acting.Unbuilt() {
-		logf("actuation: warning: %s on %s (applied %s, expires %s) is in the ledger and not given back: no lever runs for this action; "+
-			"it stays in force until reverted by hand (OPERATING.md §10)", e.Action, e.Subject, strconv.FormatFloat(e.Applied, 'f', -1, 64), e.Expires.Format(time.RFC3339))
+	acting.HeldByRealRun(real)
+	for _, u := range acting.Unmanaged() {
+		logf("actuation: warning: %s on %s (applied %s, expires %s) is in the ledger and not given back: %s (OPERATING.md §10)",
+			u.Action, u.Subject, strconv.FormatFloat(u.Applied, 'f', -1, 64), u.Expires.Format(time.RFC3339), u.Why)
 	}
 	return acting, !dry, nil
 }

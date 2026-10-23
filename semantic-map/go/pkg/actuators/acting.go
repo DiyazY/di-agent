@@ -22,6 +22,7 @@ type Acting struct {
 
 	mu        sync.Mutex
 	actuators map[string]Actuator
+	real      []Entry // a dry run's view of the on-disk ledger: changes a real run holds
 }
 
 // NewActing builds an Acting for nodeID over the given actuators, keyed by the
@@ -50,15 +51,48 @@ func (a *Acting) Descriptors() []Descriptor {
 	return out
 }
 
-// Unbuilt lists the ledger's entries, on any node, whose action this Acting has
-// no actuator for, as when relief is off or the action's lever was removed: no
-// one gives them back. Sorted by action, then soonest-expiring first.
-func (a *Acting) Unbuilt() []Entry {
-	var out []Entry
-	for _, e := range a.ledger.All() {
-		if _, ok := a.actuators[e.Action]; !ok {
-			out = append(out, e)
+// Unmanaged is a change the ledger holds that no loop of this agent gives back,
+// with why: another node recorded it, no actuator is built for its action
+// (relief off, or its lever removed), or a real run holds it while this is a
+// dry run. It stays in force until something that manages it gives it back.
+type Unmanaged struct {
+	Entry
+	Why string `json:"why"`
+}
+
+// HeldByRealRun records the entries of the on-disk ledger a dry run read
+// without opening it for writing: changes an earlier real run left in force,
+// which a dry run shows and never gives back.
+func (a *Acting) HeldByRealRun(es []Entry) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.real = append([]Entry(nil), es...)
+}
+
+// Unmanaged lists the ledger's changes this Acting does not give back, with
+// why, sorted by action, then soonest-expiring first: another node's, an action
+// it has no actuator for, and those a real run holds while this is a dry run.
+func (a *Acting) Unmanaged() []Unmanaged {
+	a.mu.Lock()
+	real := append([]Entry(nil), a.real...)
+	a.mu.Unlock()
+	var out []Unmanaged
+	add := func(e Entry, why string) {
+		switch _, built := a.actuators[e.Action]; {
+		case e.NodeID != a.nodeID:
+			why = fmt.Sprintf("recorded by node %s; this agent is %s; not managed", e.NodeID, a.nodeID)
+		case !built:
+			why = "no lever runs for this action; it stays in force until reverted by hand"
 		}
+		out = append(out, Unmanaged{Entry: e, Why: why})
+	}
+	for _, e := range a.ledger.All() {
+		if _, built := a.actuators[e.Action]; !built || e.NodeID != a.nodeID {
+			add(e, "")
+		}
+	}
+	for _, e := range real {
+		add(e, "held by a real run and not given back while dry_run is on; a real run's reconcile takes it up")
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Action != out[j].Action {
@@ -69,8 +103,20 @@ func (a *Acting) Unbuilt() []Entry {
 	return out
 }
 
-// Entries lists the ledger's entries of action, on any node, soonest-expiring first.
-func (a *Acting) Entries(action string) []Entry { return a.ledger.For(action) }
+// Entries lists the ledger's entries of action that this Acting manages: this
+// node's, of a built action, soonest-expiring first. The rest are Unmanaged.
+func (a *Acting) Entries(action string) []Entry {
+	if _, built := a.actuators[action]; !built {
+		return nil
+	}
+	var out []Entry
+	for _, e := range a.ledger.For(action) {
+		if e.NodeID == a.nodeID {
+			out = append(out, e)
+		}
+	}
+	return out
+}
 
 // readBack bounds the read that follows a Set. It is not the caller's context:
 // a Set that ran out the caller's deadline may still have taken effect, and only

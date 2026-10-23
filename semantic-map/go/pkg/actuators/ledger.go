@@ -98,10 +98,25 @@ func OpenLedger(path string) (*Ledger, error) {
 	if err := os.Remove(probe.Name()); err != nil {
 		return nil, fmt.Errorf("ledger %s: directory not writable: %w", path, err)
 	}
+	es, err := ReadLedger(path)
+	if err != nil {
+		return nil, err
+	}
 	l := &Ledger{path: path, entries: map[ledgerKey]Entry{}}
+	for _, e := range es {
+		l.entries[ledgerKey{e.Action, e.Subject}] = e
+	}
+	return l, nil
+}
+
+// ReadLedger loads the entries of the ledger at path without ever writing it or
+// its directory, as a dry run does to show what a real run left in force. A
+// missing file is no entries; an unreadable, corrupt or invalid one is an error
+// naming path.
+func ReadLedger(path string) ([]Entry, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return l, nil
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ledger %s: %w", path, err)
@@ -117,9 +132,8 @@ func OpenLedger(path string) (*Ledger, error) {
 		if err := e.validate(); err != nil {
 			return nil, fmt.Errorf("ledger %s: %w", path, err)
 		}
-		l.entries[ledgerKey{e.Action, e.Subject}] = e
 	}
-	return l, nil
+	return f.Entries, nil
 }
 
 // Put records e, which must be valid. An existing entry for the key must be

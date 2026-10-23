@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -571,5 +572,40 @@ func TestRestoreIsNotGatedByCheck(t *testing.T) {
 	}
 	if _, err := a.Restore(context.Background(), wl("t"), "fake", 8, time.Time{}, "d0"); err == nil {
 		t.Fatal("Restore with nothing held succeeded")
+	}
+}
+
+// TestUnmanagedSaysWhy: every ledger entry this Acting does not give back is
+// listed, with why: another node's, an action with no actuator, and one a real
+// run holds while this is a dry run.
+func TestUnmanagedSaysWhy(t *testing.T) {
+	l := MemoryLedger()
+	for _, e := range []Entry{
+		{Action: "fake", Subject: "mine", NodeID: "n", Applied: 1},
+		{Action: "fake", Subject: "theirs", NodeID: "m", Applied: 1},
+		{Action: "removed", Subject: "s", NodeID: "n", Applied: 1},
+	} {
+		if err := l.Put(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := NewActing("n", l, newMem())
+	a.HeldByRealRun([]Entry{{Action: "fake", Subject: "real", NodeID: "n", Applied: 2}})
+	got := map[string]string{}
+	for _, u := range a.Unmanaged() {
+		got[u.Subject] = u.Why
+	}
+	want := map[string]string{
+		"theirs": "recorded by node m; this agent is n; not managed",
+		"s":      "no lever runs for this action",
+		"real":   "held by a real run and not given back while dry_run is on",
+	}
+	for s, w := range want {
+		if !strings.Contains(got[s], w) {
+			t.Errorf("%s: why %q; want it to say %q", s, got[s], w)
+		}
+	}
+	if _, ok := got["mine"]; ok || len(got) != 3 {
+		t.Errorf("unmanaged %v; want exactly the three", got)
 	}
 }
