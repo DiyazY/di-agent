@@ -131,8 +131,8 @@ func TestRevertGoneDeletes(t *testing.T) {
 	ctx := context.Background()
 	e, _ := a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "d")
 	f.gone["s"] = true
-	if err := a.Revert(ctx, wl("s"), e); err != nil {
-		t.Fatalf("ErrGone should be absorbed, got %v", err)
+	if err := a.Revert(ctx, wl("s"), e); !errors.Is(err, ErrGone) {
+		t.Fatalf("err %v; want ErrGone, so the caller can tell the workload left", err)
 	}
 	if len(a.ledger.All()) != 0 {
 		t.Fatal("entry not deleted")
@@ -254,5 +254,80 @@ func TestApplyRecordsReadBackValue(t *testing.T) {
 	held, dropped, err := a.Held(ctx, []runtime.Workload{wl("s")})
 	if err != nil || len(held) != 1 || len(dropped) != 0 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
+	}
+}
+
+func TestReconcileSkipsAnActionWithNoActuator(t *testing.T) {
+	l := MemoryLedger()
+	l.Put(Entry{Action: "removed", Subject: "s", Applied: 5, NodeID: "n"})
+	a := NewActing("n", l, newMem())
+	held, dropped, err := a.Held(context.Background(), nil)
+	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
+		t.Fatalf("held %+v dropped %+v err %v; want the entry kept, neither held nor dropped", held, dropped, err)
+	}
+}
+
+func TestReconcileFailsOnAReadError(t *testing.T) {
+	f := &readErr{memAct: newMem()}
+	a := NewActing("n", MemoryLedger(), f)
+	ctx := context.Background()
+	if _, err := a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.fail = true
+	if _, _, err := a.Held(ctx, []runtime.Workload{wl("s")}); err == nil {
+		t.Fatal("want the read error")
+	}
+	if len(a.ledger.All()) != 1 {
+		t.Fatal("an entry whose read failed was dropped")
+	}
+}
+
+// readErr is memAct whose Read fails while fail is set.
+type readErr struct {
+	*memAct
+	fail bool
+}
+
+func (r *readErr) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	if r.fail {
+		return 0, false, errors.New("api unavailable")
+	}
+	return r.memAct.Read(ctx, w)
+}
+
+// lying records the value and then reports failure, as a resize whose call timed
+// out after it took.
+type lying struct{ *memAct }
+
+func (l lying) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	if err := l.memAct.Set(ctx, w, v, set); err != nil {
+		return err
+	}
+	return errors.New("context deadline exceeded")
+}
+
+func TestAFailedSetThatTookEffectIsRecorded(t *testing.T) {
+	f := lying{newMem()}
+	f.vals["s"] = 10
+	a := NewActing("n", MemoryLedger(), f)
+	e, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if err == nil {
+		t.Fatal("want the Set error")
+	}
+	if got := a.ledger.All(); len(got) != 1 || got[0].Applied != 5 || got[0].Original != 10 || got[0] != e {
+		t.Fatalf("ledger %+v; want the change that took effect recorded", got)
+	}
+}
+
+type refusing struct{ *memAct }
+
+func (refusing) Check(runtime.Workload) string { return "not running" }
+
+func TestApplyAsksCheckFirst(t *testing.T) {
+	f := refusing{newMem()}
+	a := NewActing("n", MemoryLedger(), f)
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, ""); err == nil || len(f.sets) != 0 {
+		t.Fatalf("err %v sets %+v; want refused before any Set", err, f.sets)
 	}
 }

@@ -79,3 +79,16 @@ func TestLedgerCorruptIsError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestForFiltersByAction(t *testing.T) {
+	l := MemoryLedger()
+	l.Put(Entry{Action: "a", Subject: "s1"})
+	l.Put(Entry{Action: "b", Subject: "s1"})
+	l.Put(Entry{Action: "a", Subject: "s2"})
+	if got := l.For("a"); len(got) != 2 || got[0].Subject != "s1" || got[1].Subject != "s2" {
+		t.Fatalf("For(a) = %+v", got)
+	}
+	if got := l.For("c"); len(got) != 0 {
+		t.Fatalf("For(c) = %+v", got)
+	}
+}

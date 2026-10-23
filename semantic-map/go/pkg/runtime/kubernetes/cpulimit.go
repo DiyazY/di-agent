@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -15,7 +14,12 @@ import (
 )
 
 // CPULimitDescriptor describes the cpu.limit action, for the real actuator and
-// for the dry-run stand-in alike.
+// for the dry-run stand-in alike. It relieves node CPU contention rather than
+// cpu_pressure_ratio because a cgroup's stall counts the time its own quota held
+// it back: a pod at its limit raises node pressure with nobody else waiting, and
+// lowering its limit raises it further, so the lever would move the signal the
+// wrong way. Usage is a share of node capacity in [0,1], and so is each pod's
+// cpu_utilization@<subject>; cpu_cores turns a share into cores.
 var CPULimitDescriptor = actuators.Descriptor{
 	Action:   "cpu.limit",
 	Kinds:    []string{"pod"},
@@ -65,12 +69,17 @@ func NewCPULimit(r *Runtime) actuators.Actuator { return &CPULimit{r: r} }
 
 func (a *CPULimit) Describe() actuators.Descriptor { return CPULimitDescriptor }
 
-// Check is why the pod's CPU limit cannot be changed, or "" when it can.
+// Check is why the pod's CPU limit cannot be changed, or "" when it can, as the
+// runtime's latest listing found the pod.
 func (a *CPULimit) Check(w runtime.Workload) string {
 	if w.Self {
 		return "the agent itself"
 	}
-	return w.Can[runtime.ActionCPULimit]
+	why, listed := a.r.reason(w.Subject)
+	if !listed {
+		return "not a workload the runtime lists"
+	}
+	return why
 }
 
 // Read is the pod's limits.cpu in cores; set is false when it has none.
@@ -85,35 +94,49 @@ func (a *CPULimit) Read(ctx context.Context, w runtime.Workload) (float64, bool,
 	return 0, false, nil
 }
 
-// Set resizes the pod's limits.cpu to v cores, or removes it when set is false.
+// Set resizes the pod's limits.cpu to v cores, or removes it when set is false. A
+// pod already at v is not resized, so giving back a change that never took
+// cannot fail on a resize the API refuses.
 func (a *CPULimit) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
 	p, err := a.pod(ctx, w)
 	if err != nil {
 		return err
 	}
 	if !set {
-		return gone(a.r.removeLimit(ctx, p))
+		return a.r.removeLimit(ctx, p)
 	}
 	milli := millis(v)
+	if atLimit(p, milli) {
+		return nil
+	}
 	if wouldBeGuaranteed(p, milli) {
 		return fmt.Errorf("%s/%s cannot take a cpu.limit of %dm: equal to its request, with memory "+
 			"request equal to limit, it would make the pod Guaranteed, a QoS class change", p.Namespace, p.Name, milli)
 	}
-	return gone(a.r.resize(ctx, p, milli))
+	return a.r.resize(ctx, p, milli)
 }
 
-// pod is the pod behind w, or actuators.ErrGone.
+// pod is the pod behind w, or actuators.ErrGone: a pod that has finished has no
+// limit left to read or give back, so it is gone too.
 func (a *CPULimit) pod(ctx context.Context, w runtime.Workload) (corev1.Pod, error) {
 	p, err := a.r.find(ctx, w.Subject)
-	return p, gone(err)
+	if err != nil {
+		return p, err
+	}
+	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		return p, fmt.Errorf("%s/%s has finished: %w", p.Namespace, p.Name, actuators.ErrGone)
+	}
+	return p, nil
 }
 
-// gone turns the runtime's ErrGone into the actuators' one.
-func gone(err error) error {
-	if errors.Is(err, runtime.ErrGone) {
-		return fmt.Errorf("%v: %w", err, actuators.ErrGone)
+// atLimit reports whether the pod's single container already has a CPU limit of
+// milli millicores.
+func atLimit(p corev1.Pod, milli int64) bool {
+	if len(p.Spec.Containers) != 1 {
+		return false
 	}
-	return err
+	l, ok := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	return ok && l.MilliValue() == milli
 }
 
 // removeLimit drops the single container's limits.cpu through the resize

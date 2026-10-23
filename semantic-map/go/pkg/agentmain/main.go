@@ -324,18 +324,23 @@ func Main() {
 		log.Printf("policy: policy.rules replaces the default rules and has none to %s; "+
 			"copy it from `agent -print-config` unless leaving it out is meant", rule)
 	}
+	// Outcomes are evidence only when the changes really reach the system: after a
+	// dry run, pressure moves with the workload's own load and nothing else.
+	acting, evidence, err := buildActing(cfg, rt, log.Printf)
+	if err != nil {
+		log.Fatalf("actuation in %s: %v", *configPath, err)
+	}
 	var reliefLoop *relief.Loop
 	if cfg.Loops.Relief.Enabled {
-		// Outcomes are evidence only when the runtime really changes the system: after a
-		// dry run, pressure moves with the workload's own load and nothing else.
-		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, NodeID: cfg.Node.ID,
-			Runtime: rt, Policy: pol, Map: state, Logf: log.Printf,
-			Evidence: rt.Name() != "dry-run", Candidates: sm})
+		cpu, _ := acting.Actuator("cpu.limit")
+		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, Descriptor: cpu.Describe(), NodeID: cfg.Node.ID,
+			Runtime: rt, Acting: acting, Policy: pol, Map: state, Logf: log.Printf,
+			Evidence: evidence, Candidates: sm})
 		if err != nil {
 			log.Fatalf("loops.relief in %s: %v", *configPath, err)
 		}
 	}
-	registerActingRoutes(mux, rt, pol, reliefLoop)
+	registerActingRoutes(mux, rt, acting, pol, reliefLoop)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)

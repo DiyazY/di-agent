@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
@@ -83,7 +84,7 @@ func (h *harness) secondStep(subject string, share, p float64) {
 
 func interventionsOn(t *testing.T, m *statemap.Map, subject string) *statemap.Interventions {
 	t.Helper()
-	for _, r := range m.Relationships(usage(subject), NodeContention) {
+	for _, r := range m.Relationships(usage(subject), contention) {
 		if r.Interventions != nil {
 			return r.Interventions
 		}
@@ -123,22 +124,22 @@ func TestSmallPodsDoNotConfound(t *testing.T) {
 	record(t, m, usage("pod:a"), "pod:a", 0.3, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.02, t0)
 	at := map[string]float64{"pod:a": 0.4, "pod:c": 0.01}
-	if moved, _, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 0 {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:a", 0.25); len(moved) != 0 {
 		t.Fatalf("moved %v; a pod going 0.01 → 0.02 of the node is not a confound", moved)
 	}
-	if confounded(m, at, "pod:a", 0.25, true) {
+	if confounded(m, nodeUsage, at, "pod:a", 0.25, true) {
 		t.Fatal("confounded; want not")
 	}
 	// pod:a back at its share at act, so pod:c's rise is not CPU the cap freed.
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	record(t, m, usage("pod:c"), "pod:c", 0.04, t0)
-	if !confounded(m, at, "pod:a", 0.25, true) {
+	if !confounded(m, nodeUsage, at, "pod:a", 0.25, true) {
 		t.Fatal("pod:c at 0.04 from 0.01 moved 0.03: want confounded")
 	}
 	// A workload that arrived since the act moved from nothing.
 	record(t, m, usage("pod:c"), "pod:c", 0.01, t0)
 	record(t, m, usage("pod:d"), "pod:d", 0.1, t0)
-	if moved, _, _ := movedSince(m, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:a", 0.25); len(moved) != 1 || moved[0] != "pod:d" {
 		t.Fatalf("moved %v; want the newcomer pod:d", moved)
 	}
 }
@@ -206,8 +207,8 @@ func (h *harness) twoAgreeing() {
 
 func TestAnInterventionSettlesThePendingCandidate(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "other", FromID: usage("pod:b"), ToID: NodeContention},
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
+		{CandidateID: "other", FromID: usage("pod:b"), ToID: contention},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: contention},
 	}}
 	h := settleFixture(t, cands, true)
 	h.judged("pod:a", 0.44)
@@ -227,13 +228,13 @@ func TestAnInterventionSettlesThePendingCandidate(t *testing.T) {
 		t.Fatalf("confirmation %+v; want c1 from pod:a's usage by intervention, citing %s", c, verify.ID)
 	}
 	iv, _ := verify.Inputs["intervention"].(map[string]any)
-	if iv == nil || iv["changed"] != "created" || iv["relationship"] != statemap.RelationshipID(usage("pod:a"), NodeContention, "") {
+	if iv == nil || iv["changed"] != "created" || iv["relationship"] != statemap.RelationshipID(usage("pod:a"), contention, "") {
 		t.Fatalf("intervention input %v; want the created relationship", verify.Inputs["intervention"])
 	}
 	if verify.Inputs["candidate"] != "c1" {
 		t.Errorf("candidate input %v; want c1", verify.Inputs["candidate"])
 	}
-	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, ""))
+	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), contention, ""))
 	if !ok || r.Provenance != statemap.Intervened {
 		t.Fatalf("relationship %+v; want it created with intervened provenance", r)
 	}
@@ -241,7 +242,7 @@ func TestAnInterventionSettlesThePendingCandidate(t *testing.T) {
 
 func TestAnUndirectedCandidateIsSettledFromTheWorkload(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "u1", FromID: NodeContention, ToID: usage("pod:a"), Undirected: true},
+		{CandidateID: "u1", FromID: contention, ToID: usage("pod:a"), Undirected: true},
 	}}
 	h := settleFixture(t, cands, true)
 	h.twoAgreeing()
@@ -253,7 +254,7 @@ func TestAnUndirectedCandidateIsSettledFromTheWorkload(t *testing.T) {
 
 func TestAReversedDirectedCandidateIsNotSettled(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "rev", FromID: NodeContention, ToID: usage("pod:a")},
+		{CandidateID: "rev", FromID: contention, ToID: usage("pod:a")},
 	}}
 	h := settleFixture(t, cands, true)
 	h.twoAgreeing()
@@ -264,7 +265,7 @@ func TestAReversedDirectedCandidateIsNotSettled(t *testing.T) {
 
 func TestAFailedSettlementIsACaveat(t *testing.T) {
 	cands := &fakeCandidates{err: errTest, pending: []*types.CandidateEdge{
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: contention},
 	}}
 	h := settleFixture(t, cands, true)
 	h.twoAgreeing()
@@ -278,14 +279,14 @@ func TestAFailedSettlementIsACaveat(t *testing.T) {
 	if !found {
 		t.Fatalf("caveats %v; want the failed settlement stated", d.Caveats)
 	}
-	if _, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, "")); !ok {
+	if _, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), contention, "")); !ok {
 		t.Fatal("the relationship the interventions created is missing")
 	}
 }
 
 func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: contention},
 	}}
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1}, noRelate: true,
 		evidence: true, candidates: cands})
@@ -301,7 +302,7 @@ func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 	if got := h.l.effects.Of("pod:a", BasisUsage); got != 1 {
 		t.Errorf("effect %v; want 1", got)
 	}
-	if rs := h.m.Relationships(usage("pod:a"), NodeContention); len(rs) != 0 {
+	if rs := h.m.Relationships(usage("pod:a"), contention); len(rs) != 0 {
 		t.Errorf("relationships %+v; confounded outcomes must not create one", rs)
 	}
 	if calls := cands.calls(); len(calls) != 0 {
@@ -315,11 +316,11 @@ func TestAConfoundedOutcomeTeachesNothing(t *testing.T) {
 
 func TestDryRunTeachesNothing(t *testing.T) {
 	cands := &fakeCandidates{pending: []*types.CandidateEdge{
-		{CandidateID: "c1", FromID: usage("pod:a"), ToID: NodeContention},
+		{CandidateID: "c1", FromID: usage("pod:a"), ToID: contention},
 	}}
 	h := settleFixture(t, cands, false)
 	h.twoAgreeing()
-	if rs := h.m.Relationships(usage("pod:a"), NodeContention); len(rs) != 0 {
+	if rs := h.m.Relationships(usage("pod:a"), contention); len(rs) != 0 {
 		t.Errorf("relationships %+v; a dry run changes nothing, so it shows nothing", rs)
 	}
 	if got := h.l.effects.Of("pod:a", BasisUsage); got != 1 {
@@ -340,8 +341,8 @@ func TestDryRunTeachesNothing(t *testing.T) {
 
 func TestAResumedActionWithoutAPredictionTeachesNothing(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
-	record(t, h.m, NodeContention, "", 0.5, h.now)
-	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
+	record(t, h.m, contention, "", 0.5, h.now)
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
 		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
 	if err := h.l.Reconcile(h.ctx); err != nil {
 		t.Fatal(err)
@@ -421,11 +422,14 @@ func TestAFurtherStepAfterResumeTeaches(t *testing.T) {
 	resumeWithPrediction(h)
 	h.step(0.5)
 	h.firstVerify(2*time.Minute, 0.44)
+	// The resumed cap holds pod:a at 1.2 cores, 0.3 of the node: a further step
+	// goes below it, to 0.9.
+	record(t, h.m, usage("pod:a"), "pod:a", 0.3, h.now)
 	h.until(3*time.Minute, 0.44, "a further step", func() bool { return len(h.decisions("act")) > 1 }) // the journalled act, then this loop's
-	if a := h.action("pod:a"); a.Resumed || a.Outcome != "" {
-		t.Fatalf("action %+v; want the further step in flight, no longer resumed", a)
+	if a := h.action("pod:a"); a.Resumed || a.Outcome != "" || !near(a.Plan.To, 0.9) {
+		t.Fatalf("action %+v; want the further step to 0.9 in flight, no longer resumed", a)
 	}
-	h.run(2*time.Minute, 0.38) // predicted 0.1 from 0.44, observed 0.06
+	h.run(2*time.Minute, 0.38) // predicted 0.075 from 0.44, observed 0.06
 	if iv := interventionsOn(t, h.m, "pod:a"); iv == nil || iv.Agreed != 1 {
 		t.Fatalf("interventions %+v; want the further step's agreed outcome", iv)
 	}
@@ -444,9 +448,9 @@ func (h *harness) firstVerify(limit time.Duration, p float64) *statemap.Decision
 // the loop to take up at its first tick.
 func resumeWithPrediction(h *harness) {
 	b := h.m.Decide("relief-act-1-1", "earlier act")
-	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1, FromCores: 1.6, ToCores: 1.2, Basis: BasisMap})
+	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1, From: 1.6, To: 1.2, Basis: BasisMap})
 	b.Commit(nil)
-	h.rt.PutUndo(runtime.Undo{Runtime: "dry-run", NodeID: "n1", Subject: "pod:a", Action: runtime.ActionCPULimit,
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
 		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
 }
 
@@ -520,12 +524,12 @@ func TestAUsageEffectDoesNotScaleAMapPrediction(t *testing.T) {
 	m := planFixture(t, 1)
 	ws := []runtime.Workload{pod("pod:a")}
 	pol, c := defaultPolicy(t, nil), reliefCfg()
-	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, e.Of)
+	p, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, e.Of)
 	if !ok || p.Basis != BasisMap || !near(p.Predicted, 0.1) || p.Effect != 1 {
 		t.Fatalf("plan %+v ok=%v why=%q; want the map's 0.1, unscaled by the usage factor", p, ok, why)
 	}
 	e.Observe("pod:a", BasisMap, 0.5)
-	if p, _, _ = MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, e.Of); !near(p.Predicted, 0.1*0.85) {
+	if p, _, _ = MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, e.Of); !near(p.Predicted, 0.1*0.85) {
 		t.Fatalf("plan %+v; want the map factor 0.85 applied", p)
 	}
 }
@@ -539,17 +543,17 @@ func TestAVictimTakingUpTheFreedCPUDoesNotConfound(t *testing.T) {
 	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
 	record(t, m, usage("pod:hog"), "pod:hog", 0.38, t0)
 	record(t, m, usage("pod:victim"), "pod:victim", 0.5, t0)
-	if moved, left, absorbed := movedSince(m, at, "pod:hog", 0.25); len(moved)+len(left) != 0 || len(absorbed) != 1 {
+	if moved, left, absorbed := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved)+len(left) != 0 || len(absorbed) != 1 {
 		t.Fatalf("moved %v left %v absorbed %v; the victim took up the 0.12 the hog gave up", moved, left, absorbed)
 	}
 	// The victim rose by more than the hog gave up: something besides the cap moved it.
 	record(t, m, usage("pod:victim"), "pod:victim", 0.7, t0)
-	if moved, _, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
 		t.Fatalf("moved %v; a rise of 0.32 against 0.12 freed is a confound", moved)
 	}
 	// A workload that fell lowered contention on its own.
 	record(t, m, usage("pod:victim"), "pod:victim", 0.2, t0)
-	if moved, _, _ := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
+	if moved, _, _ := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved) != 1 || moved[0] != "pod:victim" {
 		t.Fatalf("moved %v; a fall is a confound whatever the hog gave up", moved)
 	}
 }
@@ -578,7 +582,7 @@ func TestNothingIsFreedByAWorkloadTheMapNoLongerHolds(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
 	at := map[string]float64{"pod:hog": 0.5, "pod:victim": 0.38}
 	record(t, m, usage("pod:victim"), "pod:victim", 0.6, t0)
-	if moved, _, absorbed := movedSince(m, at, "pod:hog", 0.25); len(moved) != 1 || len(absorbed) != 0 {
+	if moved, _, absorbed := movedSince(m, nodeUsage, at, "pod:hog", 0.25); len(moved) != 1 || len(absorbed) != 0 {
 		t.Fatalf("moved %v absorbed %v; nothing is known to have been freed", moved, absorbed)
 	}
 }
@@ -614,7 +618,7 @@ func TestTheCreatedRelationshipReasonsFromTheMeasuredEffect(t *testing.T) {
 	// The second cap binds: pod:a runs at its new limit, 0.9 of 4 cores.
 	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
 	h.run(2*time.Minute, 0.40)
-	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, ""))
+	r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), contention, ""))
 	if !ok || r.Provenance != statemap.Intervened || r.Measured == nil || r.Basis() != "measured" {
 		t.Fatalf("relationship %+v; want it created and reasoning from the measured effect", r)
 	}
@@ -652,7 +656,7 @@ func TestAMeasuredEffectReplacesTheMapPredictionsCorrection(t *testing.T) {
 	h.secondStep("pod:a", 0.3, 0.44)
 	record(t, h.m, usage("pod:a"), "pod:a", 0.225, h.now)
 	h.run(2*time.Minute, 0.40)
-	if r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), NodeContention, "")); !ok || r.Measured == nil {
+	if r, ok := h.m.Relationship(statemap.RelationshipID(usage("pod:a"), contention, "")); !ok || r.Measured == nil {
 		t.Fatalf("relationship %+v; want a measured strength", r)
 	}
 	if f := h.l.effects.Of("pod:a", BasisMap); f != 1 {

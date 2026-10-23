@@ -217,7 +217,7 @@ export class Drawer {
     const stale = model.actingError ? `<div class="window-note stale-note">
       <span><strong>Not current.</strong> The last refresh failed: ${escapeHTML(model.actingError)}. Showing the last answer.</span>
     </div>` : '';
-    if (relief.stuck) tiles.push(['undo failing', relief.stuck, 'changes in force whose undo the runtime has refused; retried every tick']);
+    if (relief.stuck) tiles.push(['undo failing', relief.stuck, 'changes in force whose undo the actuator has refused; retried every tick']);
     const strip = stale + `<div class="action-strip">
       ${tiles.map(([label, v, tip]) => `<div class="tile"${tip ? ` title="${escapeHTML(tip)}"` : ''}>
         <span class="label">${escapeHTML(label)}</span><span class="value">${escapeHTML(String(v))}</span></div>`).join('')}
@@ -246,7 +246,7 @@ export class Drawer {
           return `<tr data-action="${escapeHTML(a.id)}"${this.isPointed('actions', a.id) ? ' class="pointed"' : ''}
               title="open the trace, and highlight on the map what the agent capped and the pressure it was relieving">
             <td class="mono" title="${escapeHTML(a.subject)}">${escapeHTML(name)}</td>
-            <td class="num nowrap">${fmt.num(a.plan?.from_cores, 2)} → ${fmt.num(a.plan?.to_cores, 2)}</td>
+            <td class="num nowrap">${fmt.num(a.plan?.from, 2)} → ${fmt.num(a.plan?.to, 2)}</td>
             <td class="num">${fmt.num(a.plan?.predicted, 4)}</td>
             <td class="num">${a.observed === undefined || a.observed === null ? '—' : fmt.num(a.observed, 4)}</td>
             <td><span class="badge outcome-${escapeHTML(a.outcome || 'inflight')}">${escapeHTML(a.outcome || 'in flight')}</span>${a.revert_attempts
@@ -1166,7 +1166,7 @@ function actionTrace(a, t) {
 
   const p = a.plan || {};
   parts.push(stage(3, 'Plan and prediction', `<dl class="kv" style="max-width:460px">
-    <dt>cap</dt><dd>${fmt.num(p.from_cores, 2)} → ${fmt.num(p.to_cores, 2)} cores</dd>
+    <dt>cap</dt><dd>${fmt.num(p.from, 2)} → ${fmt.num(p.to, 2)} ${escapeHTML(p.unit || '')}</dd>
     <dt>predicted drop in pressure</dt><dd>${fmt.num(p.predicted, 4)}</dd>
     <dt>basis</dt><dd>${escapeHTML(p.basis || '—')}</dd>
     <dt>learned effect factor</dt><dd>${fmt.num(p.effect, 2)}</dd>
@@ -1176,9 +1176,9 @@ function actionTrace(a, t) {
   parts.push(stage(4, 'Act', `<dl class="kv" style="max-width:460px">
     <dt>decision</dt><dd class="mono">${escapeHTML(a.decision_id)}</dd>
     <dt>acted</dt><dd>${fmt.clock(a.acted_at)} (${fmt.ago(a.acted_at)})</dd>
-    <dt>original limit</dt><dd>${a.undo?.original?.limit == null ? 'none' : fmt.num(a.undo.original.limit, 2) + ' cores'}</dd>
-    <dt>expires</dt><dd>${fmt.clock(a.undo?.expires)}</dd>
-    <dt>runtime</dt><dd>${escapeHTML(a.undo?.runtime || '—')}</dd></dl>`));
+    <dt>original setting</dt><dd>${a.entry?.original_set ? fmt.num(a.entry.original, 2) + ' ' + escapeHTML(p.unit || '') : 'none'}</dd>
+    <dt>expires</dt><dd>${fmt.clock(a.entry?.expires)}</dd>
+    <dt>action</dt><dd class="mono">${escapeHTML(a.entry?.action || '—')}</dd></dl>`));
 
   const v = t.verify;
   let verifyBody;

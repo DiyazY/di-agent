@@ -662,10 +662,10 @@ func Load(path string) (Spec, error) {
 }
 
 // PolicyActions are the names a policy's allow and deny lists may hold. They are
-// the runtime's action names (runtime.ActionCPULimit, which a test in pkg/runtime
-// holds to this list), named here because the runtime imports this package.
-// "evict" is reserved: no runtime performs it, and the default policy denies it
-// so that a runtime that one day can will not do so by default.
+// the registered actuators' actions (cpu.limit, which a test in
+// pkg/runtime/kubernetes holds to this list), named here because those packages
+// import this one. "evict" is reserved: no actuator performs it, and the default
+// policy denies it so that one that one day can will not do so by default.
 var PolicyActions = []string{"cpu.limit", "evict"}
 
 // WorkloadKinds are the subject kinds, the part of a workload's subject before

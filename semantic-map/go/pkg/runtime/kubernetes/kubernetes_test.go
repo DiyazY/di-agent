@@ -2,7 +2,6 @@ package kubernetes
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -21,11 +20,10 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
 )
-
-func f64(v float64) *float64 { return &v }
 
 type podOpt func(*corev1.Pod)
 
@@ -129,165 +127,45 @@ func TestCPUSumsContainers(t *testing.T) {
 	p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "d", Resources: corev1.ResourceRequirements{Requests: rl("200m"), Limits: rl("1")}})
 	r, _ := newRT("n1", p)
 	w := workload(t, r, "pod:ua")
-	if w.CPU.Request == nil || *w.CPU.Request != 0.3 || w.CPU.Limit == nil || *w.CPU.Limit != 1.5 {
-		t.Fatalf("cpu %+v", w.CPU)
+	if c := w.Resources["cpu"]; c.Request == nil || *c.Request != 0.3 || c.Limit == nil || *c.Limit != 1.5 {
+		t.Fatalf("cpu %+v", c)
 	}
 	p2 := burstable("b", "n1", "ub", "100m", "500m")
 	p2.Spec.Containers = append(p2.Spec.Containers, corev1.Container{Name: "d"})
 	r, _ = newRT("n1", p2)
-	if w := workload(t, r, "pod:ub"); w.CPU.Limit != nil {
-		t.Fatalf("limit %v; a container without one makes the pod's nil", *w.CPU.Limit)
+	if l := workload(t, r, "pod:ub").Resources["cpu"].Limit; l != nil {
+		t.Fatalf("limit %v; a container without one makes the pod's nil", *l)
 	}
 }
 
-func TestApplyResizesAndAnnotates(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	exp := time.Unix(5000, 0).UTC()
-	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3, Expires: exp, DecisionID: "d1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.Runtime != "kubernetes" || u.NodeID != "n1" || u.Applied != 0.3 || u.Original.Limit == nil || *u.Original.Limit != 1 {
-		t.Fatalf("undo %+v", u)
-	}
-	p := getPod(t, cs, "a")
-	if got := p.Spec.Containers[0].Resources.Limits.Cpu().String(); got != "300m" {
-		t.Fatalf("limit %s, want 300m", got)
-	}
-	var stored runtime.Undo
-	if err := json.Unmarshal([]byte(p.Annotations[Annotation]), &stored); err != nil {
-		t.Fatal(err)
-	}
-	if stored.Original.Limit == nil || *stored.Original.Limit != 1 || stored.Applied != 0.3 || stored.DecisionID != "d1" || !stored.Expires.Equal(exp) {
-		t.Fatalf("annotation %+v", stored)
-	}
+// set is the cpu.limit actuator's Set of v cores on subject.
+func set(r *Runtime, subject string, v float64) error {
+	return NewCPULimit(r).Set(context.Background(), runtime.Workload{Subject: subject}, v, true)
 }
 
 func TestTheLimitIsRoundedDownToMillicores(t *testing.T) {
 	r, cs := newRT("n1", burstable("a", "n1", "ua", "", "1"))
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.2999}); err != nil {
+	if err := set(r, "pod:ua", 0.2999); err != nil {
 		t.Fatal(err)
 	}
 	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "299m" {
-		t.Fatalf("limit %s, want 299m", got)
+		t.Fatalf("limit %s; want 299m", got)
 	}
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.0001}); err != nil {
+	if v, _, err := NewCPULimit(r).Read(context.Background(), runtime.Workload{Subject: "pod:ua"}); err != nil || v != 0.299 {
+		t.Fatalf("read %v err %v; want the value in force, 0.299", v, err)
+	}
+	if err := set(r, "pod:ua", 0.0001); err != nil {
 		t.Fatal(err)
 	}
 	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1m" {
-		t.Fatalf("limit %s, want 1m", got)
-	}
-}
-
-func TestRevertRestoresAndClears(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	ctx := context.Background()
-	u, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Revert(ctx, u); err != nil {
-		t.Fatal(err)
-	}
-	p := getPod(t, cs, "a")
-	if got := p.Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
-		t.Fatalf("limit %s, want 1", got)
-	}
-	if _, ok := p.Annotations[Annotation]; ok {
-		t.Fatalf("annotation still there: %v", p.Annotations)
-	}
-}
-
-func TestASecondChangeKeepsTheFirstOriginal(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	ctx := context.Background()
-	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.6}); err != nil {
-		t.Fatal(err)
-	}
-	u, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.Original.Limit == nil || *u.Original.Limit != 1 || u.Applied != 0.3 {
-		t.Fatalf("undo %+v; want original 1, applied 0.3", u)
-	}
-	if err := r.Revert(ctx, u); err != nil {
-		t.Fatal(err)
-	}
-	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
-		t.Fatalf("limit %s after revert, want 1", got)
-	}
-}
-
-func annotated(v string) podOpt {
-	return func(p *corev1.Pod) { p.Annotations = map[string]string{Annotation: v} }
-}
-
-func TestAnotherNodesChangeIsNeverOverwritten(t *testing.T) {
-	foreign, _ := json.Marshal(runtime.Undo{NodeID: "n2", Subject: "pod:ua", Original: runtime.Resource{Limit: f64(9)}})
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1", annotated(string(foreign))))
-	if got := workload(t, r, "pod:ua").Can[runtime.ActionCPULimit]; got != "changed by another node: n2" {
-		t.Fatalf("Can = %q", got)
-	}
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5}); err == nil {
-		t.Fatal("applied over another node's change")
-	}
-	p := getPod(t, cs, "a")
-	if p.Annotations[Annotation] != string(foreign) || p.Spec.Containers[0].Resources.Limits.Cpu().String() != "1" {
-		t.Fatalf("pod touched: %v", p.Annotations)
-	}
-	err := r.Revert(context.Background(), runtime.Undo{NodeID: "n1", Subject: "pod:ua", Original: runtime.Resource{Limit: f64(1)}})
-	if err == nil || errors.Is(err, runtime.ErrGone) || getPod(t, cs, "a").Annotations[Annotation] != string(foreign) {
-		t.Fatalf("revert err %v; want a plain error and the foreign record kept", err)
-	}
-}
-
-func TestAGarbledAnnotationIsLeftAlone(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1", annotated("{not json")))
-	if got := workload(t, r, "pod:ua").Can[runtime.ActionCPULimit]; got != "unreadable di-agent/change annotation" {
-		t.Fatalf("Can = %q", got)
-	}
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5}); err == nil {
-		t.Fatal("applied over a garbled record")
-	}
-	if got := getPod(t, cs, "a").Annotations[Annotation]; got != "{not json" {
-		t.Fatalf("annotation %q", got)
-	}
-	if ch, err := r.Changed(context.Background(), "n1"); err != nil || len(ch) != 0 {
-		t.Fatalf("changed %+v err %v", ch, err)
-	}
-}
-
-func failResize(cs *fake.Clientset, err error) {
-	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
-		if a.GetSubresource() == "resize" {
-			return true, nil, err
-		}
-		return false, nil, nil
-	})
-}
-
-func TestAFailedResizeLeavesTheRecord(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	failResize(cs, errors.New("timeout"))
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil {
-		t.Fatal("want the resize error")
-	}
-	p := getPod(t, cs, "a")
-	if p.Spec.Containers[0].Resources.Limits.Cpu().String() != "1" {
-		t.Fatalf("limit changed: %v", p.Spec.Containers[0].Resources.Limits)
-	}
-	got, err := r.Changed(context.Background(), "n1")
-	if err != nil || len(got) != 1 || *got[0].Original.Limit != 1 {
-		t.Fatalf("changed %+v err %v; want the record", got, err)
+		t.Fatalf("limit %s; want never below 1m", got)
 	}
 }
 
 func TestANotFoundAboutSomethingElseIsNotGone(t *testing.T) {
 	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
 	failResize(cs, apierrors.NewNotFound(schema.GroupResource{Resource: "pods/resize"}, "other"))
-	_, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
-	if err == nil || errors.Is(err, runtime.ErrGone) {
+	if err := set(r, "pod:ua", 0.3); err == nil || errors.Is(err, actuators.ErrGone) {
 		t.Fatalf("err %v; a 404 not about this pod is not ErrGone", err)
 	}
 }
@@ -297,7 +175,7 @@ func TestResizeLeavesMemoryAndRequestsAlone(t *testing.T) {
 	p.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("64Mi")
 	p.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("128Mi")
 	r, cs := newRT("n1", p)
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err != nil {
+	if err := set(r, "pod:ua", 0.3); err != nil {
 		t.Fatal(err)
 	}
 	res := getPod(t, cs, "a").Spec.Containers[0].Resources
@@ -306,105 +184,52 @@ func TestResizeLeavesMemoryAndRequestsAlone(t *testing.T) {
 	}
 }
 
-func TestAppliedIsTheValueSet(t *testing.T) {
-	r, _ := newRT("n1", burstable("a", "n1", "ua", "", "1"))
-	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.2999})
-	if err != nil || u.Applied != 0.299 {
-		t.Fatalf("applied %v err %v; want 0.299", u.Applied, err)
-	}
-}
-
-func TestRevertOnAFinishedPodIsErrGone(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := getPod(t, cs, "a")
-	p.Status.Phase = corev1.PodSucceeded
-	if _, err := cs.CoreV1().Pods("default").Update(context.Background(), p, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Revert(context.Background(), u); !errors.Is(err, runtime.ErrGone) {
-		t.Fatalf("err %v; want ErrGone", err)
-	}
-}
-
-func TestChangedIgnoresOtherNodes(t *testing.T) {
-	foreign, _ := json.Marshal(runtime.Undo{NodeID: "n2", Subject: "pod:ua"})
-	p := burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) { p.Annotations = map[string]string{Annotation: string(foreign)} })
-	r, _ := newRT("n1", p)
-	got, err := r.Changed(context.Background(), "n1")
-	if err != nil || len(got) != 0 {
-		t.Fatalf("changed %+v err %v; want none", got, err)
-	}
-	got, err = r.Changed(context.Background(), "n2")
-	if err != nil || len(got) != 1 {
-		t.Fatalf("n2's changed %+v err %v; want its one", got, err)
-	}
-}
-
-func TestChangedFindsWhatApplyRecorded(t *testing.T) {
-	r, _ := newRT("n1", burstable("a", "n1", "ua", "100m", "1"), burstable("b", "n1", "ub", "100m", "1"))
-	ctx := context.Background()
-	if _, err := r.Apply(ctx, "pod:ub", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5, Expires: time.Unix(10, 0)}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5, Expires: time.Unix(5, 0)}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := r.Changed(ctx, "n1")
-	if err != nil || len(got) != 2 || got[0].Subject != "pod:ua" || got[1].Subject != "pod:ub" {
-		t.Fatalf("changed %+v err %v; want ua then ub", got, err)
+// TestAFinishedPodIsGone: a pod that has finished has no limit to read or give
+// back, so Read and Set say it is gone, as for a deleted one.
+func TestAFinishedPodIsGone(t *testing.T) {
+	for _, phase := range []corev1.PodPhase{corev1.PodSucceeded, corev1.PodFailed} {
+		r, _ := newRT("n1", burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) { p.Status.Phase = phase }))
+		a, w := NewCPULimit(r), runtime.Workload{Subject: "pod:ua"}
+		if _, _, err := a.Read(context.Background(), w); !errors.Is(err, actuators.ErrGone) {
+			t.Fatalf("%s: read err %v; want ErrGone", phase, err)
+		}
+		if err := a.Set(context.Background(), w, 1, true); !errors.Is(err, actuators.ErrGone) {
+			t.Fatalf("%s: set err %v; want ErrGone", phase, err)
+		}
 	}
 }
 
 func TestAGonePodIsErrGone(t *testing.T) {
 	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
 	ctx := context.Background()
-	u, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := cs.CoreV1().Pods("default").Delete(ctx, "a", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Revert(ctx, u); !errors.Is(err, runtime.ErrGone) {
-		t.Fatalf("revert err %v; want ErrGone", err)
-	}
-	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.2}); !errors.Is(err, runtime.ErrGone) {
-		t.Fatalf("apply err %v; want ErrGone", err)
+	if err := set(r, "pod:ua", 0.3); !errors.Is(err, actuators.ErrGone) {
+		t.Fatalf("set err %v; want ErrGone", err)
 	}
 }
 
 func TestAPodThatRestartedUnderANewUIDIsErrGone(t *testing.T) {
 	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	u, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3})
-	if err != nil {
-		t.Fatal(err)
-	}
 	p := getPod(t, cs, "a")
 	p.UID = "ua2"
 	if _, err := cs.CoreV1().Pods("default").Update(context.Background(), p, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Revert(context.Background(), u); !errors.Is(err, runtime.ErrGone) {
-		t.Fatalf("revert err %v; want ErrGone", err)
+	if err := set(r, "pod:ua", 0.3); !errors.Is(err, actuators.ErrGone) {
+		t.Fatalf("set err %v; want ErrGone", err)
 	}
 }
 
-func TestAnUndoWithoutALimitIsAnErrorNotGone(t *testing.T) {
-	r, _ := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	err := r.Revert(context.Background(), runtime.Undo{Subject: "pod:ua", NodeID: "n1"})
-	if err == nil || errors.Is(err, runtime.ErrGone) {
-		t.Fatalf("err %v; want an error that is not ErrGone", err)
-	}
-}
-
+// TestAPodThatCannotTakeALimitIsNotApplied: Acting asks the actuator's Check
+// before it changes anything.
 func TestAPodThatCannotTakeALimitIsNotApplied(t *testing.T) {
 	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending }))
-	if _, err := r.Apply(context.Background(), "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil || !strings.Contains(err.Error(), "not running") {
-		t.Fatalf("err %v; want the Can reason", err)
+	w := workload(t, r, "pod:ua")
+	acting := actuators.NewActing("n1", actuators.MemoryLedger(), NewCPULimit(r))
+	if _, err := acting.Apply(context.Background(), w, "cpu.limit", 0.3, time.Time{}, "d"); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("err %v; want the Check reason", err)
 	}
 	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
 		t.Fatalf("limit %s; a refused apply must not touch the pod", got)
@@ -451,9 +276,8 @@ func TestCanReasons(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			r, _ := newRT("n1", c.pod)
 			w := workload(t, r, "pod:"+string(c.pod.UID))
-			got, listed := w.Can[runtime.ActionCPULimit]
-			if !listed || got != c.want {
-				t.Fatalf("Can = %q (listed %v), want %q", got, listed, c.want)
+			if got := NewCPULimit(r).Check(w); got != c.want {
+				t.Fatalf("Check = %q, want %q", got, c.want)
 			}
 		})
 	}
@@ -463,16 +287,58 @@ func TestMultiContainerPodsCannotBeResized(t *testing.T) {
 	p := burstable("m", "n1", "um", "100m", "1")
 	p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "d", Resources: corev1.ResourceRequirements{Limits: rl("1")}})
 	r, _ := newRT("n1", p)
-	if _, err := r.Apply(context.Background(), "pod:um", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil {
-		t.Fatal("applied to a two-container pod")
+	if err := set(r, "pod:um", 0.3); err == nil {
+		t.Fatal("set on a two-container pod")
 	}
 }
 
 func TestPodsNotRunningAreListed(t *testing.T) {
 	r, _ := newRT("n1", burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) { p.Status.Phase = corev1.PodSucceeded }))
-	if w := workload(t, r, "pod:ua"); w.Can[runtime.ActionCPULimit] != "not running" {
-		t.Fatalf("can %v", w.Can)
+	if got := NewCPULimit(r).Check(workload(t, r, "pod:ua")); got != "not running" {
+		t.Fatalf("check %q", got)
 	}
+}
+
+// TestALimitThatWouldMakeThePodGuaranteedIsRefused: a CPU limit equal to the
+// request, on a pod whose memory request equals its limit, changes the QoS class.
+func TestALimitThatWouldMakeThePodGuaranteedIsRefused(t *testing.T) {
+	mem := resource.MustParse("64Mi")
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "500m", "1", func(p *corev1.Pod) {
+		c := &p.Spec.Containers[0].Resources
+		c.Requests[corev1.ResourceMemory], c.Limits[corev1.ResourceMemory] = mem, mem
+	}))
+	if err := set(r, "pod:ua", 0.5); err == nil || !strings.Contains(err.Error(), "Guaranteed") {
+		t.Fatalf("err %v; want the QoS change refused", err)
+	}
+	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
+		t.Fatalf("pod touched: limit %s", got)
+	}
+	if err := set(r, "pod:ua", 0.6); err != nil {
+		t.Fatalf("a limit above the request: %v", err)
+	}
+}
+
+// TestSetAtTheLimitInForceSendsNoResize: a pod already at the value, as after a
+// resize that never took, needs no resize to be given back, so a resize the API
+// keeps refusing cannot keep a change in force that is not there.
+func TestSetAtTheLimitInForceSendsNoResize(t *testing.T) {
+	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
+	failResize(cs, errors.New("timeout"))
+	if err := set(r, "pod:ua", 1); err != nil {
+		t.Fatalf("set: %v; want no resize for the limit in force", err)
+	}
+	if err := set(r, "pod:ua", 0.5); err == nil {
+		t.Fatal("want the resize error for a new limit")
+	}
+}
+
+func failResize(cs *fake.Clientset, err error) {
+	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
+		if a.GetSubresource() == "resize" {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
 }
 
 func TestTheAgentsOwnPodIsSelf(t *testing.T) {
@@ -498,17 +364,6 @@ func TestTheFactoryNamesTheSpecPath(t *testing.T) {
 	}
 }
 
-func TestRevertWithNoAnnotationRestoresTheOriginal(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "300m"))
-	u := runtime.Undo{NodeID: "n1", Subject: "pod:ua", Original: runtime.Resource{Limit: f64(1)}}
-	if err := r.Revert(context.Background(), u); err != nil {
-		t.Fatal(err)
-	}
-	if got := getPod(t, cs, "a").Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
-		t.Fatalf("limit %s, want 1", got)
-	}
-}
-
 // TestInClusterNeedsPodUID: without POD_UID the agent cannot recognise its own
 // pod, and nothing else stops it capping itself, so the factory refuses.
 func TestInClusterNeedsPodUID(t *testing.T) {
@@ -516,38 +371,6 @@ func TestInClusterNeedsPodUID(t *testing.T) {
 	_, err := runtime.Build("kubernetes", runtime.Env{NodeID: "n1", Spec: spec.RuntimeSpec{Kind: "kubernetes"}})
 	if err == nil || !strings.Contains(err.Error(), "POD_UID") || !strings.Contains(err.Error(), "metadata.uid") {
 		t.Fatalf("err %v; want one naming POD_UID and the downward API's metadata.uid", err)
-	}
-}
-
-// TestALimitThatWouldMakeThePodGuaranteedIsRefused: a CPU limit equal to the
-// request, on a pod whose memory request equals its limit, changes the QoS class.
-func TestALimitThatWouldMakeThePodGuaranteedIsRefused(t *testing.T) {
-	mem := resource.MustParse("64Mi")
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "500m", "1", func(p *corev1.Pod) {
-		c := &p.Spec.Containers[0].Resources
-		c.Requests[corev1.ResourceMemory], c.Limits[corev1.ResourceMemory] = mem, mem
-	}))
-	ctx := context.Background()
-	_, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.5})
-	if err == nil || !strings.Contains(err.Error(), "Guaranteed") {
-		t.Fatalf("err %v; want the QoS change refused", err)
-	}
-	p := getPod(t, cs, "a")
-	if _, ok := p.Annotations[Annotation]; ok || p.Spec.Containers[0].Resources.Limits.Cpu().String() != "1" {
-		t.Fatalf("pod touched: %v %v", p.Annotations, p.Spec.Containers[0].Resources.Limits)
-	}
-	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.6}); err != nil {
-		t.Fatalf("a limit above the request: %v", err)
-	}
-}
-
-// TestChangedSkipsARecordForAnotherPod: a record copied onto a pod it does not
-// describe, as by a template or a manual edit, is not this pod's change.
-func TestChangedSkipsARecordForAnotherPod(t *testing.T) {
-	stray, _ := json.Marshal(runtime.Undo{NodeID: "n1", Subject: "pod:other", Original: runtime.Resource{Limit: f64(1)}})
-	r, _ := newRT("n1", burstable("a", "n1", "ua", "100m", "1", annotated(string(stray))))
-	if got, err := r.Changed(context.Background(), "n1"); err != nil || len(got) != 0 {
-		t.Fatalf("changed %+v err %v; want none", got, err)
 	}
 }
 
@@ -570,43 +393,6 @@ current-context: x
 	}
 	if cfg.Timeout <= 0 || cfg.Timeout > time.Minute {
 		t.Fatalf("timeout %s; want a bound on every request", cfg.Timeout)
-	}
-}
-
-// TestRevertAtTheOriginalOnlyClearsTheRecord: a pod already at its original
-// limit, as after a resize that never took, needs no resize to be given back; the
-// record is cleared without one, so a resize the API keeps refusing cannot keep
-// the change in force.
-func TestRevertAtTheOriginalOnlyClearsTheRecord(t *testing.T) {
-	r, cs := newRT("n1", burstable("a", "n1", "ua", "100m", "1"))
-	failResize(cs, errors.New("timeout"))
-	ctx := context.Background()
-	if _, err := r.Apply(ctx, "pod:ua", runtime.Change{Action: runtime.ActionCPULimit, CPULimit: 0.3}); err == nil {
-		t.Fatal("want the resize error")
-	}
-	got, err := r.Changed(ctx, "n1")
-	if err != nil || len(got) != 1 {
-		t.Fatalf("changed %+v err %v; want the record the failed resize left", got, err)
-	}
-	resizes := 0
-	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
-		if a.GetSubresource() == "resize" {
-			resizes++
-		}
-		return false, nil, nil
-	})
-	if err := r.Revert(ctx, got[0]); err != nil {
-		t.Fatalf("revert: %v; want the record cleared with no resize", err)
-	}
-	if resizes != 0 {
-		t.Errorf("%d resize calls; the limit was already the original", resizes)
-	}
-	p := getPod(t, cs, "a")
-	if _, ok := p.Annotations[Annotation]; ok {
-		t.Fatalf("annotation still there: %v", p.Annotations)
-	}
-	if got := p.Spec.Containers[0].Resources.Limits.Cpu().String(); got != "1" {
-		t.Fatalf("limit %s, want 1", got)
 	}
 }
 

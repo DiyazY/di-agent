@@ -81,7 +81,7 @@ open http://localhost:8080/ui/            # macOS; xdg-open on Linux
 kill %1
 ```
 
-Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the runtime keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
+Three surfaces, one daemon: `curl` for inspection, `mapctl` for scripts and headless ops, the browser at `/ui/` for watching the map move and asking it questions. When `loops.relief.enabled` is on, the console opens on an **Actions** pane (a summary strip of actions, kept, reverted, predictions held, frozen workloads and refused, then each action's workload, cores before → after, predicted against observed drop and outcome; a row opens the act and verify decisions behind it and highlights the capped workload and node pressure on the map; a change whose undo the actuator keeps refusing shows `undo failing: <error>` under its outcome and an *undo failing* tile, and a refresh that fails after an earlier one landed says the pane is not current), a **Resources** pane lists the machine (cores, memory, disk) and every consumer the map models — pods, and the units a cgroup collector's `config.units` names, such as the agent and its decision model — with its CPU in cores and memory in bytes, and the rest of the system no subject accounts for, computed when shown; pod boxes carry the workload's name from `GET /workloads` and a `[throttled]` badge (`[throttled (dry-run)]` on the dry-run runtime, which changes nothing) or `[frozen]`, and with relief off the pane says so, asking `/relief` again every tenth poll so an agent restarted with relief on is noticed without a reload. All three speak the same JSON HTTP API.
 
 ---
 
@@ -173,8 +173,14 @@ semantic-map/
     │   │   ├── spec.go         Spec types + Default(), Parse (defaults overlaid, ${VAR} expanded, unknown keys refused), Load, Validate, Redacted, YAML
     │   │   └── spec_test.go    Defaults, overlay, validation, redaction, round trip
     │   ├── policy/             What the agent may touch: rules over workloads, freeze always wins (concrete, NOT a contract)
-    │   ├── runtime/            Runtime contract: list workloads, cap CPU, undo; registry + `dry-run` implementation
-    │   │   └── kubernetes/     The `kubernetes` runtime: this node's pods, CPU limit changed in place through the pod `resize` subresource, undo kept in a pod annotation
+    │   ├── runtime/            Runtime contract: the node's workloads and their resources (inventory only); registry + `dry-run` implementation
+    │   │   └── kubernetes/     The `kubernetes` runtime: this node's pods; the `cpu.limit` actuator, a pod's CPU limit changed in place through the pod `resize` subresource
+    │   ├── actuators/          Actuator contract: one action's Descriptor, Check, Read, Set; registry, the ledger, Acting, DryRun and Static
+    │   │   ├── actuators.go    Descriptor + Actuator + Env + Register/Build/Names + ErrGone
+    │   │   ├── ledger.go       Entry + Ledger: every change the agent holds and what it replaced; OpenLedger (atomic file) / MemoryLedger
+    │   │   ├── acting.go       Acting: Apply (records the original first), Revert, Held (reconcile against the workloads listed)
+    │   │   ├── dryrun.go       DryRun: wraps an actuator so Set changes nothing outside the process
+    │   │   └── static.go       Static: an actuator over in-memory values, the stand-in where the runtime is dry-run
     │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)
     │   │   ├── facts.go        Source iface + registry; Load() into the map; the host keys
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
@@ -271,7 +277,8 @@ semantic-map/
     │   ├── main.go             Main(): -config / -print-config + spec load + profile build + ListenAndServe
     │   ├── config_route.go     GET /config: the running spec, secrets redacted
     │   ├── collectors_route.go GET /collectors: each configured collector's status
-    │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loop with its kill switch
+    │   ├── acting.go           /workloads, /policy, /relief*: what the runtime lists, the policy that governs each, and the relief loop with its kill switch; buildActing (actuators + ledger)
+    │   ├── actuators_route.go  GET /actuators: each action's descriptor and the changes the ledger holds
     │   ├── routes.go           registerRoutes + writeError + requireJSON (CSRF guard)
     │   ├── state_routes.go     /state* — query, lifecycle, journal, decisions, estimate
     │   ├── peer_state_routes.go  /state/cluster, /state/peers, /state/where + the peer poll loop
@@ -614,10 +621,11 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/candidates/{id}/defer`            | path only                                                | Phase 1  |
 | GET  | `/config`                           | —                                                        | spec     | The spec the agent runs on (`agent.yaml` over the defaults), secrets shown as `[redacted]`; so are each collector entry's non-empty `config` block and `exec.args`, and an `http.url`'s userinfo and query (its fragment is dropped) |
 | GET  | `/collectors`                       | —                                                        | collectors | `{interval_ms, collectors:[…]}`: `sources.interval` in milliseconds and each configured collector's state, counters and declared types, in list order; see [`GET /collectors`](#get-collectors) |
-| GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, cpu{request,limit}, can, policy` (the effective policy: `frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
+| GET  | `/workloads`                        | — each workload the runtime lists: `subject, name, labels, resources, can, policy`; `resources` by name, `cpu` in cores and `memory` in bytes, each `{request, limit}` (`null` when not set); `can` by action, why that action cannot apply to the workload, `""` when it can; `policy` the effective policy (`frozen`, `frozen_by`, `rule`, `settings`) | runtime  |
+| GET  | `/actuators`                        | `?subject=pod:x` optional — each action the agent can take: `descriptor` (`action, kinds, resource, unit, capacity, min, relieves, usage, describe`) and `held`, the ledger's entries for it (`action, subject, decision_id, original, original_set, applied, expires, node_id`; `original_set` false: there was no setting to give back). With `subject`, `held` is that workload's and each action adds `can` (`""` when it can apply); `404` when the runtime has no such workload | actuators |
 | GET  | `/policy`                           | `?subject=pod:x` — the effective policy for one workload, `settings.cooldown` a Go duration (`"10m0s"`) as in `/workloads` and `/config`; `400` without `subject`, `404` when the runtime has no such workload | runtime  |
-| GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the runtime has refused; absent when none), `cooling` | relief   |
-| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its prediction and `verify_id` (the decision that judged it; absent until verified) (the plan's `effect` is the learned factor it was scaled by), observed drop, `outcome`, `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding), and, for a change whose undo the runtime has refused, `revert_attempts` (refusals since its latest step) and `last_error` (the latest one); the undo is retried every tick and its first refusal is journalled once, as a `relief-stuck-*` decision | relief   |
+| GET  | `/relief`                           | — the relief loop: `phase`, `paused`, `runtime`, `in_flight`, `actions`, `kept`, `reverted`, `refused`, `predictions_held`, `stuck` (changes in force whose undo the actuator has refused; absent when none), `cooling` | relief   |
+| GET  | `/relief/actions`                   | — the loop's actions, newest first (at most 200), each with its `plan` (`subject, from, to, unit, predicted, estimate_id, basis, rule, effect`: usage `from` and the setting `to`, in `unit`; `effect` the learned factor the prediction was scaled by), `entry` (the ledger's record, as in `/actuators`: `original` is the setting before the agent's first step), `verify_id` (the decision that judged it; absent until verified), observed drop, `outcome`, `shares_at_act` (every workload's share when it acted, against which the outcome is checked for confounding), and, for a change whose undo the actuator has refused, `revert_attempts` (refusals since its latest step) and `last_error` (the latest one); the undo is retried every tick and its first refusal is journalled once, as a `relief-stuck-*` decision | relief   |
 | POST | `/relief/actions/{id}/revert`       | JSON content type — undo one action in force and cool its workload down; outcome `manual`; `404` for an id not in force | relief   |
 | POST | `/relief/pause`                     | JSON content type — stop making and releasing changes; verifying, reverting a failed action and expiry go on | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause                           | relief   |
@@ -649,7 +657,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/peers/refresh`              | — poll every peer now                                    | Peer state |
 | GET  | `/state/where`                      | `?property=` — per-node answers, deliberately not averaged | Peer state |
 
-When `loops.relief.enabled` is false every `/relief*` route is `404` with `relief is not enabled in the spec`. The mutating relief routes refuse a body without `Content-Type: application/json` with `400`, as every other mutating route does.
+When `loops.relief.enabled` is false every `/relief*` route is `404` with `relief is not enabled in the spec`. `/workloads`, `/policy` and `/actuators` answer either way. The mutating relief routes refuse a body without `Content-Type: application/json` with `400`, as every other mutating route does.
 
 `POST /explain` returns `200` with an `ExplainResponse`, `422` with `{error, response}` when the answer failed a gate after `max_iterations`, `501` when `explain.provider: none`, and `application/x-ndjson` instead of JSON when `stream:true`. See [§8](#8-natural-language-explain-explain).
 
@@ -721,7 +729,7 @@ Values that cannot be what was meant are refused at startup, every one named. In
 
 ### The runtime and the relief loop
 
-The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
+The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default; `cpu.limit` acts there only on a workload whose inventory lists a CPU limit); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
 
 ```yaml
 # relief on dry-run: the loop decides, records and verifies; nothing is changed
@@ -740,7 +748,9 @@ loops:
 
 The trigger is the node's CPU contention, `cpu_contention_ratio`: the share of time a pod waited for CPU it was owed and another pod held — PSI stall less the pod's own throttling, counted only for a pod getting less than its weighted fair share of the pods' CPUs (a pod past its share waits on its own threads, and capping a neighbour cannot help it) — not CPU utilisation, and not `cpu_pressure_ratio`, which counts a pod held back by its own limit as pressure. A node can be fully used and not contended, and the loop acts only on the waiting. It comes from the cgroup collector with subjects on (the default).
 
-The hourly limit (`max_actions_per_hour`) survives a restart: changes the agent takes up from the runtime count toward it from the time the journal says they were made, or from the restart when the journal no longer has them. Cooldowns do not: they are per process lifetime, so a restarted agent may act on a workload that was cooling down.
+Every change the agent holds is in its ledger, `actions.json` beside `persist.file` (`/var/lib/di-agent/actions.json` when `persist.file` is empty), shown at `GET /actuators`; with relief enabled on a runtime other than `dry-run`, a ledger that cannot be written refuses start, naming its path. Under `dry-run` the ledger is in memory.
+
+The hourly limit (`max_actions_per_hour`) survives a restart: changes the agent takes up from the ledger count toward it from the time the journal says they were made, or from the restart when the journal no longer has them. Cooldowns do not: they are per process lifetime, so a restarted agent may act on a workload that was cooling down.
 
 Outcomes teach the map — interventions on relationships, each workload's learned effect, candidates settled — only on a runtime that really changes the system, never on `dry-run` (ARCHITECTURE §16, "Learning from outcomes"). At start the agent logs `relief: acting every <interval> through runtime <name>`. Watch it with `curl localhost:8080/relief` and `curl localhost:8080/relief/actions`; stop it making changes with `curl -X POST -H 'Content-Type: application/json' localhost:8080/relief/pause`. Every other `loops.relief.cpu` key is in [`agent.example.yaml`](agent.example.yaml).
 
@@ -773,7 +783,7 @@ runtime:
   kubeconfig: ""          # empty: in-cluster; else a kubeconfig path
 ```
 
-It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (above) marks the agent's own pod, which no rule may touch. Every API request times out after 30s, and a relief pass, or a manual revert, gives up on the runtime after `loops.relief.interval` (at least 10s). The role grants `list` and `patch` on `pods` and `patch` on `pods/resize`, and nothing else. Note that `patch` on pods is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever patches pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can`); see ARCHITECTURE §16.
+It needs Kubernetes 1.33 or later, where a pod's CPU limit can be changed in place (the `resize` subresource): the container is not restarted. `POD_UID` (above) marks the agent's own pod, which no rule may touch. Every API request times out after 30s, and a relief pass, or a manual revert, gives up on the runtime after `loops.relief.interval` (at least 10s). The role grants `list` on `pods` and `patch` on `pods/resize`, and nothing else; nothing is written to the pod but its limit. Note that `patch` on `pods/resize` is cluster-wide in RBAC: Kubernetes cannot scope it to a node. The agent only ever resizes pods on its own node. A workload is a pod on this node, named by its bare pod name, with `k8s/namespace` as a label. Pods that cannot take a CPU cap are listed with the reason in `GET /workloads` (`can["cpu.limit"]`); see ARCHITECTURE §16.
 
 ### The state model
 

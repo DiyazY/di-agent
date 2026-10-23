@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
+	"github.com/DiyazY/di-agent/pkg/spec"
 )
 
 func TestCPULimitDescriptor(t *testing.T) {
@@ -37,9 +39,6 @@ func TestCPULimitCheckReasons(t *testing.T) {
 		{"no limit", burstable("p", "n1", "u", "100m", ""), "no CPU limit: a limit the agent added could never be removed"},
 		{"guaranteed", burstable("p", "n1", "u", "1", "1", func(p *corev1.Pod) { p.Status.QOSClass = corev1.PodQOSGuaranteed }),
 			"Guaranteed: changing the limit alone would change the pod's QoS class"},
-		{"another node's record", burstable("p", "n1", "u", "100m", "1", func(p *corev1.Pod) {
-			p.Annotations = map[string]string{Annotation: `{"node_id":"other"}`}
-		}), "changed by another node: other"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -55,6 +54,49 @@ func TestCPULimitCheckReasons(t *testing.T) {
 	w.Self = true
 	if got := NewCPULimit(rt).Check(w); got != "the agent itself" {
 		t.Fatalf("self: %q", got)
+	}
+	if got := NewCPULimit(rt).Check(runtime.Workload{Subject: "pod:never"}); got != "not a workload the runtime lists" {
+		t.Fatalf("unlisted: %q", got)
+	}
+}
+
+// TestBuildPicksTheActuatorForTheRuntime: cpu.limit over a Kubernetes runtime is
+// the real actuator; over any other it is the stand-in that touches nothing.
+func TestBuildPicksTheActuatorForTheRuntime(t *testing.T) {
+	r, _ := newRT("n1")
+	a, err := actuators.Build("cpu.limit", actuators.Env{NodeID: "n1", Runtime: r})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(*CPULimit); !ok {
+		t.Fatalf("actuator %T over a kubernetes runtime; want *CPULimit", a)
+	}
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err = actuators.Build("cpu.limit", actuators.Env{NodeID: "n1", Runtime: dry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(*CPULimit); ok || a.Describe().Action != "cpu.limit" {
+		t.Fatalf("actuator %T (%s) over dry-run; want the static stand-in", a, a.Describe().Action)
+	}
+	l := 0.5
+	w := runtime.Workload{Subject: "pod:x", Resources: map[string]runtime.Resource{"cpu": {Limit: &l}}}
+	if v, set, err := a.Read(context.Background(), w); err != nil || !set || v != 0.5 {
+		t.Fatalf("stand-in read %v %v %v; want the inventory's limit", v, set, err)
+	}
+}
+
+// TestThePolicyKnowsEveryAction: the spec refuses an allow or deny entry that is
+// not in its own list; every registered action must be there, or no policy could
+// allow it.
+func TestThePolicyKnowsEveryAction(t *testing.T) {
+	for _, a := range actuators.Names() {
+		if !slices.Contains(spec.PolicyActions, a) {
+			t.Errorf("spec.PolicyActions %v lacks %q", spec.PolicyActions, a)
+		}
 	}
 }
 
@@ -73,8 +115,8 @@ func TestCPULimitReadSet(t *testing.T) {
 	if l := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]; l.MilliValue() != 250 {
 		t.Fatalf("limit %v", l.String())
 	}
-	if _, ok := p.Annotations[Annotation]; ok {
-		t.Fatal("the actuator must not write the change annotation")
+	if len(p.Annotations) != 0 {
+		t.Fatalf("annotations %v; the actuator records nothing on the pod", p.Annotations)
 	}
 	if v, set, _ := a.Read(ctx, w); !set || v != 0.25 {
 		t.Fatalf("read after set %v %v", v, set)

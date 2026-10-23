@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 )
 
@@ -40,13 +41,13 @@ const (
 
 // expire gives back every action past its expiry, whatever the phase and
 // whether or not the loop is paused: a change the agent can no longer vouch for
-// must not outlive the time it was granted. One the runtime will not give back
+// must not outlive the time it was granted. One the actuator will not give back
 // stays in force and is tried again next tick.
 func (l *Loop) expire(ctx context.Context, now time.Time) {
 	l.mu.Lock()
 	var due []*Action
 	for _, a := range l.liveLocked() {
-		if !now.Before(a.Undo.Expires) {
+		if !now.Before(a.Entry.Expires) {
 			due = append(due, a)
 		}
 	}
@@ -58,9 +59,9 @@ func (l *Loop) expire(ctx context.Context, now time.Time) {
 	}
 }
 
-// undoFailed records that the runtime refused to undo a's change: counted and
+// undoFailed records that the actuator refused to undo a's change: counted and
 // kept on the action, so Actions and Status show a change stuck in force, logged
-// every time, and journalled only on the first refusal, so a runtime that refuses
+// every time, and journalled only on the first refusal, so an actuator that refuses
 // for an hour is one record rather than 240. The change stays in force and the
 // undo is retried on the next tick. Called under the pass lock, with mu not held.
 func (l *Loop) undoFailed(a *Action, what string, err error) {
@@ -75,10 +76,10 @@ func (l *Loop) undoFailed(a *Action, what string, err error) {
 	}
 	b := l.cfg.Map.Decide(l.id("stuck"), fmt.Sprintf("give back the change to %s?", a.Subject))
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Input("while", what)
 	b.Input("error", err.Error())
-	b.Caveat("the runtime refused to undo the change: it stays in force and is retried every tick; later refusals are counted on the action, not journalled")
+	b.Caveat("the actuator refused to undo the change: it stays in force and is retried every tick; later refusals are counted on the action, not journalled")
 	b.Commit(map[string]any{"stuck": a.Subject})
 }
 
@@ -87,7 +88,7 @@ func (l *Loop) undoFailed(a *Action, what string, err error) {
 // action is always kept, as there is no pre-cap baseline to judge it by. The
 // judgement needs a fresh reading taken after Settle; one taken before it says
 // nothing about the cap's effect. A workload the runtime no longer lists is
-// gone, and its slot is freed once the runtime has let go of the change.
+// gone, and its slot is freed once the actuator has let go of the change.
 func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at time.Time, fresh bool, workloads func() ([]runtime.Workload, bool)) {
 	l.mu.Lock()
 	a := l.inFlight
@@ -99,10 +100,11 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	if !ok {
 		return
 	}
-	if !hasSubject(ws, a.Subject) {
-		// Revert anyway, so a runtime that still holds the change gives it up;
-		// the undo is dropped only once it has.
-		if err := l.cfg.Runtime.Revert(ctx, a.Undo); err != nil && !errors.Is(err, runtime.ErrGone) {
+	w, listed := workload(ws, a.Subject)
+	if !listed {
+		// Revert anyway, so an orchestrator that still has the workload gives the
+		// change up; the entry is dropped only once it has.
+		if err := l.cfg.Acting.Revert(ctx, w, a.Entry); err != nil && !errors.Is(err, actuators.ErrGone) {
 			l.undoFailed(a, "letting go of", err)
 			return
 		}
@@ -110,7 +112,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		return
 	}
 	if a.revertPending {
-		l.revertFailed(ctx, now, a, a.VerifyID)
+		l.revertFailed(ctx, now, w, a, a.VerifyID)
 		return
 	}
 	if !fresh || at.Before(a.ActedAt.Add(l.c.Settle)) {
@@ -128,7 +130,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	}
 	id := l.id("verify")
 	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s relieve node CPU contention?", a.Subject))
-	b.Property(NodeContention)
+	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
 	b.Input("predicted", a.Plan.Predicted)
 	b.Input("observed", observed)
@@ -155,31 +157,30 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	}
 	a.revertPending = true
 	l.mu.Unlock()
-	l.revertFailed(ctx, now, a, id)
+	l.revertFailed(ctx, now, w, a, id)
 }
 
 // revertFailed undoes a step that did not help and puts its workload on a long
 // cooldown. A first step is reverted; a further step is undone by putting back
-// the cap before it, which stays kept. A revert the runtime refuses is retried
+// the cap before it, which stays kept. A revert the actuator refuses is retried
 // on the next tick without judging the step again.
-func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verifyID string) {
+func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Workload, a *Action, verifyID string) {
 	var (
-		undo runtime.Undo
-		err  error
+		entry actuators.Entry
+		err   error
 	)
 	if a.prev != nil {
 		p := a.prev
-		undo, err = l.cfg.Runtime.Apply(ctx, a.Subject, runtime.Change{Action: runtime.ActionCPULimit,
-			CPULimit: p.Undo.Applied, Expires: p.Undo.Expires, DecisionID: p.DecisionID})
+		entry, err = l.cfg.Acting.Apply(ctx, w, l.d.Action, p.Entry.Applied, p.Entry.Expires, p.DecisionID)
 		if err != nil {
-			l.reconciled = false // what the runtime holds now is asked again, as after any failed Apply
+			l.reconciled = false // the ledger is reconciled again, as after any failed Apply
 		}
 	} else {
-		err = l.cfg.Runtime.Revert(ctx, a.Undo)
+		err = l.cfg.Acting.Revert(ctx, w, a.Entry)
 	}
 	switch {
-	case errors.Is(err, runtime.ErrGone):
-		l.gone(now, a, "the runtime no longer has the workload")
+	case errors.Is(err, actuators.ErrGone):
+		l.gone(now, a, "the actuator no longer finds the workload")
 		return
 	case err != nil:
 		l.undoFailed(a, "reverting", err)
@@ -195,9 +196,9 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 	if verifyID != "" {
 		b.Input("verify", verifyID)
 	}
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	if a.prev != nil {
-		b.Input("restored", map[string]any{"act": a.prev.DecisionID, "to_cores": a.prev.Undo.Applied})
+		b.Input("restored", map[string]any{"act": a.prev.DecisionID, "to": a.prev.Entry.Applied, "unit": l.d.Unit})
 	}
 	b.Note("attribution failed; cooling %s down for %s", a.Subject, cooldown)
 	b.Commit(map[string]any{"reverted": a.Subject})
@@ -208,7 +209,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 		id, failed := a.ID, a.VerifyID
 		*a = *p
 		// The verify that caused the revert is the one an operator wants, not the earlier step's.
-		a.ID, a.Undo, a.Outcome, a.revertPending, a.VerifyID = id, undo, OutcomeKept, false, failed
+		a.ID, a.Entry, a.Outcome, a.revertPending, a.VerifyID = id, entry, OutcomeKept, false, failed
 		a.RevertAttempts, a.LastError = 0, "" // the undo went through; the earlier cap is in force anew
 		if l.inFlight == a {
 			l.inFlight = nil
@@ -224,7 +225,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 
 // release gives back the most recent kept change, one per Settle, whenever the
 // node is not relieving: after pressure has eased, and after a restart that
-// found caps on a calm node. One the runtime will not give back does not hold up
+// found caps on a calm node. One the actuator will not give back does not hold up
 // the rest: the next most recent is tried in the same tick, and the refused one
 // is tried again at the next release, a Settle later. In Releasing, with nothing left, it ends the
 // phase. An action in flight is judged first, so it is either kept and
@@ -257,10 +258,10 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 
 	var skipped []string
 	for i, a := range kept {
-		err := l.cfg.Runtime.Revert(ctx, a.Undo)
+		err := l.cfg.Acting.Revert(ctx, bySubject(a.Subject), a.Entry)
 		switch {
-		case errors.Is(err, runtime.ErrGone):
-			l.gone(now, a, "the runtime no longer has the workload")
+		case errors.Is(err, actuators.ErrGone):
+			l.gone(now, a, "the actuator no longer finds the workload")
 			return
 		case err != nil:
 			l.undoFailed(a, "releasing", err)
@@ -273,18 +274,18 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 }
 
 // recordRelease journals and records the release of a, whose revert went
-// through. skipped lists the newer actions the runtime would not give back first.
+// through. skipped lists the newer actions the actuator would not give back first.
 func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
 	b := l.cfg.Map.Decide(l.id("release"), fmt.Sprintf("give %s back its CPU: node CPU contention has eased", a.Subject))
-	b.Property(NodeContention)
+	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Input("pressure", pressure)
 	b.Input("phase", string(phase))
 	b.Note("released most recent first; cooling %s down for %s", a.Subject, cooldown)
 	if len(skipped) > 0 {
 		b.Input("skipped", skipped)
-		b.Note("newer changes the runtime would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
+		b.Note("newer changes the actuator would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
 	}
 	b.Commit(map[string]any{"released": a.Subject, "cooldown": cooldown.String()})
 	l.end(now, a, OutcomeReleased, cooldown)
@@ -302,10 +303,10 @@ func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase P
 // giveBack reverts an action for a reason other than its verdict or a release:
 // expiry or an operator. A workload that is gone is recorded as such.
 func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, kind string, cooldown time.Duration) error {
-	err := l.cfg.Runtime.Revert(ctx, a.Undo)
+	err := l.cfg.Acting.Revert(ctx, bySubject(a.Subject), a.Entry)
 	switch {
-	case errors.Is(err, runtime.ErrGone):
-		l.gone(now, a, "the runtime no longer has the workload")
+	case errors.Is(err, actuators.ErrGone):
+		l.gone(now, a, "the actuator no longer finds the workload")
 		return nil
 	case err != nil:
 		return fmt.Errorf("reverting %s on %s (%s): %w", a.ID, a.Subject, outcome, err)
@@ -316,7 +317,7 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 	}
 	b := l.cfg.Map.Decide(l.id(kind), question)
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Note("cooling %s down for %s", a.Subject, cooldown)
 	b.Commit(map[string]any{outcome: a.Subject})
 	l.end(now, a, outcome, cooldown)
@@ -329,7 +330,7 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 func (l *Loop) gone(now time.Time, a *Action, why string) {
 	b := l.cfg.Map.Decide(l.id("gone"), fmt.Sprintf("what became of the change to %s?", a.Subject))
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Note("%s; the change is dropped", why)
 	b.Commit(map[string]any{"gone": a.Subject})
 	l.end(now, a, OutcomeGone, 0)
@@ -362,13 +363,24 @@ func backoff(base time.Duration, k int) time.Duration {
 }
 
 func hasSubject(ws []runtime.Workload, subject string) bool {
+	_, ok := workload(ws, subject)
+	return ok
+}
+
+// workload is the listed workload with subject, or one named only by it when ws
+// does not list it: an actuator finds a workload by its subject.
+func workload(ws []runtime.Workload, subject string) (runtime.Workload, bool) {
 	for _, w := range ws {
 		if w.Subject == subject {
-			return true
+			return w, true
 		}
 	}
-	return false
+	return bySubject(subject), false
 }
+
+// bySubject is a workload named only by its subject, for giving a change back
+// where the loop has no listing to hand.
+func bySubject(subject string) runtime.Workload { return runtime.Workload{Subject: subject} }
 
 // removeAction drops a from as without disturbing the order of the rest.
 func removeAction(as []*Action, a *Action) []*Action {
@@ -392,7 +404,6 @@ func appendHistory(h []*Action, a *Action) []*Action {
 func copyAction(a *Action) Action {
 	c := *a
 	c.Observed = cloneFloat(a.Observed)
-	c.Undo.Original = runtime.Resource{Request: cloneFloat(a.Undo.Original.Request), Limit: cloneFloat(a.Undo.Original.Limit)}
 	if a.SharesAtAct != nil {
 		c.SharesAtAct = make(map[string]float64, len(a.SharesAtAct))
 		for s, v := range a.SharesAtAct {

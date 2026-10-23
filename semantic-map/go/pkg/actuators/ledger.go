@@ -142,6 +142,17 @@ func (l *Ledger) All() []Entry {
 	return out
 }
 
+// For lists the entries of action, in All's order. It has the shape of Env.Held.
+func (l *Ledger) For(action string) []Entry {
+	var out []Entry
+	for _, e := range l.All() {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // saveLocked writes the ledger to a temp file beside the real one, syncs it and
 // renames it over, so a crash leaves the old file or the new, never half of one.
 func (l *Ledger) saveLocked() error {

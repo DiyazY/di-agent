@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
@@ -34,10 +35,11 @@ type Status struct {
 
 // Action is the agent's change to one workload, with what it predicted and what
 // it then observed. A workload stepped again while its change is in force keeps
-// one Action: Plan, Undo and DecisionID describe the latest step, and ID stays
+// one Action: Plan, Entry and DecisionID describe the latest step, and ID stays
 // the first step's act decision, so an operator's handle on the change does not
-// move. Resumed marks one found on the runtime at start rather than made by this
-// loop: its prediction is only known if the journal still has the decision that
+// move. Entry is the ledger's record of it, whose Original is the setting before
+// the agent's first step. Resumed marks one found in the ledger at start rather
+// than made by this loop: its prediction is only known if the journal still has the decision that
 // made it, and its outcome is never evidence, as its baseline was taken with the
 // change already in force. SharesAtAct is every workload's share of node CPU when the action's
 // baseline was taken, so its outcome can be told apart from another workload
@@ -49,7 +51,7 @@ type Action struct {
 	Subject         string             `json:"subject"`
 	DecisionID      string             `json:"decision_id"`
 	Plan            Plan               `json:"plan"`
-	Undo            runtime.Undo       `json:"undo"`
+	Entry           actuators.Entry    `json:"entry"`
 	ContentionAtAct float64            `json:"contention_at_act"`
 	ActedAt         time.Time          `json:"acted_at"`
 	Observed        *float64           `json:"observed,omitempty"` // observed drop, after settle
@@ -64,20 +66,26 @@ type Action struct {
 	cooldown      time.Duration // the workload's policy cooldown, the base of every cooldown after this
 	revertPending bool          // judged not to have helped; the revert has not yet succeeded
 	needBaseline  bool          // resumed without a fresh reading; ContentionAtAct and ActedAt await one
-	origin        *float64      // the limit before the agent's first step, for the of_original floor
+	origin        *float64      // the setting before the agent's first step, for the of_original floor
 	prev          *Action       // the action as it stood before its latest step
 	originRefused bool          // a further step was refused for want of origin, and journalled
 }
 
-// Config is what a Loop is built from. Evidence says the runtime really changes
-// the system, so an action's outcome is evidence about it: only then do outcomes
-// feed the map, the learned effects and the discovery queue. A dry run changes
-// nothing, and what pressure did after it is the workload's own doing. Candidates
-// is the discovery queue interventions settle; nil settles nothing.
+// Config is what a Loop is built from. Descriptor is the action the loop takes:
+// the node property it relieves, the per-workload usage it moves, its unit and
+// the capacity fact that turns a share into that unit. Runtime lists the
+// workloads; Acting changes them through the descriptor's actuator and holds the
+// ledger of what it changed. Evidence says the changes really reach the system,
+// so an action's outcome is evidence about it: only then do outcomes feed the
+// map, the learned effects and the discovery queue. A dry run changes nothing,
+// and what pressure did after it is the workload's own doing. Candidates is the
+// discovery queue interventions settle; nil settles nothing.
 type Config struct {
 	Relief     spec.Relief
+	Descriptor actuators.Descriptor
 	NodeID     string
 	Runtime    runtime.Runtime
+	Acting     *actuators.Acting
 	Policy     *policy.Policy
 	Map        *statemap.Map
 	Now        func() time.Time
@@ -86,20 +94,22 @@ type Config struct {
 	Candidates Candidates
 }
 
-// Loop relieves CPU pressure on one node: it notices pressure, caps the
-// workload the map says is causing it, checks after Settle that the cap helped,
-// undoes it if not, and gives every cap back once pressure is gone. Every step
-// is a decision in the map's journal.
+// Loop relieves one kind of pressure on one node through one action: it notices
+// pressure, caps the workload the map says is causing it, checks after Settle
+// that the cap helped, undoes it if not, and gives every cap back once pressure
+// is gone. Every step is a decision in the map's journal.
 //
 // Tick, Reconcile and Revert each hold the pass lock for their whole run,
-// Runtime calls included, so only one of them changes the system at a time and
-// an outcome can be attributed to one action. The state lock is never held
-// across a Runtime call: Status, Actions, Pause and Resume take only it, so an
+// runtime and actuator calls included, so only one of them changes the system
+// at a time and an outcome can be attributed to one action. The state lock is
+// never held across such a call: Status, Actions, Pause and Resume take only it, so an
 // HTTP handler is never blocked behind a slow orchestrator, and they always see
 // state between two steps, never in the middle of one.
 type Loop struct {
 	cfg   Config
 	c     spec.CPURelief
+	d     actuators.Descriptor
+	act   actuators.Actuator // the descriptor's, from Acting
 	epoch int64
 
 	effects effects       // what acting on each workload has done; safe on its own
@@ -107,7 +117,7 @@ type Loop struct {
 
 	pass       sync.Mutex // serialises the passes that change the system
 	seq        int        // decision counter; touched only under pass
-	reconciled bool       // Changed has answered; until then nothing is applied. Touched only under pass
+	reconciled bool       // the ledger has been reconciled; until then nothing is applied. Touched only under pass
 
 	mu          sync.Mutex
 	trigger     *Trigger
@@ -137,12 +147,20 @@ func New(c Config) (*Loop, error) {
 	switch {
 	case c.Runtime == nil:
 		return nil, errors.New("relief: no runtime")
+	case c.Acting == nil:
+		return nil, errors.New("relief: no acting")
+	case c.Descriptor.Action == "":
+		return nil, errors.New("relief: no action descriptor")
 	case c.Policy == nil:
 		return nil, errors.New("relief: no policy")
 	case c.Map == nil:
 		return nil, errors.New("relief: no state map")
 	case c.Relief.Interval <= 0:
 		return nil, fmt.Errorf("relief: interval %s must be positive", c.Relief.Interval)
+	}
+	act, ok := c.Acting.Actuator(c.Descriptor.Action)
+	if !ok {
+		return nil, fmt.Errorf("relief: no actuator for action %q", c.Descriptor.Action)
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -152,7 +170,7 @@ func New(c Config) (*Loop, error) {
 	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Relief.CPU, epoch: now.Unix(), timeout: max(c.Relief.Interval, minCallTimeout),
+		cfg: c, c: c.Relief.CPU, d: c.Descriptor, act: act, epoch: now.Unix(), timeout: max(c.Relief.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Relief.CPU), phase: Calm, since: now,
 		cooling: map[string]time.Time{}, released: map[string]time.Time{}, cycles: map[string]int{},
 	}, nil
@@ -163,7 +181,7 @@ func New(c Config) (*Loop, error) {
 // slowly.
 const minCallTimeout = 10 * time.Second
 
-// Start reconciles with what the runtime says this node changed, then ticks
+// Start reconciles with what the ledger says this node changed, then ticks
 // every Relief.Interval until ctx ends. A failed reconcile is retried by every
 // tick until it succeeds, and nothing is applied before then.
 func (l *Loop) Start(ctx context.Context) {
@@ -260,7 +278,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	if fresh {
 		// For a resumed action's baseline, taken below; read outside the state lock,
 		// as the loop's other reads of the map are.
-		shares = workloadShares(l.cfg.Map)
+		shares = workloadShares(l.cfg.Map, l.d.Usage)
 	}
 
 	l.mu.Lock()
@@ -318,10 +336,10 @@ func (l *Loop) Tick(ctx context.Context) {
 	l.release(ctx, now, pressure, phase)
 }
 
-// Reconcile takes up the changes the runtime says this node made and has not
-// given back, as after a restart. Until it has succeeded once the loop applies
-// nothing, because a change made on top of caps it does not know of would
-// record one of them as the workload's original.
+// Reconcile takes up the changes the ledger says this node made with this
+// loop's action and has not given back, as after a restart. Until it has
+// succeeded once the loop applies nothing, because a change made on top of caps
+// it does not know of would record one of them as the workload's original.
 func (l *Loop) Reconcile(ctx context.Context) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
@@ -335,67 +353,101 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// reconcile is Reconcile under the pass lock. The most recent unexpired change
-// becomes the action in flight, with its prediction taken from the decision that
-// made it if the journal still holds it. Verify keeps it either way: its baseline
-// is read with the change in force, so there is no drop to judge. Its baseline is the
-// pressure now if that is fresh, else the first fresh reading after. Older
-// unexpired changes are kept, for release. Expired ones are kept in force for
-// the caller's expire to give back, so one the runtime will not yet give back is
-// retried every tick.
-// A change stamped by another node is never touched. Each unexpired change counts
-// toward the hourly limit from the time the journal says it was made, or from now
-// when the journal no longer has it, so a restart does not hand the loop a fresh
-// budget.
+// reconcile is Reconcile under the pass lock. Acting reads each held change back
+// against the workloads the runtime lists: one whose workload is no longer
+// listed, or whose setting no longer reads as what the agent applied, as after a
+// pod restart or another hand, is no longer the agent's and is journalled gone.
+// Of the rest, the most recent unexpired change becomes the action in flight,
+// with its prediction taken from the decision that made it if the journal still
+// holds it. Verify keeps it either way: its baseline is read with the change in
+// force, so there is no drop to judge. Its baseline is the pressure now if that
+// is fresh, else the first fresh reading after. Older unexpired changes are
+// kept, for release. Expired ones are kept in force for the caller's expire to
+// give back, so one the actuator will not yet give back is retried every tick.
+// Another node's changes, and another action's, are never touched here. Each
+// unexpired change counts toward the hourly limit from the time the journal says
+// it was made, or from now when the journal no longer has it, so a restart does
+// not hand the loop a fresh budget.
 func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
-	undos, err := l.cfg.Runtime.Changed(ctx, l.cfg.NodeID)
+	ws, err := l.cfg.Runtime.Workloads(ctx)
 	if err != nil {
-		return fmt.Errorf("relief: listing this node's changes: %w", err)
+		return fmt.Errorf("relief: listing workloads: %w", err)
+	}
+	held, dropped, err := l.cfg.Acting.Held(ctx, ws)
+	if err != nil {
+		return fmt.Errorf("relief: reconciling this node's changes: %w", err)
 	}
 	pressure, _, fresh := l.pressure(now)
-	cooldowns := l.cooldowns(ctx)
-	shares := workloadShares(l.cfg.Map)
+	cooldowns := l.cooldowns(ws)
+	shares := workloadShares(l.cfg.Map, l.d.Usage)
 
 	l.mu.Lock()
-	live := l.liveSubjects()
+	live := map[string]*Action{}
+	for _, a := range l.liveLocked() {
+		live[a.Subject] = a
+	}
 	busy := l.inFlight != nil
 	l.mu.Unlock()
 
-	var expired, resumed []*Action
-	var acts []time.Time
-	for _, u := range undos {
-		if u.NodeID != l.cfg.NodeID || live[u.Subject] {
-			continue
-		}
-		a := &Action{ID: u.DecisionID, Subject: u.Subject, DecisionID: u.DecisionID, Undo: u,
-			Resumed: true, cooldown: cooldowns(u.Subject), Plan: Plan{Subject: u.Subject, ToCores: u.Applied}}
-		if p, first, ok := l.journalledAct(u.DecisionID); ok {
+	// taken builds the action for a change found in the ledger rather than made here.
+	taken := func(e actuators.Entry) *Action {
+		a := &Action{ID: e.DecisionID, Subject: e.Subject, DecisionID: e.DecisionID, Entry: e,
+			Resumed: true, cooldown: cooldowns(e.Subject), Plan: Plan{Subject: e.Subject, To: e.Applied, Unit: l.d.Unit}}
+		if p, first, ok := l.journalledAct(e.DecisionID); ok {
 			a.Plan = p
 			if first != "" {
 				a.ID = first
 			}
 		}
-		a.origin = l.originOf(a)
 		if a.ID == "" {
 			a.ID = l.id("act")
 		}
+		return a
+	}
+
+	for _, e := range dropped {
+		if e.Action != l.d.Action {
+			continue
+		}
+		why := "the runtime no longer lists the workload"
+		if hasSubject(ws, e.Subject) {
+			why = "its setting no longer reads as what the agent applied: changed underneath, as by a restart or another hand"
+		}
+		a := live[e.Subject]
+		if a == nil {
+			a = taken(e)
+			l.mu.Lock()
+			l.history = appendHistory(l.history, a)
+			l.mu.Unlock()
+		}
+		l.gone(now, a, why)
+	}
+
+	var expired, resumed []*Action
+	var acts []time.Time
+	for _, e := range held {
+		if e.Action != l.d.Action || live[e.Subject] != nil {
+			continue
+		}
+		a := taken(e)
+		a.origin = l.originOf(a)
 		if fresh {
 			a.ContentionAtAct, a.ActedAt, a.SharesAtAct = pressure, now, shares
 		} else {
 			a.needBaseline = true
 		}
-		if !now.Before(u.Expires) {
+		if !now.Before(e.Expires) {
 			expired = append(expired, a)
 		} else {
 			resumed = append(resumed, a)
 			at := now
-			if d, ok := l.cfg.Map.Journal().Decision(u.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
+			if d, ok := l.cfg.Map.Journal().Decision(e.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
 				at = d.At
 			}
 			acts = append(acts, at)
 		}
 	}
-	sort.SliceStable(resumed, func(i, j int) bool { return resumed[i].Undo.Expires.Before(resumed[j].Undo.Expires) })
+	sort.SliceStable(resumed, func(i, j int) bool { return resumed[i].Entry.Expires.Before(resumed[j].Entry.Expires) })
 
 	l.mu.Lock()
 	l.acted = append(l.acted, acts...)
@@ -417,7 +469,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	l.mu.Unlock()
 	l.reconciled = true
 	for _, a := range resumed {
-		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Undo.Expires.Format(time.RFC3339))
+		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
 	}
 	return nil
 }
@@ -426,9 +478,9 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 var ErrNoAction = errors.New("no such action in force")
 
 // Revert undoes an action by hand and cools its workload down, as an operator
-// overriding the loop. Only an action still in force can be reverted. A runtime
-// that does not answer within the loop's timeout is an error, and the action
-// stays in force.
+// overriding the loop. Only an action still in force can be reverted. An
+// actuator that does not answer within the loop's timeout is an error, and the
+// action stays in force.
 func (l *Loop) Revert(ctx context.Context, id string) error {
 	l.pass.Lock()
 	defer l.pass.Unlock()
@@ -453,7 +505,7 @@ func (l *Loop) Revert(ctx context.Context, id string) error {
 // age is checked here as well: a source that has just gone quiet leaves a value
 // that is active for up to a sweep interval longer and describes nothing now.
 func (l *Loop) pressure(now time.Time) (float64, time.Time, bool) {
-	p, ok := l.cfg.Map.Property(NodeContention)
+	p, ok := l.cfg.Map.Property(l.d.Relieves)
 	fresh := ok && p.Status == statemap.Active && !p.LastObserved.IsZero() &&
 		now.Sub(p.LastObserved) <= l.cfg.Map.StaleAfter()
 	return p.Value, p.LastObserved, fresh
@@ -499,7 +551,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	var limitedSubject string
 	var unanchored []*Action
 	for _, w := range ws {
-		if cooling[w.Subject] || !actionable(w, pol) {
+		if cooling[w.Subject] || !actionable(w, l.act, pol) {
 			continue
 		}
 		if k := kept[w.Subject]; k != nil && k.origin == nil {
@@ -530,8 +582,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	if !noPlanAt.IsZero() && key == noPlanKey && now.Sub(noPlanAt) < l.c.Settle {
 		return
 	}
-	if _, ok := coreCount(l.cfg.Map); !ok {
-		l.refuse(noCores, nil)
+	if _, ok := capacity(l.cfg.Map, l.d); !ok {
+		l.refuse(noCapacity(l.d), nil)
 		return
 	}
 
@@ -541,8 +593,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 			originals[s] = *a.origin
 		}
 	}
-	cands := Attribute(l.cfg.Map, open, pol, l.c)
-	plan, ok, why := makePlan(l.cfg.Map, cands, open, pol, l.c, l.effects.Of, originals)
+	cands := Attribute(l.cfg.Map, l.act, open, pol, l.c)
+	plan, ok, why := makePlan(ctx, l.cfg.Map, l.act, cands, open, pol, l.c, l.effects.Of, originals)
 	if !ok {
 		l.mu.Lock()
 		l.noPlanAt, l.noPlanKey = now, key
@@ -561,29 +613,27 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 
 	id := l.id("act")
 	b := l.cfg.Map.Decide(id, fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
-	b.Property(NodeContention)
-	b.Property(NodeUsage + "@" + plan.Subject)
+	b.Property(l.d.Relieves)
+	b.Property(l.d.Usage + "@" + plan.Subject)
 	b.Facts()
-	shares := workloadShares(l.cfg.Map)
-	undo, err := l.cfg.Runtime.Apply(ctx, plan.Subject, runtime.Change{
-		Action: runtime.ActionCPULimit, CPULimit: plan.ToCores, Expires: now.Add(l.c.Expiry), DecisionID: id,
-	})
+	shares := workloadShares(l.cfg.Map, l.d.Usage)
+	entry, err := l.cfg.Acting.Apply(ctx, w, l.d.Action, plan.To, now.Add(l.c.Expiry), id)
 	if err != nil {
 		r := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
 		r.Input("plan", plan)
 		r.Input("policy", eff)
 		r.Input("rule", eff.Rule)
 		r.Input("error", err.Error())
-		r.Note("the runtime refused the change; cooling %s down for %s", plan.Subject, eff.Settings.Cooldown)
-		r.Note("the change may have taken effect regardless; the next pass asks the runtime what it holds")
-		r.Commit(map[string]any{"refused": "runtime: " + err.Error()})
+		r.Note("the actuator refused the change; cooling %s down for %s", plan.Subject, eff.Settings.Cooldown)
+		r.Note("the change may have taken effect regardless; the next pass reconciles the ledger with what the workload reads as")
+		r.Commit(map[string]any{"refused": "actuator: " + err.Error()})
 		l.mu.Lock()
 		l.cooling[plan.Subject] = now.Add(eff.Settings.Cooldown)
 		l.nRefused++
 		l.mu.Unlock()
 		// A failed Apply can still have taken effect, as a resize whose call timed
-		// out: reconciling again adopts whatever the runtime recorded, so expiry and
-		// release give it back.
+		// out: Acting records one that reads back changed, and reconciling again
+		// adopts it, so expiry and release give it back.
 		l.reconciled = false
 		return
 	}
@@ -596,13 +646,13 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		b.Input("previous", map[string]any{"act": k.DecisionID, "plan": k.Plan, "action": k.ID})
 		b.Note("a further step on the change %s already in force", k.ID)
 	}
-	b.Note("capping %s from %.3f to %.3f cores; predicted drop in node CPU contention %.4f", plan.Subject,
-		plan.FromCores, plan.ToCores, plan.Predicted)
+	b.Note("capping %s from %.3f to %.3f %s; predicted drop in node CPU contention %.4f", plan.Subject,
+		plan.From, plan.To, plan.Unit, plan.Predicted)
 	if plan.Basis == BasisUsage {
 		b.Caveat("%s", usageCaveat)
 	}
-	b.Commit(map[string]any{"action": runtime.ActionCPULimit, "subject": plan.Subject,
-		"to_cores": plan.ToCores, "predicted": plan.Predicted, "expires": undo.Expires})
+	b.Commit(map[string]any{"action": l.d.Action, "subject": plan.Subject,
+		"to": plan.To, "unit": plan.Unit, "predicted": plan.Predicted, "expires": entry.Expires})
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -612,16 +662,16 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		a.prev = &before
 		l.kept = removeAction(l.kept, a)
 		l.history = appendHistory(removeAction(l.history, a), a)
-		a.DecisionID, a.Plan, a.Undo, a.Observed, a.Outcome, a.VerifyID = id, plan, undo, nil, "", ""
+		a.DecisionID, a.Plan, a.Entry, a.Observed, a.Outcome, a.VerifyID = id, plan, entry, nil, "", ""
 		a.RevertAttempts, a.LastError = 0, ""
 		a.ContentionAtAct, a.ActedAt, a.cooldown, a.Resumed, a.needBaseline = pressure, now, eff.Settings.Cooldown, false, false
 		a.SharesAtAct = shares
 	} else {
-		origin := plan.FromCores
-		if w.CPU.Limit != nil {
-			origin = *w.CPU.Limit
+		origin := plan.From
+		if entry.OriginalSet {
+			origin = entry.Original
 		}
-		a = &Action{ID: id, Subject: plan.Subject, DecisionID: id, Plan: plan, Undo: undo,
+		a = &Action{ID: id, Subject: plan.Subject, DecisionID: id, Plan: plan, Entry: entry,
 			ContentionAtAct: pressure, ActedAt: now, cooldown: eff.Settings.Cooldown, origin: &origin, SharesAtAct: shares}
 		if last, ok := l.released[plan.Subject]; ok && now.Sub(last) < backoffWindow {
 			l.cycles[plan.Subject]++
@@ -659,7 +709,7 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	l.nRefused++
 	l.mu.Unlock()
 	b := l.cfg.Map.Decide(l.id("refused"), "relieve node CPU contention?")
-	b.Property(NodeContention)
+	b.Property(l.d.Relieves)
 	for k, v := range inputs {
 		b.Input(k, v)
 	}
@@ -691,14 +741,10 @@ func (l *Loop) liveSubjects() map[string]bool {
 	return out
 }
 
-// cooldowns returns each workload's policy cooldown, for actions found on the
-// runtime rather than made here. A workload the runtime no longer lists gets
-// the policy for its kind alone.
-func (l *Loop) cooldowns(ctx context.Context) func(subject string) time.Duration {
-	ws, err := l.cfg.Runtime.Workloads(ctx)
-	if err != nil {
-		l.cfg.Logf("relief: listing workloads: %v", err)
-	}
+// cooldowns returns each workload's policy cooldown, for actions found in the
+// ledger rather than made here. A workload ws does not list gets the policy for
+// its kind alone.
+func (l *Loop) cooldowns(ws []runtime.Workload) func(subject string) time.Duration {
 	return func(subject string) time.Duration {
 		for _, w := range ws {
 			if w.Subject == subject {
@@ -710,7 +756,7 @@ func (l *Loop) cooldowns(ctx context.Context) func(subject string) time.Duration
 }
 
 // refuseUnanchored journals, once per action, that a workload whose
-// pre-agent limit is not known will not be stepped again: the of_original floor
+// pre-agent setting is not known will not be stepped again: the of_original floor
 // would be a share of the agent's own cap, and would slide down with every step
 // and every restart. The change itself stays, for verify, release and expiry.
 func (l *Loop) refuseUnanchored(a *Action) {
@@ -724,31 +770,32 @@ func (l *Loop) refuseUnanchored(a *Action) {
 	if done {
 		return
 	}
-	why := fmt.Sprintf("origin of %s's change is unknown: no original limit was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
+	why := fmt.Sprintf("origin of %s's change is unknown: no original setting was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
 	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU further to relieve node CPU contention?", a.Subject))
 	b.Input("action", a.ID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Caveat("%s", why)
 	b.Commit(map[string]any{"refused": why})
 }
 
-// originOf is the limit a resumed action's workload had before the agent first
-// touched it, or nil when that is not known for certain. It is the undo's
-// original limit when one was set; otherwise the usage the first act recorded,
-// read from that act and never from a further step, whose usage is already the
-// agent's doing.
+// originOf is the setting a resumed action's workload had before the agent
+// first touched it, or nil when that is not known for certain. It is the
+// ledger's Original when one was set; otherwise the usage the first act
+// recorded, read from that act and never from a further step, whose usage is
+// already the agent's doing.
 func (l *Loop) originOf(a *Action) *float64 {
-	if a.Undo.Original.Limit != nil {
-		return cloneFloat(a.Undo.Original.Limit)
+	if a.Entry.OriginalSet {
+		v := a.Entry.Original
+		return &v
 	}
 	if a.ID == "" {
 		return nil
 	}
 	p, first, ok := l.journalledAct(a.ID)
-	if !ok || first != "" || p.FromCores <= 0 {
+	if !ok || first != "" || p.From <= 0 {
 		return nil
 	}
-	return &p.FromCores
+	return &p.From
 }
 
 // journalledAct reads an act decision: the plan it recorded, so a resumed action
@@ -769,8 +816,9 @@ func (l *Loop) journalledAct(id string) (p Plan, first string, ok bool) {
 	case map[string]any:
 		p.Subject, _ = v["subject"].(string)
 		p.Predicted, _ = v["predicted"].(float64)
-		p.FromCores, _ = v["from_cores"].(float64)
-		p.ToCores, _ = v["to_cores"].(float64)
+		p.From, _ = v["from"].(float64)
+		p.To, _ = v["to"].(float64)
+		p.Unit, _ = v["unit"].(string)
 		p.EstimateID, _ = v["estimate_id"].(string)
 		p.Basis, _ = v["basis"].(string)
 		p.Effect, _ = v["effect"].(float64)
