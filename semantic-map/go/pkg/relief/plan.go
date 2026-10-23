@@ -15,7 +15,8 @@ import (
 )
 
 // Basis says what a candidate's ranking or a plan's prediction rests on: the
-// map's relationships, or only the workload's share of node CPU.
+// map's relationships, or only the workload's share of the node's usage (the
+// descriptor's Usage: CPU for cpu.limit, memory for memory.high).
 const (
 	BasisMap   = "map"
 	BasisUsage = "usage"

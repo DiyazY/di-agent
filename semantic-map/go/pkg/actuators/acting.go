@@ -135,8 +135,10 @@ const readBack = 10 * time.Second
 // reads back, since an actuator may quantise. When Set fails, a setting that
 // reads back changed from before this Apply is adopted and committed (and the
 // error still returned); one that reads back unchanged restores the entry before
-// (or none); one that cannot be read leaves the entry pending, for Held to
-// resolve. A successful Set whose read-back fails is left pending too.
+// (or none); one that cannot be read, or that reads back as no setting while it
+// differs from before (neither what it was nor what was asked), leaves the entry
+// pending, for Held to resolve. A successful Set whose read-back fails is left
+// pending too.
 func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
 	return a.apply(ctx, w, action, v, expires, decisionID, true)
 }

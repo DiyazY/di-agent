@@ -26,7 +26,8 @@ const (
 	// scaled to nothing, nor more than doubled, on its own history.
 	effectMin, effectMax = 0.1, 2.0
 	// confoundAbs is the smallest absolute change in another workload's share of
-	// node CPU that confounds an outcome: below it, a relative change is a small
+	// the node's usage (the descriptor's Usage: CPU for cpu.limit, memory for
+	// memory.high) that confounds an outcome: below it, a relative change is a small
 	// pod's noise.
 	confoundAbs = 0.02
 	// bindRatio is how close to its cap a throttled workload's usage must be at
@@ -99,7 +100,7 @@ func workloadShares(m *statemap.Map, usage string) map[string]float64 {
 }
 
 // movedSince lists, sorted, the workloads other than throttled whose share of
-// node CPU has moved since at was taken by more than step relative to their
+// the node's usage (the descriptor's Usage) has moved since at was taken by more than step relative to their
 // share then and by more than 0.02 absolute. A workload live now and absent from
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
@@ -154,7 +155,8 @@ func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled 
 }
 
 // measuredEffect is what one outcome measured about the relationship it tests: the
-// drop in node contention per unit drop in the workload's share of node CPU, both
+// drop in node contention per unit drop in the workload's share of the node's
+// usage (the descriptor's Usage: CPU for cpu.limit, memory for memory.high), both
 // fractions of the node, so in the range-normalised units the estimate projects in.
 // It is clamped to [0, 1] like every strength, a rise in contention measuring zero.
 // A share that fell by no more than confoundAbs gives nothing to divide by, and no

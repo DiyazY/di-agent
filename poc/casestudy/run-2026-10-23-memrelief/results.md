@@ -2,7 +2,7 @@
 
 `memrelief.sh` on the k0s VM (Ubuntu 24.04 arm64, kernel 6.8.0-147, MGLRU on, no swap, cgroup v2,
 cgroupfs driver, MemoryQoS off), agent `ef9db5f` (branch `feat/actuators`) on `agent-relief.yaml`
-with both levers at their defaults and the ledger at `<run>/actions.json`. Times are EEST.
+with both levers at their defaults of that commit — the memory lever's `step` was 0.10 then (raised to 0.25 afterwards, Ruling R19) — and the ledger at `<run>/actions.json`. Times are EEST.
 Raw files stay on the node, at `/home/ubuntu/casestudy/run-2026-10-23-memrelief{,-2,-3}/`
 (`poll.jsonl`, `node.jsonl`, `phases.jsonl`, `agent.log`, `agent.yaml`, `page-hog.log`,
 `replaced-service.txt`).

@@ -55,9 +55,10 @@ type Unread struct {
 // the agent's first step. Resumed marks one found in the ledger at start rather
 // than made by this loop: its prediction is only known if the journal still has the decision that
 // made it, and its outcome is never evidence, as its baseline was taken with the
-// change already in force. SharesAtAct is every workload's share of node CPU when the action's
+// change already in force. SharesAtAct is every workload's share of the node's usage (the descriptor's
+// Usage: CPU for cpu.limit, memory for memory.high) when the action's
 // baseline was taken, so its outcome can be told apart from another workload
-// moving at the same time. RevertAttempts counts the undos the runtime has
+// moving at the same time. RevertAttempts counts the undos the actuator has
 // refused since the latest step, and LastError is the latest refusal: a change
 // stuck in force is shown, not only logged.
 type Action struct {
