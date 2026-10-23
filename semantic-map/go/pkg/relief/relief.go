@@ -137,9 +137,10 @@ type Loop struct {
 	effects effects       // what acting on each workload has done; safe on its own
 	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
-	pass       sync.Mutex // serialises the passes that change the system
-	seq        int        // decision counter; touched only under pass
-	reconciled bool       // the ledger has been reconciled; until then nothing is applied. Touched only under pass
+	pass       sync.Mutex      // serialises the passes that change the system
+	seq        int             // decision counter; touched only under pass
+	reconciled bool            // the ledger has been reconciled; until then nothing is applied. Touched only under pass
+	spentFor   map[string]bool // subjects whose failed Apply kept its hourly spend, so reconcile does not spend again. Touched only under pass
 
 	mu          sync.Mutex
 	trigger     *Trigger
@@ -199,7 +200,7 @@ func New(c Config) (*Loop, error) {
 		cfg: c, c: c.Lever, d: c.Descriptor, budget: c.Budget, act: act, epoch: now.Unix(),
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
-		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{},
+		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spentFor: map[string]bool{},
 	}, nil
 }
 
@@ -462,7 +463,9 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			if d, ok := l.cfg.Map.Journal().Decision(e.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
 				at = d.At
 			}
-			l.budget.Spend(at)
+			if !l.spentFor[a.Subject] { // a failed Apply that left it in force kept its spend
+				l.budget.Spend(at)
+			}
 			l.budget.coolExcept(a.Subject, l.d.Action, at.Add(a.cooldown))
 		}
 	}
@@ -485,6 +488,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 	l.mu.Unlock()
 	l.reconciled = true
+	clear(l.spentFor)
 	for _, a := range resumed {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
 	}
@@ -505,6 +509,17 @@ func (l *Loop) taken(e actuators.Entry, cooldown time.Duration) *Action {
 		a.ID = l.id("act")
 	}
 	return a
+}
+
+// pendingFor reports whether the ledger holds a pending entry of this lever's
+// action for subject: a change written ahead whose outcome is not known.
+func (l *Loop) pendingFor(subject string) bool {
+	for _, e := range l.cfg.Acting.Entries(l.d.Action) {
+		if e.Subject == subject && e.Pending {
+			return true
+		}
+	}
+	return false
 }
 
 // hasUnread reports ledger entries whose setting could not be read.
@@ -676,9 +691,15 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	shares := workloadShares(l.cfg.Map, l.d.Usage)
 	entry, err := l.cfg.Acting.Apply(ctx, w, l.d.Action, plan.To, now.Add(l.c.Expiry), id)
 	if err != nil {
-		// The action is given back; the hold on the workload stands, and Cool below
-		// extends it to this lever too.
-		l.budget.refund(now)
+		// A change still in force, adopted or pending, keeps the action it spent:
+		// refunded, another lever could take the slot before the next pass takes
+		// the change up. One that changed nothing gives it back. Either way the
+		// hold on the workload stands, and Cool below extends it to this lever.
+		if entry.Action != "" || l.pendingFor(plan.Subject) {
+			l.spentFor[plan.Subject] = true
+		} else {
+			l.budget.refund(now)
+		}
 		r := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
 		r.Input("plan", plan)
 		r.Input("policy", eff)

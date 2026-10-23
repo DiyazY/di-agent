@@ -1405,3 +1405,36 @@ func (u *unreadable) Read(ctx context.Context, w runtime.Workload) (float64, boo
 	}
 	return u.Actuator.Read(ctx, w)
 }
+
+// TestAnAdoptedChangeKeepsItsSpend: an Apply that failed yet left the change in
+// force (adopted) is an action in force, so its hourly slot is not refunded for
+// another lever to take before the next pass takes the change up; that pass
+// does not count it twice either. One that changed nothing is refunded.
+func TestAnAdoptedChangeKeepsItsSpend(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			return d, &lyingSet{Actuator: a, fail: 1}
+		}})
+	h.act("pod:a")
+	if n := h.l.budget.Count(h.now); n != 1 {
+		t.Fatalf("hourly count %d after an adopted change; want 1, the change is in force", n)
+	}
+	h.step(0.5)
+	if f := h.l.Status().InFlight; f == nil || !f.Resumed {
+		t.Fatalf("in flight %+v; want the adopted change taken up", f)
+	}
+	if n := h.l.budget.Count(h.now); n != 1 {
+		t.Fatalf("hourly count %d after it was taken up; want 1, not counted twice", n)
+	}
+}
+
+// TestARefusedChangeIsRefunded: an Apply whose Set changed nothing gives its
+// hourly slot back.
+func TestARefusedChangeIsRefunded(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, flaky: true})
+	h.fl.set(func(f *flaky) { f.stuck["pod:a"] = true })
+	h.until(2*time.Hour, 0.5, "a refused change", func() bool { return h.l.Status().Refused > 0 })
+	if n := h.l.budget.Count(h.now); n != 0 || len(h.ledger.All()) != 0 {
+		t.Fatalf("hourly count %d, ledger %+v; want the slot given back, nothing in force", n, h.ledger.All())
+	}
+}
