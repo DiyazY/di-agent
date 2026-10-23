@@ -1788,3 +1788,73 @@ func TestAClosedChangeClearsItsKeptSpend(t *testing.T) {
 		t.Fatalf("count %d → %d after a later reconcile; a closed change's spend must not move", n, got)
 	}
 }
+
+// TestAGivenBackChangeAnotherWriterChangedIsGone: a change given back from its
+// record while unreadable, that then reads as another writer's value rather than
+// its original, is closed as gone, saying so, not as a confirmed expiry.
+func TestAGivenBackChangeAnotherWriterChangedIsGone(t *testing.T) {
+	h, b := blindHarness(t, false, "pod:b")
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(5 * time.Minute), DecisionID: "relief-act-1-2"})
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.until(10*time.Minute, 0.05, "the give-back", func() bool { return h.limit("pod:b") == nil })
+	if err := h.actuator.Set(h.ctx, runtime.Workload{Subject: "pod:b"}, 2, true); err != nil { // another controller
+		t.Fatal(err)
+	}
+	b.see("pod:b")
+	h.step(0.05)
+	if a := h.action("pod:b"); a.Outcome != OutcomeGone {
+		t.Fatalf("pod:b %+v; want gone, the setting being another writer's", a)
+	}
+	g := h.decisions("gone")
+	if len(g) != 1 || !strings.Contains(g[0].Rationale, "another writer") {
+		t.Fatalf("gone decisions %+v; want one naming another writer", g)
+	}
+	if l := h.limit("pod:b"); l == nil || *l != 2 {
+		t.Fatalf("limit %v; the other writer's setting must be left alone", l)
+	}
+}
+
+// counting counts the Sets of the actuator it wraps.
+type counting struct {
+	actuators.Actuator
+	mu   sync.Mutex
+	sets map[string]int
+}
+
+func (c *counting) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	c.mu.Lock()
+	c.sets[w.Subject]++
+	c.mu.Unlock()
+	return c.Actuator.Set(ctx, w, v, set)
+}
+
+// TestAGiveBackIsNotRewrittenWithoutBound: a given-back change that never reads
+// back is set again only a few times, with backoff, then left for an operator,
+// still shown as stuck: never a fight with another controller every tick.
+func TestAGiveBackIsNotRewrittenWithoutBound(t *testing.T) {
+	var c *counting
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			bl := &blind{Actuator: a, noRead: map[string]bool{"pod:b": true}, noSet: map[string]bool{}}
+			c = &counting{Actuator: bl, sets: map[string]int{}}
+			return d, c
+		}})
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(5 * time.Minute), DecisionID: "relief-act-1-2"})
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.run(2*time.Hour, 0.05)
+	c.mu.Lock()
+	n := c.sets["pod:b"]
+	c.mu.Unlock()
+	if n < 1 || n > 4 {
+		t.Fatalf("%d Sets of pod:b over two hours; want the give-back and at most 3 more", n)
+	}
+	if st := h.l.Status(); len(st.Unread) != 1 || st.Stuck < 1 || !st.Unread[0].GivenBack {
+		t.Fatalf("status %+v; want it still shown stuck, given back", st)
+	}
+}

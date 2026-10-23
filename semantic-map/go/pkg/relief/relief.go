@@ -51,6 +51,20 @@ type Unread struct {
 	GivenBack bool `json:"given_back,omitempty"`
 
 	live bool // an action in force holds it: its own undo and expiry give it back
+	// reSets counts the Sets of the original after the first give-back, and
+	// nextSet is when the next may be: a few, with backoff, then none, so the
+	// agent never fights another controller over the setting every tick.
+	reSets  int
+	nextSet time.Time
+}
+
+// carry keeps what an unread entry's earlier record knew: attempts, whether it
+// was given back, and its re-Set budget.
+func (u *Unread) carry(prev *Unread) {
+	if prev == nil {
+		return
+	}
+	u.Attempts, u.GivenBack, u.reSets, u.nextSet = prev.Attempts+1, prev.GivenBack, prev.reSets, prev.nextSet
 }
 
 // Action is the agent's change to one workload, with what it predicted and what
@@ -428,7 +442,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		e := f.Entry
 		u := &Unread{Entry: e, Error: f.Err.Error(), Attempts: 1, live: live[e.Subject] != nil}
 		if prev := l.unread[e.Subject]; prev != nil {
-			u.Attempts, u.GivenBack = prev.Attempts+1, prev.GivenBack
+			u.carry(prev)
 		} else {
 			l.cfg.Logf("relief: %v; the change stays in force, is retried every tick, and is given back from the ledger once it expires", f.Err)
 		}
@@ -597,10 +611,16 @@ func (l *Loop) journalDropped(now time.Time, ws []runtime.Workload, dropped []ac
 			l.mu.Unlock()
 		}
 		if u := prevUnread[e.Subject]; u != nil && u.GivenBack {
-			// Given back from its record while it could not be read: what reads
-			// now is the original the agent set, and the give-back is confirmed.
-			l.expiredFromRecord(now, a, *u)
-			continue
+			if d.ReadsOriginal() {
+				// Given back from its record while it could not be read: it reads
+				// as the original the agent set, and the give-back is confirmed.
+				l.expiredFromRecord(now, a, *u)
+				continue
+			}
+			if !d.Gone {
+				why = fmt.Sprintf("changed by another writer after give-back: it reads %v (set %v), not the original %v (set %v)",
+					d.Read, d.ReadSet, e.Original, e.OriginalSet)
+			}
 		}
 		l.gone(now, a, why)
 	}
@@ -636,9 +656,7 @@ func (l *Loop) reconcileFailed(err error) error {
 	unread := map[string]*Unread{}
 	for _, e := range es {
 		u := &Unread{Entry: e, Error: err.Error(), Attempts: 1, live: live[e.Subject]}
-		if prev := l.unread[e.Subject]; prev != nil {
-			u.Attempts, u.GivenBack = prev.Attempts+1, prev.GivenBack
-		}
+		u.carry(l.unread[e.Subject])
 		unread[e.Subject] = u
 	}
 	l.unread, l.reconcileErr = unread, err.Error()

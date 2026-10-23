@@ -67,6 +67,10 @@ func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 	l.expireUnread(ctx, now, workloads)
 }
 
+// maxReSets bounds how many more times a given-back change is set to its
+// original when it does not read back as it.
+const maxReSets = 3
+
 // expireUnread gives back, from the ledger's record itself, every change whose
 // setting could not be read and whose expiry has passed: its original is set
 // through the workload the runtime lists, or through its subject. One the
@@ -76,7 +80,11 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 	l.mu.Lock()
 	var due []Unread
 	for _, u := range l.unread {
-		if !u.live && !now.Before(u.Entry.Expires) {
+		switch {
+		case u.live || now.Before(u.Entry.Expires):
+		case u.GivenBack && (u.reSets >= maxReSets || now.Before(u.nextSet)):
+			// Given back already: set again only a few times, with backoff.
+		default:
 			due = append(due, *u)
 		}
 	}
@@ -96,7 +104,16 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 			l.mu.Lock()
 			if cur := l.unread[e.Subject]; cur != nil {
 				cur.Error = err.Error()
-				cur.GivenBack = cur.GivenBack || errors.Is(err, actuators.ErrUnconfirmed)
+				switch {
+				case cur.GivenBack:
+					cur.reSets++
+					cur.nextSet = now.Add(l.cfg.Interval << cur.reSets)
+					if cur.reSets >= maxReSets {
+						cur.Error += fmt.Sprintf("; set back %d more times without reading back as the original: no longer written, left for an operator", maxReSets)
+					}
+				case errors.Is(err, actuators.ErrUnconfirmed):
+					cur.GivenBack, cur.nextSet = true, now.Add(l.cfg.Interval)
+				}
 			}
 			l.mu.Unlock()
 			l.cfg.Logf("relief: giving back the unread change to %s from the ledger: %v (retrying next tick)", e.Subject, err)
