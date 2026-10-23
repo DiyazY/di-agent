@@ -17,6 +17,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -174,6 +175,12 @@ func (r *Runtime) Workloads(ctx context.Context) ([]runtime.Workload, error) {
 			CPU:     cpuOf(p),
 			Can:     map[string]string{runtime.ActionCPULimit: cannot(p, r.env.NodeID)},
 			Self:    self != "" && string(p.UID) == self,
+			UID:     string(p.UID),
+			QoS:     strings.ToLower(string(p.Status.QOSClass)),
+			Resources: map[string]runtime.Resource{
+				"cpu":    cpuOf(p),
+				"memory": memoryOf(p),
+			},
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Subject < out[j].Subject })
@@ -219,6 +226,34 @@ func cpuOf(p corev1.Pod) runtime.Resource {
 	if allLim {
 		v := float64(lim) / 1000
 		r.Limit = &v
+	}
+	return r
+}
+
+// memoryOf sums the containers' memory in bytes, by the rule cpuOf applies to
+// CPU: a request is nil when any container has none, and so is a limit.
+func memoryOf(p corev1.Pod) runtime.Resource {
+	var req, lim float64
+	allReq := len(p.Spec.Containers) > 0
+	allLim := allReq
+	for _, c := range p.Spec.Containers {
+		if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+			req += q.AsApproximateFloat64()
+		} else {
+			allReq = false
+		}
+		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+			lim += q.AsApproximateFloat64()
+		} else {
+			allLim = false
+		}
+	}
+	var r runtime.Resource
+	if allReq {
+		r.Request = &req
+	}
+	if allLim {
+		r.Limit = &lim
 	}
 	return r
 }

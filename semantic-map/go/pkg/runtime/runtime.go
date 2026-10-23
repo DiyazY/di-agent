@@ -49,6 +49,12 @@ type Workload struct {
 	CPU     Resource          `json:"cpu"`
 	Can     map[string]string `json:"can"`
 	Self    bool              `json:"self"`
+	// UID is the orchestrator's identity for the workload; QoS its class, lower
+	// case ("guaranteed" | "burstable" | "besteffort"), empty when it has none.
+	UID string `json:"uid"`
+	QoS string `json:"qos"`
+	// Resources by name: "cpu" in cores, "memory" in bytes.
+	Resources map[string]Resource `json:"resources"`
 }
 
 // Change is one action to apply, with when it lapses and the decision that
