@@ -80,16 +80,54 @@ func (a *CPULimit) Check(w runtime.Workload) string {
 	return why
 }
 
-// Read is the pod's limits.cpu in cores; set is false when it has none.
+// Read is the pod's CPU limit in force, in cores; set is false when it has none.
+// In force is what the kubelet has applied, the container's status.resources,
+// when the status reports it, and the spec otherwise. While a resize is pending
+// or in progress the limit in force is not settled, and Read is an error (never
+// ErrGone): the caller cannot tell what it would be giving back.
 func (a *CPULimit) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
 	p, err := a.pod(ctx, w)
 	if err != nil {
 		return 0, false, err
 	}
+	if c, ok := resizeCondition(p); ok {
+		return 0, false, fmt.Errorf("%s/%s: a resize is %s (%s): the CPU limit in force is not settled", p.Namespace, p.Name, resizeState(c), c.Message)
+	}
+	if len(p.Spec.Containers) == 1 {
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.Name != p.Spec.Containers[0].Name || cs.Resources == nil {
+				continue
+			}
+			if q, ok := cs.Resources.Limits[corev1.ResourceCPU]; ok {
+				return float64(q.MilliValue()) / 1000, true, nil
+			}
+			return 0, false, nil
+		}
+	}
 	if l := cpuOf(p).Limit; l != nil {
 		return *l, true, nil
 	}
 	return 0, false, nil
+}
+
+// resizeCondition is the pod's PodResizePending or PodResizeInProgress
+// condition, when one is true.
+func resizeCondition(p corev1.Pod) (corev1.PodCondition, bool) {
+	for _, c := range p.Status.Conditions {
+		if (c.Type == corev1.PodResizePending || c.Type == corev1.PodResizeInProgress) && c.Status == corev1.ConditionTrue {
+			return c, true
+		}
+	}
+	return corev1.PodCondition{}, false
+}
+
+// resizeState names a resize condition: pending with its reason (Deferred,
+// Infeasible), or in progress.
+func resizeState(c corev1.PodCondition) string {
+	if c.Type == corev1.PodResizePending {
+		return "pending, " + c.Reason
+	}
+	return "in progress"
 }
 
 // Set resizes the pod's limits.cpu to v cores, or removes it when set is false. A
@@ -111,7 +149,25 @@ func (a *CPULimit) Set(ctx context.Context, w runtime.Workload, v float64, set b
 		return fmt.Errorf("%s/%s cannot take a cpu.limit of %dm: equal to its request, with memory "+
 			"request equal to limit, it would make the pod Guaranteed, a QoS class change", p.Namespace, p.Name, milli)
 	}
-	return a.r.resize(ctx, p, milli)
+	if err := a.r.resize(ctx, p, milli); err != nil {
+		return err
+	}
+	return a.refused(ctx, w)
+}
+
+// refused is a Set error when, after the resize call returned, the kubelet has
+// marked the resize Infeasible or Deferred: the spec asks for it, and it has not
+// taken effect.
+func (a *CPULimit) refused(ctx context.Context, w runtime.Workload) error {
+	p, err := a.pod(ctx, w)
+	if err != nil {
+		return err
+	}
+	c, ok := resizeCondition(p)
+	if !ok || c.Type != corev1.PodResizePending || (c.Reason != corev1.PodReasonInfeasible && c.Reason != corev1.PodReasonDeferred) {
+		return nil
+	}
+	return fmt.Errorf("%s/%s: the kubelet holds the resize %s: %s", p.Namespace, p.Name, c.Reason, c.Message)
 }
 
 // pod is the pod behind w, or actuators.ErrGone: a pod that has finished has no

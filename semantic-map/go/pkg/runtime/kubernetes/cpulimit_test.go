@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -209,5 +210,48 @@ func TestMemoryCountsSidecarsAndPodLevelResources(t *testing.T) {
 	m = workload(t, r, "pod:ub").Resources["memory"]
 	if m.Request == nil || *m.Request != 300<<20 || m.Limit == nil || *m.Limit != 512<<20 {
 		t.Fatalf("memory %v / %v; want the pod-level 300Mi / 512Mi", m.Request, m.Limit)
+	}
+}
+
+// TestReadIsTheLimitTheKubeletApplied: Read reports the limit in force, the
+// container's status.resources, not the spec asked for; while a resize is
+// pending or in progress what is in force is not settled, and Read says so with
+// an error that is not ErrGone.
+func TestReadIsTheLimitTheKubeletApplied(t *testing.T) {
+	ctx := context.Background()
+	applied := burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c",
+			Resources: &corev1.ResourceRequirements{Limits: rl("2")}}}
+	})
+	plain := burstable("b", "n1", "ub", "100m", "1")
+	resizing := burstable("c", "n1", "uc", "100m", "1", func(p *corev1.Pod) {
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodResizeInProgress, Status: corev1.ConditionTrue}}
+	})
+	r, _ := newRT("n1", applied, plain, resizing)
+	a := NewCPULimit(r)
+	if v, set, err := a.Read(ctx, runtime.Workload{Subject: "pod:ua"}); err != nil || !set || v != 2 {
+		t.Fatalf("read %v %v %v; want the applied 2 cores", v, set, err)
+	}
+	if v, set, err := a.Read(ctx, runtime.Workload{Subject: "pod:ub"}); err != nil || !set || v != 1 {
+		t.Fatalf("read %v %v %v; want the spec's 1 core with no status", v, set, err)
+	}
+	if _, _, err := a.Read(ctx, runtime.Workload{Subject: "pod:uc"}); err == nil || errors.Is(err, actuators.ErrGone) {
+		t.Fatalf("read err %v; want an unsettled resize reported, not gone", err)
+	}
+}
+
+// TestAResizeTheKubeletCannotTakeIsASetError: a resize the kubelet marks
+// Infeasible or Deferred has not taken effect, and Set says so, naming it.
+func TestAResizeTheKubeletCannotTakeIsASetError(t *testing.T) {
+	for _, reason := range []string{corev1.PodReasonInfeasible, corev1.PodReasonDeferred} {
+		p := burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) {
+			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodResizePending, Status: corev1.ConditionTrue,
+				Reason: reason, Message: "node lacks cpu"}}
+		})
+		r, _ := newRT("n1", p)
+		err := set(r, "pod:ua", 0.5)
+		if err == nil || !strings.Contains(err.Error(), reason) || errors.Is(err, actuators.ErrGone) {
+			t.Errorf("%s: Set err %v; want an error naming %s", reason, err, reason)
+		}
 	}
 }
