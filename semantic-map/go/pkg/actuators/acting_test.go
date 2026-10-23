@@ -730,3 +730,30 @@ func TestApplySaysWhenItLeftAStepPending(t *testing.T) {
 		t.Fatalf("err %v; want a refusal that did not leave this step pending", err)
 	}
 }
+
+// TestHeldReturnsWhatItDroppedBeforeASaveFailed: a save that fails partway
+// through Held's deletions returns the entries already dropped with the error,
+// so the caller can record them.
+func TestHeldReturnsWhatItDroppedBeforeASaveFailed(t *testing.T) {
+	f := newMem()
+	l := MemoryLedger()
+	a := NewActing("n", l, f)
+	ctx := context.Background()
+	for _, s := range []string{"a", "b", "c"} {
+		if _, err := a.Apply(ctx, wl(s), "fake", 5, time.Time{}, ""); err != nil {
+			t.Fatal(err)
+		}
+		f.gone[s] = true
+	}
+	boom := errors.New("disk full")
+	l.FailSaves(1, boom)
+	_, dropped, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("x")})
+	if !errors.Is(err, boom) || len(dropped) != 1 || len(l.All()) != 2 {
+		t.Fatalf("dropped %+v err %v ledger %+v; want the one deleted before the failure returned with it", dropped, err, l.All())
+	}
+	for _, e := range l.All() {
+		if e.Subject == dropped[0].Subject {
+			t.Fatalf("%s returned as dropped and still in the ledger", e.Subject)
+		}
+	}
+}

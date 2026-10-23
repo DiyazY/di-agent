@@ -335,7 +335,9 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 // ErrGone is returned in failed, with the error, and left in the ledger
 // untouched, for the caller to retry; the rest are held or dropped as above. An
 // error is returned only when nothing could be reconciled: an empty listing, or a
-// ledger that could not be saved.
+// ledger that could not be saved; a save that fails partway through the
+// deletions returns the entries already dropped with it, for the caller to
+// record.
 func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload) (held, dropped []Entry, failed []Unread, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -400,9 +402,17 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 			return nil, nil, nil, err
 		}
 	}
+	isDropped := map[string]bool{}
+	for _, e := range dropped {
+		isDropped[e.Subject] = true
+	}
+	var done []Entry // dropped and deleted so far
 	for _, e := range gone {
 		if err := a.ledger.Delete(e.Action, e.Subject); err != nil {
-			return nil, nil, nil, err
+			return nil, done, nil, err // what was dropped is the caller's to record
+		}
+		if isDropped[e.Subject] {
+			done = append(done, e)
 		}
 	}
 	return held, dropped, failed, nil

@@ -1574,3 +1574,23 @@ func TestAPendingStepThatNeverTookIsRefunded(t *testing.T) {
 		t.Fatalf("hourly count %d, ledger %+v once it never took; want the spend back", n, h.ledger.All())
 	}
 }
+
+// TestDropsBeforeAFailedSaveAreJournalled: a reconcile whose ledger save fails
+// partway through still journals the changes it dropped before the failure.
+func TestDropsBeforeAFailedSaveAreJournalled(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3, "pod:c": 0.2}})
+	for _, s := range []string{"pod:a", "pod:b"} {
+		h.seed(actuators.Entry{NodeID: "n1", Subject: s, Action: cpu.Action, Applied: 0.9, Expires: h.now.Add(time.Hour), DecisionID: "d-" + s})
+		h.rt.Remove(s)
+	}
+	h.ledger.FailSaves(1, errors.New("disk full"))
+	if err := h.l.Reconcile(h.ctx); err == nil {
+		t.Fatal("want the save error")
+	}
+	if n := len(h.ledger.All()); n != 1 {
+		t.Fatalf("%d entries; want one dropped before the failure", n)
+	}
+	if g := h.decisions("gone"); len(g) != 1 {
+		t.Fatalf("%d gone decisions; want the drop that happened journalled", len(g))
+	}
+}

@@ -74,9 +74,18 @@ type ledgerFile struct {
 type Ledger struct {
 	path string // "" keeps it in memory
 
-	mu      sync.Mutex
-	entries map[ledgerKey]Entry
-	saveErr error // when set, saving fails with it; for tests
+	mu        sync.Mutex
+	entries   map[ledgerKey]Entry
+	saveErr   error // when set, saving fails with it; for tests
+	saveAfter int   // saves left before saveErr applies; for tests
+}
+
+// FailSaves makes every save after the next after ones fail with err, as a disk
+// that fills partway through: for tests of what a caller does then.
+func (l *Ledger) FailSaves(after int, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.saveAfter, l.saveErr = after, err
 }
 
 // MemoryLedger is a ledger that never touches disk.
@@ -246,7 +255,11 @@ func (l *Ledger) For(action string) []Entry {
 // new, never half of one, and a change recorded stays recorded.
 func (l *Ledger) saveLocked() error {
 	if l.saveErr != nil {
-		return l.saveErr
+		if l.saveAfter > 0 {
+			l.saveAfter--
+		} else {
+			return l.saveErr
+		}
 	}
 	if l.path == "" {
 		return nil

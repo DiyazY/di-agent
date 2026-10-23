@@ -403,6 +403,11 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 	held, dropped, failed, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
 	if err != nil {
+		// Changes dropped before the failure are gone from the ledger: record them.
+		l.mu.Lock()
+		prev := l.unread
+		l.mu.Unlock()
+		l.journalDropped(now, ws, dropped, prev)
 		return l.reconcileFailed(fmt.Errorf("relief: reconciling this node's changes: %w", err))
 	}
 	pressure, _, fresh := l.pressure(now)
@@ -433,26 +438,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 
 	taken := func(e actuators.Entry) *Action { return l.taken(e, cooldowns(e.Subject)) }
 
-	for _, e := range dropped {
-		why := "the actuator no longer finds the workload"
-		if hasSubject(ws, e.Subject) {
-			why = "its setting no longer reads as what the agent applied: changed underneath, as by a restart or another hand"
-		}
-		a := live[e.Subject]
-		if a == nil {
-			a = taken(e)
-			l.mu.Lock()
-			l.history = appendHistory(l.history, a)
-			l.mu.Unlock()
-		}
-		if u := prevUnread[e.Subject]; u != nil && u.GivenBack {
-			// Given back from its record while it could not be read: what reads
-			// now is the original the agent set, and the give-back is confirmed.
-			l.expiredFromRecord(now, a, *u)
-			continue
-		}
-		l.gone(now, a, why)
-	}
+	l.journalDropped(now, ws, dropped, prevUnread)
 
 	var expired, resumed []*Action
 	for _, e := range held {
@@ -526,6 +512,43 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// journalDropped journals each change Held dropped from the ledger as gone, with
+// why, closing the action in force that held it; one given back from its record
+// while unreadable (prevUnread) is closed as expired instead, its give-back now
+// confirmed.
+func (l *Loop) journalDropped(now time.Time, ws []runtime.Workload, dropped []actuators.Entry, prevUnread map[string]*Unread) {
+	if len(dropped) == 0 {
+		return
+	}
+	cooldowns := l.cooldowns(ws)
+	l.mu.Lock()
+	live := map[string]*Action{}
+	for _, a := range l.liveLocked() {
+		live[a.Subject] = a
+	}
+	l.mu.Unlock()
+	for _, e := range dropped {
+		why := "the actuator no longer finds the workload"
+		if hasSubject(ws, e.Subject) {
+			why = "its setting no longer reads as what the agent applied: changed underneath, as by a restart or another hand"
+		}
+		a := live[e.Subject]
+		if a == nil {
+			a = l.taken(e, cooldowns(e.Subject))
+			l.mu.Lock()
+			l.history = appendHistory(l.history, a)
+			l.mu.Unlock()
+		}
+		if u := prevUnread[e.Subject]; u != nil && u.GivenBack {
+			// Given back from its record while it could not be read: what reads
+			// now is the original the agent set, and the give-back is confirmed.
+			l.expiredFromRecord(now, a, *u)
+			continue
+		}
+		l.gone(now, a, why)
+	}
 }
 
 // taken builds the action for a change found in the ledger rather than made here.
