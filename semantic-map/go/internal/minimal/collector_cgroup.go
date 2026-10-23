@@ -75,13 +75,13 @@ import (
 // promised memory (not BestEffort, not a unit) that is not limiting itself — its
 // memory_events_high and memory_events_max did not rise — and, when CgroupOptions.Requests
 // holds the pods' requests, is within its memory request (memory.current ≤ request). It is
-// emitted for a window in which the node itself has a memory_pressure_ratio and either no
-// pod is promised memory or at least one promised pod was read: a pod is read when it has
-// a memory_pressure_ratio and a memory.events delta this window (unknown whether it limits
-// itself is not "not limiting itself"). It is 0 when no pod counts (none promised, or every
-// one read excluded): a fresh 0 is what lets a relief step taken on it be released. When
-// pods are promised memory and none was read (all new this window, memory.events
-// unreadable or reset), nothing is emitted: they say nothing about the node. A node without memory PSI reports nothing
+// emitted for a window in which the node itself has a memory_pressure_ratio. A pod is read
+// when it has a memory_pressure_ratio and a memory.events delta this window (unknown whether
+// it limits itself is not "not limiting itself"). The value is the worst among the pods read
+// that count; it is emitted when no pod is promised memory, or every promised pod was read
+// (0 when none counts: a fresh 0 is what lets a relief step taken on it be released). With
+// some promised pod unread (new this window, memory.events unreadable or reset) a positive
+// value is emitted and a 0 is not: an unread pod may be the one stalling. A node without memory PSI reports nothing
 // rather than a calm node. Like cpu_contention_ratio it needs subjects.
 //
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
@@ -421,15 +421,20 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	if worst, ok := owedContention(promised, c.podCPUs()); ok {
 		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
 	}
-	// A fresh 0 needs a reason: no pod promised memory, or one read and none counted. Pods
-	// promised memory of which none could be read say nothing about the node.
-	if rootMemPSI && (memPromised == 0 || len(memPods) > 0) {
+	if rootMemPSI {
 		var req map[string]float64
 		var haveReq bool
 		if c.opts.Requests != nil {
 			req, haveReq = c.opts.Requests.Load()
 		}
-		out = append(out, c.sample(types.MemoryContentionRatio, unitNodeShare, memoryContention(memPods, req, haveReq), now, window, "", nil))
+		// A 0 releases caps, so it must speak for every promised pod: it is emitted
+		// only when none is promised or every one was read. With some unread, a stall
+		// among those read is emitted as it is, and a 0 is not: an unread pod may be
+		// the one stalling.
+		v := memoryContention(memPods, req, haveReq)
+		if memPromised == len(memPods) || v > 0 {
+			out = append(out, c.sample(types.MemoryContentionRatio, unitNodeShare, v, now, window, "", nil))
+		}
 	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {

@@ -353,3 +353,51 @@ func TestMemoryContentionAbsentWithoutNodePSI(t *testing.T) {
 		t.Fatalf("memory_contention_ratio %v without node memory PSI; want none", s.Value)
 	}
 }
+
+// TestMemoryContentionIsNotZeroForUnreadPods: a 0 releases caps, so it must speak
+// for every promised pod. With nine promised pods unread and the one read
+// excluded, nothing is emitted; a stall among the read ones is emitted as it is.
+func TestMemoryContentionIsNotZeroForUnreadPods(t *testing.T) {
+	root := t.TempDir()
+	procRoot := writeFakeProc(t)
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	writePSI(t, root, "memory.pressure", 0)
+	var unread []string
+	for i := 0; i < 9; i++ {
+		d := filepath.Join(root, "kubepods", "burstable", fmt.Sprintf("pod%08d-0000-0000-0000-000000000000", i))
+		writeCgroup(t, d, 1_000_000, 0, 0, "104857600")
+		writePSI(t, d, "memory.pressure", 0) // no memory.events: unknown whether it limits itself
+		unread = append(unread, d)
+	}
+	read := filepath.Join(root, "kubepods", "burstable", "pod99999999-0000-0000-0000-000000000000")
+	writeCgroup(t, read, 1_000_000, 0, 0, "104857600")
+	writePSI(t, read, "memory.pressure", 0)
+	writeMemEvents(t, read, 0, 0, 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 32,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	collect := func(readStall uint64, highs uint64) *types.MetricSample {
+		t.Helper()
+		clock = clock.Add(10 * time.Second)
+		writePSI(t, root, "memory.pressure", uint64(clock.Sub(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)).Microseconds())/2)
+		for _, d := range unread {
+			writePSI(t, d, "memory.pressure", 5_000_000)
+		}
+		writePSI(t, read, "memory.pressure", readStall)
+		writeMemEvents(t, read, highs, 0, 0)
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bySubject(samples)[""][types.MemoryContentionRatio]
+	}
+	if s := collect(1_000_000, 1); s != nil { // the read pod hit its memory.high: excluded
+		t.Fatalf("memory_contention_ratio %v with nine promised pods unread and the read one excluded; want none", s.Value)
+	}
+	if s := collect(4_000_000, 1); s == nil || s.Value != 0.3 { // flat high count: counted, stall 0.3
+		t.Fatalf("memory_contention_ratio %v; want 0.3, the stall of the pod read", s)
+	}
+}
