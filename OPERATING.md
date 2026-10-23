@@ -420,7 +420,7 @@ The agent checks both at start and refuses to start, naming the lever, when eith
 
    and the kubelet configuration has no `featureGates: {MemoryQoS: true}`.
 
-It also needs to write the pod cgroups: the agent runs as root or with write access to them. At start the actuator opens an existing pod cgroup's `memory.high` for writing (writing nothing), or, with no pod yet, checks that `kubepods` is on a writable mount, and refuses start naming the lever, the root and `read-only` when it cannot. The DaemonSet mounts the node at `/host` **read-only**, so there the memory lever refuses start until the cgroup tree is mounted writable (or the lever is removed).
+It also needs to write the pod cgroups: the agent runs as root or with write access to them. At start the actuator opens an existing pod cgroup's `memory.high` for writing (writing nothing), or, with no pod yet, checks that `kubepods` is on a writable mount, and refuses start naming the lever, the root and `read-only` when it cannot. When the ledger holds this node's `memory.high` changes and the root has no `kubepods` tree at all (a wrong `config.root`, as after a remount), start is refused naming the root: the agent would otherwise find none of its caps to give back. The DaemonSet mounts the node at `/host` **read-only**, so there the memory lever refuses start until the cgroup tree is mounted writable (or the lever is removed).
 
 ### What it writes
 

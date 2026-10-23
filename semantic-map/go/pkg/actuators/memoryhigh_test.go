@@ -140,6 +140,10 @@ func TestMemoryHighReadSetUnset(t *testing.T) {
 
 func TestMemoryHighGone(t *testing.T) {
 	root := mhRoot(t)
+	// The pod's QoS parent is there and the pod is not: it is gone.
+	if err := os.MkdirAll(filepath.Join(root, "kubepods", "burstable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	a := mhNew(t, root)
 	ctx := context.Background()
 	w := mhWL("burstable")
@@ -150,8 +154,102 @@ func TestMemoryHighGone(t *testing.T) {
 		t.Errorf("Set err = %v", err)
 	}
 	// Nothing was created by the failed Set.
-	if _, err := os.Stat(filepath.Join(root, "kubepods")); err == nil {
+	if ents, _ := os.ReadDir(filepath.Join(root, "kubepods", "burstable")); len(ents) != 0 {
 		t.Error("Set created cgroup directories")
+	}
+}
+
+// TestMemoryHighIsNotGoneWithoutItsQoSParent: a pod is gone only when its cgroup
+// is missing from a QoS parent that is there. A tree with no kubepods, or with
+// no parent for the pod's QoS class, says the root is wrong, not that the pod
+// left: Read and Set fail, and nothing may forget a change on their say-so.
+func TestMemoryHighIsNotGoneWithoutItsQoSParent(t *testing.T) {
+	ctx := context.Background()
+	for name, mk := range map[string]string{"no kubepods": "", "no QoS parent": "kubepods"} {
+		root := mhRoot(t)
+		if mk != "" {
+			if err := os.MkdirAll(filepath.Join(root, mk), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		a := mhNew(t, root)
+		w := mhWL("burstable")
+		if _, _, err := a.Read(ctx, w); err == nil || errors.Is(err, ErrGone) {
+			t.Errorf("%s: Read err = %v; want an error that is not ErrGone", name, err)
+		}
+		if err := a.Set(ctx, w, 1<<30, true); err == nil || errors.Is(err, ErrGone) {
+			t.Errorf("%s: Set err = %v; want an error that is not ErrGone", name, err)
+		}
+	}
+}
+
+// TestMemoryHighStatErrorIsNotGone: a pod cgroup that cannot be looked at (EACCES,
+// EIO) is not one that left: the error is returned as it is, and a revert that
+// meets it keeps the entry.
+func TestMemoryHighStatErrorIsNotGone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through file modes")
+	}
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "209715200")
+	a := mhNew(t, root)
+	l := MemoryLedger()
+	acting := NewActing("n1", l, a)
+	ctx := context.Background()
+	e, err := acting.Apply(ctx, mhWL("burstable"), "memory.high", 128<<20, time.Now().Add(time.Hour), "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(d)
+	if err := os.Chmod(parent, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o755) })
+	if _, _, err := a.Read(ctx, mhWL("burstable")); err == nil || errors.Is(err, ErrGone) {
+		t.Fatalf("Read err = %v; want the stat error, not ErrGone", err)
+	}
+	if err := acting.Revert(ctx, mhWL("burstable"), e); err == nil || errors.Is(err, ErrGone) {
+		t.Fatalf("Revert err = %v; want the stat error, not ErrGone", err)
+	}
+	if len(l.All()) != 1 {
+		t.Fatalf("ledger %+v; want the entry kept", l.All())
+	}
+}
+
+// TestMemoryHighWithoutItsFileIsNotGone: a pod cgroup that is there but has no
+// memory.high (the memory controller not enabled for it) is not a pod that left.
+func TestMemoryHighWithoutItsFileIsNotGone(t *testing.T) {
+	root := mhRoot(t)
+	d := mhMkPod(t, root, "burstable", mhUID, false, "max", "")
+	a := mhNew(t, root)
+	os.Remove(filepath.Join(d, "memory.high"))
+	ctx := context.Background()
+	if _, _, err := a.Read(ctx, mhWL("burstable")); err == nil || errors.Is(err, ErrGone) {
+		t.Errorf("Read err = %v; want an error that is not ErrGone", err)
+	}
+	if err := a.Set(ctx, mhWL("burstable"), 1<<30, true); err == nil || errors.Is(err, ErrGone) {
+		t.Errorf("Set err = %v; want an error that is not ErrGone", err)
+	}
+}
+
+// TestMemoryHighRefusesHeldEntriesWithoutKubepods: a ledger that holds this
+// node's memory.high changes over a root with no kubepods tree at all is a wrong
+// cgroup root, as after a restart with another mount: start is refused, naming
+// the root, rather than every change taken for gone.
+func TestMemoryHighRefusesHeldEntriesWithoutKubepods(t *testing.T) {
+	root := mhRoot(t)
+	held := func(string) []Entry {
+		return []Entry{{Action: "memory.high", Subject: "pod:" + mhUID, NodeID: "n1", Applied: 1 << 30}}
+	}
+	_, err := NewMemoryHigh(Env{NodeID: "n1", CgroupRoot: root, Held: held})
+	if err == nil || !strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), "kubepods") {
+		t.Fatalf("err %v; want a refusal naming %s and kubepods", err, root)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "kubepods.slice"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewMemoryHigh(Env{NodeID: "n1", CgroupRoot: root, Held: held}); err != nil {
+		t.Fatalf("with a kubepods tree: %v", err)
 	}
 }
 

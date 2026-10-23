@@ -70,10 +70,18 @@ func NewMemoryHigh(env Env) (Actuator, error) {
 	}
 	a := &MemoryHigh{root: env.CgroupRoot}
 	held := map[string]bool{}
+	mine := 0
 	if env.Held != nil {
 		for _, e := range env.Held("memory.high") {
 			held[e.Subject] = true
+			if e.NodeID == env.NodeID {
+				mine++
+			}
 		}
+	}
+	if mine > 0 && !a.hasKubepods() {
+		return nil, fmt.Errorf("memory.high: the ledger holds %d change(s) of this node, and %s has no kubepods tree (kubepods or kubepods.slice): "+
+			"the cgroup root is wrong, and no change could be found to give back; mount the node's cgroup tree there", mine, a.root)
 	}
 	if err := a.refuseManaged(held); err != nil {
 		return nil, err
@@ -105,8 +113,8 @@ func (a *MemoryHigh) probeWritable() error {
 		return h.Close()
 	}
 	dir := a.root
-	for _, d := range []string{filepath.Join(a.root, "kubepods"), filepath.Join(a.root, "kubepods.slice")} {
-		if st, err := os.Stat(d); err == nil && st.IsDir() {
+	for _, d := range a.kubepods() {
+		if isDir(d) {
 			dir = d
 			break
 		}
@@ -136,8 +144,10 @@ func (a *MemoryHigh) Check(w runtime.Workload) string {
 	switch {
 	case errors.Is(err, ErrInvalidIdentity):
 		return "invalid pod identity"
-	case err != nil:
+	case errors.Is(err, ErrGone):
 		return "pod cgroup not found"
+	case err != nil:
+		return "pod cgroup unreadable"
 	}
 	cur, err := readInt(filepath.Join(dir, "memory.current"))
 	if err != nil {
@@ -156,11 +166,8 @@ func (a *MemoryHigh) Read(_ context.Context, w runtime.Workload) (float64, bool,
 		return 0, false, err
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "memory.high"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return 0, false, fmt.Errorf("%s: %w", w.Subject, ErrGone)
-	}
 	if err != nil {
-		return 0, false, err
+		return 0, false, missingFile(w, dir, err)
 	}
 	return parseHigh(string(b))
 }
@@ -181,11 +188,8 @@ func (a *MemoryHigh) Set(_ context.Context, w runtime.Workload, v float64, set b
 	}
 	// No O_CREATE: a cgroup that left must fail the write, not leave a file.
 	f, err := os.OpenFile(filepath.Join(dir, "memory.high"), os.O_WRONLY|os.O_TRUNC, 0)
-	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%s: %w", w.Subject, ErrGone)
-	}
 	if err != nil {
-		return err
+		return missingFile(w, dir, err)
 	}
 	if _, err := f.WriteString(s); err != nil {
 		f.Close()
@@ -215,7 +219,10 @@ func (a *MemoryHigh) podDirs(uid, qos string) []string {
 
 // podDir is the pod's cgroup directory: ErrInvalidIdentity when w has no valid
 // UID and QoS class to find it by, which is the caller's error and says nothing
-// of the pod, and ErrGone when the identity is valid and neither layout has it.
+// of the pod. ErrGone only when no layout has the pod's directory and the QoS
+// parent it would be in is there: a missing parent says the root is wrong, not
+// that the pod left, and any error but "does not exist" (EACCES, EIO) is
+// returned as it is. Unknown is never gone.
 func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
 	if !podUID.MatchString(w.UID) {
 		return "", fmt.Errorf("%s has no valid pod uid %q: %w", w.Subject, w.UID, ErrInvalidIdentity)
@@ -225,12 +232,63 @@ func (a *MemoryHigh) podDir(w runtime.Workload) (string, error) {
 	default:
 		return "", fmt.Errorf("%s has no valid qos %q: %w", w.Subject, w.QoS, ErrInvalidIdentity)
 	}
+	parent := false
 	for _, d := range a.podDirs(w.UID, w.QoS) {
-		if st, err := os.Stat(d); err == nil && st.IsDir() {
+		st, err := os.Stat(d)
+		switch {
+		case err == nil && st.IsDir():
 			return d, nil
+		case err == nil:
+			return "", fmt.Errorf("%s: %s is not a directory", w.Subject, d)
+		case !errors.Is(err, fs.ErrNotExist):
+			return "", fmt.Errorf("%s: %w", w.Subject, err)
+		}
+		switch st, err := os.Stat(filepath.Dir(d)); {
+		case err == nil && st.IsDir():
+			parent = true
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return "", fmt.Errorf("%s: %w", w.Subject, err)
 		}
 	}
+	if !parent {
+		return "", fmt.Errorf("%s: no cgroup, and no %s QoS parent for it under %s: the cgroup root may be wrong", w.Subject, w.QoS, a.root)
+	}
 	return "", fmt.Errorf("%s: no cgroup: %w", w.Subject, ErrGone)
+}
+
+// missingFile is the error for a pod cgroup's memory.high that could not be
+// opened: ErrGone when the directory itself has gone since it was found, as a
+// pod removed in between; otherwise the error as it is, since a directory
+// without the file is one whose memory controller is not enabled, not a pod
+// that left.
+func missingFile(w runtime.Workload, dir string, err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		if _, serr := os.Stat(dir); errors.Is(serr, fs.ErrNotExist) {
+			return fmt.Errorf("%s: %w", w.Subject, ErrGone)
+		}
+		return fmt.Errorf("%s: %s has no memory.high (is the memory controller enabled for it?): %w", w.Subject, dir, err)
+	}
+	return fmt.Errorf("%s: memory.high: %w", w.Subject, err)
+}
+
+// kubepods is the top of the pod tree in each driver's layout.
+func (a *MemoryHigh) kubepods() []string {
+	return []string{filepath.Join(a.root, "kubepods"), filepath.Join(a.root, "kubepods.slice")}
+}
+
+// hasKubepods reports whether either layout's pod tree is under the root.
+func (a *MemoryHigh) hasKubepods() bool {
+	for _, d := range a.kubepods() {
+		if isDir(d) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDir(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
 }
 
 // podCgroup is one pod's cgroup directory, with the pod's UID.
