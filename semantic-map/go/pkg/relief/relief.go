@@ -626,7 +626,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	}
 
 	id := l.id("act")
-	b := l.cfg.Map.Decide(id, fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
+	b := l.cfg.Map.Decide(id, l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
 	b.Property(l.d.Relieves)
 	b.Property(l.d.Usage + "@" + plan.Subject)
 	b.Facts()
@@ -636,7 +636,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		// The action is given back; the hold on the workload stands, and Cool below
 		// extends it to this lever too.
 		l.budget.refund(now)
-		r := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU to relieve node CPU contention?", plan.Subject))
+		r := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
 		r.Input("plan", plan)
 		r.Input("policy", eff)
 		r.Input("rule", eff.Rule)
@@ -663,8 +663,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		b.Input("previous", map[string]any{"act": k.DecisionID, "plan": k.Plan, "action": k.ID})
 		b.Note("a further step on the change %s already in force", k.ID)
 	}
-	b.Note("capping %s from %.3f to %.3f %s; predicted drop in node CPU contention %.4f", plan.Subject,
-		plan.From, plan.To, plan.Unit, plan.Predicted)
+	b.Note("capping %s from %.3f to %.3f %s; predicted drop in %s %.4f", plan.Subject,
+		plan.From, plan.To, plan.Unit, l.d.Relieves, plan.Predicted)
 	if plan.Basis == BasisUsage {
 		b.Caveat("%s", usageCaveat)
 	}
@@ -724,7 +724,7 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	l.noted = why
 	l.nRefused++
 	l.mu.Unlock()
-	b := l.cfg.Map.Decide(l.id("refused"), "relieve node CPU contention?")
+	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("relieve %s through %s?", l.d.Relieves, l.d.Action))
 	b.Property(l.d.Relieves)
 	for k, v := range inputs {
 		b.Input(k, v)
@@ -789,7 +789,7 @@ func (l *Loop) refuseUnanchored(a *Action) {
 		return
 	}
 	why := fmt.Sprintf("origin of %s's change is unknown: no original setting was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
-	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("cap %s's CPU further to relieve node CPU contention?", a.Subject))
+	b := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s further through %s to relieve %s?", a.Subject))
 	b.Input("action", a.ID)
 	b.Input("entry", a.Entry)
 	b.Caveat("%s", why)
@@ -845,4 +845,16 @@ func (l *Loop) journalledAct(id string) (p Plan, first string, ok bool) {
 		first, _ = prev["action"].(string)
 	}
 	return p, first, true
+}
+
+// ask is a decision's question about subject in the lever's own terms: format
+// takes the subject, the resource, the action and the pressure it relieves.
+func (l *Loop) ask(format, subject string) string {
+	return fmt.Sprintf(format, subject, l.d.Resource, l.d.Action, l.d.Relieves)
+}
+
+// giveBackAsk is the question of giving subject back the setting the lever's
+// action changed, and why.
+func (l *Loop) giveBackAsk(subject, why string) string {
+	return fmt.Sprintf("give %s back its %s (%s): %s", subject, l.d.Resource, l.d.Action, why)
 }

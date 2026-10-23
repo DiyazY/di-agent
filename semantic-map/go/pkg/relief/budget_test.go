@@ -289,3 +289,40 @@ func TestLeversDoNotStackWhileOneIsApplying(t *testing.T) {
 		t.Fatalf("budget count %d; want only cpu.limit's act", n)
 	}
 }
+
+// TestDecisionsAreWordedFromTheDescriptor: what a decision asks names the lever's
+// action and the pressure it relieves, so a memory lever's journal does not read
+// as CPU relief. The wording changes; the numbers do not.
+func TestDecisionsAreWordedFromTheDescriptor(t *testing.T) {
+	budget := NewBudget(6)
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3},
+		policy: leverPolicy(6), budget: budget})
+	l2 := h.second(budget)
+	for i := 0; i < 20 && len(h.actsBy("memory.high")) == 0; i++ {
+		h.both(l2, tick, 0.5)
+	}
+	h.both(l2, 3*time.Minute, 0.5) // neither helped: both are reverted
+	byAction := map[string]int{}
+	for _, d := range h.m.Journal().Decisions(0) {
+		if !strings.HasPrefix(d.ID, "relief-") {
+			continue
+		}
+		if strings.Contains(d.Question, "CPU") {
+			t.Errorf("%s asks %q; want it worded from the descriptor", d.ID, d.Question)
+		}
+		for _, action := range []string{"cpu.limit", "memory.high"} {
+			if strings.Contains(d.Question, action) {
+				byAction[action]++
+			}
+		}
+		if strings.HasPrefix(d.ID, "relief-act-") && !strings.Contains(d.Question, cpu.Relieves) {
+			t.Errorf("%s asks %q; want the pressure it relieves, %s", d.ID, d.Question, cpu.Relieves)
+		}
+	}
+	if byAction["cpu.limit"] == 0 || byAction["memory.high"] == 0 {
+		t.Errorf("questions naming each action: %v; want both levers' decisions named by their action", byAction)
+	}
+	if n := len(h.decisions("revert")); n == 0 {
+		t.Errorf("no revert decision to check the wording of")
+	}
+}

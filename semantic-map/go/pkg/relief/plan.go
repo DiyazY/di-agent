@@ -168,7 +168,7 @@ func makePlan(ctx context.Context, m *statemap.Map, a actuators.Actuator, cands 
 		return Plan{}, false, noCapacity(d)
 	}
 	if len(cands) == 0 {
-		return Plan{}, false, "no candidate: no actionable workload uses victim_share or more of node CPU"
+		return Plan{}, false, "no candidate: no actionable workload has victim_share or more of node " + d.Usage
 	}
 	byID := make(map[string]runtime.Workload, len(ws))
 	for _, w := range ws {

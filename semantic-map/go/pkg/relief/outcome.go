@@ -129,7 +129,7 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		verdict = "keep"
 	}
 	id := l.id("verify")
-	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s relieve node CPU contention?", a.Subject))
+	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s's %s through %s relieve %s?", a.Subject, l.d.Resource, l.d.Action, l.d.Relieves))
 	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
 	b.Input("predicted", a.Plan.Predicted)
@@ -187,9 +187,9 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Worklo
 		return
 	}
 	cooldown := failedCooldown * a.cooldown
-	question := fmt.Sprintf("give %s back its CPU: capping it did not help", a.Subject)
+	question := l.giveBackAsk(a.Subject, "capping it did not help")
 	if a.prev != nil {
-		question = fmt.Sprintf("put %s back at its earlier cap: the further step did not help", a.Subject)
+		question = fmt.Sprintf("put %s back at its earlier %s: the further step did not help", a.Subject, l.d.Action)
 	}
 	b := l.cfg.Map.Decide(l.id("revert"), question)
 	b.Input("act", a.DecisionID)
@@ -276,7 +276,7 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 // recordRelease journals and records the release of a, whose revert went
 // through. skipped lists the newer actions the actuator would not give back first.
 func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
-	b := l.cfg.Map.Decide(l.id("release"), fmt.Sprintf("give %s back its CPU: node CPU contention has eased", a.Subject))
+	b := l.cfg.Map.Decide(l.id("release"), l.giveBackAsk(a.Subject, l.d.Relieves+" has eased"))
 	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
 	b.Input("entry", a.Entry)
@@ -311,9 +311,9 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 	case err != nil:
 		return fmt.Errorf("reverting %s on %s (%s): %w", a.ID, a.Subject, outcome, err)
 	}
-	question := fmt.Sprintf("give %s back its CPU: the change expired", a.Subject)
+	question := l.giveBackAsk(a.Subject, "the change expired")
 	if outcome == OutcomeManual {
-		question = fmt.Sprintf("give %s back its CPU: an operator asked", a.Subject)
+		question = l.giveBackAsk(a.Subject, "an operator asked")
 	}
 	b := l.cfg.Map.Decide(l.id(kind), question)
 	b.Input("act", a.DecisionID)
