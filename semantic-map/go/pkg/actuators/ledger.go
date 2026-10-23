@@ -136,6 +136,35 @@ func ReadLedger(path string) ([]Entry, error) {
 	return f.Entries, nil
 }
 
+// ReadLedgerLenient is ReadLedger that does not refuse the whole file for an
+// invalid entry: it returns the valid entries and, for each invalid one, its
+// index in the file and why. An unreadable or corrupt file is still an error.
+// It is for an agent that changes nothing and only shows what the ledger holds.
+func ReadLedgerLenient(path string) (valid []Entry, invalid []string, err error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("ledger %s: %w", path, err)
+	}
+	var f ledgerFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil, nil, fmt.Errorf("ledger %s: corrupt: %w", path, err)
+	}
+	if f.Version != 1 {
+		return nil, nil, fmt.Errorf("ledger %s: unsupported version %d", path, f.Version)
+	}
+	for i, e := range f.Entries {
+		if err := e.validate(); err != nil {
+			invalid = append(invalid, fmt.Sprintf("entry %d: %v", i, err))
+			continue
+		}
+		valid = append(valid, e)
+	}
+	return valid, invalid, nil
+}
+
 // Put records e, which must be valid. An existing entry for the key must be
 // given its own Original back: the ledger holds what the setting was before the
 // agent's first change, however many followed, and a Put that would change it is

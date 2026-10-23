@@ -74,7 +74,7 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 		case cfg.Loops.Relief.Enabled:
 			return nil, false, fmt.Errorf("loops.relief dry run: the ledger a real run keeps cannot be read: %w", err)
 		default:
-			logf("actuation: %v", err)
+			real = showLedger(path, logf)
 		}
 	}
 	if !dry {
@@ -85,7 +85,13 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 		case cfg.Loops.Relief.Enabled:
 			return nil, false, fmt.Errorf("loops.relief needs a writable ledger of its changes (actuation.ledger, else beside persist.file, else %s): %w", defaultLedger, err)
 		default:
-			logf("actuation: %v; relief is off, so the agent changes nothing and keeps no ledger on disk", err)
+			logf("actuation: warning: %v; relief is off, so the agent changes nothing and keeps no ledger on disk", err)
+			// What the file still holds is shown, never written back.
+			for _, e := range showLedger(path, logf) {
+				if perr := ledger.Put(e); perr != nil {
+					logf("actuation: warning: ledger %s: %v", path, perr)
+				}
+			}
 		}
 	}
 	held := func(action string) []actuators.Entry {
@@ -121,6 +127,21 @@ func buildActing(cfg spec.Spec, rt runtime.Runtime, logf func(string, ...any)) (
 			u.Action, u.Subject, strconv.FormatFloat(u.Applied, 'f', -1, 64), u.Expires.Format(time.RFC3339), u.Why)
 	}
 	return acting, !dry, nil
+}
+
+// showLedger reads the ledger at path for an agent that changes nothing: the
+// valid entries, to warn of and show as unmanaged, with a warning naming each
+// invalid one by index and reason, and one for a file that cannot be read.
+func showLedger(path string, logf func(string, ...any)) []actuators.Entry {
+	es, invalid, err := actuators.ReadLedgerLenient(path)
+	if err != nil {
+		logf("actuation: warning: %v; what it holds cannot be shown", err)
+		return nil
+	}
+	for _, why := range invalid {
+		logf("actuation: warning: ledger %s: %s; not shown", path, why)
+	}
+	return es
 }
 
 // buildRelief builds one relief loop per lever, in lever order, sharing one

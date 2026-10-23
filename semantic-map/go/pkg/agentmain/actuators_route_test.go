@@ -408,3 +408,114 @@ func TestADryRunShowsTheRealRunsChanges(t *testing.T) {
 		t.Fatalf("memory.high %q; want the real run's cap untouched", b)
 	}
 }
+
+// writeLedgerFile writes a ledger file holding entries as given, valid or not.
+func writeLedgerFile(t *testing.T, path string, entries ...actuators.Entry) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"version": 1, "entries": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAnInvalidLedgerEntryWithReliefOffIsWarned: with relief off a ledger holding
+// an invalid entry does not hide the valid ones: they are warned of and shown as
+// unmanaged, and the invalid one is named in a warning by index and reason. With
+// relief on, start is refused.
+func TestAnInvalidLedgerEntryWithReliefOffIsWarned(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "actions.json")
+	writeLedgerFile(t, path,
+		actuators.Entry{Action: "memory.high", Subject: "pod:x", NodeID: "n1", Applied: 314572800, Expires: time.Unix(100, 0).UTC()},
+		actuators.Entry{Action: "memory.high", Subject: "pod:y", Applied: 1}) // no node id
+	s := spec.Default()
+	s.Node.ID, s.Runtime.Kind = "n1", "kubernetes"
+	s.Actuation.Ledger = path
+	var logs []string
+	acting, _, err := buildActing(s, named{dry}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	if err != nil {
+		t.Fatalf("relief off: %v", err)
+	}
+	if !warnedOf(logs, "pod:x", "no lever runs for this action") {
+		t.Errorf("logs %q; want the valid entry warned of", logs)
+	}
+	if !warnedOf(logs, path, "entry 1", "no node id") {
+		t.Errorf("logs %q; want the invalid entry named by index and reason", logs)
+	}
+	mux := http.NewServeMux()
+	registerActuatorsRoute(mux, dry, acting)
+	if row := rowOf(actuatorRows(t, get(mux, "/actuators").Body.Bytes()), "memory.high"); len(row.Unmanaged) != 1 || row.Unmanaged[0].Subject != "pod:x" {
+		t.Fatalf("memory.high %+v; want pod:x shown unmanaged", row)
+	}
+	s.Loops.Relief.Enabled = true
+	if _, _, err := buildActing(s, named{dry}, t.Logf); err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("relief on: err %v; want start refused naming %s", err, path)
+	}
+}
+
+// TestADryRunWithACorruptLedger: a dry run that cannot read the ledger a real
+// run keeps refuses start with relief on, and with relief off warns and starts.
+func TestADryRunWithACorruptLedger(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _, _, ledger := memTree(t, "max", ", dry_run: true")
+	if err := os.WriteFile(ledger, []byte("{nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := buildActing(s, named{dry}, t.Logf); err == nil || !strings.Contains(err.Error(), ledger) {
+		t.Fatalf("relief on: err %v; want start refused naming %s", err, ledger)
+	}
+	s.Loops.Relief.Enabled = false
+	var logs []string
+	if _, _, err := buildActing(s, named{dry}, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }); err != nil {
+		t.Fatalf("relief off: %v", err)
+	}
+	if !warnedOf(logs, ledger, "corrupt") {
+		t.Errorf("logs %q; want a warning naming the corrupt ledger", logs)
+	}
+}
+
+// TestADryRunLeavesAnExpiredRealRunChangeAlone: a dry-run loop ticking past a
+// real run's expired change neither gives it back nor writes the ledger file.
+func TestADryRunLeavesAnExpiredRealRunChangeAlone(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _, pod, ledger := memTree(t, "500000000", ", dry_run: true")
+	const subject = "pod:1234abcd-0000-1111-2222-333344445555"
+	writeLedgerFile(t, ledger, actuators.Entry{Action: "memory.high", Subject: subject, NodeID: "n1", Applied: 500000000,
+		Expires: time.Now().Add(-time.Hour).UTC(), DecisionID: "d1"})
+	before, _ := os.ReadFile(ledger)
+	acting, evidence, err := buildActing(s, named{dry}, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.New(s.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops, err := buildRelief(s, named{dry}, acting, pol, statemap.New(statemap.Config{Owner: "n1"}, nil), evidence, nil, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		for _, l := range loops {
+			l.Tick(context.Background())
+		}
+	}
+	if after, _ := os.ReadFile(ledger); string(after) != string(before) {
+		t.Fatalf("ledger file changed by a dry run:\n%s\n→\n%s", before, after)
+	}
+	if b, _ := os.ReadFile(filepath.Join(pod, "memory.high")); strings.TrimSpace(string(b)) != "500000000" {
+		t.Fatalf("memory.high %q; want the real run's cap left alone", b)
+	}
+}
