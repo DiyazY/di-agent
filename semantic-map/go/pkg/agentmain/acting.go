@@ -111,7 +111,7 @@ func buildRelief(cfg spec.Spec, rt runtime.Runtime, acting *actuators.Acting, po
 		}
 		loop, err := relief.New(relief.Config{Interval: cfg.Loops.Relief.Interval, Lever: l, Budget: budget,
 			Descriptor: a.Describe(), NodeID: cfg.Node.ID, Runtime: rt, Acting: acting, Policy: pol, Map: m,
-			Logf: logf, Evidence: evidence, Candidates: cands})
+			Logf: logf, Evidence: evidence, DryRun: cfg.Loops.Relief.IsDryRun(cfg.Runtime.Kind), Candidates: cands})
 		if err != nil {
 			return nil, fmt.Errorf("loops.relief.levers[%d] %s: %w", i, l.Action, err)
 		}

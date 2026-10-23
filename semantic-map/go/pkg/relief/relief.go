@@ -25,6 +25,7 @@ type Status struct {
 	Phase           Phase                `json:"phase"`
 	Paused          bool                 `json:"paused"`
 	Runtime         string               `json:"runtime"` // what the changes go through: dry-run changes nothing
+	DryRun          bool                 `json:"dry_run"` // the loop decides and records, and its actuator changes nothing
 	InFlight        *Action              `json:"in_flight,omitempty"`
 	Actions         int                  `json:"actions"`
 	Kept            int                  `json:"kept"`
@@ -84,7 +85,8 @@ type Action struct {
 // so an action's outcome is evidence about it: only then do outcomes feed the
 // map, the learned effects and the discovery queue. A dry run changes nothing,
 // and what pressure did after it is the workload's own doing. Candidates is the
-// discovery queue interventions settle; nil settles nothing.
+// discovery queue interventions settle; nil settles nothing. DryRun says the
+// actuator is a dry run's, which changes nothing; Status reports it.
 type Config struct {
 	Interval   time.Duration
 	Lever      spec.Lever
@@ -98,6 +100,7 @@ type Config struct {
 	Now        func() time.Time
 	Logf       func(string, ...any)
 	Evidence   bool
+	DryRun     bool
 	Candidates Candidates
 }
 
@@ -227,7 +230,7 @@ func (l *Loop) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.cfg.Now()
-	st := Status{Action: l.d.Action, Phase: l.trigger.Phase(), Paused: l.paused, Runtime: l.cfg.Runtime.Name(),
+	st := Status{Action: l.d.Action, Phase: l.trigger.Phase(), Paused: l.paused, Runtime: l.cfg.Runtime.Name(), DryRun: l.cfg.DryRun,
 		Actions: l.nActs, Kept: l.nKept, Reverted: l.nReverted, Refused: l.nRefused}
 	if l.inFlight != nil {
 		a := copyAction(l.inFlight)

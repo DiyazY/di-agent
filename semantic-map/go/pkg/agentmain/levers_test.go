@@ -183,3 +183,53 @@ func TestReliefRouteListsLevers(t *testing.T) {
 		t.Errorf("unknown id = %d, want 404", rec.Code)
 	}
 }
+
+// TestReliefStatusSaysDryRun: each lever's GET /relief status says whether it is
+// a dry run, as loops.relief.dry_run resolves against runtime.kind.
+func TestReliefStatusSaysDryRun(t *testing.T) {
+	dry, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	for name, c := range map[string]struct {
+		kind   string
+		dryRun *bool
+		rt     runtime.Runtime
+		want   bool
+	}{
+		"dry-run runtime":          {"dry-run", nil, dry, true},
+		"real runtime":             {"kubernetes", nil, named{dry}, false},
+		"real runtime, dry_run on": {"kubernetes", &yes, named{dry}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := spec.Default()
+			s.Node.ID, s.Runtime.Kind = "n1", c.kind
+			s.Loops.Relief.Enabled, s.Loops.Relief.Levers, s.Loops.Relief.DryRun = true, s.Loops.Relief.Levers[:1], c.dryRun
+			s.Actuation.Ledger = filepath.Join(t.TempDir(), "actions.json")
+			pol, err := policy.New(s.Policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			acting, evidence, err := buildActing(s, c.rt, t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loops, err := buildRelief(s, c.rt, acting, pol, statemap.New(statemap.Config{Owner: "n1"}, nil), evidence, nil, t.Logf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mux := http.NewServeMux()
+			registerActingRoutes(mux, c.rt, acting, pol, loops)
+			var body struct {
+				Levers []map[string]any `json:"levers"`
+			}
+			if err := json.Unmarshal(get(mux, "/relief").Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if len(body.Levers) != 1 || body.Levers[0]["dry_run"] != c.want {
+				t.Fatalf("levers %v; want dry_run %v", body.Levers, c.want)
+			}
+		})
+	}
+}
