@@ -75,7 +75,7 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 	l.mu.Lock()
 	var due []Unread
 	for _, u := range l.unread {
-		if !now.Before(u.Entry.Expires) {
+		if !u.live && !now.Before(u.Entry.Expires) {
 			due = append(due, *u)
 		}
 	}

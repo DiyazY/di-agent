@@ -1470,3 +1470,64 @@ func TestTheDescriptorIsTheActuators(t *testing.T) {
 		t.Fatalf("err %v; want a refusal naming %s", err, lever.Action)
 	}
 }
+
+// blindAfterSet is an actuator that cannot read a workload from its first Set
+// until see is called, as an API that stops answering right after a resize.
+type blindAfterSet struct {
+	actuators.Actuator
+	mu    sync.Mutex
+	blind map[string]bool
+	seen  bool
+}
+
+func (b *blindAfterSet) see() { b.mu.Lock(); b.seen = true; b.mu.Unlock() }
+
+func (b *blindAfterSet) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	b.mu.Lock()
+	if !b.seen {
+		b.blind[w.Subject] = true
+	}
+	b.mu.Unlock()
+	return b.Actuator.Set(ctx, w, v, set)
+}
+
+func (b *blindAfterSet) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	b.mu.Lock()
+	fail := b.blind[w.Subject] && !b.seen
+	b.mu.Unlock()
+	if fail {
+		return 0, false, errors.New("api unavailable")
+	}
+	return b.Actuator.Read(ctx, w)
+}
+
+// TestAPendingChangeInFlightIsResolved: a change applied and not read back is in
+// flight with a pending entry. While it cannot be read it is shown as unread,
+// with its error; once it reads, the entry Held settles is the action's own.
+func TestAPendingChangeInFlightIsResolved(t *testing.T) {
+	var b *blindAfterSet
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			b = &blindAfterSet{Actuator: a, blind: map[string]bool{}}
+			return d, b
+		}})
+	h.act("pod:a")
+	if f := h.l.Status().InFlight; f == nil || !f.Entry.Pending {
+		t.Fatalf("in flight %+v; want the change pending", f)
+	}
+	h.step(0.5)
+	st := h.l.Status()
+	if len(st.Unread) != 1 || st.Unread[0].Entry.Subject != "pod:a" || !strings.Contains(st.Unread[0].Error, "api unavailable") || st.Stuck < 1 {
+		t.Fatalf("status %+v; want the pending change shown unread with its error", st)
+	}
+	b.see()
+	h.step(0.5)
+	st = h.l.Status()
+	if len(st.Unread) != 0 {
+		t.Fatalf("unread %+v once it reads", st.Unread)
+	}
+	a := h.action("pod:a")
+	if a.Entry.Pending || a.Entry.Applied != h.applied()["pod:a"].Applied || h.applied()["pod:a"].Pending {
+		t.Fatalf("action entry %+v, ledger %+v; want the settled entry, the same in both", a.Entry, h.applied()["pod:a"])
+	}
+}

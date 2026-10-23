@@ -49,6 +49,8 @@ type Unread struct {
 	// GivenBack: its expiry passed and the original was set from the ledger's
 	// record; the entry goes once the original reads back.
 	GivenBack bool `json:"given_back,omitempty"`
+
+	live bool // an action in force holds it: its own undo and expiry give it back
 }
 
 // Action is the agent's change to one workload, with what it predicted and what
@@ -417,10 +419,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	unread := map[string]*Unread{}
 	for _, f := range failed {
 		e := f.Entry
-		if live[e.Subject] != nil {
-			continue // the action in force retries its own undo
-		}
-		u := &Unread{Entry: e, Error: f.Err.Error(), Attempts: 1}
+		u := &Unread{Entry: e, Error: f.Err.Error(), Attempts: 1, live: live[e.Subject] != nil}
 		if prev := l.unread[e.Subject]; prev != nil {
 			u.Attempts, u.GivenBack = prev.Attempts+1, prev.GivenBack
 		} else {
@@ -457,7 +456,12 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 
 	var expired, resumed []*Action
 	for _, e := range held {
-		if live[e.Subject] != nil {
+		if a := live[e.Subject]; a != nil {
+			// The action in force keeps the entry Held settled, as a pending one
+			// adopted or restored.
+			l.mu.Lock()
+			a.Entry = e
+			l.mu.Unlock()
 			continue
 		}
 		a := taken(e)
@@ -536,7 +540,8 @@ func (l *Loop) pendingFor(subject string) bool {
 
 // reconcileFailed records a reconcile that failed as a whole (the listing failed
 // or held nothing, or the ledger could not be saved): every change of this
-// node's action the loop has not taken up is unread with err, so Status shows it
+// node's action is unread with err (one an action in force holds is marked so,
+// and left to that action's undo), so Status shows it
 // stuck and expireUnread gives it back through its subject once it expires,
 // rather than the node wedging with its changes in force unseen. It returns err.
 func (l *Loop) reconcileFailed(err error) error {
@@ -546,10 +551,7 @@ func (l *Loop) reconcileFailed(err error) error {
 	live := l.liveSubjects()
 	unread := map[string]*Unread{}
 	for _, e := range es {
-		if live[e.Subject] {
-			continue
-		}
-		u := &Unread{Entry: e, Error: err.Error(), Attempts: 1}
+		u := &Unread{Entry: e, Error: err.Error(), Attempts: 1, live: live[e.Subject]}
 		if prev := l.unread[e.Subject]; prev != nil {
 			u.Attempts, u.GivenBack = prev.Attempts+1, prev.GivenBack
 		}
@@ -772,6 +774,10 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	b.Commit(map[string]any{"action": l.d.Action, "subject": plan.Subject,
 		"to": plan.To, "unit": plan.Unit, "predicted": plan.Predicted, "expires": entry.Expires})
 
+	if entry.Pending {
+		// Applied, not read back: the next pass reconciles it, so its entry settles.
+		l.reconciled = false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := k
