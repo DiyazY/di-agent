@@ -117,8 +117,8 @@ func TestWorkloadsCarryTheirPolicy(t *testing.T) {
 	for _, w := range got {
 		switch w.Subject {
 		case "pod:a":
-			if w.Can["cpu.limit"] != "no cpu limit" {
-				t.Errorf("pod:a can = %v; want cpu.limit's Check, which a pod with no limit fails", w.Can)
+			if w.Can["cpu.limit"] != "" {
+				t.Errorf("pod:a can = %v; want cpu.limit possible: a dry run acts on a pod with no limit too", w.Can)
 			}
 		case "pod:b":
 			if cpu := w.Resources["cpu"]; len(cpu) != 2 || *cpu["limit"] != 1 || w.Can["cpu.limit"] != "" {

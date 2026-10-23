@@ -729,7 +729,7 @@ Values that cannot be what was meant are refused at startup, every one named. In
 
 ### The runtime and the relief loop
 
-The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default; `cpu.limit` acts there only on a workload whose inventory lists a CPU limit); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
+The agent changes the system it models only through a `runtime`, and only when `loops.relief.enabled` is true (the default is off). `runtime.kind` is `dry-run` (changes are recorded in memory and nothing is touched; the default; `cpu.limit` acts there on every workload but the agent's own, limited or not); `kubernetes` acts on this node's pods (below); there `runtime.kubeconfig` is a kubeconfig file (empty means the in-cluster service account) and `runtime.node` is the node's name in Kubernetes, defaulting to `node.id`. What may be touched is `policy`, shown at `GET /workloads` and `GET /policy`.
 
 ```yaml
 # relief on dry-run: the loop decides, records and verifies; nothing is changed

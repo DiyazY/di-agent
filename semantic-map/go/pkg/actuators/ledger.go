@@ -23,6 +23,12 @@ type Entry struct {
 	Applied     float64   `json:"applied"`
 	Expires     time.Time `json:"expires"`
 	NodeID      string    `json:"node_id"`
+	// Pending marks an entry written ahead of its Set and not yet committed:
+	// Applied is the value asked for, and PrevApplied the step before it, when
+	// PrevSet; Held settles what is in force.
+	Pending     bool    `json:"pending,omitempty"`
+	PrevApplied float64 `json:"prev_applied,omitempty"`
+	PrevSet     bool    `json:"prev_set,omitempty"`
 }
 
 type ledgerKey struct{ action, subject string }

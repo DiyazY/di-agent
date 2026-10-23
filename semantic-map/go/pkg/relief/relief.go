@@ -373,7 +373,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("relief: listing workloads: %w", err)
 	}
-	held, dropped, err := l.cfg.Acting.Held(ctx, ws)
+	held, dropped, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
 	if err != nil {
 		return fmt.Errorf("relief: reconciling this node's changes: %w", err)
 	}
@@ -406,9 +406,6 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 
 	for _, e := range dropped {
-		if e.Action != l.d.Action {
-			continue
-		}
 		why := "the runtime no longer lists the workload"
 		if hasSubject(ws, e.Subject) {
 			why = "its setting no longer reads as what the agent applied: changed underneath, as by a restart or another hand"
@@ -426,7 +423,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	var expired, resumed []*Action
 	var acts []time.Time
 	for _, e := range held {
-		if e.Action != l.d.Action || live[e.Subject] != nil {
+		if live[e.Subject] != nil {
 			continue
 		}
 		a := taken(e)

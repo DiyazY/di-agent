@@ -41,14 +41,12 @@ func init() {
 	})
 }
 
-// staticCheck is Check for the dry-run stand-in: the workload's own inventory
-// says whether it has a limit to change.
+// staticCheck is Check for the dry-run stand-in, which changes nothing: it
+// refuses only the agent's own workload, so a dry run acts on every workload the
+// map holds, limited or not, and giving back a cap restores "no limit".
 func staticCheck(w runtime.Workload) string {
 	if w.Self {
 		return "the agent itself"
-	}
-	if w.Resources["cpu"].Limit == nil {
-		return "no cpu limit"
 	}
 	return ""
 }

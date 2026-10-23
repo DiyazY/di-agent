@@ -53,12 +53,25 @@ func (a *Acting) Descriptors() []Descriptor {
 // Entries lists the ledger's entries of action, on any node, soonest-expiring first.
 func (a *Acting) Entries(action string) []Entry { return a.ledger.For(action) }
 
+// readBack bounds the read that follows a Set. It is not the caller's context:
+// a Set that ran out the caller's deadline may still have taken effect, and only
+// a read can tell.
+const readBack = 10 * time.Second
+
 // Apply sets action to v on w and records it. A workload the actuator's Check
 // refuses is not touched. The setting before the agent's first change to
 // (action, subject) is read only when the ledger has no entry for it, and kept as
-// Original. When Set fails nothing new is recorded, unless the setting reads back
-// changed regardless, as a resize whose call timed out after it took: that change
-// is recorded, so it can be given back, and the error is still returned.
+// Original; a further step keeps it and records the step before as PrevApplied.
+//
+// The entry is written ahead, Pending with Applied v, before Set, so a change is
+// never in force without a record, whatever happens after: a crash, or a Set
+// whose call failed after it took effect. After Set the setting is read back
+// under a fresh bounded context. On success the entry is committed with what
+// reads back, since an actuator may quantise. When Set fails, a setting that
+// reads back changed from before this Apply is adopted and committed (and the
+// error still returned); one that reads back unchanged restores the entry before
+// (or none); one that cannot be read leaves the entry pending, for Held to
+// resolve. A successful Set whose read-back fails is left pending too.
 func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
 	x, ok := a.actuators[action]
 	if !ok {
@@ -69,10 +82,12 @@ func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e := Entry{Action: action, Subject: w.Subject, DecisionID: decisionID, Applied: v, Expires: expires, NodeID: a.nodeID}
+	e := Entry{Action: action, Subject: w.Subject, DecisionID: decisionID, Applied: v, Expires: expires,
+		NodeID: a.nodeID, Pending: true}
 	prev, held := a.entry(action, w.Subject)
 	if held {
 		e.Original, e.OriginalSet = prev.Original, prev.OriginalSet
+		e.PrevApplied, e.PrevSet = prev.Applied, true
 	} else {
 		orig, set, err := x.Read(ctx, w)
 		if err != nil {
@@ -80,39 +95,84 @@ func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v
 		}
 		e.Original, e.OriginalSet = orig, set
 	}
-	if err := x.Set(ctx, w, v, true); err != nil {
-		err = fmt.Errorf("%s: set %s: %w", w.Subject, action, err)
-		beforeV, beforeSet := e.Original, e.OriginalSet
+	beforeV, beforeSet := before(e)
+	// restore puts back the ledger as it was before this Apply.
+	restore := func() error {
 		if held {
-			beforeV, beforeSet = prev.Applied, true
+			return a.ledger.Put(prev)
 		}
-		got, set, rerr := x.Read(ctx, w)
-		if rerr != nil || !set || (beforeSet && closeTo(got, beforeV)) {
-			return Entry{}, err
-		}
-		e.Applied = got
-		if perr := a.ledger.Put(e); perr != nil {
-			return Entry{}, errors.Join(err, perr)
-		}
-		return e, err
-	}
-	// An actuator may quantise what it stores; the ledger holds what is in force.
-	if got, set, err := x.Read(ctx, w); err == nil && set {
-		e.Applied = got
+		return a.ledger.Delete(action, w.Subject)
 	}
 	if err := a.ledger.Put(e); err != nil {
-		// The change is in force but unrecorded, so the agent could never undo
-		// it: put back what the setting was before this Apply.
-		backV, backSet := e.Original, e.OriginalSet
-		if held {
-			backV, backSet = prev.Applied, true
+		return Entry{}, err // nothing has changed yet
+	}
+	setErr := x.Set(ctx, w, v, true)
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readBack)
+	got, gotSet, rerr := x.Read(rctx, w)
+	cancel()
+	if setErr != nil {
+		setErr = fmt.Errorf("%s: set %s: %w", w.Subject, action, setErr)
+		switch {
+		case rerr != nil:
+			return Entry{}, setErr // pending: Held finds out what is in force
+		case same(got, gotSet, beforeV, beforeSet):
+			if err := restore(); err != nil {
+				return Entry{}, errors.Join(setErr, err)
+			}
+			return Entry{}, setErr
+		case !gotSet:
+			// Neither what it was nor what was asked: leave it for Held.
+			return Entry{}, setErr
 		}
-		if rerr := x.Set(ctx, w, backV, backSet); rerr != nil {
+		c := committed(e, got)
+		if err := a.ledger.Put(c); err != nil {
+			return Entry{}, errors.Join(setErr, err)
+		}
+		return c, setErr
+	}
+	if rerr != nil {
+		return e, nil // in force as far as Set said; Held settles what reads back
+	}
+	applied := v
+	if gotSet {
+		applied = got
+	}
+	c := committed(e, applied)
+	if err := a.ledger.Put(c); err != nil {
+		// The change is in force but its record is still pending: put back what
+		// the setting was before this Apply, and the entry before it.
+		if rerr := x.Set(ctx, w, beforeV, beforeSet); rerr != nil {
 			return Entry{}, errors.Join(err, fmt.Errorf("%s: roll back %s: %w", w.Subject, action, rerr))
+		}
+		if rerr := restore(); rerr != nil {
+			return Entry{}, errors.Join(err, rerr)
 		}
 		return Entry{}, err
 	}
-	return e, nil
+	return c, nil
+}
+
+// before is the setting a pending entry's Apply started from: the step before
+// it, or the original for a first step.
+func before(e Entry) (float64, bool) {
+	if e.PrevSet {
+		return e.PrevApplied, true
+	}
+	return e.Original, e.OriginalSet
+}
+
+// committed is e no longer pending, with what is in force as Applied.
+func committed(e Entry, applied float64) Entry {
+	e.Applied, e.Pending, e.PrevApplied, e.PrevSet = applied, false, 0, false
+	return e
+}
+
+// same reports whether a reading (v, set) is the setting (w, wset).
+func same(v float64, set bool, w float64, wset bool) bool {
+	if !set || !wset {
+		return set == wset
+	}
+	return closeTo(v, w)
 }
 
 // Revert gives back what e replaced and forgets it. A workload that is gone has
@@ -138,47 +198,80 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 	return nil
 }
 
-// Held reconciles this node's ledger entries against the workloads now listed. An
-// entry whose workload is no longer listed, or whose setting no longer reads as
-// what was applied, is dropped and deleted from the ledger; the rest are held.
-// Entries of other nodes, and entries of an action this Acting has no actuator
-// for, as one whose lever was removed from the config, are neither returned nor
-// dropped: they stay in the ledger. A Read that fails fails the reconcile.
-func (a *Acting) Held(ctx context.Context, ws []runtime.Workload) (held []Entry, dropped []Entry, err error) {
+// Held reconciles this node's ledger entries of action against the workloads now
+// listed. An entry whose workload is no longer listed, or whose setting no longer
+// reads as what was applied, is dropped and deleted from the ledger; the rest are
+// held. A pending entry, one an Apply wrote ahead and never committed, is
+// resolved by what reads back: the setting from before that Apply means the
+// change never took, and the entry before it is restored (a further step's, now
+// held) or none (a first step's, neither held nor dropped); any other setting
+// is adopted as Applied and held; none at all is dropped. Entries of other nodes
+// and other actions are not touched, and neither is anything when this Acting
+// has no actuator for action, as when its lever was removed from the config.
+//
+// Every entry is read before the ledger is changed: a Read that fails fails the
+// reconcile and changes nothing.
+func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload) (held []Entry, dropped []Entry, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	x, ok := a.actuators[action]
+	if !ok {
+		return nil, nil, nil
+	}
 	bySubject := make(map[string]runtime.Workload, len(ws))
 	for _, w := range ws {
 		bySubject[w.Subject] = w
 	}
+	var puts []Entry // entries rewritten: restored or adopted
+	var gone []Entry // entries deleted: dropped, or a first step that never took
 	for _, e := range a.ledger.All() {
-		if e.NodeID != a.nodeID {
-			continue
-		}
-		x, ok := a.actuators[e.Action]
-		if !ok {
+		if e.NodeID != a.nodeID || e.Action != action {
 			continue
 		}
 		w, listed := bySubject[e.Subject]
-		keep := false
-		if listed {
-			v, set, rerr := x.Read(ctx, w)
-			switch {
-			case errors.Is(rerr, ErrGone):
-			case rerr != nil:
-				return held, dropped, fmt.Errorf("%s: read %s: %w", e.Subject, e.Action, rerr)
-			default:
-				keep = set && closeTo(v, e.Applied)
-			}
-		}
-		if keep {
-			held = append(held, e)
+		if !listed {
+			gone, dropped = append(gone, e), append(dropped, e)
 			continue
 		}
-		if derr := a.ledger.Delete(e.Action, e.Subject); derr != nil {
-			return held, dropped, derr
+		v, set, rerr := x.Read(ctx, w)
+		switch {
+		case errors.Is(rerr, ErrGone):
+			gone, dropped = append(gone, e), append(dropped, e)
+			continue
+		case rerr != nil:
+			return nil, nil, fmt.Errorf("%s: read %s: %w", e.Subject, e.Action, rerr)
 		}
-		dropped = append(dropped, e)
+		if !e.Pending {
+			if set && closeTo(v, e.Applied) {
+				held = append(held, e)
+			} else {
+				gone, dropped = append(gone, e), append(dropped, e)
+			}
+			continue
+		}
+		bv, bset := before(e)
+		switch {
+		case same(v, set, bv, bset) && e.PrevSet:
+			r := committed(e, e.PrevApplied)
+			puts, held = append(puts, r), append(held, r)
+		case same(v, set, bv, bset):
+			gone = append(gone, e)
+		case set:
+			r := committed(e, v)
+			puts, held = append(puts, r), append(held, r)
+		default:
+			gone, dropped = append(gone, e), append(dropped, e)
+		}
+	}
+	for _, e := range puts {
+		if err := a.ledger.Put(e); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, e := range gone {
+		if err := a.ledger.Delete(e.Action, e.Subject); err != nil {
+			return nil, nil, err
+		}
 	}
 	return held, dropped, nil
 }

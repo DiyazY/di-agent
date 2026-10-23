@@ -11,12 +11,16 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
+	"github.com/DiyazY/di-agent/pkg/policy"
+	"github.com/DiyazY/di-agent/pkg/relief"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 func TestActuatorsRoute(t *testing.T) {
-	mux, _, _, acting := actingMuxWith(t, false)
+	mux, _, dr, acting := actingMuxWith(t, false)
+	dr.Put(runtime.Workload{Subject: "pod:me", Name: "me", Self: true})
 	b := runtime.Workload{Subject: "pod:b", Name: "b", Resources: map[string]runtime.Resource{"cpu": {Limit: f64(1)}}}
 	if _, err := acting.Apply(context.Background(), b, "cpu.limit", 0.5, time.Unix(100, 0), "d1"); err != nil {
 		t.Fatal(err)
@@ -48,9 +52,9 @@ func TestActuatorsRoute(t *testing.T) {
 		t.Fatalf("held %+v; want the change to pod:b, 1 → 0.5", h)
 	}
 
-	one := read("/actuators?subject=pod:a")
-	if len(one) != 1 || one[0].Can == nil || *one[0].Can != "no cpu limit" || len(one[0].Held) != 0 {
-		t.Fatalf("pod:a %+v; want can naming why not, and nothing held on it", one)
+	one := read("/actuators?subject=pod:me")
+	if len(one) != 1 || one[0].Can == nil || *one[0].Can != "the agent itself" || len(one[0].Held) != 0 {
+		t.Fatalf("pod:me %+v; want can naming why not, and nothing held on it", one)
 	}
 	one = read("/actuators?subject=pod:b")
 	if len(one) != 1 || one[0].Can == nil || *one[0].Can != "" || len(one[0].Held) != 1 {
@@ -131,5 +135,64 @@ func TestLedgerPath(t *testing.T) {
 	}
 	if got := ledgerPath(""); got != "/var/lib/di-agent/actions.json" {
 		t.Errorf("ledgerPath(\"\") = %s", got)
+	}
+}
+
+// TestADryRunReliefLoopActsOnAMapWorkload: under runtime.kind dry-run the loop
+// takes a step on a workload the map holds, with no limit of its own, and the
+// step is recorded in memory only.
+func TestADryRunReliefLoopActsOnAMapWorkload(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	m := statemap.New(statemap.Config{Owner: "n1", AdmitUnknown: true, Alpha: 1}, statemap.NewJournal(0))
+	m.SetClock(clock)
+	unit := [2]float64{0, 1}
+	read := func() {
+		t.Helper()
+		for _, o := range []statemap.Observation{
+			{ID: "cpu_utilization", Value: 0.8},
+			{ID: "cpu_contention_ratio", Value: 0.5},
+			{ID: "cpu_utilization@pod:a", Subject: "pod:a", Value: 0.4},
+		} {
+			o.At, o.Range = now, &unit
+			if err := m.Record(o); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	read()
+	if err := m.RecordFacts("test", []statemap.Fact{statemap.NumberFact("cpu_cores", 4, "cores")}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec.Default()
+	s.Node.ID = "n1"
+	s.Loops.Relief.Enabled = true
+	rt, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1", Spec: s.Runtime, Subjects: workloadSubjects(m)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acting, evidence, err := buildActing(s, rt, t.Logf)
+	if err != nil || evidence {
+		t.Fatalf("evidence %v err %v", evidence, err)
+	}
+	pol, err := policy.New(s.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpu, _ := acting.Actuator("cpu.limit")
+	loop, err := relief.New(relief.Config{Relief: s.Loops.Relief, Descriptor: cpu.Describe(), NodeID: "n1",
+		Runtime: rt, Acting: acting, Policy: pol, Map: m, Now: clock, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 12 && len(acting.Entries("cpu.limit")) == 0; i++ {
+		now = now.Add(15 * time.Second)
+		read()
+		loop.Tick(ctx)
+	}
+	held := acting.Entries("cpu.limit")
+	if len(held) != 1 || held[0].Subject != "pod:a" || held[0].OriginalSet || held[0].Applied != 1.2000000000000002 {
+		t.Fatalf("held %+v; want pod:a stepped from 1.6 to 1.2 cores, with no limit before", held)
 	}
 }

@@ -146,7 +146,7 @@ func TestReconcileDropsChangedUnderneath(t *testing.T) {
 	a.Apply(ctx, wl("keep"), "fake", 5, time.Time{}, "")
 	a.Apply(ctx, wl("chg"), "fake", 5, time.Time{}, "")
 	f.vals["chg"] = 7
-	held, dropped, err := a.Held(ctx, []runtime.Workload{wl("keep"), wl("chg")})
+	held, dropped, err := a.Held(ctx, "fake", []runtime.Workload{wl("keep"), wl("chg")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestReconcileDropsGoneWorkload(t *testing.T) {
 	a := NewActing("n", MemoryLedger(), f)
 	ctx := context.Background()
 	a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "")
-	held, dropped, err := a.Held(ctx, nil)
+	held, dropped, err := a.Held(ctx, "fake", nil)
 	if err != nil || len(held) != 0 || len(dropped) != 1 || len(a.ledger.All()) != 0 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
 	}
@@ -174,7 +174,7 @@ func TestReconcileIgnoresOtherNode(t *testing.T) {
 	l := MemoryLedger()
 	l.Put(Entry{Action: "fake", Subject: "s", Applied: 5, NodeID: "other"})
 	a := NewActing("n", l, f)
-	held, dropped, err := a.Held(context.Background(), nil)
+	held, dropped, err := a.Held(context.Background(), "fake", nil)
 	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
 	}
@@ -189,7 +189,7 @@ func TestActingConcurrent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			a.Apply(context.Background(), wl(fmt.Sprint("s", i)), "fake", float64(i+1), time.Time{}, "")
-			a.Held(context.Background(), nil)
+			a.Held(context.Background(), "fake", nil)
 		}(i)
 	}
 	wg.Wait()
@@ -251,7 +251,7 @@ func TestApplyRecordsReadBackValue(t *testing.T) {
 	if err != nil || e.Applied != 8192 {
 		t.Fatalf("%+v %v", e, err)
 	}
-	held, dropped, err := a.Held(ctx, []runtime.Workload{wl("s")})
+	held, dropped, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
 	if err != nil || len(held) != 1 || len(dropped) != 0 {
 		t.Fatalf("%+v %+v %v", held, dropped, err)
 	}
@@ -261,7 +261,11 @@ func TestReconcileSkipsAnActionWithNoActuator(t *testing.T) {
 	l := MemoryLedger()
 	l.Put(Entry{Action: "removed", Subject: "s", Applied: 5, NodeID: "n"})
 	a := NewActing("n", l, newMem())
-	held, dropped, err := a.Held(context.Background(), nil)
+	held, dropped, err := a.Held(context.Background(), "removed", nil)
+	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
+		t.Fatalf("held %+v dropped %+v err %v; want the entry kept, neither held nor dropped", held, dropped, err)
+	}
+	held, dropped, err = a.Held(context.Background(), "fake", nil)
 	if err != nil || len(held) != 0 || len(dropped) != 0 || len(l.All()) != 1 {
 		t.Fatalf("held %+v dropped %+v err %v; want the entry kept, neither held nor dropped", held, dropped, err)
 	}
@@ -275,7 +279,7 @@ func TestReconcileFailsOnAReadError(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.fail = true
-	if _, _, err := a.Held(ctx, []runtime.Workload{wl("s")}); err == nil {
+	if _, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")}); err == nil {
 		t.Fatal("want the read error")
 	}
 	if len(a.ledger.All()) != 1 {
@@ -329,5 +333,172 @@ func TestApplyAsksCheckFirst(t *testing.T) {
 	a := NewActing("n", MemoryLedger(), f)
 	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, ""); err == nil || len(f.sets) != 0 {
 		t.Fatalf("err %v sets %+v; want refused before any Set", err, f.sets)
+	}
+}
+
+// timesOut sets the value and then runs out the caller's context, as a resize
+// whose call outlived the pass deadline after the API server took it. Its Read
+// honours the context it is given.
+type timesOut struct {
+	*memAct
+	cancel context.CancelFunc
+}
+
+func (t timesOut) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	return t.memAct.Read(ctx, w)
+}
+
+func (t timesOut) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	if err := t.memAct.Set(ctx, w, v, set); err != nil {
+		return err
+	}
+	t.cancel()
+	return ctx.Err()
+}
+
+func TestASetThatTimedOutAfterTakingEffectIsAdopted(t *testing.T) {
+	for _, further := range []bool{false, true} {
+		m := newMem()
+		m.vals["s"] = 10
+		l := MemoryLedger()
+		if further {
+			pre := NewActing("n", l, m)
+			if _, err := pre.Apply(context.Background(), wl("s"), "fake", 7, time.Time{}, "d0"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		a := NewActing("n", l, timesOut{m, cancel})
+		if _, err := a.Apply(ctx, wl("s"), "fake", 5, time.Time{}, "d"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("further=%v: err %v; want the Set's context error", further, err)
+		}
+		got := l.All()
+		if len(got) != 1 || got[0].Pending || got[0].Applied != 5 || got[0].Original != 10 || !got[0].OriginalSet {
+			t.Fatalf("further=%v: ledger %+v; want the change adopted, with the first original", further, got)
+		}
+		held, dropped, err := a.Held(context.Background(), "fake", []runtime.Workload{wl("s")})
+		if err != nil || len(held) != 1 || len(dropped) != 0 {
+			t.Fatalf("further=%v: held %+v dropped %+v err %v", further, held, dropped, err)
+		}
+	}
+}
+
+func TestAFailedSetThatChangedNothingRestoresThePriorEntry(t *testing.T) {
+	f := newMem()
+	f.vals["s"] = 10
+	a := NewActing("n", MemoryLedger(), f)
+	prior, err := a.Apply(context.Background(), wl("s"), "fake", 7, time.Unix(50, 0), "d0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setErr = errors.New("conflict")
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Unix(99, 0), "d1"); err == nil {
+		t.Fatal("want the Set error")
+	}
+	if got := a.ledger.All(); len(got) != 1 || got[0] != prior {
+		t.Fatalf("ledger %+v; want the prior entry %+v back", got, prior)
+	}
+}
+
+// TestHeldResolvesAPendingEntry: an entry written ahead and never committed, as
+// after a crash, is settled by what reads back.
+func TestHeldResolvesAPendingEntry(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		e       Entry
+		value   float64
+		held    bool
+		dropped bool
+		left    int // entries left in the ledger
+		applied float64
+	}{
+		{"first step, crashed before Set", Entry{Original: 10, OriginalSet: true, Applied: 5}, 10, false, false, 0, 0},
+		{"first step, crashed after Set", Entry{Original: 10, OriginalSet: true, Applied: 5}, 5, true, false, 1, 5},
+		{"further step, crashed before Set", Entry{Original: 10, OriginalSet: true, Applied: 5, PrevApplied: 7, PrevSet: true}, 7, true, false, 1, 7},
+		{"further step, crashed after Set", Entry{Original: 10, OriginalSet: true, Applied: 5, PrevApplied: 7, PrevSet: true}, 5, true, false, 1, 5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newMem()
+			f.vals["s"] = c.value
+			l := MemoryLedger()
+			c.e.Action, c.e.Subject, c.e.NodeID, c.e.Pending = "fake", "s", "n", true
+			l.Put(c.e)
+			a := NewActing("n", l, f)
+			held, dropped, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
+			if err != nil || (len(held) == 1) != c.held || (len(dropped) == 1) != c.dropped || len(l.All()) != c.left {
+				t.Fatalf("held %+v dropped %+v err %v ledger %+v", held, dropped, err, l.All())
+			}
+			if c.left == 1 {
+				if e := l.All()[0]; e.Pending || e.Applied != c.applied || e.PrevSet {
+					t.Fatalf("entry %+v; want committed at %v", e, c.applied)
+				}
+			}
+		})
+	}
+}
+
+// flakyRead is quantised and fails the read that follows its next Set.
+type flakyRead struct {
+	quantised
+	failNext *bool
+}
+
+func (f flakyRead) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	*f.failNext = true
+	return f.quantised.Set(ctx, w, v, set)
+}
+
+func (f flakyRead) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	if *f.failNext {
+		*f.failNext = false
+		return 0, false, errors.New("api unavailable")
+	}
+	return f.quantised.Read(ctx, w)
+}
+
+func TestAQuantisedValueWhoseReadBackFailedIsSettledByHeld(t *testing.T) {
+	var fail bool
+	a := NewActing("n", MemoryLedger(), flakyRead{quantised{newMem()}, &fail})
+	ctx := context.Background()
+	e, err := a.Apply(ctx, wl("s"), "fake", 10000, time.Time{}, "")
+	if err != nil || !e.Pending {
+		t.Fatalf("%+v %v; want the change left pending", e, err)
+	}
+	held, dropped, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
+	if err != nil || len(held) != 1 || held[0].Applied != 8192 || held[0].Pending || len(dropped) != 0 {
+		t.Fatalf("held %+v dropped %+v err %v; want the quantised value adopted", held, dropped, err)
+	}
+}
+
+func TestHeldChangesNothingWhenAReadFails(t *testing.T) {
+	f := &readErr{memAct: newMem()}
+	a := NewActing("n", MemoryLedger(), f)
+	ctx := context.Background()
+	for _, s := range []string{"a", "b"} {
+		if _, err := a.Apply(ctx, wl(s), "fake", 5, time.Time{}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.fail = true
+	// "a" is not listed and would be dropped; "b" cannot be read.
+	if _, _, err := a.Held(ctx, "fake", []runtime.Workload{wl("b")}); err == nil {
+		t.Fatal("want the read error")
+	}
+	if n := len(a.ledger.All()); n != 2 {
+		t.Fatalf("%d entries; a failed reconcile must delete nothing", n)
+	}
+}
+
+func TestHeldTouchesOnlyItsAction(t *testing.T) {
+	l := MemoryLedger()
+	l.Put(Entry{Action: "other", Subject: "s", Applied: 5, NodeID: "n"})
+	a := NewActing("n", l, newMem())
+	if _, dropped, err := a.Held(context.Background(), "fake", nil); err != nil || len(dropped) != 0 || len(l.All()) != 1 {
+		t.Fatalf("dropped %+v err %v ledger %+v; another action's entry must be left alone", dropped, err, l.All())
 	}
 }
