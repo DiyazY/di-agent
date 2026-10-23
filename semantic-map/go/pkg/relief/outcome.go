@@ -219,7 +219,8 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 
 // revertFailed undoes a step that did not help and puts its workload on a long
 // cooldown. A first step is reverted; a further step is undone by putting back
-// the cap before it, which stays kept. A revert the actuator refuses is retried
+// the cap before it, through Restore, which no Check gates, and that cap stays
+// kept. A revert the actuator refuses is retried
 // on the next tick without judging the step again.
 func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Workload, a *Action, verifyID string) {
 	var (
@@ -228,7 +229,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Worklo
 	)
 	if a.prev != nil {
 		p := a.prev
-		entry, err = l.cfg.Acting.Apply(ctx, w, l.d.Action, p.Entry.Applied, p.Entry.Expires, p.DecisionID)
+		entry, err = l.cfg.Acting.Restore(ctx, w, l.d.Action, p.Entry.Applied, p.Entry.Expires, p.DecisionID)
 		if err != nil {
 			l.reconciled = false // the ledger is reconciled again, as after any failed Apply
 		}

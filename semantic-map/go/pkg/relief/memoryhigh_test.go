@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -372,4 +373,51 @@ func TestMemoryHighReconcileRefusesAnEmptyListing(t *testing.T) {
 	if got := h.ledger.All(); len(got) != 1 || got[0] != before[0] {
 		t.Fatalf("ledger %+v; want %+v unchanged", got, before)
 	}
+}
+
+// TestMemoryHighFurtherStepIsUndonePastCheck: a further step that did not help
+// is undone by putting the earlier cap back, and that undo is never gated by
+// Check: the tighter cap may have reclaimed the pod down to its request, which
+// Check refuses for a cut, and the earlier, looser cap must still go back.
+func TestMemoryHighFurtherStepIsUndonePastCheck(t *testing.T) {
+	h := newMemHarness(t)
+	first := h.act()
+	h.until(10*time.Minute, 0.3, "the first step kept", func() bool { return outcomeOf(h.l, first.ID) == OutcomeKept })
+	earlier := h.ledger.All()[0].Applied
+	// The pod now uses what its cap lets it, and still drives the pressure.
+	subject := "pod:" + memUID
+	h.until(time.Hour, 0.3, "a further step", func() bool {
+		record(h.t, h.m, actuators.MemoryHighDescriptor.Usage+"@"+subject, subject, 0.45, h.clock())
+		es := h.ledger.All()
+		return len(es) == 1 && es[0].Applied < earlier
+	})
+	// The tighter cap reclaimed the pod down to its request (100 MiB).
+	if err := os.WriteFile(filepath.Join(filepath.Dir(h.high), "memory.current"), []byte("104857600\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.until(10*time.Minute, 0.3, "the further step undone", func() bool {
+		es := h.ledger.All()
+		return len(es) == 1 && es[0].Applied == earlier
+	})
+	if got := h.file(); got != strconv.FormatInt(int64(earlier), 10) {
+		t.Fatalf("memory.high %q; want the earlier step %v back", got, earlier)
+	}
+	a := h.action(first.ID)
+	if a.Outcome != OutcomeKept || a.RevertAttempts != 0 || a.Entry.Applied != earlier {
+		t.Fatalf("action %+v; want kept at the earlier step, no failed undo", a)
+	}
+	if h.l.Status().Reverted != 1 {
+		t.Fatalf("status %+v; want one revert", h.l.Status())
+	}
+}
+
+func (h *memHarness) action(id string) Action {
+	h.t.Helper()
+	for _, a := range h.l.Actions() {
+		if a.ID == id {
+			return a
+		}
+	}
+	h.t.Fatalf("no action %s", id)
+	return Action{}
 }

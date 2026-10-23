@@ -530,3 +530,26 @@ func TestHeldTouchesOnlyItsAction(t *testing.T) {
 		t.Fatalf("dropped %+v err %v ledger %+v; another action's entry must be left alone", dropped, err, l.All())
 	}
 }
+
+// TestRestoreIsNotGatedByCheck: putting back an earlier value of the agent's own
+// change never asks Check, which gates only cuts; with nothing held there is
+// nothing to restore.
+func TestRestoreIsNotGatedByCheck(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	if _, err := NewActing("n", l, m).Apply(context.Background(), wl("s"), "fake", 7, time.Time{}, "d0"); err != nil {
+		t.Fatal(err)
+	}
+	a := NewActing("n", l, refusing{m})
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d1"); err == nil {
+		t.Fatal("Apply past a refusing Check")
+	}
+	e, err := a.Restore(context.Background(), wl("s"), "fake", 8, time.Time{}, "d0")
+	if err != nil || e.Applied != 8 || e.Original != 10 || m.vals["s"] != 8 {
+		t.Fatalf("entry %+v err %v value %v; want 8 restored with the first original", e, err, m.vals["s"])
+	}
+	if _, err := a.Restore(context.Background(), wl("t"), "fake", 8, time.Time{}, "d0"); err == nil {
+		t.Fatal("Restore with nothing held succeeded")
+	}
+}

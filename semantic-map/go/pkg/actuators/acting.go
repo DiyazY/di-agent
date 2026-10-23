@@ -92,11 +92,28 @@ const readBack = 10 * time.Second
 // (or none); one that cannot be read leaves the entry pending, for Held to
 // resolve. A successful Set whose read-back fails is left pending too.
 func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
+	return a.apply(ctx, w, action, v, expires, decisionID, true)
+}
+
+// Restore puts back v, an earlier value of the agent's own change to (action,
+// w), as Apply does in every other respect: written ahead, read back, recorded.
+// It never runs Check, which gates only cuts: undoing a step that did not help
+// must not be refused because that step reclaimed the workload down to where
+// Check would refuse a further one.
+func (a *Acting) Restore(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
+	return a.apply(ctx, w, action, v, expires, decisionID, false)
+}
+
+func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string, check bool) (Entry, error) {
 	x, ok := a.actuators[action]
 	if !ok {
 		return Entry{}, fmt.Errorf("no actuator for action %q", action)
 	}
-	if why := x.Check(w); why != "" {
+	if !check {
+		if _, held := a.entry(action, w.Subject); !held {
+			return Entry{}, fmt.Errorf("%s: nothing of %s to restore: the ledger holds no change to it", w.Subject, action)
+		}
+	} else if why := x.Check(w); why != "" {
 		return Entry{}, fmt.Errorf("%s cannot take %s: %s", w.Subject, action, why)
 	}
 	a.mu.Lock()
