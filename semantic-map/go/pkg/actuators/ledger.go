@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -31,6 +32,34 @@ type Entry struct {
 	Pending     bool    `json:"pending,omitempty"`
 	PrevApplied float64 `json:"prev_applied,omitempty"`
 	PrevSet     bool    `json:"prev_set,omitempty"`
+}
+
+// validate is why e cannot be in the ledger, or nil: it names an action, a
+// subject and a node; its values are finite; a committed entry has no step
+// before it, and a pending one has a step before it only when PrevSet; and an
+// entry with no original setting records none.
+func (e Entry) validate() error {
+	bad := func(why string) error {
+		return fmt.Errorf("invalid ledger entry %s on %s (node %q): %s", e.Action, e.Subject, e.NodeID, why)
+	}
+	finite := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+	switch {
+	case e.Action == "":
+		return bad("no action")
+	case e.Subject == "":
+		return bad("no subject")
+	case e.NodeID == "":
+		return bad("no node id")
+	case !finite(e.Applied) || !finite(e.Original) || !finite(e.PrevApplied):
+		return bad(fmt.Sprintf("a value is not finite (applied %v, original %v, prev_applied %v)", e.Applied, e.Original, e.PrevApplied))
+	case !e.Pending && (e.PrevSet || e.PrevApplied != 0):
+		return bad("committed, yet it records a step before it")
+	case !e.PrevSet && e.PrevApplied != 0:
+		return bad("prev_applied without prev_set")
+	case !e.OriginalSet && e.Original != 0:
+		return bad("an original value with original_set false")
+	}
+	return nil
 }
 
 type ledgerKey struct{ action, subject string }
@@ -85,21 +114,29 @@ func OpenLedger(path string) (*Ledger, error) {
 		return nil, fmt.Errorf("ledger %s: unsupported version %d", path, f.Version)
 	}
 	for _, e := range f.Entries {
+		if err := e.validate(); err != nil {
+			return nil, fmt.Errorf("ledger %s: %w", path, err)
+		}
 		l.entries[ledgerKey{e.Action, e.Subject}] = e
 	}
 	return l, nil
 }
 
-// Put records e. An existing entry for the key keeps its Original: the ledger
-// holds what the setting was before the agent's first change, however many
-// followed.
+// Put records e, which must be valid. An existing entry for the key must be
+// given its own Original back: the ledger holds what the setting was before the
+// agent's first change, however many followed, and a Put that would change it is
+// a caller's bug, refused.
 func (l *Ledger) Put(e Entry) error {
+	if err := e.validate(); err != nil {
+		return err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	k := ledgerKey{e.Action, e.Subject}
 	prev, had := l.entries[k]
-	if had {
-		e.Original, e.OriginalSet = prev.Original, prev.OriginalSet
+	if had && (e.OriginalSet != prev.OriginalSet || e.Original != prev.Original) {
+		return fmt.Errorf("ledger entry %s on %s: original %v (set %v) would replace the recorded original %v (set %v)",
+			e.Action, e.Subject, e.Original, e.OriginalSet, prev.Original, prev.OriginalSet)
 	}
 	l.entries[k] = e
 	if err := l.saveLocked(); err != nil {
