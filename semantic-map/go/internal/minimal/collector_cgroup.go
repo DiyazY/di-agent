@@ -75,9 +75,13 @@ import (
 // promised memory (not BestEffort, not a unit) that is not limiting itself — its
 // memory_events_high and memory_events_max did not rise — and, when CgroupOptions.Requests
 // holds the pods' requests, is within its memory request (memory.current ≤ request). It is
-// emitted for every window in which the node itself has a memory_pressure_ratio, and is 0
-// when no pod counts (none promised, all new this window, all excluded): a fresh 0 is what
-// lets a relief step taken on it be released. A node without memory PSI reports nothing
+// emitted for a window in which the node itself has a memory_pressure_ratio and either no
+// pod is promised memory or at least one promised pod was read: a pod is read when it has
+// a memory_pressure_ratio and a memory.events delta this window (unknown whether it limits
+// itself is not "not limiting itself"). It is 0 when no pod counts (none promised, or every
+// one read excluded): a fresh 0 is what lets a relief step taken on it be released. When
+// pods are promised memory and none was read (all new this window, memory.events
+// unreadable or reset), nothing is emitted: they say nothing about the node. A node without memory PSI reports nothing
 // rather than a calm node. Like cpu_contention_ratio it needs subjects.
 //
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
@@ -322,7 +326,8 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	seen := map[string]bool{}
 	var promised []podCPU // pods promised CPU: the node's contention is theirs
-	var memPods []podMem  // pods promised memory with a memory stall reading this window
+	var memPods []podMem  // pods promised memory with a memory stall reading and a memory.events delta this window
+	memPromised := 0      // pods promised memory, read or not
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
@@ -372,6 +377,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 				if pc, ok := c.podCPULocked(info.subject, p, samples); ok {
 					promised = append(promised, pc)
 				}
+				memPromised++
 				if pm, ok := c.podMemLocked(info.subject, labels["pod_uid"], samples); ok {
 					memPods = append(memPods, pm)
 				}
@@ -415,7 +421,9 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	if worst, ok := owedContention(promised, c.podCPUs()); ok {
 		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
 	}
-	if rootMemPSI {
+	// A fresh 0 needs a reason: no pod promised memory, or one read and none counted. Pods
+	// promised memory of which none could be read say nothing about the node.
+	if rootMemPSI && (memPromised == 0 || len(memPods) > 0) {
 		var req map[string]float64
 		var haveReq bool
 		if c.opts.Requests != nil {
@@ -590,17 +598,25 @@ func (c *CgroupCollector) podCPULocked(subject, dir string, samples []*types.Met
 }
 
 // podMemLocked is a pod's part in memoryContention, from this collect's samples and the
-// snapshot just taken of it. A pod with no memory stall reading this window has no part.
+// snapshot just taken of it. A pod with no memory stall reading this window has no part,
+// and neither has one without a memory.events delta for both high and max (unreadable,
+// first seen, or its counters went backwards): whether it is limiting itself is unknown,
+// and unknown is not "not self-limited".
 func (c *CgroupCollector) podMemLocked(subject, uid string, samples []*types.MetricSample) (podMem, bool) {
 	pm := podMem{uid: uid, current: math.NaN()}
-	var have bool
+	var have, hasHigh, hasMax bool
 	for _, s := range samples {
 		switch s.MetricType {
 		case types.MemoryPressureRatio:
 			pm.psi, have = s.Value, true
-		case types.MemoryEventsHigh, types.MemoryEventsMax:
-			pm.selfLimited = pm.selfLimited || s.Value > 0
+		case types.MemoryEventsHigh:
+			pm.selfLimited, hasHigh = pm.selfLimited || s.Value > 0, true
+		case types.MemoryEventsMax:
+			pm.selfLimited, hasMax = pm.selfLimited || s.Value > 0, true
 		}
+	}
+	if !hasHigh || !hasMax {
+		return pm, false
 	}
 	if snap := c.prev[subject]; snap != nil && snap.hasMemCurrent {
 		pm.current = float64(snap.memCurrent)

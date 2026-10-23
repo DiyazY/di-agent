@@ -217,10 +217,9 @@ func TestCollectorEmitsMemoryContention(t *testing.T) {
 	}
 }
 
-// TestMemoryContentionIsZeroWithoutAPromisedPod: with the node's memory stall read but no
-// pod promised memory (only BestEffort, or a promised pod first seen this window), the
-// node reports a fresh 0 — relief releases only on fresh readings, so silence here would
-// hold a step it took for ever.
+// TestMemoryContentionIsZeroWithoutAPromisedPod: with the node's memory stall read and
+// no pod promised memory (only BestEffort), the node reports a fresh 0 — relief releases
+// only on fresh readings, so silence here would hold a step it took for ever.
 func TestMemoryContentionIsZeroWithoutAPromisedPod(t *testing.T) {
 	root := t.TempDir()
 	procRoot := writeFakeProc(t)
@@ -238,17 +237,98 @@ func TestMemoryContentionIsZeroWithoutAPromisedPod(t *testing.T) {
 	clock = clock.Add(10 * time.Second)
 	writePSI(t, root, "memory.pressure", 5_000_000)
 	writePSI(t, podB, "memory.pressure", 9_000_000)
-	// A promised pod new this window has no stall reading yet and is not counted either.
-	podA := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
-	writeCgroup(t, podA, 1_000_000, 0, 0, "268435456")
-	writePSI(t, podA, "memory.pressure", 9_000_000)
 	samples, err := c.Collect()
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := bySubject(samples)[""][types.MemoryContentionRatio]
 	if s == nil || s.Value != 0 {
-		t.Fatalf("memory_contention_ratio %v; want a fresh 0 when no promised pod has a reading", s)
+		t.Fatalf("memory_contention_ratio %v; want a fresh 0 when no pod is promised memory", s)
+	}
+}
+
+// TestMemoryContentionIsAbsentWhenNoPromisedPodWasRead: promised pods that all lack a
+// valid reading this window (new, without a memory.events delta) say nothing about the
+// node: no reading is emitted, rather than a 0 that would read as calm. Once one is read,
+// the node reports again.
+func TestMemoryContentionIsAbsentWhenNoPromisedPodWasRead(t *testing.T) {
+	root := t.TempDir()
+	procRoot := writeFakeProc(t)
+	writeRootCgroup(t, root, 10_000_000, 0, 0)
+	writePSI(t, root, "memory.pressure", 0)
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(10 * time.Second)
+	podA := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+	writeCgroup(t, podA, 1_000_000, 0, 0, "268435456")
+	writePSI(t, podA, "memory.pressure", 0)
+	writeMemEvents(t, podA, 0, 0, 0)
+	writePSI(t, root, "memory.pressure", 5_000_000)
+	samples, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := bySubject(samples)[""][types.MemoryContentionRatio]; s != nil {
+		t.Fatalf("memory_contention_ratio %v with the only promised pod new this window; want none", s.Value)
+	}
+	clock = clock.Add(10 * time.Second)
+	writePSI(t, podA, "memory.pressure", 2_000_000)
+	writePSI(t, root, "memory.pressure", 9_000_000)
+	samples, err = c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := bySubject(samples)[""][types.MemoryContentionRatio]; s == nil || s.Value != 0.2 {
+		t.Fatalf("memory_contention_ratio %v once the pod was read; want 0.2", s)
+	}
+}
+
+// TestAPodWithoutAMemoryEventsDeltaIsNotCounted: a pod whose memory.events cannot be read,
+// or whose counters went backwards, may be limiting itself for all the agent knows;
+// unknown is not "not self-limited", so it is left out of the node's memory contention.
+func TestAPodWithoutAMemoryEventsDeltaIsNotCounted(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t) // podA burstable
+	const uidC = "33333333-4444-5555-6666-777777777777"
+	podC := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod33333333_4444_5555_6666_777777777777.slice")
+	writeCgroup(t, podC, 1_000_000, 0, 0, "104857600")
+	writePSI(t, root, "memory.pressure", 0)
+	for _, d := range []string{podA, podC} {
+		writePSI(t, d, "memory.pressure", 0)
+	}
+	writeMemEvents(t, podA, 0, 0, 0) // podC has no memory.events
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	stall := map[string]uint64{}
+	collect := func() *types.MetricSample {
+		t.Helper()
+		for d, add := range map[string]uint64{root: 9_000_000, podA: 3_000_000, podC: 5_000_000} {
+			stall[d] += add
+			writePSI(t, d, "memory.pressure", stall[d])
+		}
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(10 * time.Second)
+		return bySubject(samples)[""][types.MemoryContentionRatio]
+	}
+	collect()
+	if s := collect(); s == nil || s.Value != 0.3 {
+		t.Fatalf("with podC's memory.events unreadable: %v; want 0.3, podC left out", s)
+	}
+	writeMemEvents(t, podC, 5, 5, 0)
+	collect() // podC's first memory.events: no delta yet
+	if s := collect(); s == nil || s.Value != 0.5 {
+		t.Fatalf("with podC's delta known and flat: %v; want 0.5", s)
+	}
+	writeMemEvents(t, podC, 0, 0, 0) // counters went backwards: recreated
+	if s := collect(); s == nil || s.Value != 0.3 {
+		t.Fatalf("after podC's counter reset: %v; want 0.3, podC left out", s)
 	}
 }
 
