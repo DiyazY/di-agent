@@ -35,7 +35,8 @@ If you need it on a shared network, put it behind something that terminates TLS 
 - [7. Multi-node setup](#7-multi-node-setup)
 - [8. Upgrade and rollback](#8-upgrade-and-rollback)
 - [9. What it touches on your system](#9-what-it-touches-on-your-system)
-- [10. Troubleshooting](#10-troubleshooting)
+- [10. Memory relief](#10-memory-relief)
+- [11. Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -256,7 +257,7 @@ curl -s http://$ADDR/graph | jq '[.edges[].n_observations] | add'
 # → 0 immediately after start; must be climbing a minute later
 ```
 
-**Check 4 is the important one.** Checks 1–3 pass on a completely blind agent — one whose collector is misconfigured and has never observed anything. If `n_observations` stays at 0 after several collection intervals, the agent is running but learning nothing. See [§10](#10-troubleshooting).
+**Check 4 is the important one.** Checks 1–3 pass on a completely blind agent — one whose collector is misconfigured and has never observed anything. If `n_observations` stays at 0 after several collection intervals, the agent is running but learning nothing. See [§11](#11-troubleshooting).
 
 ---
 
@@ -381,7 +382,9 @@ Full inventory, so you can reason about it before deploying.
 
 ### Writes
 
-**Nothing.** No files, no databases, no temp files. The agent is read-only on the filesystem. That is why `ProtectSystem=strict` in [§4](#4-run-under-systemd) works without exceptions.
+**With `loops.relief.enabled: false` (the default), nothing but `persist.file`.** No databases, no temp files. Set `persist.file: ""` and the agent is read-only on the filesystem, which is why `ProtectSystem=strict` in [§4](#4-run-under-systemd) works without exceptions.
+
+With relief enabled on a runtime that changes the system, it also writes its ledger (`actuation.ledger`, else `actions.json` beside `persist.file`), and the settings its levers change: a pod's CPU limit through the Kubernetes API, and a pod's cgroup `memory.high` ([§10](#10-memory-relief)). The unit in §4 then needs `ReadWritePaths=` for the ledger's directory and write access to the pod cgroups.
 
 ### Network
 
@@ -396,11 +399,56 @@ No telemetry, analytics, or update checks. The agent never contacts anything you
 
 ### Privileges
 
-None. It needs no root, no capabilities, and no write access. `DynamicUser=yes` works. If your cgroup files are root-only you may need `SupplementaryGroups=` or a read ACL — that is the only case requiring any privilege consideration at all.
+With relief off (the default), none. It needs no root, no capabilities, and no write access. `DynamicUser=yes` works. If your cgroup files are root-only you may need `SupplementaryGroups=` or a read ACL — that is the only case requiring any privilege consideration at all. With relief on, the `memory.high` lever writes the pod cgroups, which are root's ([§10](#10-memory-relief)).
 
 ---
 
-## 10. Troubleshooting
+## 10. Memory relief
+
+With `loops.relief.enabled: true` the agent runs two levers by default: `cpu.limit` and `memory.high`. The memory lever relieves `memory_contention_ratio` — the worst memory stall of a pod that is within its memory request and not limiting itself — by lowering the soft memory cap of a pod using more than its request. On `runtime.kind: dry-run`, or with `loops.relief.dry_run: true`, nothing below is written.
+
+### Preconditions
+
+The agent checks both at start and refuses to start, naming the lever, when either fails:
+
+1. **cgroup v2**, at the cgroup collector's `config.root` (`/sys/fs/cgroup` by default; `/host/sys/fs/cgroup` in the DaemonSet). `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`.
+2. **The kubelet's MemoryQoS off.** With the `MemoryQoS` feature gate on, the kubelet sets `memory.high` itself and would overwrite what the agent writes. The agent takes any pod or container `memory.high` other than `max` under `kubepods` that its ledger does not hold as the kubelet's. Check by hand — no output means it is off:
+
+   ```bash
+   find /sys/fs/cgroup -path '*kubepods*' -name memory.high | xargs -r grep -Lx max
+   ```
+
+   and the kubelet configuration has no `featureGates: {MemoryQoS: true}`.
+
+It also needs to write the pod cgroups: the agent runs as root or with write access to them. The DaemonSet mounts the node at `/host` **read-only**, so there `memory.high` changes fail and are refused one by one until the cgroup tree is mounted writable.
+
+### What it writes
+
+- Only the **pod-level** `memory.high`: `<root>/kubepods/<qos>/pod<uid>/memory.high` (cgroupfs driver; `pod<uid>` directly under `kubepods` for a Guaranteed pod), or `kubepods.slice/kubepods-<qos>.slice/kubepods-<qos>-pod<uid>.slice/memory.high` (systemd driver). The value is bytes, never below `policy.defaults.floor.memory.high.min` (64 MiB) or the actuator's own 64 MiB.
+- The kernel enforces it by reclaiming and throttling the pod's allocations above it. Nothing is killed: the agent **never writes `memory.max`**, and never a container's file.
+- It is undone by writing `max`, on a revert, a release, or expiry (`expiry`, 1h by default). A pod that restarts gets a new cgroup at `max`, and the agent drops its entry.
+
+### The ledger
+
+Every change is recorded in the ledger before it is made: `actuation.ledger`, else `actions.json` beside `persist.file` (`/var/lib/di-agent/actions.json` by default). **Keep it on persistent storage**, as `/var/lib/di-agent` is in the DaemonSet. It is how a restarted agent finds and gives back what it set; without it the pods it capped stay capped, and the next start with relief on refuses, taking the agent's own `memory.high` values for the kubelet's. Recover from a lost ledger by writing `max` to the `memory.high` the check above lists. With relief enabled, a ledger that cannot be written refuses start. `GET /actuators` shows what it holds.
+
+### Turning it off
+
+The lever list in the file replaces the default one, so name only CPU:
+
+```yaml
+loops:
+  relief:
+    enabled: true
+    levers:
+      - action: cpu.limit
+```
+
+The memory lever then no longer runs, and gives back nothing it set earlier: first revert its changes (`GET /relief/actions`, then `POST /relief/actions/<id>/revert` with `Content-Type: application/json`) or let them expire. To keep it off one workload, deny `memory.high` in a `policy.rules` entry matching it; to stop all relief, `POST /relief/pause`.
+
+---
+
+## 11. Troubleshooting
 
 **`/healthz` fine but `n_observations` stays 0.** The agent is running blind. Three causes, in order of likelihood:
 
