@@ -31,9 +31,10 @@ type Status struct {
 	Kept            int                  `json:"kept"`
 	Reverted        int                  `json:"reverted"`
 	Refused         int                  `json:"refused"`
-	PredictionsHeld float64              `json:"predictions_held"` // kept / (kept+reverted)
-	Stuck           int                  `json:"stuck,omitempty"`  // changes in force whose undo the actuator has refused, or whose setting it cannot read
-	Unread          []Unread             `json:"unread,omitempty"` // the ledger's changes whose setting cannot be read, retried every tick
+	PredictionsHeld float64              `json:"predictions_held"`          // kept / (kept+reverted)
+	Stuck           int                  `json:"stuck,omitempty"`           // changes in force whose undo the actuator has refused, or whose setting it cannot read
+	Unread          []Unread             `json:"unread,omitempty"`          // the ledger's changes whose setting cannot be read, retried every tick
+	ReconcileError  string               `json:"reconcile_error,omitempty"` // why the latest reconcile failed; empty when it succeeded
 	Cooling         map[string]time.Time `json:"cooling,omitempty"`
 }
 
@@ -145,25 +146,26 @@ type Loop struct {
 	reconciled bool            // the ledger has been reconciled; until then nothing is applied. Touched only under pass
 	spentFor   map[string]bool // subjects whose failed Apply kept its hourly spend, so reconcile does not spend again. Touched only under pass
 
-	mu          sync.Mutex
-	trigger     *Trigger
-	phase       Phase
-	since       time.Time // when the current phase began
-	paused      bool
-	inFlight    *Action
-	kept        []*Action            // oldest first; release reverts from the end
-	history     []*Action            // oldest first, at most historySize
-	released    map[string]time.Time // when each workload was last released
-	cycles      map[string]int       // throttle/release cycles within backoffWindow
-	lastRelease time.Time            // the last release revert, for one per Settle
-	noted       string               // the last refusal journalled this episode
-	noPlanAt    time.Time            // when attribution last found no plan
-	noPlanKey   string               // the eligible workloads it found none among
-	unread      map[string]*Unread   // by subject: ledger entries whose setting could not be read at the latest reconcile
-	nActs       int
-	nKept       int
-	nReverted   int
-	nRefused    int
+	mu           sync.Mutex
+	trigger      *Trigger
+	phase        Phase
+	since        time.Time // when the current phase began
+	paused       bool
+	inFlight     *Action
+	kept         []*Action            // oldest first; release reverts from the end
+	history      []*Action            // oldest first, at most historySize
+	released     map[string]time.Time // when each workload was last released
+	cycles       map[string]int       // throttle/release cycles within backoffWindow
+	lastRelease  time.Time            // the last release revert, for one per Settle
+	noted        string               // the last refusal journalled this episode
+	noPlanAt     time.Time            // when attribution last found no plan
+	noPlanKey    string               // the eligible workloads it found none among
+	unread       map[string]*Unread   // by subject: ledger entries whose setting could not be read at the latest reconcile
+	reconcileErr string               // why the latest reconcile failed, "" when it succeeded
+	nActs        int
+	nKept        int
+	nReverted    int
+	nRefused     int
 }
 
 // New builds a loop in Calm. Its decision ids carry the time it was built, so a
@@ -260,6 +262,7 @@ func (l *Loop) Status() Status {
 	}
 	sort.Slice(st.Unread, func(i, j int) bool { return st.Unread[i].Entry.Subject < st.Unread[j].Entry.Subject })
 	st.Stuck += len(st.Unread)
+	st.ReconcileError = l.reconcileErr
 	if judged := l.nKept + l.nReverted; judged > 0 {
 		st.PredictionsHeld = float64(l.nKept) / float64(judged)
 	}
@@ -394,11 +397,11 @@ func (l *Loop) Reconcile(ctx context.Context) error {
 func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	ws, err := l.cfg.Runtime.Workloads(ctx)
 	if err != nil {
-		return fmt.Errorf("relief: listing workloads: %w", err)
+		return l.reconcileFailed(fmt.Errorf("relief: listing workloads: %w", err))
 	}
 	held, dropped, failed, err := l.cfg.Acting.Held(ctx, l.d.Action, ws)
 	if err != nil {
-		return fmt.Errorf("relief: reconciling this node's changes: %w", err)
+		return l.reconcileFailed(fmt.Errorf("relief: reconciling this node's changes: %w", err))
 	}
 	pressure, _, fresh := l.pressure(now)
 	cooldowns := l.cooldowns(ws)
@@ -426,6 +429,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		unread[e.Subject] = u
 	}
 	l.unread = unread
+	l.reconcileErr = ""
 	l.mu.Unlock()
 
 	taken := func(e actuators.Entry) *Action { return l.taken(e, cooldowns(e.Subject)) }
@@ -528,6 +532,31 @@ func (l *Loop) pendingFor(subject string) bool {
 		}
 	}
 	return false
+}
+
+// reconcileFailed records a reconcile that failed as a whole (the listing failed
+// or held nothing, or the ledger could not be saved): every change of this
+// node's action the loop has not taken up is unread with err, so Status shows it
+// stuck and expireUnread gives it back through its subject once it expires,
+// rather than the node wedging with its changes in force unseen. It returns err.
+func (l *Loop) reconcileFailed(err error) error {
+	es := l.cfg.Acting.Entries(l.d.Action)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	live := l.liveSubjects()
+	unread := map[string]*Unread{}
+	for _, e := range es {
+		if live[e.Subject] {
+			continue
+		}
+		u := &Unread{Entry: e, Error: err.Error(), Attempts: 1}
+		if prev := l.unread[e.Subject]; prev != nil {
+			u.Attempts, u.GivenBack = prev.Attempts+1, prev.GivenBack
+		}
+		unread[e.Subject] = u
+	}
+	l.unread, l.reconcileErr = unread, err.Error()
+	return err
 }
 
 // hasUnread reports ledger entries whose setting could not be read.

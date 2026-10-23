@@ -421,3 +421,41 @@ func (h *memHarness) action(id string) Action {
 	h.t.Fatalf("no action %s", id)
 	return Action{}
 }
+
+// TestAnEmptyListingAtStartStillExpires: a restart whose listing holds no pod
+// refuses to reconcile, but does not wedge: the node's changes are shown as
+// stuck with the reconcile error, and one past its expiry is given back through
+// its subject, memory.high written back to max and the change closed as expired.
+func TestAnEmptyListingAtStartStillExpires(t *testing.T) {
+	h := newMemHarness(t)
+	h.act()
+	h.rt.mu.Lock()
+	h.rt.ws = nil
+	h.rt.mu.Unlock()
+	h.mu.Lock()
+	h.now = h.now.Add(2 * time.Hour)
+	h.mu.Unlock()
+	h.l = h.newLoop()
+	if err := h.l.Reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile on an empty listing succeeded")
+	}
+	st := h.l.Status()
+	if st.ReconcileError == "" || st.Stuck != 1 || len(st.Unread) != 1 {
+		t.Fatalf("status %+v; want the reconcile error shown and the change stuck", st)
+	}
+	h.step(0)
+	h.step(0)
+	if got := h.file(); got != "max" {
+		t.Fatalf("memory.high %q; want max", got)
+	}
+	if es := h.ledger.All(); len(es) != 0 {
+		t.Fatalf("ledger %+v; want the expired change given back", es)
+	}
+	var found bool
+	for _, a := range h.l.Actions() {
+		found = found || a.Outcome == OutcomeExpired
+	}
+	if !found {
+		t.Fatalf("actions %+v; want one expired", h.l.Actions())
+	}
+}
