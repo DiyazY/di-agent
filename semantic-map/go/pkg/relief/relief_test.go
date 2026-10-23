@@ -1531,3 +1531,46 @@ func TestAPendingChangeInFlightIsResolved(t *testing.T) {
 		t.Fatalf("action entry %+v, ledger %+v; want the settled entry, the same in both", a.Entry, h.applied()["pod:a"])
 	}
 }
+
+// refusedUnread fails a Set without effect and the read after it once.
+type refusedUnread struct {
+	actuators.Actuator
+	mu       sync.Mutex
+	failNext bool
+}
+
+func (r *refusedUnread) Set(context.Context, runtime.Workload, float64, bool) error {
+	r.mu.Lock()
+	r.failNext = true
+	r.mu.Unlock()
+	return errors.New("conflict")
+}
+
+func (r *refusedUnread) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	r.mu.Lock()
+	fail := r.failNext
+	r.failNext = false
+	r.mu.Unlock()
+	if fail {
+		return 0, false, errors.New("api unavailable")
+	}
+	return r.Actuator.Read(ctx, w)
+}
+
+// TestAPendingStepThatNeverTookIsRefunded: a failed Apply whose outcome is not
+// known keeps its hourly spend, as it may be in force; once the reconcile finds
+// it never took, the spend is given back.
+func TestAPendingStepThatNeverTookIsRefunded(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			return d, &refusedUnread{Actuator: a}
+		}})
+	h.until(2*time.Hour, 0.5, "a refused change", func() bool { return h.l.Status().Refused > 0 })
+	if n := h.l.budget.Count(h.now); n != 1 {
+		t.Fatalf("hourly count %d with the step's outcome unknown; want 1", n)
+	}
+	h.step(0.5)
+	if n := h.l.budget.Count(h.now); n != 0 || len(h.ledger.All()) != 0 {
+		t.Fatalf("hourly count %d, ledger %+v once it never took; want the spend back", n, h.ledger.All())
+	}
+}

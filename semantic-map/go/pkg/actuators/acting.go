@@ -198,7 +198,7 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 		setErr = fmt.Errorf("%s: set %s: %w", w.Subject, action, setErr)
 		switch {
 		case rerr != nil:
-			return Entry{}, setErr // pending: Held finds out what is in force
+			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending, setErr) // Held finds out what is in force
 		case same(got, gotSet, beforeV, beforeSet):
 			if err := restore(); err != nil {
 				return Entry{}, errors.Join(setErr, err)
@@ -206,7 +206,7 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 			return Entry{}, setErr
 		case !gotSet:
 			// Neither what it was nor what was asked: leave it for Held.
-			return Entry{}, setErr
+			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending, setErr)
 		}
 		c := committed(e, got)
 		if err := a.ledger.Put(c); err != nil {
@@ -264,6 +264,12 @@ func same(v float64, set bool, w float64, wset bool) bool {
 	}
 	return closeTo(v, w)
 }
+
+// ErrLeftPending is in Apply's error when the step it took was left pending:
+// its Set failed and what is in force could not be told, so the change may be
+// in force, and Held settles it. Any other error of Apply's left no change of
+// this step in force.
+var ErrLeftPending = errors.New("the change was left pending")
 
 // ErrUnconfirmed is Revert's answer when the original was set and does not yet
 // read back: the entry is kept, since the change may still be in force.

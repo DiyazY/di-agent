@@ -143,10 +143,10 @@ type Loop struct {
 	effects effects       // what acting on each workload has done; safe on its own
 	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
-	pass       sync.Mutex      // serialises the passes that change the system
-	seq        int             // decision counter; touched only under pass
-	reconciled bool            // the ledger has been reconciled; until then nothing is applied. Touched only under pass
-	spentFor   map[string]bool // subjects whose failed Apply kept its hourly spend, so reconcile does not spend again. Touched only under pass
+	pass       sync.Mutex           // serialises the passes that change the system
+	seq        int                  // decision counter; touched only under pass
+	reconciled bool                 // the ledger has been reconciled; until then nothing is applied. Touched only under pass
+	spentFor   map[string]time.Time // subjects whose failed Apply kept its hourly spend, with when, so reconcile neither spends again nor keeps the spend of a step that never took. Touched only under pass
 
 	mu           sync.Mutex
 	trigger      *Trigger
@@ -205,7 +205,7 @@ func New(c Config) (*Loop, error) {
 		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act, epoch: now.Unix(),
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
-		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spentFor: map[string]bool{},
+		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spentFor: map[string]time.Time{},
 	}, nil
 }
 
@@ -479,7 +479,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			if d, ok := l.cfg.Map.Journal().Decision(e.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
 				at = d.At
 			}
-			if !l.spentFor[a.Subject] { // a failed Apply that left it in force kept its spend
+			if _, kept := l.spentFor[a.Subject]; !kept { // a failed Apply that left it in force kept its spend
 				l.budget.Spend(at)
 			}
 			l.budget.coolExcept(a.Subject, l.d.Action, at.Add(a.cooldown))
@@ -504,7 +504,24 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	}
 	l.mu.Unlock()
 	l.reconciled = true
-	clear(l.spentFor)
+	// A step whose failed Apply kept its spend and that is now neither held,
+	// dropped nor unread never took: its spend is given back.
+	settled := map[string]bool{}
+	for _, e := range held {
+		settled[e.Subject] = true
+	}
+	for _, e := range dropped {
+		settled[e.Subject] = true
+	}
+	for s, at := range l.spentFor {
+		switch {
+		case l.hasUnreadFor(s):
+			continue
+		case !settled[s]:
+			l.budget.refund(at)
+		}
+		delete(l.spentFor, s)
+	}
 	for _, a := range resumed {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
 	}
@@ -527,15 +544,11 @@ func (l *Loop) taken(e actuators.Entry, cooldown time.Duration) *Action {
 	return a
 }
 
-// pendingFor reports whether the ledger holds a pending entry of this lever's
-// action for subject: a change written ahead whose outcome is not known.
-func (l *Loop) pendingFor(subject string) bool {
-	for _, e := range l.cfg.Acting.Entries(l.d.Action) {
-		if e.Subject == subject && e.Pending {
-			return true
-		}
-	}
-	return false
+// hasUnreadFor reports whether subject's entry could not be read.
+func (l *Loop) hasUnreadFor(subject string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.unread[subject] != nil
 }
 
 // reconcileFailed records a reconcile that failed as a whole (the listing failed
@@ -734,8 +747,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		// refunded, another lever could take the slot before the next pass takes
 		// the change up. One that changed nothing gives it back. Either way the
 		// hold on the workload stands, and Cool below extends it to this lever.
-		if entry.Action != "" || l.pendingFor(plan.Subject) {
-			l.spentFor[plan.Subject] = true
+		if entry.Action != "" || errors.Is(err, actuators.ErrLeftPending) {
+			l.spentFor[plan.Subject] = now
 		} else {
 			l.budget.refund(now)
 		}

@@ -684,3 +684,49 @@ func TestARevertIsConfirmedBeforeTheEntryGoes(t *testing.T) {
 		t.Fatalf("ledger %+v value %v; want the entry gone once 10 read back", l.All(), m.vals["s"])
 	}
 }
+
+// failSetBlindRead fails every Set without effect and fails the read after it
+// once, as a resize whose call errored and whose read-back timed out.
+type failSetBlindRead struct {
+	*memAct
+	failNext bool
+}
+
+func (f *failSetBlindRead) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	f.failNext = true
+	return errors.New("conflict")
+}
+
+func (f *failSetBlindRead) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	if f.failNext {
+		f.failNext = false
+		return 0, false, errors.New("api unavailable")
+	}
+	return f.memAct.Read(ctx, w)
+}
+
+// TestApplySaysWhenItLeftAStepPending: Apply's error says whether this step was
+// left pending (its outcome unknown, so possibly in force); a step restored to
+// the entry before it was not, even when that entry was itself pending.
+func TestApplySaysWhenItLeftAStepPending(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	a := NewActing("n", MemoryLedger(), &failSetBlindRead{memAct: m})
+	_, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want ErrLeftPending for a step whose outcome is unknown", err)
+	}
+	l := MemoryLedger()
+	prior := Entry{Action: "fake", Subject: "s", NodeID: "n", Original: 10, OriginalSet: true, Applied: 7, Pending: true}
+	if err := l.Put(prior); err != nil {
+		t.Fatal(err)
+	}
+	m.vals["s"] = 10
+	f := newMem()
+	f.vals["s"] = 10
+	f.setErr = errors.New("conflict")
+	_, err = NewActing("n", l, f).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d2")
+	if err == nil || errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want a refusal that did not leave this step pending", err)
+	}
+}
