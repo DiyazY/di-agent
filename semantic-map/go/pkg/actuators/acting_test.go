@@ -609,3 +609,78 @@ func TestUnmanagedSaysWhy(t *testing.T) {
 		t.Errorf("unmanaged %v; want exactly the three", got)
 	}
 }
+
+// lagging is memAct whose Set takes effect only after lag more reads, as a
+// kubelet that applies an accepted resize a moment later: until then Read
+// returns the setting from before.
+type lagging struct {
+	*memAct
+	lag     int
+	left    int
+	pending *memSet
+}
+
+func (l *lagging) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	if l.pending != nil && *l.pending == (memSet{w.Subject, v, set}) {
+		return nil // asked again for what is on its way: the kubelet does not start over
+	}
+	l.pending, l.left = &memSet{w.Subject, v, set}, l.lag
+	return nil
+}
+
+func (l *lagging) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	if l.pending != nil {
+		if l.left == 0 {
+			p := *l.pending
+			l.pending = nil
+			if err := l.memAct.Set(ctx, w, p.v, p.set); err != nil {
+				return 0, false, err
+			}
+		} else {
+			l.left--
+		}
+	}
+	return l.memAct.Read(ctx, w)
+}
+
+// TestASetThatReadsBackAsBeforeStaysPending: a Set that succeeded and reads back
+// as the setting before it, not the value asked, has not been seen to take: the
+// entry stays pending, and is never committed with the original as Applied.
+func TestASetThatReadsBackAsBeforeStaysPending(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	a := NewActing("n", MemoryLedger(), &lagging{memAct: m, lag: 2})
+	e, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if err != nil || !e.Pending || e.Applied != 5 {
+		t.Fatalf("entry %+v err %v; want pending at the 5 asked for", e, err)
+	}
+	if got := a.ledger.All(); len(got) != 1 || !got[0].Pending || got[0].Applied != 5 {
+		t.Fatalf("ledger %+v; want the step pending, never Applied=Original", got)
+	}
+}
+
+// TestARevertIsConfirmedBeforeTheEntryGoes: a revert deletes the entry only once
+// the original reads back; one that has not yet taken is an error, and the entry
+// stays for the next try.
+func TestARevertIsConfirmedBeforeTheEntryGoes(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	e, err := NewActing("n", l, m).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewActing("n", l, &lagging{memAct: m, lag: 2})
+	if err := a.Revert(context.Background(), wl("s"), e); err == nil || errors.Is(err, ErrGone) {
+		t.Fatalf("revert err %v; want not yet confirmed", err)
+	}
+	if len(l.All()) != 1 {
+		t.Fatal("the entry went before the original read back")
+	}
+	for i := 0; i < 3 && len(l.All()) == 1; i++ {
+		a.Revert(context.Background(), wl("s"), e)
+	}
+	if len(l.All()) != 0 || m.vals["s"] != 10 {
+		t.Fatalf("ledger %+v value %v; want the entry gone once 10 read back", l.All(), m.vals["s"])
+	}
+}

@@ -217,6 +217,12 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 	if rerr != nil {
 		return e, nil // in force as far as Set said; Held settles what reads back
 	}
+	if same(got, gotSet, beforeV, beforeSet) && !same(got, gotSet, v, true) {
+		// Set took the change and it reads back as before: not yet seen to take, as
+		// a kubelet that applies an accepted resize a moment later. Committing it
+		// would record the original as Applied and drop the cut when it lands.
+		return e, nil
+	}
 	applied := v
 	if gotSet {
 		applied = got
@@ -259,7 +265,11 @@ func same(v float64, set bool, w float64, wset bool) bool {
 	return closeTo(v, w)
 }
 
-// Revert gives back what e replaced and forgets it. A workload that is gone has
+// ErrUnconfirmed is Revert's answer when the original was set and does not yet
+// read back: the entry is kept, since the change may still be in force.
+var ErrUnconfirmed = errors.New("given back, not yet confirmed")
+
+// Revert gives back what e replaced and forgets it once the original reads back. A workload that is gone has
 // nothing to give back, so ErrGone also forgets the entry; it is still returned,
 // so the caller can tell a change given back from a workload that left. Any
 // other error keeps the entry: only the actuator's ErrGone ever drops a change.
@@ -273,6 +283,21 @@ func (a *Acting) Revert(ctx context.Context, w runtime.Workload, e Entry) error 
 	err := x.Set(ctx, w, e.Original, e.OriginalSet)
 	if err != nil && !errors.Is(err, ErrGone) {
 		return fmt.Errorf("%s: revert %s: %w", e.Subject, e.Action, err)
+	}
+	if err == nil {
+		// The entry goes only once the original reads back: an actuator that
+		// applies a moment later (a kubelet resizing) still holds the change.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readBack)
+		got, gotSet, rerr := x.Read(rctx, w)
+		cancel()
+		switch {
+		case errors.Is(rerr, ErrGone):
+			err = rerr
+		case rerr != nil:
+			return fmt.Errorf("%s: revert %s: %w: %w", e.Subject, e.Action, ErrUnconfirmed, rerr)
+		case !same(got, gotSet, e.Original, e.OriginalSet):
+			return fmt.Errorf("%s: revert %s: %w (reads %v, set %v)", e.Subject, e.Action, ErrUnconfirmed, got, gotSet)
+		}
 	}
 	if derr := a.ledger.Delete(e.Action, e.Subject); derr != nil {
 		return derr

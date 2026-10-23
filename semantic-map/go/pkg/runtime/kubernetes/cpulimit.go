@@ -82,9 +82,12 @@ func (a *CPULimit) Check(w runtime.Workload) string {
 
 // Read is the pod's CPU limit in force, in cores; set is false when it has none.
 // In force is what the kubelet has applied, the container's status.resources,
-// when the status reports it, and the spec otherwise. While a resize is pending
-// or in progress the limit in force is not settled, and Read is an error (never
-// ErrGone): the caller cannot tell what it would be giving back.
+// when the status reports it, and the spec otherwise. The limit in force is not
+// settled, and Read is an error (never ErrGone), while a resize is pending or in
+// progress, while the kubelet has not observed the pod's latest generation, and
+// while the spec and the applied limit differ, as right after a resize the
+// kubelet has accepted and not yet applied: the caller cannot tell what it
+// would be giving back.
 func (a *CPULimit) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
 	p, err := a.pod(ctx, w)
 	if err != nil {
@@ -93,21 +96,51 @@ func (a *CPULimit) Read(ctx context.Context, w runtime.Workload) (float64, bool,
 	if c, ok := resizeCondition(p); ok {
 		return 0, false, fmt.Errorf("%s/%s: a resize is %s (%s): the CPU limit in force is not settled", p.Namespace, p.Name, resizeState(c), c.Message)
 	}
-	if len(p.Spec.Containers) == 1 {
-		for _, cs := range p.Status.ContainerStatuses {
-			if cs.Name != p.Spec.Containers[0].Name || cs.Resources == nil {
-				continue
-			}
-			if q, ok := cs.Resources.Limits[corev1.ResourceCPU]; ok {
-				return float64(q.MilliValue()) / 1000, true, nil
-			}
-			return 0, false, nil
+	if p.Generation > p.Status.ObservedGeneration && p.Status.ObservedGeneration > 0 {
+		return 0, false, fmt.Errorf("%s/%s: the kubelet has not yet observed generation %d (at %d): the CPU limit in force is not settled",
+			p.Namespace, p.Name, p.Generation, p.Status.ObservedGeneration)
+	}
+	specMilli, specSet := specLimit(p)
+	appliedMilli, appliedSet, reported := statusLimit(p)
+	if !reported {
+		appliedMilli, appliedSet = specMilli, specSet
+	} else if appliedSet != specSet || appliedMilli != specMilli {
+		// Accepted and not yet applied, as right after a resize: the kubelet lags.
+		return 0, false, fmt.Errorf("%s/%s: the spec asks for a CPU limit the kubelet has not applied yet: the CPU limit in force is not settled", p.Namespace, p.Name)
+	}
+	if !appliedSet {
+		return 0, false, nil
+	}
+	return float64(appliedMilli) / 1000, true, nil
+}
+
+// specLimit is the single container's spec limits.cpu in millicores.
+func specLimit(p corev1.Pod) (int64, bool) {
+	if len(p.Spec.Containers) != 1 {
+		if l := cpuOf(p).Limit; l != nil {
+			return millis(*l), true
 		}
+		return 0, false
 	}
-	if l := cpuOf(p).Limit; l != nil {
-		return *l, true, nil
+	q, ok := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	return q.MilliValue(), ok
+}
+
+// statusLimit is the CPU limit the kubelet reports applied to the single
+// container, from status.containerStatuses[].resources; reported is false when
+// the status says nothing of it.
+func statusLimit(p corev1.Pod) (milli int64, set, reported bool) {
+	if len(p.Spec.Containers) != 1 {
+		return 0, false, false
 	}
-	return 0, false, nil
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.Name != p.Spec.Containers[0].Name || cs.Resources == nil {
+			continue
+		}
+		q, ok := cs.Resources.Limits[corev1.ResourceCPU]
+		return q.MilliValue(), ok, true
+	}
+	return 0, false, false
 }
 
 // resizeCondition is the pod's PodResizePending or PodResizeInProgress
@@ -184,13 +217,21 @@ func (a *CPULimit) pod(ctx context.Context, w runtime.Workload) (corev1.Pod, err
 }
 
 // atLimit reports whether the pod's single container already has a CPU limit of
-// milli millicores.
+// milli millicores, both asked for in the spec and applied, as far as the status
+// reports it: a spec at milli whose status still holds another limit is not at
+// it, so a retried give-back is not taken for done.
 func atLimit(p corev1.Pod, milli int64) bool {
 	if len(p.Spec.Containers) != 1 {
 		return false
 	}
 	l, ok := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
-	return ok && l.MilliValue() == milli
+	if !ok || l.MilliValue() != milli {
+		return false
+	}
+	if a, set, reported := statusLimit(p); reported && (!set || a != milli) {
+		return false
+	}
+	return true
 }
 
 // removeLimit drops the single container's limits.cpu through the resize

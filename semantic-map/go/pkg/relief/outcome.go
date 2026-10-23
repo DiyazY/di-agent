@@ -95,6 +95,7 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 			l.mu.Lock()
 			if cur := l.unread[e.Subject]; cur != nil {
 				cur.Error = err.Error()
+				cur.GivenBack = cur.GivenBack || errors.Is(err, actuators.ErrUnconfirmed)
 			}
 			l.mu.Unlock()
 			l.cfg.Logf("relief: giving back the unread change to %s from the ledger: %v (retrying next tick)", e.Subject, err)
@@ -109,14 +110,20 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 			l.gone(now, a, "the actuator no longer finds the workload")
 			continue
 		}
-		b := l.cfg.Map.Decide(l.id("expired"), l.giveBackAsk(e.Subject, "the change expired"))
-		b.Input("act", a.DecisionID)
-		b.Input("entry", e)
-		b.Input("unread", u.Error)
-		b.Caveat("its setting could not be read; it was given back from the ledger's record of what it replaced")
-		b.Commit(map[string]any{OutcomeExpired: e.Subject})
-		l.end(now, a, OutcomeExpired, a.cooldown)
+		l.expiredFromRecord(now, a, u)
 	}
+}
+
+// expiredFromRecord journals and closes a change given back at its expiry from
+// the ledger's record, its setting having been unreadable.
+func (l *Loop) expiredFromRecord(now time.Time, a *Action, u Unread) {
+	b := l.cfg.Map.Decide(l.id("expired"), l.giveBackAsk(a.Subject, "the change expired"))
+	b.Input("act", a.DecisionID)
+	b.Input("entry", u.Entry)
+	b.Input("unread", u.Error)
+	b.Caveat("its setting could not be read; it was given back from the ledger's record of what it replaced")
+	b.Commit(map[string]any{OutcomeExpired: a.Subject})
+	l.end(now, a, OutcomeExpired, a.cooldown)
 }
 
 // lister lists the workloads the runtime runs, at most once per pass and only

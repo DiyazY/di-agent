@@ -45,6 +45,9 @@ type Unread struct {
 	Entry    actuators.Entry `json:"entry"`
 	Error    string          `json:"error"`
 	Attempts int             `json:"attempts"`
+	// GivenBack: its expiry passed and the original was set from the ledger's
+	// record; the entry goes once the original reads back.
+	GivenBack bool `json:"given_back,omitempty"`
 }
 
 // Action is the agent's change to one workload, with what it predicted and what
@@ -407,6 +410,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		live[a.Subject] = a
 	}
 	busy := l.inFlight != nil
+	prevUnread := l.unread
 	unread := map[string]*Unread{}
 	for _, f := range failed {
 		e := f.Entry
@@ -415,7 +419,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		}
 		u := &Unread{Entry: e, Error: f.Err.Error(), Attempts: 1}
 		if prev := l.unread[e.Subject]; prev != nil {
-			u.Attempts = prev.Attempts + 1
+			u.Attempts, u.GivenBack = prev.Attempts+1, prev.GivenBack
 		} else {
 			l.cfg.Logf("relief: %v; the change stays in force, is retried every tick, and is given back from the ledger once it expires", f.Err)
 		}
@@ -437,6 +441,12 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			l.mu.Lock()
 			l.history = appendHistory(l.history, a)
 			l.mu.Unlock()
+		}
+		if u := prevUnread[e.Subject]; u != nil && u.GivenBack {
+			// Given back from its record while it could not be read: what reads
+			// now is the original the agent set, and the give-back is confirmed.
+			l.expiredFromRecord(now, a, *u)
+			continue
 		}
 		l.gone(now, a, why)
 	}

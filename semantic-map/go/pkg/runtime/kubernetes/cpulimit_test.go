@@ -5,10 +5,16 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
@@ -214,21 +220,34 @@ func TestMemoryCountsSidecarsAndPodLevelResources(t *testing.T) {
 }
 
 // TestReadIsTheLimitTheKubeletApplied: Read reports the limit in force, the
-// container's status.resources, not the spec asked for; while a resize is
-// pending or in progress what is in force is not settled, and Read says so with
-// an error that is not ErrGone.
+// container's status.resources, or the spec when the status says nothing; while
+// a resize is pending or in progress, the spec and the status differ, or the
+// kubelet has not observed the latest generation, what is in force is not
+// settled, and Read says so with an error that is not ErrGone.
 func TestReadIsTheLimitTheKubeletApplied(t *testing.T) {
 	ctx := context.Background()
-	applied := burstable("a", "n1", "ua", "100m", "1", func(p *corev1.Pod) {
+	applied := burstable("a", "n1", "ua", "100m", "2", func(p *corev1.Pod) {
 		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c",
 			Resources: &corev1.ResourceRequirements{Limits: rl("2")}}}
+	})
+	lagging := burstable("d", "n1", "ud", "100m", "1", func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c",
+			Resources: &corev1.ResourceRequirements{Limits: rl("2")}}}
+	})
+	unobserved := burstable("e", "n1", "ue", "100m", "1", func(p *corev1.Pod) {
+		p.Generation, p.Status.ObservedGeneration = 3, 2
 	})
 	plain := burstable("b", "n1", "ub", "100m", "1")
 	resizing := burstable("c", "n1", "uc", "100m", "1", func(p *corev1.Pod) {
 		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodResizeInProgress, Status: corev1.ConditionTrue}}
 	})
-	r, _ := newRT("n1", applied, plain, resizing)
+	r, _ := newRT("n1", applied, plain, resizing, lagging, unobserved)
 	a := NewCPULimit(r)
+	for _, sub := range []string{"pod:ud", "pod:ue"} {
+		if _, _, err := a.Read(ctx, runtime.Workload{Subject: sub}); err == nil || errors.Is(err, actuators.ErrGone) {
+			t.Fatalf("%s read err %v; want not settled (spec and status differ, or generation unobserved)", sub, err)
+		}
+	}
 	if v, set, err := a.Read(ctx, runtime.Workload{Subject: "pod:ua"}); err != nil || !set || v != 2 {
 		t.Fatalf("read %v %v %v; want the applied 2 cores", v, set, err)
 	}
@@ -253,5 +272,120 @@ func TestAResizeTheKubeletCannotTakeIsASetError(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), reason) || errors.Is(err, actuators.ErrGone) {
 			t.Errorf("%s: Set err %v; want an error naming %s", reason, err, reason)
 		}
+	}
+}
+
+// kubelet makes the fake clientset lag like a kubelet: a resize changes the spec
+// at once, and the container's status.resources follow only after lag more
+// listings.
+func kubelet(cs *fake.Clientset, lag int) {
+	var mu sync.Mutex
+	left := -1
+	cs.PrependReactor("patch", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
+		if a.GetSubresource() == "resize" {
+			mu.Lock()
+			if left < 0 { // one already on its way is not started over
+				left = lag
+			}
+			mu.Unlock()
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("list", "pods", func(a k8stesting.Action) (bool, apiruntime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if left < 0 {
+			return false, nil, nil
+		}
+		if left > 0 {
+			left--
+			return false, nil, nil
+		}
+		left = -1
+		gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+		objs, err := cs.Tracker().List(gvr, schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, "default")
+		if err != nil {
+			return true, nil, err
+		}
+		for _, o := range objs.(*corev1.PodList).Items {
+			p := o.DeepCopy()
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: p.Spec.Containers[0].Name,
+				Resources: &corev1.ResourceRequirements{Limits: p.Spec.Containers[0].Resources.Limits.DeepCopy()}}}
+			if err := cs.Tracker().Update(gvr, p, "default"); err != nil {
+				return true, nil, err
+			}
+		}
+		return false, nil, nil
+	})
+}
+
+// applied is a burstable pod whose status reports the limit it was given.
+func applied(limit string) *corev1.Pod {
+	return burstable("a", "n1", "ua", "100m", limit, func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c", Resources: &corev1.ResourceRequirements{Limits: rl(limit)}}}
+	})
+}
+
+// TestACutTheKubeletAppliesLateIsKept: the kubelet applies an accepted resize a
+// moment later. The cut is never committed with the original as Applied nor
+// dropped when it lands: it stays pending, unread while the spec and status
+// differ, and is committed at the cut once they agree.
+func TestACutTheKubeletAppliesLateIsKept(t *testing.T) {
+	r, cs := newRT("n1", applied("1"))
+	kubelet(cs, 3)
+	l := actuators.MemoryLedger()
+	acting := actuators.NewActing("n1", l, NewCPULimit(r))
+	ctx := context.Background()
+	w := workload(t, r, "pod:ua")
+	if _, err := acting.Apply(ctx, w, "cpu.limit", 0.5, time.Now().Add(time.Hour), "d1"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		held, dropped, _, err := acting.Held(ctx, "cpu.limit", []runtime.Workload{w})
+		if err != nil || len(dropped) != 0 {
+			t.Fatalf("held %+v dropped %+v err %v; the cut must never be dropped", held, dropped, err)
+		}
+		if len(held) == 1 {
+			break
+		}
+	}
+	es := l.All()
+	if len(es) != 1 || es[0].Pending || es[0].Applied != 0.5 || es[0].Original != 1 {
+		t.Fatalf("ledger %+v; want the cut committed at 0.5 over the original 1", es)
+	}
+}
+
+// TestAGiveBackTheKubeletAppliesLateKeepsTheEntry: a give-back whose spec holds
+// the original while the status still holds the cut is not given back yet; the
+// entry is deleted only once the status shows the original.
+func TestAGiveBackTheKubeletAppliesLateKeepsTheEntry(t *testing.T) {
+	r, cs := newRT("n1", applied("500m"))
+	l := actuators.MemoryLedger()
+	e := actuators.Entry{Action: "cpu.limit", Subject: "pod:ua", NodeID: "n1", Original: 1, OriginalSet: true, Applied: 0.5}
+	if err := l.Put(e); err != nil {
+		t.Fatal(err)
+	}
+	kubelet(cs, 3)
+	acting := actuators.NewActing("n1", l, NewCPULimit(r))
+	ctx := context.Background()
+	w := workload(t, r, "pod:ua")
+	tries := 0
+	for ; tries < 10 && len(l.All()) == 1; tries++ {
+		err := acting.Revert(ctx, w, e)
+		if len(l.All()) == 0 {
+			if err != nil {
+				t.Fatalf("entry deleted with error %v", err)
+			}
+			break
+		}
+		if !errors.Is(err, actuators.ErrUnconfirmed) {
+			t.Fatalf("revert err %v; want unconfirmed while the status holds the cut", err)
+		}
+	}
+	if tries == 0 || len(l.All()) != 0 {
+		t.Fatalf("after %d tries ledger %+v; want the entry kept a while, then gone", tries, l.All())
+	}
+	if p := getPod(t, cs, "a"); p.Status.ContainerStatuses[0].Resources.Limits.Cpu().MilliValue() != 1000 {
+		t.Fatalf("status %v; want the original 1 core applied", p.Status.ContainerStatuses[0].Resources.Limits)
 	}
 }

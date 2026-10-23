@@ -1322,7 +1322,7 @@ func blindHarness(t *testing.T, noSet bool, subjects ...string) (*harness, *blin
 // resumed and given back as usual, and the unreadable one is retried every tick
 // and given back from the ledger's record once its expiry has passed.
 func TestAnUnreadableEntryDoesNotBlockTheRest(t *testing.T) {
-	h, _ := blindHarness(t, false, "pod:b")
+	h, b := blindHarness(t, false, "pod:b")
 	record(t, h.m, contention, "", 0.5, h.now)
 	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
 		Applied: 1.2, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-1"})
@@ -1347,9 +1347,20 @@ func TestAnUnreadableEntryDoesNotBlockTheRest(t *testing.T) {
 	if a := h.action("pod:a"); a.Outcome != OutcomeExpired {
 		t.Fatalf("pod:a %+v; want expired", a)
 	}
-	h.until(time.Hour, 0.5, "pod:b given back at expiry", func() bool { _, ok := h.applied()["pod:b"]; return !ok })
-	if h.limit("pod:b") != nil {
-		t.Fatalf("pod:b limit %v; want its original (none) back", *h.limit("pod:b"))
+	h.until(time.Hour, 0.5, "pod:b given back at expiry", func() bool { return h.limit("pod:b") == nil })
+	// Given back from the record, but not confirmed while it cannot be read: the
+	// entry stays, and so does its place among the stuck.
+	h.step(0.5)
+	if _, ok := h.applied()["pod:b"]; !ok {
+		t.Fatal("the entry went before the give-back could be confirmed")
+	}
+	if st := h.l.Status(); len(st.Unread) != 1 {
+		t.Fatalf("status %+v; want pod:b still unread", st)
+	}
+	b.see("pod:b")
+	h.step(0.5)
+	if _, ok := h.applied()["pod:b"]; ok {
+		t.Fatal("pod:b's entry is still held once it reads back given back")
 	}
 	if a := h.action("pod:b"); a.Outcome != OutcomeExpired {
 		t.Fatalf("pod:b %+v; want expired", a)
