@@ -51,6 +51,8 @@ type Env struct {
 	CgroupRoot string
 	Runtime    runtime.Runtime
 	Logf       func(format string, args ...any)
+	// Held returns the ledger's outstanding entries for an action. May be nil.
+	Held func(action string) []Entry
 }
 
 // Factory builds the actuator of one registered action.
