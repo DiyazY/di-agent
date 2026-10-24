@@ -51,11 +51,13 @@ type Unread struct {
 	GivenBack bool `json:"given_back,omitempty"`
 
 	live bool // an action in force holds it: its own undo and expiry give it back
-	// reSets counts the Sets of the original after the first give-back, and
-	// nextSet is when the next may be: a few, with backoff, then none, so the
-	// agent never fights another controller over the setting every tick.
-	reSets  int
-	nextSet time.Time
+	// reSets counts the Sets of the original after the first give-back that went
+	// through without reading back as it; tries counts every attempt, refused or
+	// not, and sets the backoff: nextSet is when the next may be. A few, with
+	// backoff, then none, so the agent never fights another controller over the
+	// setting every tick.
+	reSets, tries int
+	nextSet       time.Time
 }
 
 // carry keeps what an unread entry's earlier record knew: attempts, whether it
@@ -64,8 +66,14 @@ func (u *Unread) carry(prev *Unread) {
 	if prev == nil {
 		return
 	}
-	u.Attempts, u.GivenBack, u.reSets, u.nextSet = prev.Attempts+1, prev.GivenBack, prev.reSets, prev.nextSet
+	u.Attempts, u.GivenBack, u.reSets, u.tries, u.nextSet = prev.Attempts+1, prev.GivenBack, prev.reSets, prev.tries, prev.nextSet
+	if u.reSets >= maxReSets && !strings.Contains(u.Error, stoppedNote) {
+		u.Error += stoppedNote
+	}
 }
+
+// stoppedNote is what an unread entry's error says once its re-set budget is spent.
+var stoppedNote = fmt.Sprintf("; set to the original %d more times and it still does not read back as it: no longer written, left for an operator", maxReSets)
 
 // Action is the agent's change to one workload, with what it predicted and what
 // it then observed. A workload stepped again while its change is in force keeps

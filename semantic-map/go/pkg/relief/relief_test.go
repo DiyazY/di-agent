@@ -2052,3 +2052,83 @@ func TestANeverTookCloseThatCannotSaveIsRetried(t *testing.T) {
 		t.Fatalf("reconcile_error %q after it settled; want none", st.ReconcileError)
 	}
 }
+
+// timedSets records when each Set of the actuator it wraps happened.
+type timedSets struct {
+	actuators.Actuator
+	mu    sync.Mutex
+	clock func() time.Time
+	at    []time.Time
+}
+
+func (s *timedSets) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	s.mu.Lock()
+	s.at = append(s.at, s.clock())
+	s.mu.Unlock()
+	return s.Actuator.Set(ctx, w, v, set)
+}
+
+func givenBackHarness(t *testing.T) (*harness, *blind, *timedSets) {
+	var b *blind
+	var ts *timedSets
+	var h *harness
+	h = newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			ts = &timedSets{Actuator: a, clock: func() time.Time { return h.clock() }}
+			b = &blind{Actuator: ts, noRead: map[string]bool{"pod:b": true}, noSet: map[string]bool{}}
+			return d, b
+		}})
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(5 * time.Minute), DecisionID: "relief-act-1-2"})
+	ts.mu.Lock()
+	ts.at = nil // the seed's own Set
+	ts.mu.Unlock()
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	return h, b, ts
+}
+
+// TestAGiveBackBacksOffDoubling: after the give-back, the original is set again
+// three times, waiting twice, four and eight times the loop's interval.
+func TestAGiveBackBacksOffDoubling(t *testing.T) {
+	h, _, ts := givenBackHarness(t)
+	h.run(2*time.Hour, 0.05)
+	ts.mu.Lock()
+	at := append([]time.Time(nil), ts.at...)
+	ts.mu.Unlock()
+	if len(at) != 4 {
+		t.Fatalf("%d Sets at %v; want the give-back and 3 more", len(at), at)
+	}
+	iv := h.l.cfg.Interval
+	for i, want := range []time.Duration{2 * iv, 4 * iv, 8 * iv} {
+		if got := at[i+1].Sub(at[i]); got != want {
+			t.Errorf("wait %d: %s; want %s", i+1, got, want)
+		}
+	}
+}
+
+// TestAGiveBackRefusedOutrightKeepsItsBudget: a Set that fails outright, rather
+// than going through without reading back, does not count toward the three
+// re-sets; it backs off all the same.
+func TestAGiveBackRefusedOutrightKeepsItsBudget(t *testing.T) {
+	h, b, ts := givenBackHarness(t)
+	h.until(10*time.Minute, 0.05, "the give-back", func() bool { ts.mu.Lock(); defer ts.mu.Unlock(); return len(ts.at) == 1 })
+	b.mu.Lock()
+	b.noSet["pod:b"] = true
+	b.mu.Unlock()
+	h.run(30*time.Minute, 0.05)
+	b.mu.Lock()
+	b.noSet["pod:b"] = false
+	b.mu.Unlock()
+	h.run(3*time.Hour, 0.05)
+	ts.mu.Lock()
+	n := len(ts.at)
+	ts.mu.Unlock()
+	if n != 4 {
+		t.Fatalf("%d Sets that went through; want the give-back and 3 re-sets, refusals not counted", n)
+	}
+	if st := h.l.Status(); len(st.Unread) != 1 || !strings.Contains(st.Unread[0].Error, "3 more times") {
+		t.Fatalf("unread %+v; want it left for an operator, saying so", st.Unread)
+	}
+}

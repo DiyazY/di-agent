@@ -68,8 +68,12 @@ func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 }
 
 // maxReSets bounds how many more times a given-back change is set to its
-// original when it does not read back as it.
-const maxReSets = 3
+// original when it does not read back as it. The waits double from twice the
+// loop's interval: ×2, ×4, ×8, at most ×2^maxBackoffShift.
+const (
+	maxReSets       = 3
+	maxBackoffShift = 6
+)
 
 // expireUnread gives back, from the ledger's record itself, every change whose
 // setting could not be read and whose expiry has passed: its original is set
@@ -106,13 +110,18 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 				cur.Error = err.Error()
 				switch {
 				case cur.GivenBack:
-					cur.reSets++
-					cur.nextSet = now.Add(l.cfg.Interval << cur.reSets)
+					// Only a Set that went through and still does not read back
+					// counts toward the budget; a refusal backs off all the same.
+					if errors.Is(err, actuators.ErrUnconfirmed) {
+						cur.reSets++
+					}
+					cur.tries++
+					cur.nextSet = now.Add(l.cfg.Interval << min(cur.tries+1, maxBackoffShift))
 					if cur.reSets >= maxReSets {
-						cur.Error += fmt.Sprintf("; set back %d more times without reading back as the original: no longer written, left for an operator", maxReSets)
+						cur.Error += stoppedNote
 					}
 				case errors.Is(err, actuators.ErrUnconfirmed):
-					cur.GivenBack, cur.nextSet = true, now.Add(l.cfg.Interval)
+					cur.GivenBack, cur.nextSet = true, now.Add(l.cfg.Interval<<1)
 				}
 			}
 			l.mu.Unlock()
