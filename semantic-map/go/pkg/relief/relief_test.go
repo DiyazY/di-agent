@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/testhooks"
 	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
@@ -1583,7 +1584,8 @@ func TestDropsBeforeAFailedSaveAreJournalled(t *testing.T) {
 		h.seed(actuators.Entry{NodeID: "n1", Subject: s, Action: cpu.Action, Applied: 0.9, Expires: h.now.Add(time.Hour), DecisionID: "d-" + s})
 		h.rt.Remove(s)
 	}
-	h.ledger.FailSaves(1, errors.New("disk full"))
+	testhooks.LedgerSave = testhooks.FailAfter(1, errors.New("disk full"))
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
 	if err := h.l.Reconcile(h.ctx); err == nil {
 		t.Fatal("want the save error")
 	}

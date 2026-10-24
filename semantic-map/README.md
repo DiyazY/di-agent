@@ -227,6 +227,7 @@ semantic-map/
     │
     ├── internal/               Implementation packages — not importable externally
     │   ├── scripted/           Synthetic collectors for demos, scenarios and tests
+    │   ├── testhooks/          Hooks tests set to make production code fail where nothing else can (a ledger save); nil outside a test
     │   │   ├── collector.go    ScriptedCollector — programmable patterns (Constant /
     │   │   │                   Ramp / Step / Sine / Burst / Noisy)
     │   │   ├── collector_test.go

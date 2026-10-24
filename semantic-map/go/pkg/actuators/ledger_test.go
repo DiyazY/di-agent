@@ -148,3 +148,11 @@ func TestOpenLedgerRefusesAnInvalidEntryOnDisk(t *testing.T) {
 		t.Fatalf("err %v; want a refusal naming %s and the entry", err, p)
 	}
 }
+
+// TestTheLedgerExportsNoTestHook: a hook that makes saves fail is for tests and
+// must not be reachable by an importer.
+func TestTheLedgerExportsNoTestHook(t *testing.T) {
+	if _, ok := reflect.TypeOf(&Ledger{}).MethodByName("FailSaves"); ok {
+		t.Fatal("Ledger exports FailSaves")
+	}
+}

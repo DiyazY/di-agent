@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/testhooks"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 )
 
@@ -758,7 +759,8 @@ func TestHeldReturnsWhatItDroppedBeforeASaveFailed(t *testing.T) {
 		f.gone[s] = true
 	}
 	boom := errors.New("disk full")
-	l.FailSaves(1, boom)
+	testhooks.LedgerSave = testhooks.FailAfter(1, boom)
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
 	_, dropped, _, err := held4(a, ctx, "fake", []runtime.Workload{wl("x")})
 	if !errors.Is(err, boom) || len(dropped) != 1 || len(l.All()) != 2 {
 		t.Fatalf("dropped %+v err %v ledger %+v; want the one deleted before the failure returned with it", dropped, err, l.All())

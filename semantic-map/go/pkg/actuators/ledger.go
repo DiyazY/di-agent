@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/DiyazY/di-agent/internal/testhooks"
 )
 
 // Entry is one change the agent made and still holds: what it set, and what the
@@ -74,18 +76,9 @@ type ledgerFile struct {
 type Ledger struct {
 	path string // "" keeps it in memory
 
-	mu        sync.Mutex
-	entries   map[ledgerKey]Entry
-	saveErr   error // when set, saving fails with it; for tests
-	saveAfter int   // saves left before saveErr applies; for tests
-}
-
-// FailSaves makes every save after the next after ones fail with err, as a disk
-// that fills partway through: for tests of what a caller does then.
-func (l *Ledger) FailSaves(after int, err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.saveAfter, l.saveErr = after, err
+	mu      sync.Mutex
+	entries map[ledgerKey]Entry
+	saveErr error // when set, saving fails with it; for tests
 }
 
 // MemoryLedger is a ledger that never touches disk.
@@ -255,10 +248,11 @@ func (l *Ledger) For(action string) []Entry {
 // new, never half of one, and a change recorded stays recorded.
 func (l *Ledger) saveLocked() error {
 	if l.saveErr != nil {
-		if l.saveAfter > 0 {
-			l.saveAfter--
-		} else {
-			return l.saveErr
+		return l.saveErr
+	}
+	if h := testhooks.LedgerSave; h != nil {
+		if err := h(); err != nil {
+			return err
 		}
 	}
 	if l.path == "" {
