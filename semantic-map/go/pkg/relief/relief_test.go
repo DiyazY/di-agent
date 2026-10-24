@@ -1858,3 +1858,22 @@ func TestAGiveBackIsNotRewrittenWithoutBound(t *testing.T) {
 		t.Fatalf("status %+v; want it still shown stuck, given back", st)
 	}
 }
+
+// TestAStuckChangeInForceCountsOnce: a change in force whose undo was refused and
+// whose pending entry cannot be read is one stuck change, not two.
+func TestAStuckChangeInForceCountsOnce(t *testing.T) {
+	var b *blindAfterSet
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			b = &blindAfterSet{Actuator: a, blind: map[string]bool{}}
+			return d, b
+		}})
+	h.act("pod:a")
+	h.step(0.5)
+	h.l.mu.Lock()
+	h.l.inFlight.RevertAttempts, h.l.inFlight.LastError = 1, "refused"
+	h.l.mu.Unlock()
+	if st := h.l.Status(); len(st.Unread) != 1 || st.Stuck != 1 {
+		t.Fatalf("status stuck %d unread %d; want one stuck change", st.Stuck, len(st.Unread))
+	}
+}

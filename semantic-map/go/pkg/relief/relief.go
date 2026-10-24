@@ -269,16 +269,20 @@ func (l *Loop) Status() Status {
 		a := copyAction(l.inFlight)
 		st.InFlight = &a
 	}
+	refused := map[string]bool{}
 	for _, a := range l.liveLocked() {
 		if a.RevertAttempts > 0 {
 			st.Stuck++
+			refused[a.Subject] = true
 		}
 	}
 	for _, u := range l.unread {
 		st.Unread = append(st.Unread, *u)
+		if !(u.live && refused[u.Entry.Subject]) { // a change in force is stuck once
+			st.Stuck++
+		}
 	}
 	sort.Slice(st.Unread, func(i, j int) bool { return st.Unread[i].Entry.Subject < st.Unread[j].Entry.Subject })
-	st.Stuck += len(st.Unread)
 	st.ReconcileError = l.reconcileErr
 	if judged := l.nKept + l.nReverted; judged > 0 {
 		st.PredictionsHeld = float64(l.nKept) / float64(judged)
