@@ -26,7 +26,8 @@ const (
 	// scaled to nothing, nor more than doubled, on its own history.
 	effectMin, effectMax = 0.1, 2.0
 	// confoundAbs is the smallest absolute change in another workload's share of
-	// node CPU that confounds an outcome: below it, a relative change is a small
+	// the node's usage (the descriptor's Usage: CPU for cpu.limit, memory for
+	// memory.high) that confounds an outcome: below it, a relative change is a small
 	// pod's noise.
 	confoundAbs = 0.02
 	// bindRatio is how close to its cap a throttled workload's usage must be at
@@ -86,12 +87,12 @@ func (e *effects) Of(subject, basis string) float64 {
 	return 1
 }
 
-// workloadShares is every workload's current share of node CPU, as the map holds
-// it: each subject with an active cpu_utilization@<subject>.
-func workloadShares(m *statemap.Map) map[string]float64 {
+// workloadShares is every workload's current share of the node's usage, as the
+// map holds it: each subject with an active usage@<subject>.
+func workloadShares(m *statemap.Map, usage string) map[string]float64 {
 	out := map[string]float64{}
 	for _, s := range m.Subjects() {
-		if v, ok := share(m, s); ok {
+		if v, ok := share(m, usage, s); ok {
 			out[s] = v
 		}
 	}
@@ -99,7 +100,7 @@ func workloadShares(m *statemap.Map) map[string]float64 {
 }
 
 // movedSince lists, sorted, the workloads other than throttled whose share of
-// node CPU has moved since at was taken by more than step relative to their
+// the node's usage (the descriptor's Usage) has moved since at was taken by more than step relative to their
 // share then and by more than 0.02 absolute. A workload live now and absent from
 // at arrived since, from a share of nothing. left lists those that were using
 // more than 0.02 then and are not live now: their going took their load with
@@ -113,8 +114,8 @@ func workloadShares(m *statemap.Map) map[string]float64 {
 // What throttled gave up is known only while the map holds its share: without
 // one nothing counts as freed. Whether an absorbed rise is innocent depends on the
 // verdict, which confoundedBy decides.
-func movedSince(m *statemap.Map, at map[string]float64, throttled string, step float64) (moved, left, absorbed []string) {
-	live := workloadShares(m)
+func movedSince(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64) (moved, left, absorbed []string) {
+	live := workloadShares(m, usage)
 	var risen []string
 	rise := 0.0
 	for s, now := range live {
@@ -154,7 +155,8 @@ func movedSince(m *statemap.Map, at map[string]float64, throttled string, step f
 }
 
 // measuredEffect is what one outcome measured about the relationship it tests: the
-// drop in node contention per unit drop in the workload's share of node CPU, both
+// drop in node contention per unit drop in the workload's share of the node's
+// usage (the descriptor's Usage: CPU for cpu.limit, memory for memory.high), both
 // fractions of the node, so in the range-normalised units the estimate projects in.
 // It is clamped to [0, 1] like every strength, a rise in contention measuring zero.
 // A share that fell by no more than confoundAbs gives nothing to divide by, and no
@@ -184,13 +186,14 @@ func confoundedBy(moved, left, absorbed []string, agreed bool) []string {
 // confounded reports whether another workload moved, arrived or left while the
 // throttled one's outcome was being observed, so the change in node pressure
 // cannot be put down to the action alone.
-func confounded(m *statemap.Map, at map[string]float64, throttled string, step float64, agreed bool) bool {
-	moved, left, absorbed := movedSince(m, at, throttled, step)
+func confounded(m *statemap.Map, usage string, at map[string]float64, throttled string, step float64, agreed bool) bool {
+	moved, left, absorbed := movedSince(m, usage, at, throttled, step)
 	return len(confoundedBy(moved, left, absorbed, agreed)) > 0
 }
 
 // learn makes a judged action evidence, when it is: an intervention recorded on
-// cpu_utilization@<subject> → cpu_pressure_ratio, the workload's effect updated
+// Usage@<subject> → Relieves (cpu_utilization@<subject> → cpu_contention_ratio
+// for cpu.limit), the workload's effect updated
 // when nothing else moved, and a pending candidate on that pair settled when the
 // interventions created or promoted the relationship. What it fed, and why not
 // when it did not, goes into the verify decision b. Called under the pass lock,
@@ -201,7 +204,7 @@ func confounded(m *statemap.Map, at map[string]float64, throttled string, step f
 // is no prediction, or when the cap did not bind: a workload using well under its
 // new limit at verify asked for less on its own, so the drop is not the cap's.
 func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, agreed bool, observed float64, now time.Time) {
-	moved, left, absorbed := movedSince(l.cfg.Map, a.SharesAtAct, a.Subject, l.c.Step)
+	moved, left, absorbed := movedSince(l.cfg.Map, l.d.Usage, a.SharesAtAct, a.Subject, l.c.Step)
 	by := confoundedBy(moved, left, absorbed, agreed)
 	conf := len(by) > 0
 	b.Input("confounded", map[string]any{"confounded": conf, "moved": moved, "left": left, "absorbed": absorbed})
@@ -210,7 +213,7 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 	if v, ok := a.SharesAtAct[a.Subject]; ok {
 		ss["at_act"] = v
 	}
-	nowShare, haveShare := share(l.cfg.Map, a.Subject)
+	nowShare, haveShare := share(l.cfg.Map, l.d.Usage, a.Subject)
 	if haveShare {
 		ss["at_verify"] = nowShare
 	}
@@ -236,8 +239,8 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 		b.Note("other workloads moved while the outcome was observed (%s): recorded, teaches nothing", strings.Join(by, ", "))
 	}
 
-	from := NodeUsage + "@" + a.Subject
-	o := statemap.InterventionOutcome{From: from, To: NodeContention, Agreed: agreed, Confounded: conf, DecisionID: verifyID}
+	from := l.d.Usage + "@" + a.Subject
+	o := statemap.InterventionOutcome{From: from, To: l.d.Relieves, Agreed: agreed, Confounded: conf, DecisionID: verifyID}
 	if then, ok := a.SharesAtAct[a.Subject]; ok && haveShare {
 		o.Effect, o.HasEffect = measuredEffect(observed, then, nowShare)
 	}
@@ -276,23 +279,25 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 }
 
 // unbound says why the cap could not have caused the outcome, or "" when it
-// bound: the workload's usage at verify, in cores, is at least 0.9 of its new
-// limit. With no current usage or no core count, binding cannot be shown.
+// bound: the workload's usage at verify, in the action's unit, is at least 0.9
+// of its new setting. With no current usage or no capacity fact, binding cannot
+// be shown.
 func (l *Loop) unbound(a *Action, nowShare float64, haveShare bool) string {
-	n, ok := coreCount(l.cfg.Map)
+	n, ok := capacity(l.cfg.Map, l.d)
 	switch {
 	case !haveShare:
 		return "the cap's effect cannot be shown: " + a.Subject + " has no current usage"
 	case !ok:
-		return "the cap's effect cannot be shown: " + noCores
+		return "the cap's effect cannot be shown: " + noCapacity(l.d)
 	}
-	if used := nowShare * n; used < bindRatio*a.Plan.ToCores {
-		return fmt.Sprintf("the cap did not bind: usage %.3f cores under the %.3f-core limit", used, a.Plan.ToCores)
+	if used := nowShare * n; used < bindRatio*a.Plan.To {
+		return fmt.Sprintf("the cap did not bind: usage %.3f %s under the %.3f-%s limit", used, l.d.Unit, a.Plan.To,
+			strings.TrimSuffix(l.d.Unit, "s"))
 	}
 	return ""
 }
 
-// settle confirms the pending candidate on from → cpu_pressure_ratio, if there is
+// settle confirms the pending candidate on from → the node's Relieves, if there is
 // one: directed that way, or undirected in either order. What it settled, or why
 // it could not, goes into the verify decision.
 func (l *Loop) settle(b *statemap.DecisionBuilder, verifyID, from string, now time.Time) {
@@ -305,8 +310,9 @@ func (l *Loop) settle(b *statemap.DecisionBuilder, verifyID, from string, now ti
 		return
 	}
 	for _, c := range pending {
-		directed := !c.Undirected && c.FromID == from && c.ToID == NodeContention
-		undirected := c.Undirected && ((c.FromID == from && c.ToID == NodeContention) || (c.FromID == NodeContention && c.ToID == from))
+		to := l.d.Relieves
+		directed := !c.Undirected && c.FromID == from && c.ToID == to
+		undirected := c.Undirected && ((c.FromID == from && c.ToID == to) || (c.FromID == to && c.ToID == from))
 		if !directed && !undirected || c.Direction == types.Negative {
 			continue
 		}

@@ -68,11 +68,15 @@ func (p *Policy) For(t Target) Effective {
 			e.Frozen, e.FrozenBy = true, fmt.Sprintf("rule %d", i)
 		}
 	}
-	// Every bound is set, so a reader never meets a nil one.
-	cores, share := e.Settings.Floor.Values()
-	e.Settings.Floor = spec.NewFloor(cores, share)
+	// Every bound of every action named is set, so a reader never meets a nil one.
+	for a := range e.Settings.Floor {
+		e.Settings.Floor[a] = spec.NewBound(e.Settings.Floor.Values(a))
+	}
 	return e
 }
+
+// Defaults is the settings of a workload no rule matches, as a copy.
+func (p *Policy) Defaults() spec.Settings { return copySettings(p.spec.Defaults) }
 
 // Allows reports whether the action may be taken: not frozen, allowed, and not
 // denied. Deny beats allow.
@@ -98,7 +102,8 @@ func matches(m spec.Match, t Target) bool {
 	return true
 }
 
-// overlay sets onto s every field r leaves set; a floor field by field.
+// overlay sets onto s every field r leaves set; a floor action by action and
+// bound by bound.
 func overlay(s *spec.Settings, r spec.Settings) {
 	if r.Allow != nil {
 		s.Allow = append([]string(nil), r.Allow...)

@@ -1,21 +1,50 @@
 package relief
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/runtime"
+	"github.com/DiyazY/di-agent/pkg/runtime/kubernetes"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 var unit = [2]float64{0, 1}
 
+// cpu is the descriptor the loop is tested with: the cpu.limit action's own, so
+// the metric names, unit and capacity fact are the ones the agent runs with.
+var cpu = kubernetes.CPULimitDescriptor
+
+// The node properties cpu.limit relieves and moves.
+var (
+	contention = cpu.Relieves
+	nodeUsage  = cpu.Usage
+)
+
+// cpuActuator is cpu.limit over the workloads' own inventory: Read is the
+// limit the workload lists until a Set, and check (nil: always) is its Check.
+func cpuActuator(check func(runtime.Workload) string) actuators.Actuator {
+	return actuators.Static(cpu, check, func(w runtime.Workload) (float64, bool) {
+		if l := w.Resources["cpu"].Limit; l != nil {
+			return *l, true
+		}
+		return 0, false
+	})
+}
+
+// limiter is the actuator the plan tests attribute and plan with; they never Set.
+var limiter = cpuActuator(nil)
+
+var ctx = context.Background()
+
 // reliefCfg is the spec's defaults, so a test reads against the numbers an
 // operator gets.
-func reliefCfg() spec.CPURelief { return spec.Default().Loops.Relief.CPU }
+func reliefCfg() spec.Lever { return spec.Default().Loops.Relief.Levers[0] }
 
 // defaultPolicy is the spec's default policy with the hourly limit and
 // cooldown a test may want to change.
@@ -48,12 +77,12 @@ func record(t *testing.T, m *statemap.Map, id, subject string, v float64, at tim
 	}
 }
 
-func usage(subject string) string { return NodeUsage + "@" + subject }
+func usage(subject string) string { return nodeUsage + "@" + subject }
 
 // relate declares subject's usage as driving node pressure with strength s.
 func relate(t *testing.T, m *statemap.Map, subject string, s float64) {
 	t.Helper()
-	r := statemap.Relationship{From: usage(subject), To: NodeContention, Sign: 1, Label: "drives"}
+	r := statemap.Relationship{From: usage(subject), To: contention, Sign: 1, Label: "drives"}
 	if err := m.DeclareRelationship(r); err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +99,22 @@ func cores(t *testing.T, m *statemap.Map, n float64) {
 }
 
 func pod(subject string) runtime.Workload {
-	return runtime.Workload{Subject: subject, Name: strings.TrimPrefix(subject, "pod:"),
-		Can: map[string]string{runtime.ActionCPULimit: ""}}
+	return runtime.Workload{Subject: subject, Name: strings.TrimPrefix(subject, "pod:")}
 }
 
+// limited gives w a CPU limit; it keeps any request.
 func limited(w runtime.Workload, limit float64) runtime.Workload {
-	w.CPU.Limit = &limit
+	r := w.Resources["cpu"]
+	r.Limit = &limit
+	w.Resources = map[string]runtime.Resource{"cpu": r}
+	return w
+}
+
+// requested gives w a CPU request; it keeps any limit.
+func requested(w runtime.Workload, request float64) runtime.Workload {
+	r := w.Resources["cpu"]
+	r.Request = &request
+	w.Resources = map[string]runtime.Resource{"cpu": r}
 	return w
 }
 
@@ -86,8 +125,8 @@ func one(string, string) float64 { return 1 }
 func planFixture(t *testing.T, s float64) *statemap.Map {
 	t.Helper()
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodeContention, "", 0.5, t0)
-	record(t, m, NodeUsage, "", 0.8, t0)
+	record(t, m, contention, "", 0.5, t0)
+	record(t, m, nodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	relate(t, m, "pod:a", s)
 	cores(t, m, 4)
@@ -105,8 +144,8 @@ func subjects(cs []Candidate) []string {
 func TestAVictimIsNotACandidate(t *testing.T) {
 	m := planFixture(t, 1)
 	record(t, m, usage("pod:v"), "pod:v", 0.02, t0)
-	record(t, m, NodeContention+"@pod:v", "pod:v", 0.9, t0)
-	cs := Attribute(m, []runtime.Workload{pod("pod:a"), pod("pod:v")}, defaultPolicy(t, nil), reliefCfg())
+	record(t, m, contention+"@pod:v", "pod:v", 0.9, t0)
+	cs := Attribute(m, limiter, []runtime.Workload{pod("pod:a"), pod("pod:v")}, defaultPolicy(t, nil), reliefCfg())
 	for _, c := range cs {
 		if c.Subject == "pod:v" {
 			t.Fatalf("candidates %v: a workload using 2%% of the node is a victim, not a cause", subjects(cs))
@@ -120,7 +159,7 @@ func TestAVictimIsNotACandidate(t *testing.T) {
 func TestTheMapRanksBeforeUsage(t *testing.T) {
 	m := planFixture(t, 1)
 	record(t, m, usage("pod:b"), "pod:b", 0.6, t0)
-	cs := Attribute(m, []runtime.Workload{pod("pod:b"), pod("pod:a")}, defaultPolicy(t, nil), reliefCfg())
+	cs := Attribute(m, limiter, []runtime.Workload{pod("pod:b"), pod("pod:a")}, defaultPolicy(t, nil), reliefCfg())
 	if len(cs) != 2 || cs[0].Subject != "pod:a" || cs[1].Subject != "pod:b" {
 		t.Fatalf("candidates %v; want pod:a (the map) before pod:b (usage)", subjects(cs))
 	}
@@ -136,33 +175,28 @@ func TestAFrozenWorkloadIsSkipped(t *testing.T) {
 	m := planFixture(t, 1)
 	w := pod("pod:a")
 	w.Labels = map[string]string{"di-agent/freeze": "true"}
-	if cs := Attribute(m, []runtime.Workload{w}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
+	if cs := Attribute(m, limiter, []runtime.Workload{w}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
 		t.Fatalf("candidates %v; a frozen workload is not one", subjects(cs))
 	}
 	self := pod("pod:a")
 	self.Self = true
-	if cs := Attribute(m, []runtime.Workload{self}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
+	if cs := Attribute(m, limiter, []runtime.Workload{self}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
 		t.Fatalf("candidates %v; the agent itself is not one", subjects(cs))
 	}
 }
 
 func TestAWorkloadThatCannotBeResizedIsSkipped(t *testing.T) {
 	m := planFixture(t, 1)
-	w := pod("pod:a")
-	w.Can[runtime.ActionCPULimit] = "QoS would change"
-	if cs := Attribute(m, []runtime.Workload{w}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
-		t.Fatalf("candidates %v; the runtime said it cannot resize this one", subjects(cs))
-	}
-	w.Can = nil
-	if cs := Attribute(m, []runtime.Workload{w}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
-		t.Fatalf("candidates %v; a workload that lists no actions cannot take this one", subjects(cs))
+	refusing := cpuActuator(func(runtime.Workload) string { return "QoS would change" })
+	if cs := Attribute(m, refusing, []runtime.Workload{pod("pod:a")}, defaultPolicy(t, nil), reliefCfg()); len(cs) != 0 {
+		t.Fatalf("candidates %v; the actuator said it cannot resize this one", subjects(cs))
 	}
 }
 
 func TestTheStepRespectsTheFloors(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodeContention, "", 0.5, t0)
-	record(t, m, NodeUsage, "", 0.8, t0)
+	record(t, m, contention, "", 0.5, t0)
+	record(t, m, nodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:a"), "pod:a", 0.1, t0)
 	relate(t, m, "pod:a", 1)
 	cores(t, m, 4)
@@ -170,12 +204,12 @@ func TestTheStepRespectsTheFloors(t *testing.T) {
 	pol := defaultPolicy(t, nil)
 	c := reliefCfg()
 	c.MinEffect = 0.01 // a 0.1 share stepped by a quarter predicts 0.025
-	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	p, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one)
 	if !ok {
 		t.Fatalf("no plan: %s", why)
 	}
 	// 0.1 of 4 cores = 0.4; max(0.4·0.75, 0.1, 0.5·0.5) = 0.3
-	if !near(p.FromCores, 0.4) || !near(p.ToCores, 0.3) {
+	if !near(p.From, 0.4) || !near(p.To, 0.3) {
 		t.Fatalf("plan %+v; want 0.4 → 0.3 cores", p)
 	}
 	if p.EstimateID == "" || p.Subject != "pod:a" || p.Rule != -1 {
@@ -183,8 +217,8 @@ func TestTheStepRespectsTheFloors(t *testing.T) {
 	}
 
 	// A floor at or above usage leaves no step to take.
-	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = spec.NewFloor(0.4, 0) })
-	if _, ok, why := MakePlan(m, Attribute(m, ws, high, c), ws, high, c, one); ok || !strings.Contains(why, "floor") {
+	high := defaultPolicy(t, func(ps *spec.PolicySpec) { ps.Defaults.Floor = spec.Floor{"cpu.limit": spec.NewBound(0.4, 0)} })
+	if _, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, high, c), ws, high, c, one); ok || !strings.Contains(why, "floor") {
 		t.Fatalf("ok=%v why=%q; want refused at the floor", ok, why)
 	}
 }
@@ -195,7 +229,7 @@ func TestAStepThatDoesNotHelpIsNotTaken(t *testing.T) {
 	ws := []runtime.Workload{pod("pod:a")}
 	pol := defaultPolicy(t, nil)
 	c := reliefCfg()
-	_, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	_, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one)
 	if ok || !strings.Contains(why, "min_effect") {
 		t.Fatalf("ok=%v why=%q; want refused below min_effect", ok, why)
 	}
@@ -207,7 +241,7 @@ func TestAUsageCandidateIsPredictedFromItsShare(t *testing.T) {
 	ws := []runtime.Workload{pod("pod:b")}
 	pol := defaultPolicy(t, nil)
 	c := reliefCfg()
-	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	p, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one)
 	if !ok {
 		t.Fatalf("no plan: %s", why)
 	}
@@ -219,14 +253,14 @@ func TestAUsageCandidateIsPredictedFromItsShare(t *testing.T) {
 
 func TestNoCoresNoPlan(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodeContention, "", 0.5, t0)
-	record(t, m, NodeUsage, "", 0.8, t0)
+	record(t, m, contention, "", 0.5, t0)
+	record(t, m, nodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:a"), "pod:a", 0.4, t0)
 	relate(t, m, "pod:a", 1)
 	ws := []runtime.Workload{pod("pod:a")}
 	pol := defaultPolicy(t, nil)
 	c := reliefCfg()
-	_, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	_, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one)
 	if ok || why != "no cpu_cores fact: shares cannot become cores" {
 		t.Fatalf("ok=%v why=%q", ok, why)
 	}
@@ -239,18 +273,18 @@ func near(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
 // is what the plan predicts by assuming a new cpu_utilization@<subject>.
 func TestOnlyItsOwnUsageRanksAWorkloadByTheMap(t *testing.T) {
 	m := newMap(t, func() time.Time { return t0 })
-	record(t, m, NodeContention, "", 0.5, t0)
-	record(t, m, NodeUsage, "", 0.8, t0)
+	record(t, m, contention, "", 0.5, t0)
+	record(t, m, nodeUsage, "", 0.8, t0)
 	record(t, m, usage("pod:q"), "pod:q", 0.4, t0)
 	record(t, m, "queue@pod:q", "pod:q", 0.9, t0)
-	r := statemap.Relationship{From: "queue@pod:q", To: NodeContention, Sign: 1, Label: "drives"}
+	r := statemap.Relationship{From: "queue@pod:q", To: contention, Sign: 1, Label: "drives"}
 	if err := m.DeclareRelationship(r); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AssertRelationshipStrength(statemap.RelationshipID(r.From, r.To, r.Label), 1, "test", "fixture"); err != nil {
 		t.Fatal(err)
 	}
-	cs := Attribute(m, []runtime.Workload{pod("pod:q")}, defaultPolicy(t, nil), reliefCfg())
+	cs := Attribute(m, limiter, []runtime.Workload{pod("pod:q")}, defaultPolicy(t, nil), reliefCfg())
 	if len(cs) != 1 || cs[0].Basis != BasisUsage {
 		t.Fatalf("candidates %+v; want pod:q ranked on usage", cs)
 	}
@@ -258,19 +292,16 @@ func TestOnlyItsOwnUsageRanksAWorkloadByTheMap(t *testing.T) {
 
 func TestTheStepNeverGoesBelowTheRequest(t *testing.T) {
 	m := planFixture(t, 1)
-	w := limited(pod("pod:a"), 2)
-	req := 1.4
-	w.CPU.Request = &req
-	ws := []runtime.Workload{w}
+	ws := []runtime.Workload{requested(limited(pod("pod:a"), 2), 1.4)}
 	pol := defaultPolicy(t, nil)
 	c := reliefCfg()
 	c.MinEffect = 0.001
-	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	p, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one)
 	if !ok {
 		t.Fatalf("no plan: %s", why)
 	}
 	// 0.4 of 4 cores = 1.6; the step alone would reach 1.2, but the request is 1.4.
-	if !near(p.FromCores, 1.6) || !near(p.ToCores, 1.4) {
+	if !near(p.From, 1.6) || !near(p.To, 1.4) {
 		t.Fatalf("plan %+v; want 1.6 → 1.4 cores", p)
 	}
 }
@@ -280,19 +311,16 @@ func TestTheStepNeverGoesBelowTheRequest(t *testing.T) {
 func TestTheUsagePredictionUsesTheFlooredCut(t *testing.T) {
 	m := planFixture(t, 1)
 	record(t, m, usage("pod:b"), "pod:b", 0.6, t0)
-	w := pod("pod:b")
-	req := 2.0
-	w.CPU.Request = &req
-	ws := []runtime.Workload{w}
+	ws := []runtime.Workload{requested(pod("pod:b"), 2.0)}
 	pol := defaultPolicy(t, nil)
 	c := reliefCfg()
-	p, ok, why := MakePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one)
+	p, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one)
 	if !ok {
 		t.Fatalf("no plan: %s", why)
 	}
 	// 0.6 of 4 cores = 2.4; the step would reach 1.8, the request holds it at 2.0:
 	// a cut of 1 − 2.0/2.4 = 1/6, not the step's 0.25.
-	if !near(p.ToCores, 2.0) || p.Basis != BasisUsage {
+	if !near(p.To, 2.0) || p.Basis != BasisUsage {
 		t.Fatalf("plan %+v; want a usage plan to 2.0 cores", p)
 	}
 	if want := 0.6 * (1 - 2.0/2.4) * 0.5 / 0.8; !near(p.Predicted, want) {
@@ -310,11 +338,75 @@ func TestARefusalSaysTheFloorHeldTheStep(t *testing.T) {
 	ws := []runtime.Workload{limited(pod("pod:a"), 1.518)}
 	pol := defaultPolicy(t, nil) // floor 0.1 cores, 0.5 of the original limit
 	c := reliefCfg()
-	_, ok, why := makePlan(m, Attribute(m, ws, pol, c), ws, pol, c, one, map[string]float64{"pod:a": 3})
+	_, ok, why := makePlan(ctx, m, limiter, Attribute(m, limiter, ws, pol, c), ws, pol, c, one, map[string]float64{"pod:a": 3})
 	if ok {
 		t.Fatal("planned; want refused, the step is 1.518 → 1.5 cores")
 	}
 	if !strings.Contains(why, "below min_effect") || !strings.Contains(why, "the floor holds the step to 1.500 cores") {
 		t.Fatalf("why=%q; want the min_effect refusal to name the floor that held the step", why)
+	}
+}
+
+// TestPlanCPUUnchanged: the plan the descriptor-driven arithmetic makes for CPU
+// is, to the last bit, the one the CPU-only arithmetic made before it: a map
+// candidate capped at 2 cores and a usage candidate with no limit, on 4 cores.
+func TestPlanCPUUnchanged(t *testing.T) {
+	m := planFixture(t, 1)
+	record(t, m, usage("pod:b"), "pod:b", 0.6, t0)
+	ws := []runtime.Workload{limited(pod("pod:a"), 2), pod("pod:b")}
+	pol := defaultPolicy(t, nil)
+	c := reliefCfg()
+	for _, want := range []Plan{
+		{Subject: "pod:a", From: 1.6000000000000001, To: 1.2000000000000002, Predicted: 0.099999999999999978, Basis: BasisMap},
+		{Subject: "pod:b", From: 2.3999999999999999, To: 1.7999999999999998, Predicted: 0.09375, Basis: BasisUsage},
+	} {
+		var in []runtime.Workload
+		for _, w := range ws {
+			if w.Subject == want.Subject {
+				in = append(in, w)
+			}
+		}
+		p, ok, why := MakePlan(ctx, m, limiter, Attribute(m, limiter, in, pol, c), ws, pol, c, one)
+		if !ok {
+			t.Fatalf("%s: no plan: %s", want.Subject, why)
+		}
+		if p.From != want.From || p.To != want.To || p.Predicted != want.Predicted || p.Basis != want.Basis || p.Unit != "cores" {
+			t.Errorf("plan %+v; want from %.17g to %.17g predicted %.17g (%s) in cores", p, want.From, want.To, want.Predicted, want.Basis)
+		}
+	}
+}
+
+// TestTheDefaultMemoryLeverCanPlanAtEnter: at the default memory lever's enter
+// threshold, a usage-basis step on a pod whose share of the node's memory usage
+// is 0.7 clears min_effect; one at 0.4 does not, and is refused for it.
+func TestTheDefaultMemoryLeverCanPlanAtEnter(t *testing.T) {
+	var lever spec.Lever
+	for _, l := range spec.Default().Loops.Relief.Levers {
+		if l.Action == actuators.MemoryHighDescriptor.Action {
+			lever = l
+		}
+	}
+	d := actuators.MemoryHighDescriptor
+	act := actuators.Static(d, nil, func(runtime.Workload) (float64, bool) { return 0, false })
+	const nodeMem = 0.5
+	for _, c := range []struct {
+		ratio float64 // the pod's share over node usage
+		plan  bool
+	}{{0.7, true}, {0.4, false}} {
+		m := newMap(t, func() time.Time { return t0 })
+		record(t, m, d.Relieves, "", lever.Enter, t0)
+		record(t, m, d.Usage, "", nodeMem, t0)
+		if err := m.RecordFacts("test", []statemap.Fact{statemap.NumberFact(d.Capacity, 8<<30, d.Unit)}); err != nil {
+			t.Fatal(err)
+		}
+		share := c.ratio * nodeMem
+		cands := []Candidate{{Subject: "pod:a", Share: share, Basis: BasisUsage}}
+		p, ok, why := MakePlan(ctx, m, act, cands, []runtime.Workload{pod("pod:a")}, defaultPolicy(t, nil), lever, one)
+		if ok != c.plan {
+			t.Errorf("share/usage %.1f at enter %.2f: plan %v (%+v, %q); want plan %v", c.ratio, lever.Enter, ok, p, why, c.plan)
+		}
+		if !c.plan && !strings.Contains(why, "min_effect") {
+			t.Errorf("share/usage %.1f: refused %q; want min_effect", c.ratio, why)
+		}
 	}
 }

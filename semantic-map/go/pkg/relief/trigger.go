@@ -1,5 +1,6 @@
-// Package relief decides when a node is under CPU pressure and when it is not,
-// and acts on the answer. This file is the decision alone.
+// Package relief decides when a node is under pressure and when it is not, and
+// acts on the answer through one lever per action. This file is the decision
+// alone.
 package relief
 
 import (
@@ -18,20 +19,20 @@ const (
 	Releasing Phase = "releasing"
 )
 
-// Trigger turns readings of node CPU pressure into a phase. A phase changes
+// Trigger turns readings of one kind of node pressure into a phase. A phase changes
 // only after pressure has stayed on one side of a threshold for a set time,
 // so a spike does not start relief and a lull does not end it. A Trigger is
 // not safe for concurrent use; the loop that owns it calls it from one
 // goroutine.
 type Trigger struct {
-	cfg     spec.CPURelief
+	cfg     spec.Lever
 	phase   Phase
 	runFrom time.Time
 	running bool
 }
 
 // NewTrigger returns a Trigger in Calm.
-func NewTrigger(c spec.CPURelief) *Trigger {
+func NewTrigger(c spec.Lever) *Trigger {
 	return &Trigger{cfg: c, phase: Calm}
 }
 

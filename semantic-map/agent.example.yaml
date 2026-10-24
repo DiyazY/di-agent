@@ -87,6 +87,9 @@ runtime:
     kind: dry-run
     kubeconfig: ""
     node: ""
+actuation:
+    # "": actions.json beside persist.file.
+    ledger: ""
 loops:
     review:
         level: full
@@ -121,25 +124,48 @@ loops:
     relief:
         enabled: false
         interval: 15s
-        cpu:
-            enter: 0.25
-            exit: 0.1
-            enter_for: 1m0s
-            exit_for: 3m0s
-            step: 0.25
-            min_effect: 0.03
-            victim_share: 0.05
-            settle: 2m0s
-            expiry: 1h0m0s
+        # null: a dry run exactly when runtime.kind is dry-run; true on kubernetes
+        # decides, records and verifies, and changes nothing.
+        dry_run: null
+        # One relief loop per lever, an action and its thresholds; the loops share
+        # max_actions_per_hour and each workload's cooldown.
+        levers:
+            - action: cpu.limit
+              enter: 0.25
+              exit: 0.1
+              enter_for: 1m0s
+              exit_for: 3m0s
+              step: 0.25
+              min_effect: 0.03
+              victim_share: 0.05
+              settle: 2m0s
+              expiry: 1h0m0s
+            # memory_contention_ratio: memory stall of pods within their request.
+            # Needs cgroup v2 and the kubelet's MemoryQoS off (OPERATING.md).
+            - action: memory.high
+              enter: 0.2
+              exit: 0.05
+              enter_for: 1m0s
+              exit_for: 3m0s
+              step: 0.25
+              min_effect: 0.03
+              victim_share: 0.05
+              settle: 2m0s
+              expiry: 1h0m0s
 policy:
     defaults:
         allow:
             - cpu.limit
+            - memory.high
         deny:
             - evict
         floor:
-            cpu_cores: 0.1
-            of_original: 0.5
+            cpu.limit:
+                min: 0.1
+                of_original: 0.5
+            memory.high:
+                min: 67108864 # 64 MiB, in bytes
+                of_original: 0
         max_actions_per_hour: 6
         cooldown: 10m0s
     rules:
@@ -152,7 +178,6 @@ policy:
           freeze: true
           allow: []
           deny: []
-          floor: null
           max_actions_per_hour: 0
           cooldown: 0s
         - match:
@@ -165,7 +190,6 @@ policy:
           freeze: true
           allow: []
           deny: []
-          floor: null
           max_actions_per_hour: 0
           cooldown: 0s
 groups:

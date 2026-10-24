@@ -67,6 +67,7 @@ func newCgroup(env Env, n *yaml.Node) (contracts.CollectorContract, error) {
 		// The kubelet links each container's log under /var/log/containers, beside the
 		// per-pod /var/log/pods.
 		ContainerLogRoot: containerLogRoot(cfg.PodLogs),
+		Requests:         env.Requests,
 	}), nil
 }
 

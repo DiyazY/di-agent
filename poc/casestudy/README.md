@@ -45,7 +45,7 @@ Each moves one resource on its own period, on cycles that never line up, so pods
 correlate with each other — except the twins, which share a wall-clock schedule.
 
 Each pod carries a `di-agent/group` label — `compute` (cycler, twins, noise), `memory` (mem-wave, mem-squeeze),
-`storage` (io-wave), `relief` (hog, victim) — so the map holds each group's use of the node and P2 also asks
+`storage` (io-wave), `relief` (hog, victim, mem-victim, page-hog) — so the map holds each group's use of the node and P2 also asks
 node memory `without=group:memory`.
 
 | Pod | Moves | Period | Planted relationship |
@@ -58,6 +58,8 @@ node memory `without=group:memory`.
 | `noise` | CPU in random bursts | none | nothing |
 | `hog` | CPU, steady, six busy loops, limit 4.5 cores | none | relief phase only: its CPU → node CPU contention, learned by intervention |
 | `victim` | CPU, three busy loops, limit 6 cores, never throttled, frozen by policy | none | relief phase only: what relief protects; the workload whose waiting is the contention |
+| `mem-victim` | page cache: a 1 GiB file in an emptyDir re-read every second, within its 1280Mi request | none | memory relief only: the protected pod whose memory stall is `memory_contention_ratio` |
+| `page-hog` | 6 GiB anonymous held, then a file set growing 256 MiB/min, re-read whole, no memory limit; holds once a pass refaults a tenth of the set | none | memory relief only: the candidate for `memory.high` |
 
 The relationships marked with a node quantity that has several drivers (node CPU pressure, node I/O
 pressure) were missed in earlier runs: no single pair reaches the threshold.
@@ -103,3 +105,17 @@ decision id and `mem-wave` in `excluded`. The mark records which reviewer confir
 Both write JSON lines stamped with the VM's clock: `capture.jsonl` (`t`, `endpoint`, `status`,
 `body`; a failed poll has `status: 0` and `body: null`) and `phases.jsonl` (`t`, `phase`, `event`, and
 any ids).
+
+## Memory relief
+
+`memrelief.sh <out-dir> [phase-1-min] [phase-2-min]` (on the node, as root) exercises the second lever on its
+own: it saves the `di-agent.service` it replaces, refuses to start when any `memory.high` under `kubepods`
+is not `max` (the actuator would refuse too), starts the agent on a fresh map from `agent-relief.yaml` with the
+ledger in `<out-dir>/actions.json`, applies `mem-victim` then `page-hog`, and polls `/relief`,
+`/relief/actions`, `/actuators`, the node's memory properties and each pod's subject every 30 s
+(`poll.jsonl`), beside the node's own view of the same pods' cgroups (`node.jsonl`). Phase 2 runs `mem-squeeze`
+alone, which limits itself at its own 64Mi limit (`mem-wave` never reaches its 600Mi limit). An OOM kill of
+anything but `page-hog`, or k0s, Ollama or the agent going unhealthy, deletes `page-hog` and ends the run.
+The VM has no swap, so `memory.high` can only reclaim file pages: both workloads live on page cache, and
+`page-hog`'s anonymous block only shrinks the room left for it. What the runs showed is in
+`run-2026-10-23-memrelief/results.md`.

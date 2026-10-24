@@ -302,6 +302,25 @@ async function tick() {
  * last known rather than blanking the names, and says it is stale.
  */
 const OFF_PROBE_EVERY = 10;
+
+/**
+ * GET /relief answers one status per lever, in lever order; the Actions pane and
+ * the hulls read one. The counts are summed, the cooling workloads merged, and the
+ * phase names each lever's when there is more than one. The levers stay, as given.
+ */
+function reliefSummary({ levers = [] }) {
+  const sum = (k) => levers.reduce((n, l) => n + (l[k] || 0), 0);
+  const kept = sum('kept'), reverted = sum('reverted');
+  return {
+    levers,
+    phase: levers.map((l) => (levers.length > 1 ? `${l.action} ${l.phase}` : l.phase)).join(', '),
+    paused: levers.length > 0 && levers.every((l) => l.paused),
+    runtime: levers[0]?.runtime,
+    actions: sum('actions'), kept, reverted, refused: sum('refused'), stuck: sum('stuck'),
+    predictions_held: kept + reverted > 0 ? kept / (kept + reverted) : 0,
+    cooling: Object.assign({}, ...levers.map((l) => l.cooling || {})),
+  };
+}
 let actingTicks = 0;
 let offTicks = 0;
 let actingBusy = false;
@@ -321,7 +340,7 @@ async function refreshActing() {
       if (r === null) {
         state = 'off'; relief = null; actions = []; workloads = [];
       } else {
-        state = 'on'; relief = r;
+        state = 'on'; relief = reliefSummary(r);
         const key = model.subjects().map((s) => s.id).join(',');
         const wantWorkloads = actingTicks % 4 === 0 || key !== workloadsKey;
         const [a, w] = await Promise.allSettled([api.reliefActions(), wantWorkloads ? api.workloads() : null]);
