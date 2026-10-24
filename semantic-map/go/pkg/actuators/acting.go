@@ -134,11 +134,11 @@ const readBack = 10 * time.Second
 // under a fresh bounded context. On success the entry is committed with what
 // reads back, since an actuator may quantise. When Set fails, a setting that
 // reads back changed from before this Apply is adopted and committed (and the
-// error still returned); one that reads back unchanged restores the entry before
-// (or none); one that cannot be read, or that reads back as no setting while it
-// differs from before (neither what it was nor what was asked), leaves the entry
-// pending, for Held to resolve. A successful Set whose read-back fails is left
-// pending too.
+// error still returned); any other outcome (unchanged, unreadable, or no
+// setting) leaves the entry pending, ErrLeftPending, for Held to resolve: a Set
+// that failed on the client may still land on the server, so reading as before
+// right after it proves nothing. A successful Set whose read-back fails, or that
+// reads back as before, is left pending too.
 func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
 	return a.apply(ctx, w, action, v, expires, decisionID, true)
 }
@@ -200,10 +200,10 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 		case rerr != nil:
 			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending, setErr) // Held finds out what is in force
 		case same(got, gotSet, beforeV, beforeSet):
-			if err := restore(); err != nil {
-				return Entry{}, errors.Join(setErr, err)
-			}
-			return Entry{}, setErr
+			// Reads as before, but a Set that failed may still land, as a PATCH
+			// the client gave up on: the step stays pending, for Held to settle
+			// once it moves, or once it has stayed as before past settle.
+			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending, setErr)
 		case !gotSet:
 			// Neither what it was nor what was asked: leave it for Held.
 			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending, setErr)

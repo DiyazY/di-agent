@@ -1440,14 +1440,20 @@ func TestAnAdoptedChangeKeepsItsSpend(t *testing.T) {
 	}
 }
 
-// TestARefusedChangeIsRefunded: an Apply whose Set changed nothing gives its
-// hourly slot back.
+// TestARefusedChangeIsRefunded: an Apply whose Set failed and changed nothing
+// keeps its hourly slot while the step may still land, and gives it back once
+// the step is settled as never taken.
 func TestARefusedChangeIsRefunded(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, flaky: true})
 	h.fl.set(func(f *flaky) { f.stuck["pod:a"] = true })
 	h.until(2*time.Hour, 0.5, "a refused change", func() bool { return h.l.Status().Refused > 0 })
-	if n := h.l.budget.Count(h.now); n != 0 || len(h.ledger.All()) != 0 {
-		t.Fatalf("hourly count %d, ledger %+v; want the slot given back, nothing in force", n, h.ledger.All())
+	// A refusal may still have landed: the step is pending, its spend kept.
+	if n := h.l.budget.Count(h.now); n != 1 || len(h.ledger.All()) != 1 || !h.ledger.All()[0].Pending {
+		t.Fatalf("hourly count %d, ledger %+v; want the step pending with its spend", n, h.ledger.All())
+	}
+	h.until(10*time.Minute, 0.5, "the step settled", func() bool { return len(h.ledger.All()) == 0 })
+	if n := h.l.budget.Count(h.now); n != 0 || len(h.decisions(OutcomeNotApplied)) != 1 {
+		t.Fatalf("hourly count %d; want the slot given back once it never took", n)
 	}
 }
 
@@ -2130,5 +2136,72 @@ func TestAGiveBackRefusedOutrightKeepsItsBudget(t *testing.T) {
 	}
 	if st := h.l.Status(); len(st.Unread) != 1 || !strings.Contains(st.Unread[0].Error, "3 more times") {
 		t.Fatalf("unread %+v; want it left for an operator, saying so", st.Unread)
+	}
+}
+
+// failsThenLands is an actuator whose Set on the subjects in it reports an
+// error without effect, whose read-back right after succeeds with the value from
+// before, and which then lands on the server one read later, as a PATCH the
+// client gave up on.
+type failsThenLands struct {
+	actuators.Actuator
+	mu      sync.Mutex
+	on      map[string]bool
+	pending map[string]float64
+	reads   map[string]int
+}
+
+func (f *failsThenLands) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.on[w.Subject] {
+		return f.Actuator.Set(ctx, w, v, set)
+	}
+	delete(f.on, w.Subject)
+	f.pending[w.Subject], f.reads[w.Subject] = v, 0
+	return errors.New("context deadline exceeded")
+}
+
+func (f *failsThenLands) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	f.mu.Lock()
+	v, ok := f.pending[w.Subject]
+	if ok {
+		f.reads[w.Subject]++
+		if f.reads[w.Subject] > 1 { // the read after the read-back: it has landed
+			delete(f.pending, w.Subject)
+			f.mu.Unlock()
+			if err := f.Actuator.Set(ctx, w, v, true); err != nil {
+				return 0, false, err
+			}
+			return f.Actuator.Read(ctx, w)
+		}
+	}
+	f.mu.Unlock()
+	return f.Actuator.Read(ctx, w)
+}
+
+// TestAFailedPatchThatReadsAsBeforeAndLandsIsRecorded: a Set that failed on the
+// client and whose read-back showed the setting from before is not taken for a
+// change that never took: the step stays pending, and when the server applies
+// it a read later it is committed at the cut, never restored or deleted.
+func TestAFailedPatchThatReadsAsBeforeAndLandsIsRecorded(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			return d, &failsThenLands{Actuator: a, on: map[string]bool{"pod:a": true}, pending: map[string]float64{}, reads: map[string]int{}}
+		}})
+	h.until(2*time.Hour, 0.5, "the failed step", func() bool { return h.l.Status().Refused > 0 })
+	e, ok := h.applied()["pod:a"]
+	if !ok || !e.Pending {
+		t.Fatalf("ledger %+v; want the failed step pending, not restored", h.applied())
+	}
+	cut := e.Applied
+	for i := 0; i < 4; i++ {
+		h.step(0.5)
+		if _, ok := h.applied()["pod:a"]; !ok {
+			t.Fatalf("tick %d: the entry was deleted while the change could still land", i)
+		}
+	}
+	if e := h.applied()["pod:a"]; e.Pending || e.Applied != cut || h.limit("pod:a") == nil || *h.limit("pod:a") != cut {
+		t.Fatalf("entry %+v, limit %v; want the landed cut %v committed", e, h.limit("pod:a"), cut)
 	}
 }

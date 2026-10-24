@@ -89,21 +89,25 @@ func TestApplyUnknownActionAndSetError(t *testing.T) {
 	if _, err := a.Apply(context.Background(), wl("s"), "nope", 1, time.Time{}, ""); err == nil {
 		t.Fatal("want error for no actuator")
 	}
+	// A failed Set may still land: the step stays pending, for Held to settle.
 	f.setErr = errors.New("boom")
-	if _, err := a.Apply(context.Background(), wl("s"), "fake", 1, time.Time{}, ""); err == nil {
-		t.Fatal("want set error")
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 1, time.Time{}, ""); !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want the failed step left pending", err)
 	}
-	if len(a.ledger.All()) != 0 {
-		t.Fatal("ledger recorded a failed Set")
+	if got := a.ledger.All(); len(got) != 1 || !got[0].Pending || got[0].Applied != 1 {
+		t.Fatalf("ledger %+v; want the failed step pending", got)
 	}
 	f.setErr = nil
+	if _, err := a.ResolveNeverTook(context.Background(), wl("s"), a.ledger.All()[0]); err != nil {
+		t.Fatal(err)
+	}
 	e, _ := a.Apply(context.Background(), wl("s"), "fake", 2, time.Time{}, "")
 	f.setErr = errors.New("boom")
-	if _, err := a.Apply(context.Background(), wl("s"), "fake", 9, time.Time{}, ""); err == nil {
-		t.Fatal("want set error")
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 9, time.Time{}, ""); !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want the failed further step left pending", err)
 	}
-	if got := a.ledger.All(); len(got) != 1 || got[0] != e {
-		t.Fatalf("prior entry changed: %+v", got)
+	if got := a.ledger.All(); len(got) != 1 || !got[0].Pending || got[0].PrevApplied != e.Applied || !got[0].PrevSet {
+		t.Fatalf("ledger %+v; want the further step pending over %+v", got, e)
 	}
 }
 
@@ -419,7 +423,10 @@ func TestASetThatTimedOutAfterTakingEffectIsAdopted(t *testing.T) {
 	}
 }
 
-func TestAFailedSetThatChangedNothingRestoresThePriorEntry(t *testing.T) {
+// TestAFailedSetThatChangedNothingStaysPending: a failed further step whose
+// read-back shows the step before is not restored at once, as it may still
+// land; once settled as never taken, the prior entry comes back exactly.
+func TestAFailedSetThatChangedNothingStaysPending(t *testing.T) {
 	f := newMem()
 	f.vals["s"] = 10
 	a := NewActing("n", MemoryLedger(), f)
@@ -428,11 +435,18 @@ func TestAFailedSetThatChangedNothingRestoresThePriorEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.setErr = errors.New("conflict")
-	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Unix(99, 0), "d1"); err == nil {
-		t.Fatal("want the Set error")
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Unix(99, 0), "d1"); !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want the step left pending", err)
+	}
+	got := a.ledger.All()
+	if len(got) != 1 || !got[0].Pending || got[0].PrevDecisionID != "d0" {
+		t.Fatalf("ledger %+v; want the step pending over the prior one", got)
+	}
+	if _, err := a.ResolveNeverTook(context.Background(), wl("s"), got[0]); err != nil {
+		t.Fatal(err)
 	}
 	if got := a.ledger.All(); len(got) != 1 || got[0] != prior {
-		t.Fatalf("ledger %+v; want the prior entry %+v back", got, prior)
+		t.Fatalf("ledger %+v; want the prior entry %+v back once settled", got, prior)
 	}
 }
 
@@ -740,7 +754,7 @@ func TestApplySaysWhenItLeftAStepPending(t *testing.T) {
 	f.setErr = errors.New("conflict")
 	_, err = NewActing("n", l, f).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d2")
 	if err == nil || errors.Is(err, ErrLeftPending) {
-		t.Fatalf("err %v; want a refusal that did not leave this step pending", err)
+		t.Fatalf("err %v; want the step adopted at what reads back (it moved), not left pending", err)
 	}
 }
 
