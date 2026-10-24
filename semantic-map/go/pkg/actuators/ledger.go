@@ -34,6 +34,10 @@ type Entry struct {
 	Pending     bool    `json:"pending,omitempty"`
 	PrevApplied float64 `json:"prev_applied,omitempty"`
 	PrevSet     bool    `json:"prev_set,omitempty"`
+	// PrevDecisionID and PrevExpires are the step before's decision and expiry,
+	// with PrevSet: what a step that never took goes back to.
+	PrevDecisionID string    `json:"prev_decision_id,omitempty"`
+	PrevExpires    time.Time `json:"prev_expires,omitempty"`
 }
 
 // validate is why e cannot be in the ledger, or nil: it names an action, a
@@ -56,8 +60,8 @@ func (e Entry) validate() error {
 		return bad(fmt.Sprintf("a value is not finite (applied %v, original %v, prev_applied %v)", e.Applied, e.Original, e.PrevApplied))
 	case !e.Pending && (e.PrevSet || e.PrevApplied != 0):
 		return bad("committed, yet it records a step before it")
-	case !e.PrevSet && e.PrevApplied != 0:
-		return bad("prev_applied without prev_set")
+	case !e.PrevSet && (e.PrevApplied != 0 || e.PrevDecisionID != "" || !e.PrevExpires.IsZero()):
+		return bad("a step before (prev_applied, prev_decision_id or prev_expires) without prev_set")
 	case !e.OriginalSet && e.Original != 0:
 		return bad("an original value with original_set false")
 	}

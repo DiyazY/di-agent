@@ -461,19 +461,19 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	l.journalDropped(now, ws, dropped, prevUnread)
 
 	// A pending change that still reads as before its Apply may yet land, as a
-	// resize the kubelet applies a moment later: while its action is in flight
-	// within Settle it stays pending and is read again next pass. Past that, or
-	// with no action of this loop's to wait for, it never took.
-	awaiting := map[string]bool{}
+	// resize the kubelet applies a moment later or a PATCH that timed out on the
+	// client: while its step is within Settle it stays pending and is read again
+	// next pass, whether an action holds it or not (a failed Apply made none).
+	// The step's time is its entry's own, Expires less the lever's expiry, so it
+	// survives a restart. Past that it never took.
+	l.awaiting = map[string]bool{}
 	for _, e := range rec.NeverTook {
-		a := live[e.Subject]
-		if a != nil && a == inFlight && !a.Resumed && now.Sub(a.ActedAt) < l.c.Settle {
-			awaiting[e.Subject] = true
+		if now.Sub(e.Expires.Add(-l.c.Expiry)) < l.c.Settle {
+			l.awaiting[e.Subject] = true
 			continue
 		}
-		l.neverTook(now, e, a)
+		l.neverTook(ctx, now, ws, e, live[e.Subject], inFlight)
 	}
-	l.awaiting = awaiting
 
 	var expired, resumed []*Action
 	for _, e := range held {
@@ -544,10 +544,20 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 // step's deleted), the hourly spend it took is given back, the verdict is
 // journalled, and its action, if one holds it, is closed as not applied, or put
 // back at its earlier step.
-func (l *Loop) neverTook(now time.Time, e actuators.Entry, a *Action) {
-	restored, err := l.cfg.Acting.ResolveNeverTook(e)
+func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Workload, e actuators.Entry, a, inFlight *Action) {
+	w, _ := workload(ws, e.Subject)
+	restored, err := l.cfg.Acting.ResolveNeverTook(ctx, w, e)
 	if err != nil {
-		l.cfg.Logf("relief: settling the change to %s that never took: %v", e.Subject, err)
+		// Landed since it was read, or not settled for want of a read or a save:
+		// it stays pending and is read again next pass.
+		l.awaiting[e.Subject] = true
+		if !errors.Is(err, actuators.ErrNotSettled) {
+			l.cfg.Logf("relief: settling the change to %s that never took: %v (retried next pass)", e.Subject, err)
+			l.mu.Lock()
+			l.reconcileErr = err.Error()
+			l.mu.Unlock()
+			l.reconciled = false
+		}
 		return
 	}
 	if at, ok := l.spentFor[e.Subject]; ok {
@@ -572,7 +582,10 @@ func (l *Loop) neverTook(now time.Time, e actuators.Entry, a *Action) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if p := a.prev; p != nil {
+	// The action goes back to its state before its latest step only when the
+	// step that never took is that one; a failed Apply's step never became the
+	// action's, which keeps its own Plan and decision and only takes the entry.
+	if p := a.prev; p != nil && a == inFlight && e.DecisionID == a.DecisionID {
 		id := a.ID
 		*a = *p
 		a.ID = id

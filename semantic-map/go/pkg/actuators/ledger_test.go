@@ -85,16 +85,18 @@ func TestForFiltersByAction(t *testing.T) {
 func TestLedgerRefusesAnInvalidEntry(t *testing.T) {
 	ok := Entry{Action: "a", Subject: "s", NodeID: "n", Applied: 2}
 	cases := map[string]func(*Entry){
-		"no action":                    func(e *Entry) { e.Action = "" },
-		"no subject":                   func(e *Entry) { e.Subject = "" },
-		"no node":                      func(e *Entry) { e.NodeID = "" },
-		"applied NaN":                  func(e *Entry) { e.Applied = math.NaN() },
-		"original Inf":                 func(e *Entry) { e.Original, e.OriginalSet = math.Inf(1), true },
-		"prev applied NaN":             func(e *Entry) { e.Pending, e.PrevApplied, e.PrevSet = true, math.NaN(), true },
-		"committed with a prev":        func(e *Entry) { e.PrevApplied, e.PrevSet = 1, true },
-		"committed with a prev value":  func(e *Entry) { e.PrevApplied = 1 },
-		"pending prev value, not set":  func(e *Entry) { e.Pending, e.PrevApplied = true, 1 },
-		"original value with none set": func(e *Entry) { e.Original = 3 },
+		"no action":                      func(e *Entry) { e.Action = "" },
+		"no subject":                     func(e *Entry) { e.Subject = "" },
+		"no node":                        func(e *Entry) { e.NodeID = "" },
+		"applied NaN":                    func(e *Entry) { e.Applied = math.NaN() },
+		"original Inf":                   func(e *Entry) { e.Original, e.OriginalSet = math.Inf(1), true },
+		"prev applied NaN":               func(e *Entry) { e.Pending, e.PrevApplied, e.PrevSet = true, math.NaN(), true },
+		"committed with a prev":          func(e *Entry) { e.PrevApplied, e.PrevSet = 1, true },
+		"committed with a prev value":    func(e *Entry) { e.PrevApplied = 1 },
+		"pending prev value, not set":    func(e *Entry) { e.Pending, e.PrevApplied = true, 1 },
+		"original value with none set":   func(e *Entry) { e.Original = 3 },
+		"committed with a prev decision": func(e *Entry) { e.PrevDecisionID = "d0" },
+		"prev expiry without prev":       func(e *Entry) { e.Pending, e.PrevExpires = true, time.Unix(1, 0) },
 	}
 	for name, mutate := range cases {
 		e := ok

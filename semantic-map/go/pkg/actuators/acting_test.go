@@ -471,7 +471,7 @@ func TestHeldResolvesAPendingEntry(t *testing.T) {
 				if got := l.All(); len(got) != 1 || got[0] != c.e {
 					t.Fatalf("ledger %+v; want the entry left pending for the caller", got)
 				}
-				if _, err := a.ResolveNeverTook(r.NeverTook[0]); err != nil {
+				if _, err := a.ResolveNeverTook(ctx, wl("s"), r.NeverTook[0]); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -780,4 +780,52 @@ func held4(a *Acting, ctx context.Context, action string, ws []runtime.Workload)
 		dropped = append(dropped, d.Entry)
 	}
 	return r.Held, dropped, r.Failed, err
+}
+
+// TestANeverTookStepRestoresTheEarlierStepsRecord: a further step that never
+// took goes back to the step before it as that step was recorded: its decision
+// and its expiry, not the failed step's.
+func TestANeverTookStepRestoresTheEarlierStepsRecord(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	first, err := NewActing("n", l, m).Apply(context.Background(), wl("s"), "fake", 7, time.Unix(100, 0), "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewActing("n", l, &failSetBlindRead{memAct: m})
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Unix(200, 0), "d2"); !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want the further step left pending", err)
+	}
+	p := l.All()[0]
+	if !p.Pending || p.PrevDecisionID != "d1" || !p.PrevExpires.Equal(time.Unix(100, 0)) {
+		t.Fatalf("pending entry %+v; want the step before's decision and expiry recorded", p)
+	}
+	restored, err := a.ResolveNeverTook(context.Background(), wl("s"), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != first || l.All()[0] != first {
+		t.Fatalf("restored %+v, ledger %+v; want the first step's record %+v back", restored, l.All(), first)
+	}
+}
+
+// TestResolveNeverTookRereadsFirst: a change that has landed since Held read it
+// is not settled as never taken: it stays pending.
+func TestResolveNeverTookRereadsFirst(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	a := NewActing("n", l, &failSetBlindRead{memAct: m})
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d"); !errors.Is(err, ErrLeftPending) {
+		t.Fatal(err)
+	}
+	p := l.All()[0]
+	m.vals["s"] = 5 // it lands
+	if _, err := a.ResolveNeverTook(context.Background(), wl("s"), p); !errors.Is(err, ErrNotSettled) {
+		t.Fatalf("err %v; want ErrNotSettled for a change that has landed", err)
+	}
+	if got := l.All(); len(got) != 1 || !got[0].Pending {
+		t.Fatalf("ledger %+v; want it still pending", got)
+	}
 }

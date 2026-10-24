@@ -1570,9 +1570,14 @@ func TestAPendingStepThatNeverTookIsRefunded(t *testing.T) {
 	if n := h.l.budget.Count(h.now); n != 1 {
 		t.Fatalf("hourly count %d with the step's outcome unknown; want 1", n)
 	}
+	// It may yet land while its step is within settle; past that it never took.
 	h.step(0.5)
-	if n := h.l.budget.Count(h.now); n != 0 || len(h.ledger.All()) != 0 {
-		t.Fatalf("hourly count %d, ledger %+v once it never took; want the spend back", n, h.ledger.All())
+	if len(h.ledger.All()) != 1 {
+		t.Fatalf("ledger %+v; want the step kept pending within settle", h.ledger.All())
+	}
+	h.until(10*time.Minute, 0.5, "the step settled", func() bool { return len(h.ledger.All()) == 0 })
+	if n := h.l.budget.Count(h.now); n != 0 || h.decisions(OutcomeNotApplied) == nil {
+		t.Fatalf("hourly count %d once it never took; want the spend back", n)
 	}
 }
 
@@ -1877,5 +1882,173 @@ func TestAStuckChangeInForceCountsOnce(t *testing.T) {
 	h.l.mu.Unlock()
 	if st := h.l.Status(); len(st.Unread) != 1 || st.Stuck != 1 {
 		t.Fatalf("status stuck %d unread %d; want one stuck change", st.Stuck, len(st.Unread))
+	}
+}
+
+// timesOut is an actuator whose Set on the subjects in it reports an error
+// without effect and whose next read fails, as a PATCH that timed out on the
+// client; the change then lands on the server once read again after that.
+type timesOut struct {
+	actuators.Actuator
+	mu      sync.Mutex
+	on      map[string]bool
+	pending map[string]float64
+	stage   map[string]int // 1: next read fails; 2: next read is the old value, then it lands
+}
+
+func (t *timesOut) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.on[w.Subject] {
+		return t.Actuator.Set(ctx, w, v, set)
+	}
+	delete(t.on, w.Subject)
+	t.pending[w.Subject], t.stage[w.Subject] = v, 1
+	return errors.New("context deadline exceeded")
+}
+
+func (t *timesOut) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	t.mu.Lock()
+	st := t.stage[w.Subject]
+	switch st {
+	case 1:
+		t.stage[w.Subject] = 2
+		t.mu.Unlock()
+		return 0, false, errors.New("context deadline exceeded")
+	case 2:
+		v := t.pending[w.Subject]
+		delete(t.stage, w.Subject)
+		t.mu.Unlock()
+		old, set, err := t.Actuator.Read(ctx, w)
+		if err != nil {
+			return 0, false, err
+		}
+		if err := t.Actuator.Set(ctx, w, v, true); err != nil { // lands after this read
+			return 0, false, err
+		}
+		return old, set, nil
+	}
+	t.mu.Unlock()
+	return t.Actuator.Read(ctx, w)
+}
+
+// TestATimedOutPatchThatLandsLaterIsRecorded: a change whose Set timed out and
+// could not be read back has no action, only a pending entry; that entry is
+// not settled as never taken while its step is within settle, so when the
+// server applies it a moment later it is committed, never deleted.
+func TestATimedOutPatchThatLandsLaterIsRecorded(t *testing.T) {
+	var to *timesOut
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			to = &timesOut{Actuator: a, on: map[string]bool{"pod:a": true}, pending: map[string]float64{}, stage: map[string]int{}}
+			return d, to
+		}})
+	h.until(2*time.Hour, 0.5, "the timed-out step", func() bool { return h.l.Status().Refused > 0 })
+	cut := h.applied()["pod:a"].Applied
+	for i := 0; i < 6; i++ {
+		if _, ok := h.applied()["pod:a"]; !ok {
+			t.Fatalf("tick %d: the entry was deleted while the change could still land", i)
+		}
+		h.step(0.5)
+	}
+	e, ok := h.applied()["pod:a"]
+	if !ok || e.Pending || e.Applied != cut || h.limit("pod:a") == nil || *h.limit("pod:a") != cut {
+		t.Fatalf("entry %+v (held %v), limit %v; want the landed cut %v committed", e, ok, h.limit("pod:a"), cut)
+	}
+}
+
+// failNth is an actuator whose n-th Set reports an error without effect and
+// whose read right after it fails: a step left pending that never lands.
+type failNth struct {
+	actuators.Actuator
+	mu       sync.Mutex
+	n, sets  int
+	failRead bool
+}
+
+func (f *failNth) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	f.mu.Lock()
+	f.sets++
+	fail := f.sets == f.n
+	f.failRead = fail
+	f.mu.Unlock()
+	if fail {
+		return errors.New("context deadline exceeded")
+	}
+	return f.Actuator.Set(ctx, w, v, set)
+}
+
+func (f *failNth) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	f.mu.Lock()
+	fail := f.failRead
+	f.failRead = false
+	f.mu.Unlock()
+	if fail {
+		return 0, false, errors.New("context deadline exceeded")
+	}
+	return f.Actuator.Read(ctx, w)
+}
+
+// TestAFailedThirdStepLeavesTheActionAtItsSecond: steps one and two take, the
+// third's Apply fails and never lands. The action keeps its second step, plan
+// and decision, and its entry goes back to the second step's record; it is not
+// rolled back to the first.
+func TestAFailedThirdStepLeavesTheActionAtItsSecond(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		policy: func(ps *spec.PolicySpec) {
+			low := 0.1
+			b := ps.Defaults.Floor["cpu.limit"]
+			b.OfOriginal = &low
+			ps.Defaults.Floor["cpu.limit"] = b
+		},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			return d, &failNth{Actuator: a, n: 3}
+		}})
+	h.act("pod:a")
+	h.until(10*time.Minute, 0.44, "the first step kept", func() bool { return h.action("pod:a").Outcome == OutcomeKept })
+	first := h.applied()["pod:a"].DecisionID
+	h.until(time.Hour, 0.44, "a second step", func() bool {
+		record(h.t, h.m, usage("pod:a"), "pod:a", 0.28, h.clock())
+		return h.applied()["pod:a"].DecisionID != first
+	})
+	h.until(10*time.Minute, 0.30, "the second step kept", func() bool { return h.action("pod:a").Outcome == OutcomeKept })
+	second := h.action("pod:a")
+	h.until(time.Hour, 0.30, "a refused third step", func() bool {
+		record(h.t, h.m, usage("pod:a"), "pod:a", 0.18, h.clock())
+		return h.l.Status().Refused > 0 && h.applied()["pod:a"].Pending
+	})
+	h.until(10*time.Minute, 0.30, "the third step settled", func() bool { return !h.applied()["pod:a"].Pending })
+	a := h.action("pod:a")
+	if a.DecisionID != second.DecisionID || a.Plan != second.Plan || a.Entry.Applied != second.Entry.Applied ||
+		a.Entry.DecisionID != second.Entry.DecisionID || !a.Entry.Expires.Equal(second.Entry.Expires) {
+		t.Fatalf("action %+v; want it at its second step %+v", a, second)
+	}
+	if e := h.applied()["pod:a"]; e.DecisionID != second.Entry.DecisionID || !e.Expires.Equal(second.Entry.Expires) {
+		t.Fatalf("ledger %+v; want the second step's record back", e)
+	}
+}
+
+// TestANeverTookCloseThatCannotSaveIsRetried: a change that never took whose
+// settling cannot be saved stays pending, shows the error as reconcile_error and
+// is settled by a later pass once the ledger can be written.
+func TestANeverTookCloseThatCannotSaveIsRetried(t *testing.T) {
+	h, _ := landsHarness(t, -1)
+	h.act("pod:a")
+	testhooks.LedgerSave = testhooks.FailAfter(0, errors.New("disk full"))
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
+	h.run(4*time.Minute, 0.5)
+	if e, ok := h.applied()["pod:a"]; !ok || !e.Pending {
+		t.Fatalf("ledger %+v; want the change still pending while it cannot be settled", h.applied())
+	}
+	if st := h.l.Status(); !strings.Contains(st.ReconcileError, "disk full") {
+		t.Fatalf("reconcile_error %q; want the save error", st.ReconcileError)
+	}
+	testhooks.LedgerSave = nil
+	h.until(5*time.Minute, 0.5, "settled", func() bool { return len(h.ledger.All()) == 0 })
+	if a := h.action("pod:a"); a.Outcome != OutcomeNotApplied {
+		t.Fatalf("pod:a %+v; want not applied", a)
+	}
+	if st := h.l.Status(); st.ReconcileError != "" {
+		t.Fatalf("reconcile_error %q after it settled; want none", st.ReconcileError)
 	}
 }

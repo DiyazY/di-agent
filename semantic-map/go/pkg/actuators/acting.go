@@ -171,7 +171,7 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 	prev, held := a.entry(action, w.Subject)
 	if held {
 		e.Original, e.OriginalSet = prev.Original, prev.OriginalSet
-		e.PrevApplied, e.PrevSet = prev.Applied, true
+		e.PrevApplied, e.PrevSet, e.PrevDecisionID, e.PrevExpires = prev.Applied, true, prev.DecisionID, prev.Expires
 	} else {
 		orig, set, err := x.Read(ctx, w)
 		if err != nil {
@@ -254,6 +254,7 @@ func before(e Entry) (float64, bool) {
 // committed is e no longer pending, with what is in force as Applied.
 func committed(e Entry, applied float64) Entry {
 	e.Applied, e.Pending, e.PrevApplied, e.PrevSet = applied, false, 0, false
+	e.PrevDecisionID, e.PrevExpires = "", time.Time{}
 	return e
 }
 
@@ -438,19 +439,39 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 	return r, nil
 }
 
+// ErrNotSettled is ResolveNeverTook's answer for a change that no longer reads
+// as before its Apply: it may have landed since Held read it, and stays pending.
+var ErrNotSettled = errors.New("the change no longer reads as before; not settled")
+
 // ResolveNeverTook settles a pending entry Held returned in NeverTook, once the
 // caller judges the change will not land: a further step's entry goes back to
-// the step before it, which is returned, and a first step's is deleted (the
-// zero Entry). An entry that has changed in the ledger since is left alone.
-func (a *Acting) ResolveNeverTook(e Entry) (Entry, error) {
+// the step before it as that step was recorded (its value, decision and
+// expiry), which is returned, and a first step's is deleted (the zero Entry).
+// The setting is read again first, through w, under the same lock as the
+// change: one that no longer reads as before may have landed, and is
+// ErrNotSettled, left pending. An entry that has changed in the ledger since is
+// left alone too.
+func (a *Acting) ResolveNeverTook(ctx context.Context, w runtime.Workload, e Entry) (Entry, error) {
+	x, ok := a.actuators[e.Action]
+	if !ok {
+		return Entry{}, fmt.Errorf("no actuator for action %q", e.Action)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	cur, ok := a.entry(e.Action, e.Subject)
 	if !ok || cur != e {
 		return Entry{}, fmt.Errorf("%s: %s entry changed since it was read; not settled", e.Subject, e.Action)
 	}
+	v, set, err := x.Read(ctx, w)
+	if err != nil {
+		return Entry{}, fmt.Errorf("%s: %s: %w: reading it again: %w", e.Subject, e.Action, ErrNotSettled, err)
+	}
+	if bv, bset := before(e); !same(v, set, bv, bset) {
+		return Entry{}, fmt.Errorf("%s: %s: %w", e.Subject, e.Action, ErrNotSettled)
+	}
 	if e.PrevSet {
 		c := committed(e, e.PrevApplied)
+		c.DecisionID, c.Expires = e.PrevDecisionID, e.PrevExpires
 		return c, a.ledger.Put(c)
 	}
 	return Entry{}, a.ledger.Delete(e.Action, e.Subject)
