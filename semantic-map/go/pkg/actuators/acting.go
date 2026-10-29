@@ -145,7 +145,9 @@ const readBack = 10 * time.Second
 // setting) leaves the entry pending, ErrLeftPending, for Held to resolve: a Set
 // that failed on the client may still land on the server, so reading as before
 // right after it proves nothing. A successful Set whose read-back fails, or that
-// reads back as before, is left pending too.
+// reads back as before, is left pending too. When the commit after a successful
+// Set fails, the setting and the entry before are put back; if either cannot be,
+// the entry stays pending and the error wraps ErrLeftPending.
 func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
 	return a.apply(ctx, w, action, v, expires, decisionID, true)
 }
@@ -242,12 +244,16 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 	c := committed(e, applied)
 	if err := a.ledger.Put(c); err != nil {
 		// The change is in force but its record is still pending: put back what
-		// the setting was before this Apply, and the entry before it.
+		// the setting was before this Apply, and the entry before it. Either
+		// failing leaves the pending entry in the ledger, ErrLeftPending, for Held
+		// to settle: as held if the change is still in force, as never-took if the
+		// setting is back. Only when both succeed is the ledger as it was.
 		if rerr := x.Set(ctx, w, beforeV, beforeSet); rerr != nil {
-			return Entry{}, errors.Join(err, fmt.Errorf("%s: roll back %s: %w", w.Subject, action, rerr))
+			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending,
+				errors.Join(err, fmt.Errorf("%s: roll back %s: %w", w.Subject, action, rerr)))
 		}
 		if rerr := restore(); rerr != nil {
-			return Entry{}, errors.Join(err, rerr)
+			return Entry{}, fmt.Errorf("%w: %w", ErrLeftPending, errors.Join(err, rerr))
 		}
 		return Entry{}, err
 	}
@@ -286,10 +292,12 @@ func same(v float64, set bool, w float64, wset bool) bool {
 	return closeTo(v, w)
 }
 
-// ErrLeftPending is in Apply's error when the step it took was left pending:
-// its Set failed and what is in force could not be told, so the change may be
-// in force, and Held settles it. Any other error of Apply's left no change of
-// this step in force.
+// ErrLeftPending is in Apply's error when the step it took was left pending in
+// the ledger: its Set failed and what is in force could not be told, or its
+// commit failed and the rollback of the setting or of the ledger failed too. The
+// change may be in force, and Held settles it. An error returned with an entry
+// is a change adopted as in force; any other error of Apply's left no change of
+// this step in force and the ledger as it was.
 var ErrLeftPending = errors.New("the change was left pending")
 
 // ErrUnconfirmed is Revert's answer when the original was set and does not yet

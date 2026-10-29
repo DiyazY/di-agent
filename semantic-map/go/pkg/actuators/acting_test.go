@@ -937,3 +937,79 @@ type unreadableAct struct{ *memAct }
 func (unreadableAct) Read(context.Context, runtime.Workload) (float64, bool, error) {
 	return 0, false, errors.New("api unavailable")
 }
+
+// failRollback lets the first Set through and fails every one after, as a
+// rollback that cannot reach the API.
+type failRollback struct {
+	*memAct
+	n int
+}
+
+func (f *failRollback) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	f.n++
+	if f.n > 1 {
+		return errors.New("api unavailable")
+	}
+	return f.memAct.Set(ctx, w, v, set)
+}
+
+// TestApplyLeavesPendingWhenCommitAndRollbackFail: the change took, its commit
+// failed and the rollback failed, so the change may still be in force. The
+// pending entry stays and the error says so, so the caller keeps the slot it
+// spent until Held settles the entry.
+func TestApplyLeavesPendingWhenCommitAndRollbackFail(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	testhooks.LedgerSave = testhooks.FailAfter(1, errors.New("disk full"))
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
+	_, err := NewActing("n", l, &failRollback{memAct: m}).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want ErrLeftPending for a change that may still be in force", err)
+	}
+	if got := l.All(); len(got) != 1 || !got[0].Pending || m.vals["s"] != 5 {
+		t.Fatalf("ledger %+v value %v; want the pending entry kept with the change in force", got, m.vals["s"])
+	}
+}
+
+// TestApplyLeavesPendingWhenCommitAndRestoreFail: the commit failed, the
+// setting was put back, but the ledger could not be: the pending entry stays
+// and the error says so, for Held (never-took) to settle and refund.
+func TestApplyLeavesPendingWhenCommitAndRestoreFail(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	testhooks.LedgerSave = testhooks.FailAfter(1, errors.New("disk full"))
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
+	_, err := NewActing("n", l, m).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if !errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want ErrLeftPending for a pending entry left in the ledger", err)
+	}
+	if got := l.All(); len(got) != 1 || !got[0].Pending || m.vals["s"] != 10 {
+		t.Fatalf("ledger %+v value %v; want the pending entry kept and the setting back", got, m.vals["s"])
+	}
+}
+
+// TestApplyCommitFailureFullyUndoneIsNotPending: the commit failed and both the
+// setting and the ledger were put back, so nothing is left pending.
+func TestApplyCommitFailureFullyUndoneIsNotPending(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	n := 0
+	testhooks.LedgerSave = func() error {
+		n++
+		if n == 2 {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
+	_, err := NewActing("n", l, m).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d")
+	if err == nil || errors.Is(err, ErrLeftPending) {
+		t.Fatalf("err %v; want a plain error once everything is put back", err)
+	}
+	if len(l.All()) != 0 || m.vals["s"] != 10 {
+		t.Fatalf("ledger %+v value %v; want both put back", l.All(), m.vals["s"])
+	}
+}

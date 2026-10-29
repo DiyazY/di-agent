@@ -2646,3 +2646,42 @@ func TestARereadThatKeepsFailingHoldsOnlyItsWorkload(t *testing.T) {
 		t.Fatalf("ledger %+v; want pod:a's step still pending, never stepped on", h.applied())
 	}
 }
+
+// commitThenNoRollback lets the first Set through and makes the ledger save
+// after it fail, so Apply's commit fails; every later Set (its rollback) fails.
+type commitThenNoRollback struct {
+	actuators.Actuator
+	mu   sync.Mutex
+	sets int
+}
+
+func (c *commitThenNoRollback) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	c.mu.Lock()
+	c.sets++
+	n := c.sets
+	c.mu.Unlock()
+	if n > 1 {
+		return errors.New("api unavailable")
+	}
+	if err := c.Actuator.Set(ctx, w, v, set); err != nil {
+		return err
+	}
+	testhooks.LedgerSave = testhooks.FailAfter(0, errors.New("disk full"))
+	return nil
+}
+
+// TestACommitWhoseRollbackFailedKeepsItsSpend: an Apply whose commit failed and
+// whose rollback failed too may have left the change in force, so its hourly
+// slot is kept for the reconcile to settle, not refunded to another lever.
+func TestACommitWhoseRollbackFailedKeepsItsSpend(t *testing.T) {
+	t.Cleanup(func() { testhooks.LedgerSave = nil })
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			return d, &commitThenNoRollback{Actuator: a}
+		}})
+	h.until(2*time.Hour, 0.5, "a refused change", func() bool { return h.l.Status().Refused > 0 })
+	testhooks.LedgerSave = nil
+	if n := h.l.budget.Count(h.now); n != 1 || len(h.ledger.All()) != 1 || !h.ledger.All()[0].Pending {
+		t.Fatalf("hourly count %d, ledger %+v; want the step pending with its spend kept", n, h.ledger.All())
+	}
+}
