@@ -180,7 +180,7 @@ semantic-map/
     │   │   ├── ledger.go       Entry + Ledger: every change the agent holds and what it replaced; OpenLedger (atomic file) / MemoryLedger
     │   │   ├── acting.go       Acting: Apply (records the original first), Revert, Forget, Held (reconcile against the workloads listed), Unbuilt
     │   │   ├── dryrun.go       DryRun: wraps an actuator so Set changes nothing outside the process
-    │   │   ├── memoryhigh.go   The `memory.high` actuator: a pod's cgroup v2 memory.high, a soft cap the kernel enforces by reclaim; Build refuses no cgroup v2, the kubelet managing memory.high (MemoryQoS), or a tree it cannot write
+    │   │   ├── memoryhigh.go   The `memory.high` actuator: a pod's cgroup v2 memory.high, a soft cap the kernel enforces by reclaim; Build refuses no cgroup v2, the kubelet managing memory.high (MemoryQoS), a pod memory.high it cannot read, or a tree it cannot write
     │   │   ├── writable_*.go   Whether a directory may be written (access W_OK on unix; nothing to ask elsewhere)
     │   │   └── static.go       Static: an actuator over in-memory values, the stand-in where the runtime is dry-run
     │   ├── facts/              Reading the machine's facts (concrete, NOT a contract)

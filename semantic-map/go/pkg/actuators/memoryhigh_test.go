@@ -631,3 +631,40 @@ func TestMemoryHighDryRunSkipsTheWriteProbe(t *testing.T) {
 		t.Fatal("dry run built without cgroup v2")
 	}
 }
+
+// TestMemoryHighRefusesAnUnreadableMemoryHigh: a memory.high that cannot be read
+// (here a directory, EISDIR, which holds even as root) is not taken as unmanaged:
+// Build fails naming the file, without claiming MemoryQoS. One that is absent,
+// as a cgroup removed mid-scan, is skipped.
+func TestMemoryHighRefusesAnUnreadableMemoryHigh(t *testing.T) {
+	// Pod level.
+	root := mhRoot(t)
+	d := mhPodDirs(root, "burstable", mhUID, false)
+	if err := os.MkdirAll(filepath.Join(d, "memory.high"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewMemoryHigh(Env{CgroupRoot: root, DryRun: true})
+	if err == nil || strings.Contains(err.Error(), "MemoryQoS") || !strings.Contains(err.Error(), "could not be read") ||
+		!strings.Contains(err.Error(), filepath.Join(d, "memory.high")) {
+		t.Fatalf("pod level: %v", err)
+	}
+	// Container level.
+	root = mhRoot(t)
+	pd := mhMkPod(t, root, "guaranteed", mhUID, true, "max", "")
+	c := filepath.Join(pd, "cri-containerd-abc.scope")
+	if err := os.MkdirAll(filepath.Join(c, "memory.high"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewMemoryHigh(Env{CgroupRoot: root, DryRun: true})
+	if err == nil || strings.Contains(err.Error(), "MemoryQoS") || !strings.Contains(err.Error(), filepath.Join(c, "memory.high")) {
+		t.Fatalf("container level: %v", err)
+	}
+	// Absent is skipped.
+	root = mhRoot(t)
+	if err := os.MkdirAll(mhPodDirs(root, "besteffort", mhUID, false), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewMemoryHigh(Env{CgroupRoot: root, DryRun: true}); err != nil {
+		t.Fatalf("absent memory.high: %v", err)
+	}
+}

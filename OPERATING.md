@@ -412,7 +412,7 @@ With `loops.relief.enabled: true` the agent runs two levers by default: `cpu.lim
 The agent checks both at start and refuses to start, naming the lever, when either fails:
 
 1. **cgroup v2**, at the cgroup collector's `config.root` (`/sys/fs/cgroup` by default; `/host/sys/fs/cgroup` in the DaemonSet). `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`.
-2. **The kubelet's MemoryQoS off.** With the `MemoryQoS` feature gate on, the kubelet sets `memory.high` itself and would overwrite what the agent writes. The agent takes any pod or container `memory.high` other than `max` under `kubepods` that its ledger does not hold as the kubelet's. Check by hand — no output means it is off:
+2. **The kubelet's MemoryQoS off.** With the `MemoryQoS` feature gate on, the kubelet sets `memory.high` itself and would overwrite what the agent writes. The agent takes any pod or container `memory.high` other than `max` under `kubepods` that its ledger does not hold as the kubelet's, and refuses start, naming the file, when one cannot be read (a permission or I/O error), since it cannot then tell; one removed while it scans is skipped. Check by hand — no output means it is off:
 
    ```bash
    find /sys/fs/cgroup -path '*kubepods*' -name memory.high | xargs -r grep -Lx max

@@ -355,8 +355,11 @@ func (a *MemoryHigh) refuseManaged(held map[string]bool) error {
 			return err
 		}
 		kids, err := os.ReadDir(p.dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // the pod went mid-scan
+		}
 		if err != nil {
-			continue
+			return fmt.Errorf("memory.high: cannot tell whether the kubelet manages it: %s could not be read: %w", p.dir, err)
 		}
 		for _, k := range kids {
 			if k.IsDir() {
@@ -369,11 +372,17 @@ func (a *MemoryHigh) refuseManaged(held map[string]bool) error {
 	return nil
 }
 
-// managedBy is an error when dir's memory.high is set to anything but max.
+// managedBy is an error when dir's memory.high is set to anything but max, or
+// cannot be read: a permission or I/O error is no proof the kubelet leaves it
+// alone. One that does not exist, as a cgroup removed mid-scan, is not managed.
 func managedBy(dir string) error {
-	b, err := os.ReadFile(filepath.Join(dir, "memory.high"))
-	if err != nil {
+	f := filepath.Join(dir, "memory.high")
+	b, err := os.ReadFile(f)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("memory.high: cannot tell whether the kubelet manages it: %s could not be read: %w", f, err)
 	}
 	if _, set, err := parseHigh(string(b)); err == nil && !set {
 		return nil
