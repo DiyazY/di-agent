@@ -2469,6 +2469,7 @@ func TestNothingIsAppliedOverAnAwaitingStep(t *testing.T) {
 // settled as never taken, fails.
 type rereadFails struct {
 	actuators.Actuator
+	only     string // when set, the only subject it fails for
 	clock    func() time.Time
 	mu       sync.Mutex
 	armed    bool
@@ -2479,6 +2480,9 @@ type rereadFails struct {
 func (r *rereadFails) arm() { r.mu.Lock(); r.armed = true; r.mu.Unlock() }
 
 func (r *rereadFails) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	if r.only != "" && w.Subject != r.only {
+		return r.Actuator.Set(ctx, w, v, set)
+	}
 	r.mu.Lock()
 	r.failNext = true
 	r.mu.Unlock()
@@ -2486,6 +2490,9 @@ func (r *rereadFails) Set(ctx context.Context, w runtime.Workload, v float64, se
 }
 
 func (r *rereadFails) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	if r.only != "" && w.Subject != r.only {
+		return r.Actuator.Read(ctx, w)
+	}
 	r.mu.Lock()
 	now := r.clock()
 	fail := r.failNext || (r.armed && r.last[w.Subject].Equal(now))
@@ -2528,8 +2535,8 @@ func TestARereadThatKeepsFailingIsShown(t *testing.T) {
 	if !strings.Contains(logged, "api unavailable") {
 		t.Fatalf("logged %q; want the read error logged", logged)
 	}
-	if h.l.reconciled {
-		t.Fatal("reconciled while a step cannot be settled; want nothing applied until it can")
+	if !h.l.reconciled {
+		t.Fatal("not reconciled: one step that cannot be read holds the whole lever; want only its workload held")
 	}
 }
 
@@ -2609,5 +2616,33 @@ func TestARestoreLeftPendingKeepsItsRevertOwed(t *testing.T) {
 	}
 	if n := h.l.budget.Count(h.now); n != spent {
 		t.Fatalf("hourly count %d; want %d: a restore spends nothing and refunds nothing", n, spent)
+	}
+}
+
+// TestARereadThatKeepsFailingHoldsOnlyItsWorkload: a step that never took and
+// cannot be read again holds its own workload, never stepped while it is
+// unread, but not the lever: relief goes on with the other workloads.
+func TestARereadThatKeepsFailingHoldsOnlyItsWorkload(t *testing.T) {
+	var h *harness
+	var r *rereadFails
+	h = newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			r = &rereadFails{Actuator: a, only: "pod:a", clock: func() time.Time { return h.clock() }, last: map[string]time.Time{}}
+			return d, r
+		}})
+	h.until(2*time.Hour, 0.5, "the failed step", func() bool { return h.l.Status().Refused > 0 })
+	r.arm()
+	h.l.Pause() // nothing planned until pod:a's step is past settle and cannot be read
+	h.until(30*time.Minute, 0.5, "pod:a shown unread", func() bool { return len(h.l.Status().Unread) == 1 })
+	if _, ok := h.applied()["pod:b"]; ok {
+		t.Fatal("pod:b changed while paused")
+	}
+	h.l.Resume()
+	h.until(30*time.Minute, 0.5, "relief on pod:b", func() bool { _, ok := h.applied()["pod:b"]; return ok })
+	if st := h.l.Status(); len(st.Unread) != 1 || st.Unread[0].Entry.Subject != "pod:a" || !strings.Contains(st.ReconcileError, "api unavailable") {
+		t.Fatalf("status %+v; want pod:a still shown unread, with the read error", st)
+	}
+	if e, ok := h.applied()["pod:a"]; !ok || !e.Pending {
+		t.Fatalf("ledger %+v; want pod:a's step still pending, never stepped on", h.applied())
 	}
 }

@@ -504,21 +504,24 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		if errors.Is(err, actuators.ErrNotSettled) {
 			continue
 		}
-		settled = false
+		reread := errors.Is(err, actuators.ErrReread)
+		if !reread {
+			settled = false
+		}
 		l.mu.Lock()
 		l.reconcileErr = err.Error()
 		var first bool
-		if errors.Is(err, actuators.ErrReread) {
+		if reread {
 			// A setting that cannot be read is unread like any other: shown stuck
 			// with its error, never stepped on, and given back from its record
-			// once it expires.
+			// once it expires. Its workload, awaiting, is held; the lever is not.
 			u := &Unread{Entry: e, Error: err.Error(), Attempts: 1, live: live[e.Subject] != nil}
 			first = prevUnread[e.Subject] == nil
 			u.carry(prevUnread[e.Subject])
 			l.unread[e.Subject] = u
 		}
 		l.mu.Unlock()
-		if !errors.Is(err, actuators.ErrReread) || first {
+		if !reread || first {
 			l.cfg.Logf("relief: settling the change to %s that never took: %v (retried next pass)", e.Subject, err)
 		}
 	}
