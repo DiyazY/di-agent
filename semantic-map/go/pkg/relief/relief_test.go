@@ -11,6 +11,7 @@ import (
 
 	"github.com/DiyazY/di-agent/internal/testhooks"
 	"github.com/DiyazY/di-agent/pkg/actuators"
+	"github.com/DiyazY/di-agent/pkg/policy"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
@@ -34,6 +35,11 @@ type harness struct {
 	ctx      context.Context
 	shares   map[string]float64 // each pod's share, as the fixture gave it
 	strength float64            // of each share's relationship to pressure
+	seen     runtime.Runtime    // the runtime the loop sees
+	seenAct  actuators.Actuator // the actuator the loop acts through
+	policy   *policy.Policy
+	f        fixture
+	logged   []string // what the loop logged; guarded by mu
 
 	mu sync.Mutex // guards now against readers on other goroutines; written only by the test
 }
@@ -177,17 +183,38 @@ func newHarness(t *testing.T, f fixture) *harness {
 	if f.wrap != nil {
 		rt2, act2 = f.wrap(h.rt, h.actuator)
 	}
-	relief := spec.Default().Loops.Relief
+	h.seen, h.seenAct, h.policy, h.f = rt2, act2, defaultPolicy(t, f.policy), f
+	h.l = h.newLoop(spec.Default().Loops.Relief.Levers[0])
+	return h
+}
+
+// newLoop is a loop over the harness's runtime, actuator, ledger and map with
+// lever, as a restarted agent builds it.
+func (h *harness) newLoop(lever spec.Lever) *Loop {
+	h.t.Helper()
 	l, err := New(Config{
-		Interval: relief.Interval, Lever: relief.Levers[0], Budget: f.budget, NodeID: "n1", Runtime: rt2,
-		Acting: actuators.NewActing("n1", h.ledger, act2), Policy: defaultPolicy(t, f.policy), Map: h.m,
-		Now: h.clock, Logf: t.Logf, Evidence: f.evidence, Candidates: f.candidates,
+		Interval: spec.Default().Loops.Relief.Interval, Lever: lever, Budget: h.f.budget, NodeID: "n1", Runtime: h.seen,
+		Acting: clocked(actuators.NewActing("n1", h.ledger, h.seenAct), h.clock), Policy: h.policy, Map: h.m,
+		Now: h.clock, Logf: h.logf, Evidence: h.f.evidence, Candidates: h.f.candidates,
 	})
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
-	h.l = l
-	return h
+	return l
+}
+
+// logf logs through the test and keeps what was logged.
+func (h *harness) logf(format string, args ...any) {
+	h.t.Logf(format, args...)
+	h.mu.Lock()
+	h.logged = append(h.logged, fmt.Sprintf(format, args...))
+	h.mu.Unlock()
+}
+
+// clocked is a with its write times read from now.
+func clocked(a *actuators.Acting, now func() time.Time) *actuators.Acting {
+	a.Now = now
+	return a
 }
 
 func (h *harness) clock() time.Time {
@@ -1791,8 +1818,8 @@ func TestAClosedChangeClearsItsKeptSpend(t *testing.T) {
 	h.act("pod:a")
 	h.l.Pause()
 	h.until(2*time.Hour, 0.5, "expiry", func() bool { return len(h.ledger.All()) == 0 })
-	if len(h.l.spentFor) != 0 {
-		t.Fatalf("spentFor %v after the change closed; want it settled", h.l.spentFor)
+	if len(h.l.spent) != 0 {
+		t.Fatalf("spent %v after the change closed; want it settled", h.l.spent)
 	}
 	n := h.l.budget.Count(h.now.Add(-30 * time.Minute))
 	h.l.reconciled = false
@@ -2203,5 +2230,305 @@ func TestAFailedPatchThatReadsAsBeforeAndLandsIsRecorded(t *testing.T) {
 	}
 	if e := h.applied()["pod:a"]; e.Pending || e.Applied != cut || h.limit("pod:a") == nil || *h.limit("pod:a") != cut {
 		t.Fatalf("entry %+v, limit %v; want the landed cut %v committed", e, h.limit("pod:a"), cut)
+	}
+}
+
+// failSets is an actuator whose Sets numbered in fail (counting from 1, every
+// subject) report an error without effect, as a PATCH the client gave up on.
+// The read right after such a Set returns the setting from before, and so do
+// the next `old` reads of that subject; the read after those lands it, as the
+// server applying the request late. old < 0 never lands.
+type failSets struct {
+	actuators.Actuator
+	mu      sync.Mutex
+	fail    map[int]bool
+	old     int
+	sets    int
+	failed  int
+	pending map[string]float64
+	reads   map[string]int
+}
+
+func newFailSets(old int, fail ...int) func(*runtime.DryRun, actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+	return func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+		f := &failSets{Actuator: a, fail: map[int]bool{}, old: old, pending: map[string]float64{}, reads: map[string]int{}}
+		for _, n := range fail {
+			f.fail[n] = true
+		}
+		return d, f
+	}
+}
+
+func (f *failSets) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sets++
+	if !f.fail[f.sets] {
+		return f.Actuator.Set(ctx, w, v, set)
+	}
+	f.failed++
+	f.pending[w.Subject], f.reads[w.Subject] = v, 0
+	return errors.New("context deadline exceeded")
+}
+
+func (f *failSets) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	f.mu.Lock()
+	v, ok := f.pending[w.Subject]
+	if ok && f.old >= 0 {
+		f.reads[w.Subject]++
+		if f.reads[w.Subject] > 1+f.old { // the read-back and `old` more saw it as before
+			delete(f.pending, w.Subject)
+			f.mu.Unlock()
+			if err := f.Actuator.Set(ctx, w, v, true); err != nil {
+				return 0, false, err
+			}
+			return f.Actuator.Read(ctx, w)
+		}
+	}
+	f.mu.Unlock()
+	return f.Actuator.Read(ctx, w)
+}
+
+func (f *failSets) counts() (sets, failed int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sets, f.failed
+}
+
+// secondStepThatDoesNotHelp takes a first step on pod:a, keeps it, then a second
+// that does not help, as TestAFailedSecondStepReturnsToTheFirst, up to the
+// second step applied. It returns the first step's entry.
+func secondStepThatDoesNotHelp(h *harness) actuators.Entry {
+	h.t.Helper()
+	h.act("pod:a")
+	h.run(2*time.Minute, 0.44)
+	first := h.applied()["pod:a"]
+	record(h.t, h.m, usage("pod:a"), "pod:a", 0.3, h.now)
+	h.until(3*time.Minute, 0.44, "a second step", func() bool { return near(h.applied()["pod:a"].Applied, 0.9) })
+	return first
+}
+
+// revertOwed reports whether the action in flight still owes its revert.
+func (h *harness) revertOwed() bool {
+	h.l.mu.Lock()
+	defer h.l.mu.Unlock()
+	return h.l.inFlight != nil && h.l.inFlight.revertPending
+}
+
+// TestARestoreThatTimesOutAndLandsIsRecorded: the restore of the first step,
+// after a second that did not help, times out on the client and lands a few
+// reads later. It is not settled as never taken at once (its settle runs from
+// its own write, not from the earlier step's act), so the ledger never goes
+// back to the failed step: it ends committed at the restored cap, the revert
+// owed until then, nothing refunded.
+func TestARestoreThatTimesOutAndLandsIsRecorded(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, wrap: newFailSets(3, 3)})
+	fs := h.seenAct.(*failSets)
+	first := secondStepThatDoesNotHelp(h)
+	spent := h.l.budget.Count(h.now)
+	h.until(3*time.Minute, 0.44, "the restore attempted", func() bool { _, f := fs.counts(); return f == 1 })
+	for i := 0; i < 12; i++ {
+		e, ok := h.applied()["pod:a"]
+		if !ok {
+			t.Fatalf("tick %d: the entry left the ledger while the restore could still land", i)
+		}
+		if !e.Pending && e.DecisionID == first.DecisionID {
+			break
+		}
+		if e.Pending && !h.revertOwed() {
+			t.Fatalf("tick %d: the restore is unsettled and the revert is no longer owed", i)
+		}
+		if !e.Pending && e.DecisionID != first.DecisionID {
+			t.Fatalf("tick %d: entry %+v; the failed step was put back while the restore could still land", i, e)
+		}
+		h.step(0.44)
+	}
+	e := h.applied()["pod:a"]
+	if e.Pending || e.DecisionID != first.DecisionID || !near(e.Applied, first.Applied) || h.limit("pod:a") == nil || !near(*h.limit("pod:a"), first.Applied) {
+		t.Fatalf("entry %+v, limit %v; want the restored first step %+v committed and in force", e, h.limit("pod:a"), first)
+	}
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept || !near(a.Entry.Applied, first.Applied) || h.revertOwed() {
+		t.Fatalf("action %+v; want it kept at the first step, the revert done", a)
+	}
+	if n := h.l.budget.Count(h.now); n != spent {
+		t.Fatalf("hourly count %d; want %d: a restore spends nothing and refunds nothing", n, spent)
+	}
+	if st := h.l.Status(); st.Reverted != 1 || len(h.decisions(OutcomeNotApplied)) != 0 {
+		t.Fatalf("reverted %d, not_applied %d; want one revert, no never-took verdict", st.Reverted, len(h.decisions(OutcomeNotApplied)))
+	}
+}
+
+// TestARestoreThatNeverTakesIsRetried: a restore that genuinely never takes is
+// settled after its own settle with the failed step back in force; the revert
+// is still owed and retried, the action is not kept by that verdict, and
+// nothing is refunded: a restore never spent.
+func TestARestoreThatNeverTakesIsRetried(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, wrap: newFailSets(-1, 3, 4)})
+	fs := h.seenAct.(*failSets)
+	first := secondStepThatDoesNotHelp(h)
+	spent := h.l.budget.Count(h.now)
+	h.until(10*time.Minute, 0.44, "the restore settled as never taken", func() bool { return len(h.decisions(OutcomeNotApplied)) > 0 })
+	if !h.revertOwed() {
+		t.Fatalf("action %+v; want the revert still owed once the restore never took", h.action("pod:a"))
+	}
+	if a := h.action("pod:a"); a.Outcome != "" {
+		t.Fatalf("action %+v; want it still in flight, not closed or kept by the restore's verdict", a)
+	}
+	if n := h.l.budget.Count(h.now); n != spent {
+		t.Fatalf("hourly count %d; want %d: a restore that never took refunds nothing", n, spent)
+	}
+	h.until(10*time.Minute, 0.44, "the revert retried until it took", func() bool {
+		e := h.applied()["pod:a"]
+		return !e.Pending && e.DecisionID == first.DecisionID
+	})
+	if sets, failed := fs.counts(); failed != 2 || sets < 5 {
+		t.Fatalf("%d sets, %d failed; want the restore retried after each never took", sets, failed)
+	}
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept || !near(a.Entry.Applied, first.Applied) || h.revertOwed() {
+		t.Fatalf("action %+v; want it kept at the first step once the revert took", a)
+	}
+	if n := h.l.budget.Count(h.now); n != spent {
+		t.Fatalf("hourly count %d; want %d", n, spent)
+	}
+}
+
+// TestARaisedExpiryDoesNotSettleAPendingStepEarly: a failed step written before
+// a restart that raised the lever's expiry still waits settle from its own
+// write: it is not settled as never taken at once, and when it lands it is
+// committed, never left in force unrecorded.
+func TestARaisedExpiryDoesNotSettleAPendingStepEarly(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, wrap: newFailSets(3, 1)})
+	h.until(2*time.Hour, 0.5, "the failed step", func() bool { return h.l.Status().Refused > 0 })
+	e, ok := h.applied()["pod:a"]
+	if !ok || !e.Pending {
+		t.Fatalf("ledger %+v; want the failed step pending", h.applied())
+	}
+	cut := e.Applied
+	lever := spec.Default().Loops.Relief.Levers[0]
+	lever.Expiry = 3 * time.Hour
+	h.l = h.newLoop(lever)
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		if _, ok := h.applied()["pod:a"]; !ok {
+			t.Fatalf("tick %d: the entry was settled while the change could still land", i)
+		}
+		h.step(0.5)
+	}
+	if e := h.applied()["pod:a"]; e.Pending || e.Applied != cut || h.limit("pod:a") == nil || *h.limit("pod:a") != cut {
+		t.Fatalf("entry %+v, limit %v; want the landed cut %v committed", e, h.limit("pod:a"), cut)
+	}
+}
+
+// TestNothingIsAppliedOverAnAwaitingStep: a failed step whose outcome is not
+// yet known holds its workload: the loop never plans over it, its spend is
+// refunded exactly once when it settles as never taken, however the lever's
+// expiry or settle moved since it was written.
+func TestNothingIsAppliedOverAnAwaitingStep(t *testing.T) {
+	setup := func(t *testing.T) (*harness, *counting) {
+		var c *counting
+		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+			wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+				c = &counting{Actuator: &refusedUnread{Actuator: a}, sets: map[string]int{}}
+				return d, c
+			}})
+		h.until(2*time.Hour, 0.5, "the failed step", func() bool { return h.l.Status().Refused > 0 })
+		return h, c
+	}
+	sets := func(c *counting) int { c.mu.Lock(); defer c.mu.Unlock(); return c.sets["pod:a"] }
+	t.Run("expiry lowered", func(t *testing.T) {
+		h, c := setup(t)
+		h.l.c.Expiry = 5 * time.Minute // as a config change the loop picks up
+		h.until(time.Hour, 0.5, "the step settled", func() bool { return len(h.ledger.All()) == 0 })
+		if n := sets(c); n != 1 {
+			t.Fatalf("%d Sets of pod:a before its step settled; want only the failed one", n)
+		}
+		if n := h.l.budget.Count(h.now); n != 0 || len(h.decisions(OutcomeNotApplied)) != 1 {
+			t.Fatalf("hourly count %d; want the one spend refunded once", n)
+		}
+	})
+	t.Run("settle outlasting the cooldown", func(t *testing.T) {
+		h, c := setup(t)
+		h.l.c.Settle = 30 * time.Minute
+		h.run(25*time.Minute, 0.5)
+		if n, st := sets(c), h.l.Status(); n != 1 || st.Refused != 1 || len(h.decisions("act")) != 0 {
+			t.Fatalf("%d Sets, %d refused, %d acts while the step awaits; want none planned over it", n, st.Refused, len(h.decisions("act")))
+		}
+		h.l.Pause() // once settled, its cooldown long over, the loop would plan it again in the same pass
+		h.until(10*time.Minute, 0.5, "the step settled", func() bool { return len(h.ledger.All()) == 0 })
+		if n := h.l.budget.Count(h.now); n != 0 {
+			t.Fatalf("hourly count %d; want the spend refunded", n)
+		}
+	})
+}
+
+// rereadFails is an actuator whose Set fails without effect, the read after it
+// failing too. Once armed, it answers only the first read of a workload at any
+// one moment: a second read in the same pass, as the re-read before a step is
+// settled as never taken, fails.
+type rereadFails struct {
+	actuators.Actuator
+	clock    func() time.Time
+	mu       sync.Mutex
+	armed    bool
+	failNext bool
+	last     map[string]time.Time
+}
+
+func (r *rereadFails) arm() { r.mu.Lock(); r.armed = true; r.mu.Unlock() }
+
+func (r *rereadFails) Set(ctx context.Context, w runtime.Workload, v float64, set bool) error {
+	r.mu.Lock()
+	r.failNext = true
+	r.mu.Unlock()
+	return errors.New("context deadline exceeded")
+}
+
+func (r *rereadFails) Read(ctx context.Context, w runtime.Workload) (float64, bool, error) {
+	r.mu.Lock()
+	now := r.clock()
+	fail := r.failNext || (r.armed && r.last[w.Subject].Equal(now))
+	r.failNext = false
+	r.last[w.Subject] = now
+	r.mu.Unlock()
+	if fail {
+		return 0, false, errors.New("api unavailable")
+	}
+	return r.Actuator.Read(ctx, w)
+}
+
+// TestARereadThatKeepsFailingIsShown: a step that never took whose re-read
+// before settling keeps failing is not left awaiting unseen: it is unread with
+// its error, counted stuck, the reconcile error says why, and it is logged.
+func TestARereadThatKeepsFailingIsShown(t *testing.T) {
+	var h *harness
+	var r *rereadFails
+	h = newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4},
+		wrap: func(d *runtime.DryRun, a actuators.Actuator) (runtime.Runtime, actuators.Actuator) {
+			r = &rereadFails{Actuator: a, clock: func() time.Time { return h.clock() }, last: map[string]time.Time{}}
+			return d, r
+		}})
+	h.until(2*time.Hour, 0.5, "the failed step", func() bool { return h.l.Status().Refused > 0 })
+	r.arm()
+	h.run(5*time.Minute, 0.5)
+	st := h.l.Status()
+	if len(st.Unread) != 1 || st.Unread[0].Entry.Subject != "pod:a" || !strings.Contains(st.Unread[0].Error, "api unavailable") || st.Stuck < 1 {
+		t.Fatalf("status %+v; want the step shown unread and stuck, with the read error", st)
+	}
+	if !strings.Contains(st.ReconcileError, "api unavailable") {
+		t.Fatalf("reconcile_error %q; want the read error", st.ReconcileError)
+	}
+	if e, ok := h.applied()["pod:a"]; !ok || !e.Pending {
+		t.Fatalf("ledger %+v; want the step still pending", h.applied())
+	}
+	h.mu.Lock()
+	logged := strings.Join(h.logged, "\n")
+	h.mu.Unlock()
+	if !strings.Contains(logged, "api unavailable") {
+		t.Fatalf("logged %q; want the read error logged", logged)
+	}
+	if h.l.reconciled {
+		t.Fatal("reconciled while a step cannot be settled; want nothing applied until it can")
 	}
 }

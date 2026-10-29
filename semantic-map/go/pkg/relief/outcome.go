@@ -256,6 +256,11 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		}
 		return
 	}
+	if l.awaiting[a.Subject] {
+		// Its latest write, a step or the restore of the one before, has not yet
+		// settled: nothing is judged or written over it until it has.
+		return
+	}
 	if a.revertPending {
 		l.revertFailed(ctx, now, w, a, a.VerifyID)
 		return
@@ -332,6 +337,13 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Worklo
 		l.undoFailed(a, "reverting", err)
 		return
 	}
+	l.reverted(now, a, entry, verifyID)
+}
+
+// reverted records that a's step that did not help was undone: reverted, or,
+// for a further step, its earlier step restored (entry, its record), which
+// stays kept. Its workload cools down for failedCooldown times its cooldown.
+func (l *Loop) reverted(now time.Time, a *Action, entry actuators.Entry, verifyID string) {
 	cooldown := failedCooldown * a.cooldown
 	question := l.giveBackAsk(a.Subject, "capping it did not help")
 	if a.prev != nil {
@@ -360,7 +372,7 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Worklo
 		if l.inFlight == a {
 			l.inFlight = nil
 		}
-		l.kept = append(l.kept, a)
+		l.kept = append(removeAction(l.kept, a), a)
 		l.budget.Cool(a.Subject, now.Add(cooldown))
 		l.mu.Unlock()
 		return
@@ -491,7 +503,11 @@ func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Durat
 	defer l.mu.Unlock()
 	a.Outcome, a.revertPending = outcome, false
 	a.RevertAttempts, a.LastError = 0, ""
-	delete(l.spentFor, a.Subject) // a closed change's kept spend is settled
+	for id, sp := range l.spent {
+		if sp.subject == a.Subject {
+			delete(l.spent, id) // a closed change's kept spend is settled
+		}
+	}
 	if l.inFlight == a {
 		l.inFlight = nil
 	}

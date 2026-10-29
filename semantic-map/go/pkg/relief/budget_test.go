@@ -130,7 +130,7 @@ func (h *harness) secondWith(budget *Budget, act actuators.Actuator) *Loop {
 		}
 	}
 	l, err := New(Config{Interval: tick, Lever: lever, NodeID: "n1", Runtime: h.rt,
-		Acting: actuators.NewActing("n1", h.ledger, act), Policy: h.l.cfg.Policy, Map: h.m,
+		Acting: clocked(actuators.NewActing("n1", h.ledger, act), h.clock), Policy: h.l.cfg.Policy, Map: h.m,
 		Now: h.clock, Logf: h.t.Logf, Budget: budget})
 	if err != nil {
 		h.t.Fatal(err)

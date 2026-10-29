@@ -165,10 +165,10 @@ type Loop struct {
 	effects effects       // what acting on each workload has done; safe on its own
 	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
-	pass       sync.Mutex           // serialises the passes that change the system
-	seq        int                  // decision counter; touched only under pass
-	reconciled bool                 // the ledger has been reconciled; until then nothing is applied. Touched only under pass
-	spentFor   map[string]time.Time // subjects whose failed Apply kept its hourly spend, with when, so reconcile neither spends again nor keeps the spend of a step that never took. Touched only under pass
+	pass       sync.Mutex       // serialises the passes that change the system
+	seq        int              // decision counter; touched only under pass
+	reconciled bool             // the ledger has been reconciled; until then nothing is applied. Touched only under pass
+	spent      map[string]spend // by decision: steps that took an hourly slot and are not yet settled (left pending, or adopted after a failed Set), so reconcile neither spends again nor keeps the spend of a step that never took. Touched only under pass
 
 	mu           sync.Mutex
 	trigger      *Trigger
@@ -228,8 +228,15 @@ func New(c Config) (*Loop, error) {
 		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act, epoch: now.Unix(),
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
-		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spentFor: map[string]time.Time{},
+		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spent: map[string]spend{},
 	}, nil
+}
+
+// spend is an hourly slot a step took: its workload and when, which is what
+// the Budget refunds.
+type spend struct {
+	subject string
+	at      time.Time
 }
 
 // minCallTimeout is the least a pass waits on the runtime, however short the
@@ -470,22 +477,55 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 
 	// A pending change that still reads as before its Apply may yet land, as a
 	// resize the kubelet applies a moment later or a PATCH that timed out on the
-	// client: while its step is within Settle it stays pending and is read again
-	// next pass, whether an action holds it or not (a failed Apply made none).
-	// The step's time is its entry's own, Expires less the lever's expiry, so it
-	// survives a restart. Past that it never took.
+	// client: while it is within Settle of its write it stays pending and is read
+	// again next pass, whether an action holds it or not (a failed Apply made
+	// none). The write time is the entry's own SetAt, so it survives a restart
+	// and a change of the lever's expiry. Past that it never took.
+	settled := true
 	l.awaiting = map[string]bool{}
 	for _, e := range rec.NeverTook {
-		if now.Sub(e.Expires.Add(-l.c.Expiry)) < l.c.Settle {
+		if now.Sub(e.SetAt) < l.c.Settle {
 			l.awaiting[e.Subject] = true
 			continue
 		}
-		l.neverTook(ctx, now, ws, e, live[e.Subject], inFlight)
+		err := l.neverTook(ctx, now, ws, e, live[e.Subject], inFlight)
+		if err == nil {
+			continue
+		}
+		// Landed since it was read, or not settled for want of a read or a save:
+		// it stays pending and is read again next pass. Only a landing is quiet.
+		l.awaiting[e.Subject] = true
+		if errors.Is(err, actuators.ErrNotSettled) {
+			continue
+		}
+		settled = false
+		l.mu.Lock()
+		l.reconcileErr = err.Error()
+		var first bool
+		if errors.Is(err, actuators.ErrReread) {
+			// A setting that cannot be read is unread like any other: shown stuck
+			// with its error, never stepped on, and given back from its record
+			// once it expires.
+			u := &Unread{Entry: e, Error: err.Error(), Attempts: 1, live: live[e.Subject] != nil}
+			first = prevUnread[e.Subject] == nil
+			u.carry(prevUnread[e.Subject])
+			l.unread[e.Subject] = u
+		}
+		l.mu.Unlock()
+		if !errors.Is(err, actuators.ErrReread) || first {
+			l.cfg.Logf("relief: settling the change to %s that never took: %v (retried next pass)", e.Subject, err)
+		}
 	}
 
 	var expired, resumed []*Action
 	for _, e := range held {
 		if a := live[e.Subject]; a != nil {
+			if l.restoreLanded(a, e) {
+				// The restore of its earlier step, owed since the latest step did
+				// not help, has landed: the revert is done.
+				l.reverted(now, a, e, a.VerifyID)
+				continue
+			}
 			// The action in force keeps the entry Held settled, as a pending one
 			// adopted or restored.
 			l.mu.Lock()
@@ -508,7 +548,7 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			if d, ok := l.cfg.Map.Journal().Decision(e.DecisionID); ok && !d.At.IsZero() && d.At.Before(now) {
 				at = d.At
 			}
-			if _, kept := l.spentFor[a.Subject]; !kept { // a failed Apply that left it in force kept its spend
+			if _, kept := l.spent[e.DecisionID]; !kept { // a failed Apply that left it in force kept its spend
 				l.budget.Spend(at)
 			}
 			l.budget.coolExcept(a.Subject, l.d.Action, at.Add(a.cooldown))
@@ -532,14 +572,14 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 		l.kept = append(l.kept, a)
 	}
 	l.mu.Unlock()
-	l.reconciled = true
-	// A kept spend is settled by the verdict on its change: in force (held) or
+	l.reconciled = settled
+	// A kept spend is settled by the verdict on its step: in force (held) or
 	// dropped keeps it, and never took (neverTook) gives it back.
 	for _, e := range held {
-		delete(l.spentFor, e.Subject)
+		delete(l.spent, e.DecisionID)
 	}
 	for _, d := range dropped {
-		delete(l.spentFor, d.Subject)
+		delete(l.spent, d.DecisionID)
 	}
 	for _, a := range resumed {
 		l.cfg.Logf("relief: resumed %s on %s (expires %s)", a.ID, a.Subject, a.Entry.Expires.Format(time.RFC3339))
@@ -547,46 +587,54 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// neverTook closes a pending change that still reads as before its Apply: the
+// neverTook closes a pending change that still reads as before its write: the
 // ledger's entry is settled (a further step's back to the step before, a first
-// step's deleted), the hourly spend it took is given back, the verdict is
-// journalled, and its action, if one holds it, is closed as not applied, or put
-// back at its earlier step.
-func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Workload, e actuators.Entry, a, inFlight *Action) {
+// step's deleted), the verdict is journalled, and the step's hourly spend, if it
+// took one, is given back. An action that holds it is closed as not applied, or
+// put back at its earlier step when the step was its own latest. A restore that
+// never took, an undo of a step that did not help, spent nothing and is given
+// nothing back: the step it undoes is in force again, and the revert is still
+// owed and retried. An error leaves the entry pending: ErrNotSettled when it no
+// longer reads as before, ErrReread when it could not be read again.
+func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Workload, e actuators.Entry, a, inFlight *Action) error {
 	w, _ := workload(ws, e.Subject)
 	restored, err := l.cfg.Acting.ResolveNeverTook(ctx, w, e)
 	if err != nil {
-		// Landed since it was read, or not settled for want of a read or a save:
-		// it stays pending and is read again next pass.
-		l.awaiting[e.Subject] = true
-		if !errors.Is(err, actuators.ErrNotSettled) {
-			l.cfg.Logf("relief: settling the change to %s that never took: %v (retried next pass)", e.Subject, err)
-			l.mu.Lock()
-			l.reconcileErr = err.Error()
-			l.mu.Unlock()
-			l.reconciled = false
-		}
-		return
+		return err
 	}
-	if at, ok := l.spentFor[e.Subject]; ok {
-		l.budget.refund(at)
-		delete(l.spentFor, e.Subject)
-	} else if a != nil && !a.Resumed {
-		l.budget.refund(a.ActedAt)
+	restore := a != nil && l.restoreOf(a, e)
+	sp, spent := l.spent[e.DecisionID]
+	delete(l.spent, e.DecisionID)
+	if spent && !restore {
+		l.budget.refund(sp.at)
 	}
 	b := l.cfg.Map.Decide(l.id(OutcomeNotApplied), fmt.Sprintf("did the change to %s's %s through %s take?", e.Subject, l.d.Resource, l.d.Action))
 	b.Input("entry", e)
 	if restored.Action != "" {
 		b.Input("restored", restored)
 	}
-	b.Note("the setting still reads as before the change: it never took, and there is nothing to give back; its hourly action is given back")
+	switch {
+	case restore:
+		b.Note("the setting still reads as the step it was to undo: the restore never took, the step that did not help is in force, and the revert is retried; a restore spends no hourly action, so none is given back")
+	case spent:
+		b.Note("the setting still reads as before the change: it never took, and there is nothing to give back; its hourly action is given back")
+	default:
+		b.Note("the setting still reads as before the change: it never took, and there is nothing to give back")
+	}
 	b.Commit(map[string]any{OutcomeNotApplied: e.Subject})
 	if a == nil {
-		return
+		return nil
+	}
+	if restore {
+		l.mu.Lock()
+		a.Entry = restored
+		l.mu.Unlock()
+		l.undoFailed(a, "reverting", fmt.Errorf("putting %s back at its earlier step: the restore never took; the step that did not help is still in force", e.Subject))
+		return nil
 	}
 	if restored.Action == "" {
 		l.end(now, a, OutcomeNotApplied, a.cooldown)
-		return
+		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -605,6 +653,20 @@ func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Worklo
 	}
 	// As after a step that did not help: not tried again at once.
 	l.budget.Cool(a.Subject, now.Add(a.cooldown))
+	return nil
+}
+
+// restoreOf reports whether e is the write of a's owed revert: the restore of
+// its earlier step, under that step's decision, over a's own latest step.
+func (l *Loop) restoreOf(a *Action, e actuators.Entry) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return a.revertPending && a.prev != nil && e.DecisionID == a.prev.DecisionID && e.DecisionID != a.DecisionID
+}
+
+// restoreLanded reports whether e, committed, is a's owed restore in force.
+func (l *Loop) restoreLanded(a *Action, e actuators.Entry) bool {
+	return !e.Pending && l.restoreOf(a, e)
 }
 
 // journalDropped journals each change Held dropped from the ledger as gone, with
@@ -764,6 +826,9 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		cooling[s] = time.Time{} // a change of unknown setting is never stepped on
 	}
 	l.mu.Unlock()
+	for s := range l.awaiting {
+		cooling[s] = time.Time{} // nor is a step whose outcome is not yet known
+	}
 	ws, ok := workloads()
 	if !ok {
 		return
@@ -862,7 +927,7 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		// the change up. One that changed nothing gives it back. Either way the
 		// hold on the workload stands, and Cool below extends it to this lever.
 		if entry.Action != "" || errors.Is(err, actuators.ErrLeftPending) {
-			l.spentFor[plan.Subject] = now
+			l.spent[id] = spend{plan.Subject, now}
 		} else {
 			l.budget.refund(now)
 		}
@@ -902,8 +967,10 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		"to": plan.To, "unit": plan.Unit, "predicted": plan.Predicted, "expires": entry.Expires})
 
 	if entry.Pending {
-		// Applied, not read back: the next pass reconciles it, so its entry settles.
+		// Applied, not read back: the next pass reconciles it, so its entry
+		// settles, and gives the spend back should it never take.
 		l.reconciled = false
+		l.spent[id] = spend{plan.Subject, now}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
