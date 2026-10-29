@@ -474,8 +474,10 @@ func TestHeldResolvesAPendingEntry(t *testing.T) {
 			f := newMem()
 			f.vals["s"] = c.value
 			l := MemoryLedger()
-			c.e.Action, c.e.Subject, c.e.NodeID, c.e.Pending = "fake", "s", "n", true
-			l.Put(c.e)
+			c.e.Action, c.e.Subject, c.e.NodeID, c.e.Pending, c.e.SetAt = "fake", "s", "n", true, time.Unix(1, 0)
+			if err := l.Put(c.e); err != nil {
+				t.Fatal(err)
+			}
 			a := NewActing("n", l, f)
 			r, err := a.Held(ctx, "fake", []runtime.Workload{wl("s")})
 			if err != nil || len(r.Dropped) != 0 || (len(r.NeverTook) == 1) != c.neverTook || (len(r.Held) == 1) == c.neverTook {
@@ -733,8 +735,8 @@ func (f *failSetBlindRead) Read(ctx context.Context, w runtime.Workload) (float6
 }
 
 // TestApplySaysWhenItLeftAStepPending: Apply's error says whether this step was
-// left pending (its outcome unknown, so possibly in force); a step restored to
-// the entry before it was not, even when that entry was itself pending.
+// left pending (its outcome unknown, so possibly in force); a step refused over
+// an entry that is itself pending was not, and sets nothing.
 func TestApplySaysWhenItLeftAStepPending(t *testing.T) {
 	m := newMem()
 	m.vals["s"] = 10
@@ -744,7 +746,7 @@ func TestApplySaysWhenItLeftAStepPending(t *testing.T) {
 		t.Fatalf("err %v; want ErrLeftPending for a step whose outcome is unknown", err)
 	}
 	l := MemoryLedger()
-	prior := Entry{Action: "fake", Subject: "s", NodeID: "n", Original: 10, OriginalSet: true, Applied: 7, Pending: true}
+	prior := Entry{Action: "fake", Subject: "s", NodeID: "n", Original: 10, OriginalSet: true, Applied: 7, Pending: true, SetAt: time.Unix(1, 0)}
 	if err := l.Put(prior); err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +756,10 @@ func TestApplySaysWhenItLeftAStepPending(t *testing.T) {
 	f.setErr = errors.New("conflict")
 	_, err = NewActing("n", l, f).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d2")
 	if err == nil || errors.Is(err, ErrLeftPending) {
-		t.Fatalf("err %v; want the step adopted at what reads back (it moved), not left pending", err)
+		t.Fatalf("err %v; want the step refused over the pending one, not left pending", err)
+	}
+	if got := l.All(); len(got) != 1 || got[0] != prior {
+		t.Fatalf("ledger %+v; want the pending entry untouched", got)
 	}
 }
 
@@ -842,4 +847,93 @@ func TestResolveNeverTookRereadsFirst(t *testing.T) {
 	if got := l.All(); len(got) != 1 || !got[0].Pending {
 		t.Fatalf("ledger %+v; want it still pending", got)
 	}
+}
+
+// TestApplyAndRestoreStampTheWriteTime: a step written ahead carries when it
+// was written, from the Acting's clock, so its settle runs from then whatever
+// its expiry; committing it clears the stamp.
+func TestApplyAndRestoreStampTheWriteTime(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	at := time.Unix(5000, 0)
+	a := NewActing("n", l, &failSetBlindRead{memAct: m})
+	a.Now = func() time.Time { return at }
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, at.Add(time.Hour), "d"); !errors.Is(err, ErrLeftPending) {
+		t.Fatal(err)
+	}
+	if e := l.All()[0]; !e.Pending || !e.SetAt.Equal(at) {
+		t.Fatalf("pending entry %+v; want set_at %v", e, at)
+	}
+	if err := l.Delete("fake", "s"); err != nil {
+		t.Fatal(err)
+	}
+	ok := NewActing("n", l, m)
+	ok.Now = func() time.Time { return at }
+	first, err := ok.Apply(context.Background(), wl("s"), "fake", 7, at.Add(time.Hour), "d1")
+	if err != nil || first.Pending || !first.SetAt.IsZero() {
+		t.Fatalf("committed %+v err %v; want no set_at once committed", first, err)
+	}
+	if _, err := ok.Apply(context.Background(), wl("s"), "fake", 5, at.Add(time.Hour), "d2"); err != nil {
+		t.Fatal(err)
+	}
+	later := at.Add(time.Minute)
+	a.Now = func() time.Time { return later }
+	if _, err := a.Restore(context.Background(), wl("s"), "fake", 7, first.Expires, "d1"); !errors.Is(err, ErrLeftPending) {
+		t.Fatal(err)
+	}
+	if e := l.All()[0]; !e.Pending || !e.SetAt.Equal(later) || !e.Expires.Equal(first.Expires) {
+		t.Fatalf("pending restore %+v; want set_at %v and the earlier step's expiry %v", e, later, first.Expires)
+	}
+}
+
+// TestNothingIsAppliedOverAPendingEntry: a step whose outcome is not yet known
+// is never stepped on: Apply and Restore over it are refused, nothing is set,
+// and the pending entry is left as it was.
+func TestNothingIsAppliedOverAPendingEntry(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	if _, err := NewActing("n", l, &failSetBlindRead{memAct: m}).Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d"); !errors.Is(err, ErrLeftPending) {
+		t.Fatal(err)
+	}
+	p := l.All()[0]
+	a := NewActing("n", l, m)
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 3, time.Time{}, "d2"); err == nil || errors.Is(err, ErrLeftPending) {
+		t.Fatalf("Apply over a pending entry: err %v; want refused, nothing in force", err)
+	}
+	if _, err := a.Restore(context.Background(), wl("s"), "fake", 7, time.Time{}, "d0"); err == nil || errors.Is(err, ErrLeftPending) {
+		t.Fatalf("Restore over a pending entry: err %v; want refused, nothing in force", err)
+	}
+	if len(m.sets) != 0 || l.All()[0] != p {
+		t.Fatalf("sets %+v, ledger %+v; want nothing set and the pending entry untouched", m.sets, l.All())
+	}
+}
+
+// TestResolveNeverTookSaysWhenItCannotRead: a re-read that fails is that
+// failure, not ErrNotSettled: the caller must see a setting it cannot read.
+func TestResolveNeverTookSaysWhenItCannotRead(t *testing.T) {
+	m := newMem()
+	m.vals["s"] = 10
+	l := MemoryLedger()
+	a := NewActing("n", l, &failSetBlindRead{memAct: m})
+	if _, err := a.Apply(context.Background(), wl("s"), "fake", 5, time.Time{}, "d"); !errors.Is(err, ErrLeftPending) {
+		t.Fatal(err)
+	}
+	p := l.All()[0]
+	b := NewActing("n", l, unreadableAct{m})
+	_, err := b.ResolveNeverTook(context.Background(), wl("s"), p)
+	if !errors.Is(err, ErrReread) || errors.Is(err, ErrNotSettled) || !strings.Contains(err.Error(), "api unavailable") {
+		t.Fatalf("err %v; want the read error itself, not ErrNotSettled", err)
+	}
+	if got := l.All(); len(got) != 1 || got[0] != p {
+		t.Fatalf("ledger %+v; want it still pending", got)
+	}
+}
+
+// unreadableAct cannot read anything.
+type unreadableAct struct{ *memAct }
+
+func (unreadableAct) Read(context.Context, runtime.Workload) (float64, bool, error) {
+	return 0, false, errors.New("api unavailable")
 }

@@ -19,6 +19,9 @@ import (
 type Acting struct {
 	nodeID string
 	ledger *Ledger
+	// Now is the clock a pending entry's SetAt is read from; nil is time.Now.
+	// Set it before the Acting is used.
+	Now func() time.Time
 
 	mu        sync.Mutex
 	actuators map[string]Actuator
@@ -128,8 +131,12 @@ const readBack = 10 * time.Second
 // (action, subject) is read only when the ledger has no entry for it, and kept as
 // Original; a further step keeps it and records the step before as PrevApplied.
 //
-// The entry is written ahead, Pending with Applied v, before Set, so a change is
-// never in force without a record, whatever happens after: a crash, or a Set
+// A pending entry for (action, subject), a step whose outcome is not yet known,
+// is never stepped on: Apply and Restore over it are refused and set nothing, so
+// no step is recorded as following a value that was never in force.
+//
+// The entry is written ahead, Pending with Applied v and SetAt the Acting's
+// clock, before Set, so a change is never in force without a record, whatever happens after: a crash, or a Set
 // whose call failed after it took effect. After Set the setting is read back
 // under a fresh bounded context. On success the entry is committed with what
 // reads back, since an actuator may quantise. When Set fails, a setting that
@@ -147,7 +154,8 @@ func (a *Acting) Apply(ctx context.Context, w runtime.Workload, action string, v
 // w), as Apply does in every other respect: written ahead, read back, recorded.
 // It never runs Check, which gates only cuts: undoing a step that did not help
 // must not be refused because that step reclaimed the workload down to where
-// Check would refuse a further one.
+// Check would refuse a further one. expires is the restored step's own expiry,
+// kept with its cap; the write's settle runs from its SetAt, like any other.
 func (a *Acting) Restore(ctx context.Context, w runtime.Workload, action string, v float64, expires time.Time, decisionID string) (Entry, error) {
 	return a.apply(ctx, w, action, v, expires, decisionID, false)
 }
@@ -167,8 +175,12 @@ func (a *Acting) apply(ctx context.Context, w runtime.Workload, action string, v
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	e := Entry{Action: action, Subject: w.Subject, DecisionID: decisionID, Applied: v, Expires: expires,
-		NodeID: a.nodeID, Pending: true}
+		NodeID: a.nodeID, Pending: true, SetAt: a.now()}
 	prev, held := a.entry(action, w.Subject)
+	if held && prev.Pending {
+		return Entry{}, fmt.Errorf("%s: %s: the step %s is pending, its outcome not yet known; nothing is set over it",
+			w.Subject, action, prev.DecisionID)
+	}
 	if held {
 		e.Original, e.OriginalSet = prev.Original, prev.OriginalSet
 		e.PrevApplied, e.PrevSet, e.PrevDecisionID, e.PrevExpires = prev.Applied, true, prev.DecisionID, prev.Expires
@@ -254,8 +266,16 @@ func before(e Entry) (float64, bool) {
 // committed is e no longer pending, with what is in force as Applied.
 func committed(e Entry, applied float64) Entry {
 	e.Applied, e.Pending, e.PrevApplied, e.PrevSet = applied, false, 0, false
-	e.PrevDecisionID, e.PrevExpires = "", time.Time{}
+	e.PrevDecisionID, e.PrevExpires, e.SetAt = "", time.Time{}, time.Time{}
 	return e
+}
+
+// now is the Acting's clock.
+func (a *Acting) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }
 
 // same reports whether a reading (v, set) is the setting (w, wset).
@@ -443,14 +463,21 @@ func (a *Acting) Held(ctx context.Context, action string, ws []runtime.Workload)
 // as before its Apply: it may have landed since Held read it, and stays pending.
 var ErrNotSettled = errors.New("the change no longer reads as before; not settled")
 
+// ErrReread is in ResolveNeverTook's error, with the read's own, when the
+// setting could not be read again: the entry stays pending, and what is in force
+// is unknown, which is not the same as not settled.
+var ErrReread = errors.New("the setting could not be read again")
+
 // ResolveNeverTook settles a pending entry Held returned in NeverTook, once the
 // caller judges the change will not land: a further step's entry goes back to
 // the step before it as that step was recorded (its value, decision and
 // expiry), which is returned, and a first step's is deleted (the zero Entry).
 // The setting is read again first, through w, under the same lock as the
 // change: one that no longer reads as before may have landed, and is
-// ErrNotSettled, left pending. An entry that has changed in the ledger since is
-// left alone too.
+// ErrNotSettled, left pending. A read that fails is returned with ErrReread,
+// never as ErrNotSettled, and leaves the entry pending: a setting that cannot be
+// read is the caller's to show. An entry that has changed in the ledger since is left
+// alone too.
 func (a *Acting) ResolveNeverTook(ctx context.Context, w runtime.Workload, e Entry) (Entry, error) {
 	x, ok := a.actuators[e.Action]
 	if !ok {
@@ -464,7 +491,7 @@ func (a *Acting) ResolveNeverTook(ctx context.Context, w runtime.Workload, e Ent
 	}
 	v, set, err := x.Read(ctx, w)
 	if err != nil {
-		return Entry{}, fmt.Errorf("%s: %s: %w: reading it again: %w", e.Subject, e.Action, ErrNotSettled, err)
+		return Entry{}, fmt.Errorf("%s: %s: %w: %w", e.Subject, e.Action, ErrReread, err)
 	}
 	if bv, bset := before(e); !same(v, set, bv, bset) {
 		return Entry{}, fmt.Errorf("%s: %s: %w", e.Subject, e.Action, ErrNotSettled)

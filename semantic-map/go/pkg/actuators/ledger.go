@@ -38,12 +38,16 @@ type Entry struct {
 	// with PrevSet: what a step that never took goes back to.
 	PrevDecisionID string    `json:"prev_decision_id,omitempty"`
 	PrevExpires    time.Time `json:"prev_expires,omitempty"`
+	// SetAt is when a pending entry was written, just before its Set: its settle
+	// runs from then. A committed entry has none.
+	SetAt time.Time `json:"set_at,omitzero"`
 }
 
 // validate is why e cannot be in the ledger, or nil: it names an action, a
 // subject and a node; its values are finite; a committed entry has no step
-// before it, and a pending one has a step before it only when PrevSet; and an
-// entry with no original setting records none.
+// before it, and a pending one has a step before it only when PrevSet; a
+// pending entry records when it was written (SetAt) and a committed one does
+// not; and an entry with no original setting records none.
 func (e Entry) validate() error {
 	bad := func(why string) error {
 		return fmt.Errorf("invalid ledger entry %s on %s (node %q): %s", e.Action, e.Subject, e.NodeID, why)
@@ -64,6 +68,10 @@ func (e Entry) validate() error {
 		return bad("a step before (prev_applied, prev_decision_id or prev_expires) without prev_set")
 	case !e.OriginalSet && e.Original != 0:
 		return bad("an original value with original_set false")
+	case e.Pending && e.SetAt.IsZero():
+		return bad("pending without set_at: its settle has nothing to run from")
+	case !e.Pending && !e.SetAt.IsZero():
+		return bad("committed, yet it records a set_at")
 	}
 	return nil
 }

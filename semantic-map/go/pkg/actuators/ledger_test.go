@@ -97,10 +97,15 @@ func TestLedgerRefusesAnInvalidEntry(t *testing.T) {
 		"original value with none set":   func(e *Entry) { e.Original = 3 },
 		"committed with a prev decision": func(e *Entry) { e.PrevDecisionID = "d0" },
 		"prev expiry without prev":       func(e *Entry) { e.Pending, e.PrevExpires = true, time.Unix(1, 0) },
+		"pending without set_at":         func(e *Entry) { e.Pending, e.SetAt = true, time.Time{} },
+		"committed with a set_at":        func(e *Entry) { e.SetAt = time.Unix(1, 0) },
 	}
 	for name, mutate := range cases {
 		e := ok
 		mutate(&e)
+		if e.Pending && name != "pending without set_at" {
+			e.SetAt = time.Unix(1, 0) // only what the case names is wrong
+		}
 		if err := MemoryLedger().Put(e); err == nil {
 			t.Errorf("%s: Put(%+v) accepted", name, e)
 		}
@@ -109,7 +114,7 @@ func TestLedgerRefusesAnInvalidEntry(t *testing.T) {
 		t.Fatalf("valid entry refused: %v", err)
 	}
 	pending := ok
-	pending.Pending, pending.PrevApplied, pending.PrevSet = true, 1, true
+	pending.Pending, pending.PrevApplied, pending.PrevSet, pending.SetAt = true, 1, true, time.Unix(1, 0)
 	if err := MemoryLedger().Put(pending); err != nil {
 		t.Fatalf("valid pending entry refused: %v", err)
 	}
