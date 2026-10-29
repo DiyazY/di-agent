@@ -314,7 +314,8 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 // cooldown. A first step is reverted; a further step is undone by putting back
 // the cap before it, through Restore, which no Check gates, and that cap stays
 // kept. A revert the actuator refuses is retried
-// on the next tick without judging the step again.
+// on the next tick without judging the step again. A restore accepted but not
+// yet seen to take (left pending) keeps the revert owed until it settles.
 func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Workload, a *Action, verifyID string) {
 	var (
 		entry actuators.Entry
@@ -335,6 +336,13 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Worklo
 		return
 	case err != nil:
 		l.undoFailed(a, "reverting", err)
+		return
+	}
+	if entry.Pending {
+		// Accepted, but not yet seen to take: the revert stays owed until the
+		// restore settles. The next reconcile reads it again: one that lands
+		// completes the revert, one that never took leaves it to be retried.
+		l.reconciled = false
 		return
 	}
 	l.reverted(now, a, entry, verifyID)

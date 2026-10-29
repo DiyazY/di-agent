@@ -2573,3 +2573,41 @@ func TestARestartedNeverTookStepGivesItsEarlierStepBack(t *testing.T) {
 		t.Fatalf("limit %v after expiry; want none", *l)
 	}
 }
+
+// TestARestoreLeftPendingKeepsItsRevertOwed: the restore of the first step,
+// after a second that did not help, is accepted but reads back as before, so it
+// is left pending. The revert is not done until it settles: still owed while it
+// is pending, retried when it never took, and recorded once a retry lands.
+func TestARestoreLeftPendingKeepsItsRevertOwed(t *testing.T) {
+	h, ln := landsHarness(t, 0)
+	first := secondStepThatDoesNotHelp(h)
+	ln.mu.Lock()
+	ln.next = []int{-1, -1, 0} // the restore and its first retry never land; the second does
+	ln.mu.Unlock()
+	spent := h.l.budget.Count(h.now)
+	h.until(3*time.Minute, 0.44, "the restore written", func() bool {
+		e := h.applied()["pod:a"]
+		return e.Pending && e.DecisionID == first.DecisionID
+	})
+	if !h.revertOwed() || h.l.Status().Reverted != 0 {
+		t.Fatalf("action %+v, reverted %d; want the revert still owed while the restore is pending", h.action("pod:a"), h.l.Status().Reverted)
+	}
+	h.until(10*time.Minute, 0.44, "the restore settled as never taken", func() bool { return len(h.decisions(OutcomeNotApplied)) > 0 })
+	if !h.revertOwed() || h.l.Status().Reverted != 0 {
+		t.Fatalf("action %+v; want the revert still owed once the restore never took", h.action("pod:a"))
+	}
+	h.until(30*time.Minute, 0.44, "the revert retried until it took", func() bool {
+		e := h.applied()["pod:a"]
+		return !e.Pending && e.DecisionID == first.DecisionID
+	})
+	h.step(0.44)
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept || !near(a.Entry.Applied, first.Applied) || h.revertOwed() {
+		t.Fatalf("action %+v; want it kept at the first step once the revert took", a)
+	}
+	if st := h.l.Status(); st.Reverted != 1 {
+		t.Fatalf("reverted %d; want the revert recorded once", st.Reverted)
+	}
+	if n := h.l.budget.Count(h.now); n != spent {
+		t.Fatalf("hourly count %d; want %d: a restore spends nothing and refunds nothing", n, spent)
+	}
+}
