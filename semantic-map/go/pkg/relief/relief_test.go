@@ -2532,3 +2532,44 @@ func TestARereadThatKeepsFailingIsShown(t *testing.T) {
 		t.Fatal("reconciled while a step cannot be settled; want nothing applied until it can")
 	}
 }
+
+// TestARestartedNeverTookStepGivesItsEarlierStepBack: after a restart the ledger
+// holds a further step, pending past settle, that never took over an earlier
+// applied step. Settling it puts the earlier step back in the ledger, and that
+// cap is taken up as an action like any other found in force: listed, and given
+// back at its own expiry, never left in force with nothing to give it back.
+func TestARestartedNeverTookStepGivesItsEarlierStepBack(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	record(t, h.m, contention, "", 0.5, h.now)
+	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
+		Applied: 1.2, Expires: h.now.Add(20 * time.Minute), DecisionID: "relief-act-1-1"})
+	prevExpires := h.now.Add(20 * time.Minute)
+	if err := h.ledger.Put(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
+		Applied: 0.9, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-2", Pending: true, SetAt: h.now.Add(-time.Hour),
+		PrevApplied: 1.2, PrevSet: true, PrevDecisionID: "relief-act-1-1", PrevExpires: prevExpires}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.l.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e := h.applied()["pod:a"]; e.Pending || e.DecisionID != "relief-act-1-1" || !near(e.Applied, 1.2) {
+		t.Fatalf("entry %+v; want the earlier step committed back", e)
+	}
+	if len(h.decisions(OutcomeNotApplied)) != 1 {
+		t.Fatalf("%d not_applied; want the step that never took closed once", len(h.decisions(OutcomeNotApplied)))
+	}
+	if a := h.action("pod:a"); a.DecisionID != "relief-act-1-1" || !near(a.Entry.Applied, 1.2) || !a.Entry.Expires.Equal(prevExpires) {
+		t.Fatalf("action %+v; want the earlier cap taken up, with its own decision and expiry", a)
+	}
+	h.l.Pause() // nothing new is planned: only the expiry gives the cap back
+	h.until(30*time.Minute, 0.5, "the earlier cap given back at its expiry", func() bool {
+		_, held := h.applied()["pod:a"]
+		return !held
+	})
+	if h.now.Before(prevExpires) {
+		t.Fatalf("given back at %s, before its expiry %s", h.now, prevExpires)
+	}
+	if l := h.limit("pod:a"); l != nil {
+		t.Fatalf("limit %v after expiry; want none", *l)
+	}
+}

@@ -488,8 +488,14 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 			l.awaiting[e.Subject] = true
 			continue
 		}
-		err := l.neverTook(ctx, now, ws, e, live[e.Subject], inFlight)
+		restored, err := l.neverTook(ctx, now, ws, e, live[e.Subject], inFlight)
 		if err == nil {
+			if live[e.Subject] == nil && restored.Action != "" {
+				// No action holds it, as after a restart: the earlier step it
+				// went back to is in force, and is taken up like any change
+				// found held, so it is listed and given back at its expiry.
+				held = append(held, restored)
+			}
 			continue
 		}
 		// Landed since it was read, or not settled for want of a read or a save:
@@ -595,12 +601,14 @@ func (l *Loop) reconcile(ctx context.Context, now time.Time) error {
 // never took, an undo of a step that did not help, spent nothing and is given
 // nothing back: the step it undoes is in force again, and the revert is still
 // owed and retried. An error leaves the entry pending: ErrNotSettled when it no
-// longer reads as before, ErrReread when it could not be read again.
-func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Workload, e actuators.Entry, a, inFlight *Action) error {
+// longer reads as before, ErrReread when it could not be read again. It
+// returns the entry now in force: a further step's earlier step, as recorded,
+// or the zero Entry when a first step's was deleted.
+func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Workload, e actuators.Entry, a, inFlight *Action) (actuators.Entry, error) {
 	w, _ := workload(ws, e.Subject)
 	restored, err := l.cfg.Acting.ResolveNeverTook(ctx, w, e)
 	if err != nil {
-		return err
+		return actuators.Entry{}, err
 	}
 	restore := a != nil && l.restoreOf(a, e)
 	sp, spent := l.spent[e.DecisionID]
@@ -623,18 +631,18 @@ func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Worklo
 	}
 	b.Commit(map[string]any{OutcomeNotApplied: e.Subject})
 	if a == nil {
-		return nil
+		return restored, nil
 	}
 	if restore {
 		l.mu.Lock()
 		a.Entry = restored
 		l.mu.Unlock()
 		l.undoFailed(a, "reverting", fmt.Errorf("putting %s back at its earlier step: the restore never took; the step that did not help is still in force", e.Subject))
-		return nil
+		return restored, nil
 	}
 	if restored.Action == "" {
 		l.end(now, a, OutcomeNotApplied, a.cooldown)
-		return nil
+		return restored, nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -653,7 +661,7 @@ func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Worklo
 	}
 	// As after a step that did not help: not tried again at once.
 	l.budget.Cool(a.Subject, now.Add(a.cooldown))
-	return nil
+	return restored, nil
 }
 
 // restoreOf reports whether e is the write of a's owed revert: the restore of
