@@ -36,7 +36,7 @@ data:
       kind: kubernetes
     loops:
       relief:
-        enabled: false   # true to let the agent cap CPU; watch /relief first
+        enabled: false   # true to let the agent cap CPU and memory; watch /relief first. memory.high needs /host writable (OPERATING.md §10)
 ---
 apiVersion: apps/v1
 kind: DaemonSet

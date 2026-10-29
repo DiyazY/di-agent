@@ -266,8 +266,11 @@ func Main() {
 	// Collectors are built after the map so a refused entry stops the daemon before it
 	// serves anything; a broken collector found later is isolated by the supervisor
 	// and reported at GET /collectors instead.
-	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf},
-		cfg.Sources.Collectors)
+	// The pods' memory requests, which memory contention counts a pod against: stored
+	// by the refresh started once the runtime is built, read by the cgroup collector.
+	requests := &minimal.Requests{}
+	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf,
+		Requests: requests}, cfg.Sources.Collectors)
 	if err != nil {
 		log.Fatalf("collectors: %v", err)
 	}
@@ -324,18 +327,20 @@ func Main() {
 		log.Printf("policy: policy.rules replaces the default rules and has none to %s; "+
 			"copy it from `agent -print-config` unless leaving it out is meant", rule)
 	}
-	var reliefLoop *relief.Loop
+	// Outcomes are evidence only when the changes really reach the system: after a
+	// dry run, pressure moves with the workload's own load and nothing else.
+	acting, evidence, err := buildActing(cfg, rt, log.Printf)
+	if err != nil {
+		log.Fatalf("actuation in %s: %v", *configPath, err)
+	}
+	var reliefLoops []*relief.Loop
 	if cfg.Loops.Relief.Enabled {
-		// Outcomes are evidence only when the runtime really changes the system: after a
-		// dry run, pressure moves with the workload's own load and nothing else.
-		reliefLoop, err = relief.New(relief.Config{Relief: cfg.Loops.Relief, NodeID: cfg.Node.ID,
-			Runtime: rt, Policy: pol, Map: state, Logf: log.Printf,
-			Evidence: rt.Name() != "dry-run", Candidates: sm})
+		reliefLoops, err = buildRelief(cfg, rt, acting, pol, state, evidence, sm, log.Printf)
 		if err != nil {
-			log.Fatalf("loops.relief in %s: %v", *configPath, err)
+			log.Fatalf("%s: %v", *configPath, err)
 		}
 	}
-	registerActingRoutes(mux, rt, pol, reliefLoop)
+	registerActingRoutes(mux, rt, acting, pol, reliefLoops)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {
 		log.Fatalf("autonomy: %v", err)
@@ -369,9 +374,16 @@ func Main() {
 	// Lifecycle is time-based, so something has to advance it. Without this loop
 	// map.stale_after and map.retire_after would only take effect when an operator posted
 	// /state/sweep, and a quiet property would keep being reported as current.
-	if reliefLoop != nil {
-		log.Printf("relief: acting every %s through runtime %s", cfg.Loops.Relief.Interval, rt.Name())
-		go reliefLoop.Start(ctx)
+	for _, l := range reliefLoops {
+		dry := ""
+		if !evidence {
+			dry = ", as a dry run"
+		}
+		log.Printf("relief: %s acting every %s through runtime %s%s", l.Status().Action, cfg.Loops.Relief.Interval, rt.Name(), dry)
+		go l.Start(ctx)
+	}
+	if startRequestsLoop(ctx, cfg.Runtime.Kind, rt, requests, log.Printf) {
+		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)

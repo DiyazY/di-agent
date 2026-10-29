@@ -1,5 +1,6 @@
-# What the di-agent `kubernetes` runtime needs: list pods, patch a pod's
-# annotation, and resize a pod's CPU limit in place. Nothing else.
+# What the di-agent `kubernetes` runtime needs: list pods, and resize a pod's
+# CPU limit in place. Nothing else: what a change replaced is kept in the
+# agent's own ledger, not on the pod.
 # The DaemonSet that runs the agent is in daemonset.yaml.
 apiVersion: v1
 kind: ServiceAccount
@@ -14,7 +15,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list", "patch"]
+    verbs: ["list"]
   - apiGroups: [""]
     resources: ["pods/resize"]
     verbs: ["patch"]

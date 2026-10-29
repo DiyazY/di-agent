@@ -65,6 +65,25 @@ import (
 // weighted fair share of the pods' CPUs (owedContention): CPU it is owed another pod
 // holds. It needs subjects; with the cgroup config.subjects off it is absent.
 //
+// memory_events_high, memory_events_max and memory_oom_kills are how many times, in the
+// window, a subject went over its memory.high, reached its memory.max, and had a process
+// OOM-killed: the deltas of the high, max and oom_kill counters of its memory.events
+// (hierarchical, so a pod's include its containers'), declared as "count" on [0, 1e9].
+// The node has none: a cgroup v2 root has no memory.events.
+//
+// memory_contention_ratio is node-level only: the worst memory_pressure_ratio of a pod
+// promised memory (not BestEffort, not a unit) that is not limiting itself — its
+// memory_events_high and memory_events_max did not rise — and, when CgroupOptions.Requests
+// holds the pods' requests, is within its memory request (memory.current ≤ request). It is
+// emitted for a window in which the node itself has a memory_pressure_ratio. A pod is read
+// when it has a memory_pressure_ratio and a memory.events delta this window (unknown whether
+// it limits itself is not "not limiting itself"). The value is the worst among the pods read
+// that count; it is emitted when no pod is promised memory, or every promised pod was read
+// (0 when none counts: a fresh 0 is what lets a relief step taken on it be released). With
+// some promised pod unread (new this window, memory.events unreadable or reset) a positive
+// value is emitted and a 0 is not: an unread pod may be the one stalling. A node without memory PSI reports nothing
+// rather than a calm node. Like cpu_contention_ratio it needs subjects.
+//
 // cpu_steal_ratio is node-level only: the share of CPU time in the window the
 // hypervisor spent on someone else, from the steal column of /proc/stat's cpu line,
 // declared as "fraction" on [0,1]. It is zero on bare metal and is what separates
@@ -147,6 +166,9 @@ type CgroupOptions struct {
 	// Now is the clock the CPU windows are measured on; nil means time.Now. Tests
 	// advance it instead of sleeping.
 	Now func() time.Time
+	// Requests is the pods' memory requests, which memory_contention_ratio counts a pod
+	// against; nil, or nothing stored yet, drops the request condition.
+	Requests *Requests
 	// Logf receives the collector's own log lines: an unreadable root, a root with
 	// no pod cgroups while subjects are on, and subjects skipped by the cap. nil
 	// means the standard logger.
@@ -171,6 +193,24 @@ type cpuSnapshot struct {
 	// read for the node only; hasSteal is false when /proc/stat could not be read.
 	stealTicks, cpuTicks uint64
 	hasSteal             bool
+	// memCurrent is memory.current; hasMemCurrent is false where it could not be read.
+	memCurrent    uint64
+	hasMemCurrent bool
+	// memEvents holds memory.events' cumulative counters, in memEventFields order;
+	// hasMemEvents is false where the file, or one of the fields, is absent.
+	memEvents    [len(memEventFields)]uint64
+	hasMemEvents bool
+}
+
+// memEventFields are the memory.events counters read per cgroup, and the metric each
+// delta becomes.
+var memEventFields = [...]struct {
+	key    string
+	metric types.MetricType
+}{
+	{"high", types.MemoryEventsHigh},
+	{"max", types.MemoryEventsMax},
+	{"oom_kill", types.MemoryOOMKills},
 }
 
 // psiResources are the pressure files read per cgroup, and the metric each becomes.
@@ -192,6 +232,10 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.MemoryPressureRatio,
 	types.CPUStealRatio,
 	types.CPUContentionRatio,
+	types.MemoryContentionRatio,
+	types.MemoryEventsHigh,
+	types.MemoryEventsMax,
+	types.MemoryOOMKills,
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
@@ -274,8 +318,16 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	if !c.opts.Subjects {
 		return out, nil
 	}
+	// The node's memory contention is reported for every window the node itself has a
+	// memory stall reading for, so relief sees a fresh 0 when no pod counts.
+	rootMemPSI := false
+	for _, s := range out {
+		rootMemPSI = rootMemPSI || s.MetricType == types.MemoryPressureRatio
+	}
 	seen := map[string]bool{}
 	var promised []podCPU // pods promised CPU: the node's contention is theirs
+	var memPods []podMem  // pods promised memory with a memory stall reading and a memory.events delta this window
+	memPromised := 0      // pods promised memory, read or not
 	root := filepath.Clean(c.cgroupRoot)
 	var sawPods, rescanned bool
 	var skipped int
@@ -325,6 +377,10 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 				if pc, ok := c.podCPULocked(info.subject, p, samples); ok {
 					promised = append(promised, pc)
 				}
+				memPromised++
+				if pm, ok := c.podMemLocked(info.subject, labels["pod_uid"], samples); ok {
+					memPods = append(memPods, pm)
+				}
 			}
 			// A pod's parts are not counted again in the node's contention: the pod's
 			// own reading already holds them.
@@ -365,6 +421,21 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	if worst, ok := owedContention(promised, c.podCPUs()); ok {
 		out = append(out, c.sample(types.CPUContentionRatio, unitNodeShare, worst, now, window, "", nil))
 	}
+	if rootMemPSI {
+		var req map[string]float64
+		var haveReq bool
+		if c.opts.Requests != nil {
+			req, haveReq = c.opts.Requests.Load()
+		}
+		// A 0 releases caps, so it must speak for every promised pod: it is emitted
+		// only when none is promised or every one was read. With some unread, a stall
+		// among those read is emitted as it is, and a 0 is not: an unread pod may be
+		// the one stalling.
+		v := memoryContention(memPods, req, haveReq)
+		if memPromised == len(memPods) || v > 0 {
+			out = append(out, c.sample(types.MemoryContentionRatio, unitNodeShare, v, now, window, "", nil))
+		}
+	}
 	for subject := range c.prev {
 		if subject != "" && !seen[subject] {
 			delete(c.prev, subject)
@@ -383,7 +454,11 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	}
 	memCurrent, memErr := readMemoryCurrent(dir)
 	snap := &cpuSnapshot{ts: now, usageUsec: cpu.usageUsec, nrPeriods: cpu.nrPeriods, nrThrottled: cpu.nrThrottled,
-		throttledUsec: cpu.throttledUsec, hasThrottledUsec: cpu.hasThrottledUsec}
+		throttledUsec: cpu.throttledUsec, hasThrottledUsec: cpu.hasThrottledUsec,
+		memCurrent: memCurrent, hasMemCurrent: memErr == nil}
+	if ev, err := readMemEvents(filepath.Join(dir, "memory.events")); err == nil {
+		snap.memEvents, snap.hasMemEvents = ev, true
+	}
 	for i, r := range psiResources {
 		v, err := readStallUsec(filepath.Join(dir, r.file))
 		snap.stall[i], snap.hasStall[i] = v, err == nil
@@ -438,6 +513,14 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 		if snap.hasStall[i] && prev.hasStall[i] && snap.stall[i] >= prev.stall[i] {
 			pressure := clamp(float64(snap.stall[i]-prev.stall[i])/float64(elapsedUs), 0, 1)
 			samples = append(samples, c.sample(r.metric, unitNodeShare, pressure, now, prev.ts, subject, labels))
+		}
+	}
+	// The counters restart when the cgroup is recreated under the same subject; a window
+	// with any of them lower than before has no readings, and the next counts from here.
+	if snap.hasMemEvents && prev.hasMemEvents && memEventsAdvanced(prev, snap) {
+		for i, f := range memEventFields {
+			n := math.Min(float64(snap.memEvents[i]-prev.memEvents[i]), countRange[1])
+			samples = append(samples, c.sampleIn(countRange, f.metric, unitCount, n, now, prev.ts, subject, labels))
 		}
 	}
 	if subject != "" {
@@ -517,6 +600,43 @@ func (c *CgroupCollector) podCPULocked(subject, dir string, samples []*types.Met
 		}
 	}
 	return pc, have
+}
+
+// podMemLocked is a pod's part in memoryContention, from this collect's samples and the
+// snapshot just taken of it. A pod with no memory stall reading this window has no part,
+// and neither has one without a memory.events delta for both high and max (unreadable,
+// first seen, or its counters went backwards): whether it is limiting itself is unknown,
+// and unknown is not "not self-limited".
+func (c *CgroupCollector) podMemLocked(subject, uid string, samples []*types.MetricSample) (podMem, bool) {
+	pm := podMem{uid: uid, current: math.NaN()}
+	var have, hasHigh, hasMax bool
+	for _, s := range samples {
+		switch s.MetricType {
+		case types.MemoryPressureRatio:
+			pm.psi, have = s.Value, true
+		case types.MemoryEventsHigh:
+			pm.selfLimited, hasHigh = pm.selfLimited || s.Value > 0, true
+		case types.MemoryEventsMax:
+			pm.selfLimited, hasMax = pm.selfLimited || s.Value > 0, true
+		}
+	}
+	if !hasHigh || !hasMax {
+		return pm, false
+	}
+	if snap := c.prev[subject]; snap != nil && snap.hasMemCurrent {
+		pm.current = float64(snap.memCurrent)
+	}
+	return pm, have
+}
+
+// memEventsAdvanced is whether no memory.events counter went backwards between snapshots.
+func memEventsAdvanced(prev, snap *cpuSnapshot) bool {
+	for i := range memEventFields {
+		if snap.memEvents[i] < prev.memEvents[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // podCPUs is how many CPUs the pods may run on: the kubepods cgroup's cpuset when it is
@@ -641,6 +761,9 @@ func readMemTotal(path string) uint64 {
 
 var shareRange = [2]float64{0, 1}
 
+// countRange bounds a count of events in one window.
+var countRange = [2]float64{0, 1e9}
+
 const (
 	// unitNodeShare: a fraction of what the whole node has (CPU, memory), for the
 	// node and for every subject alike — a pod's share is of the node, never of its
@@ -654,15 +777,21 @@ const (
 	// unitPeriodShare: throttled CFS periods over elapsed periods, a fraction of
 	// the subject's own scheduling periods rather than of the node.
 	unitPeriodShare = "share-of-periods"
+	// unitCount: how many times something happened in the window.
+	unitCount = "count"
 )
 
 // sample builds a MetricSample with a deterministic event_id over
 // (source, node, subject, metric, anchor), declared in the unit the caller names
 // on [0,1] — this collector's meaning, not the map's rule.
 func (c *CgroupCollector) sample(mt types.MetricType, unit string, value float64, ts, anchorTs time.Time, subject string, labels map[string]string) *types.MetricSample {
+	return c.sampleIn(shareRange, mt, unit, value, ts, anchorTs, subject, labels)
+}
+
+// sampleIn is sample declared on rng instead of [0,1].
+func (c *CgroupCollector) sampleIn(rng [2]float64, mt types.MetricType, unit string, value float64, ts, anchorTs time.Time, subject string, labels map[string]string) *types.MetricSample {
 	key := fmt.Sprintf("%s:%s:%s:%s:%d", c.sid, c.nodeID, subject, string(mt), anchorTs.Unix())
 	h := sha256.Sum256([]byte(key))
-	rng := shareRange
 	return &types.MetricSample{
 		NodeID: c.nodeID, MetricType: mt, Value: value, TimestampUnix: ts.Unix(),
 		EventID: fmt.Sprintf("%x", h[:8]),
@@ -785,6 +914,49 @@ func readCPUSteal(path string) (steal, total uint64, ok bool) {
 		return steal, total, true
 	}
 	return 0, 0, false
+}
+
+// readMemEvents returns the cumulative counters of a cgroup v2 memory.events file, in
+// memEventFields order:
+//
+//	low 0
+//	high 12
+//	max 3
+//	oom 1
+//	oom_kill 1
+//	oom_group_kill 0
+//
+// An error when the file is unreadable or lacks one of the fields: a counter read as 0
+// would become a spurious delta when it appears.
+func readMemEvents(path string) ([len(memEventFields)]uint64, error) {
+	var out [len(memEventFields)]uint64
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out, err
+	}
+	var seen [len(memEventFields)]bool
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		for i, ef := range memEventFields {
+			if f[0] != ef.key {
+				continue
+			}
+			v, err := strconv.ParseUint(f[1], 10, 64)
+			if err != nil {
+				return out, fmt.Errorf("%s: %s: %w", path, ef.key, err)
+			}
+			out[i], seen[i] = v, true
+		}
+	}
+	for i, ef := range memEventFields {
+		if !seen[i] {
+			return out, fmt.Errorf("%s has no %s", path, ef.key)
+		}
+	}
+	return out, nil
 }
 
 // readMemoryCurrent returns the cgroup's memory.current in bytes. memory.max is not

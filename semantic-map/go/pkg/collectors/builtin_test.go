@@ -3,11 +3,14 @@ package collectors
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/spec"
+	"github.com/DiyazY/di-agent/pkg/types"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -160,5 +163,61 @@ func TestBuiltinScriptMissingRefused(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a missing script path was accepted")
+	}
+}
+
+// TestBuiltinCgroupCountsAgainstEnvRequests: the cgroup collector built from an entry
+// reads the pods' memory requests from Env.Requests. A pod the stored requests do not
+// name is not counted in memory_contention_ratio, however much it stalls.
+func TestBuiltinCgroupCountsAgainstEnvRequests(t *testing.T) {
+	root := newFakeCgroupRoot(t)
+	pod := filepath.Join(root, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod8f3c1234_aaaa_bbbb_cccc_1234567890ab.slice")
+	if err := os.MkdirAll(pod, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(pod, "cpu.stat"), "usage_usec 500000\nnr_periods 10\nnr_throttled 1\n")
+	mustWrite(t, filepath.Join(pod, "memory.current"), "268435456\n")
+	// A pod is counted only with a memory.events delta: whether it limits itself must be known.
+	mustWrite(t, filepath.Join(pod, "memory.events"), "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")
+	psi := func(total int) {
+		for _, d := range []string{root, pod} {
+			mustWrite(t, filepath.Join(d, "memory.pressure"), "some avg10=0 avg60=0 avg300=0 total="+strconv.Itoa(total)+"\n")
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		stored bool
+		want   float64
+	}{{"no requests stored", false, 1}, {"pod has no request", true, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs := &minimal.Requests{}
+			if tc.stored {
+				reqs.Store(map[string]float64{})
+			}
+			s, err := Build(Env{NodeID: "n", Interval: time.Second, Requests: reqs}, []spec.CollectorEntry{
+				{Name: "cg", Type: "cgroup", Config: node(t, "root: "+root)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			psi(0)
+			s.members[0].m.C.Collect() //nolint:errcheck // the first call only stores the baseline
+			time.Sleep(2 * time.Millisecond)
+			psi(1_000_000_000) // far longer than the window: the whole window stalled
+			got, err := s.members[0].m.C.Collect()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, smp := range got {
+				if smp.MetricType == types.MemoryContentionRatio && smp.Subject == "" {
+					if smp.Value != tc.want {
+						t.Fatalf("memory_contention_ratio = %v, want %v", smp.Value, tc.want)
+					}
+					return
+				}
+			}
+			t.Fatal("no node memory_contention_ratio")
+		})
 	}
 }

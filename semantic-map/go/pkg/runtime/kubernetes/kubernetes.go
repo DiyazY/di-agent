@@ -1,11 +1,11 @@
-// Package kubernetes is the runtime that acts on a Kubernetes node's pods. It
-// lists the pods scheduled on this node, and changes one pod's CPU limit in place
-// through the pod "resize" subresource, so the container is never restarted.
+// Package kubernetes is the runtime over a Kubernetes node's pods. It lists the
+// pods scheduled on this node, and its cpu.limit actuator changes one pod's CPU
+// limit in place through the pod "resize" subresource, so the container is never
+// restarted.
 //
-// Every change is recorded on the pod itself, in the Annotation, as the JSON of
-// the runtime.Undo that gives it back. That keeps the record where the pod is: a
-// restarted agent finds its outstanding changes with Changed, and a pod that is
-// deleted takes its record with it.
+// Nothing is recorded on the pod: what a change replaced is in the agent's own
+// ledger (pkg/actuators), which the agent reconciles against what the pod reads
+// as on start.
 package kubernetes
 
 import (
@@ -17,6 +17,8 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,12 +29,9 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 )
-
-// Annotation is the pod annotation that holds the JSON of the runtime.Undo of the
-// outstanding change on that pod.
-const Annotation = "di-agent/change"
 
 // The labels a workload carries beside the pod's own.
 const (
@@ -103,11 +102,16 @@ func restConfig(kubeconfig string) (*rest.Config, error) {
 	return cfg, nil
 }
 
-// Runtime acts on the pods of one node.
+// Runtime lists the pods of one node. It remembers, from its latest listing, why
+// each pod's CPU limit cannot be changed, so the cpu.limit actuator's Check
+// answers from the same listing the caller holds.
 type Runtime struct {
 	env    runtime.Env
 	client kubernetes.Interface
 	node   string
+
+	mu      sync.Mutex
+	reasons map[string]string // by subject: cannot()'s answer at the latest listing
 }
 
 // New builds the runtime over a client. The node is the spec's runtime.node, or
@@ -141,8 +145,8 @@ func (r *Runtime) pods(ctx context.Context) ([]corev1.Pod, error) {
 
 func subjectOf(p corev1.Pod) string { return "pod:" + string(p.UID) }
 
-// find is the pod behind a subject, or ErrGone: a pod that was deleted, and one
-// that restarted under a new UID, are both not there.
+// find is the pod behind a subject, or actuators.ErrGone: a pod that was deleted,
+// and one that restarted under a new UID, are both not there.
 func (r *Runtime) find(ctx context.Context, subject string) (corev1.Pod, error) {
 	ps, err := r.pods(ctx)
 	if err != nil {
@@ -153,12 +157,12 @@ func (r *Runtime) find(ctx context.Context, subject string) (corev1.Pod, error) 
 			return p, nil
 		}
 	}
-	return corev1.Pod{}, fmt.Errorf("%s: %w", subject, runtime.ErrGone)
+	return corev1.Pod{}, fmt.Errorf("%s: %w", subject, actuators.ErrGone)
 }
 
 // Workloads lists every pod on the node, including those that are not running,
-// each with the reason it cannot take a CPU cap, so a pod absent from the list is
-// one that is really gone.
+// so a pod absent from the list is one that is really gone. It records why each
+// cannot take a CPU cap, for the cpu.limit actuator's Check.
 func (r *Runtime) Workloads(ctx context.Context) ([]runtime.Workload, error) {
 	ps, err := r.pods(ctx)
 	if err != nil {
@@ -166,18 +170,36 @@ func (r *Runtime) Workloads(ctx context.Context) ([]runtime.Workload, error) {
 	}
 	self := os.Getenv(PodUIDEnv)
 	out := make([]runtime.Workload, 0, len(ps))
+	reasons := make(map[string]string, len(ps))
 	for _, p := range ps {
+		reasons[subjectOf(p)] = cannot(p)
 		out = append(out, runtime.Workload{
 			Subject: subjectOf(p),
 			Name:    p.Name,
 			Labels:  labelsOf(p),
-			CPU:     cpuOf(p),
-			Can:     map[string]string{runtime.ActionCPULimit: cannot(p, r.env.NodeID)},
 			Self:    self != "" && string(p.UID) == self,
+			UID:     string(p.UID),
+			QoS:     strings.ToLower(string(p.Status.QOSClass)),
+			Resources: map[string]runtime.Resource{
+				"cpu":    cpuOf(p),
+				"memory": memoryOf(p),
+			},
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Subject < out[j].Subject })
+	r.mu.Lock()
+	r.reasons = reasons
+	r.mu.Unlock()
 	return out, nil
+}
+
+// reason is cannot()'s answer for subject at the latest listing; listed is false
+// for a subject that listing did not hold.
+func (r *Runtime) reason(subject string) (why string, listed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	why, listed = r.reasons[subject]
+	return why, listed
 }
 
 func labelsOf(p corev1.Pod) map[string]string {
@@ -194,8 +216,10 @@ func labelsOf(p corev1.Pod) map[string]string {
 	return l
 }
 
-// cpuOf sums the containers' CPU in cores. A limit is nil when any container has
-// none, because the pod as a whole is then unlimited.
+// cpuOf sums the app containers' CPU in cores. A request is kept when any
+// container has one; a limit is nil when any container has none, because the
+// pod as a whole is then unlimited. cpu.limit refuses a pod with sidecars or
+// pod-level resources (cannot), so only the app containers matter to it.
 func cpuOf(p corev1.Pod) runtime.Resource {
 	var req, lim int64 // millicores, summed exactly
 	var anyReq bool
@@ -223,15 +247,67 @@ func cpuOf(p corev1.Pod) runtime.Resource {
 	return r
 }
 
+// memoryOf is the pod's memory in bytes, as the pod cgroup memory.high acts on
+// holds it: the pod-level resources when the pod sets them, else the sum over
+// every container that keeps running, its native sidecars (restartable init
+// containers) included; an init container that runs to completion is over
+// before the pod's working set exists and is not counted. Unlike cpuOf, which
+// keeps a request when any container has one, a memory request is nil when any
+// counted container has none: memory.high must never cut a pod below a promise
+// it only partly knows. A limit is nil when any counted container has none, as
+// the pod as a whole is then unlimited.
+func memoryOf(p corev1.Pod) runtime.Resource {
+	var r runtime.Resource
+	if pl := p.Spec.Resources; pl != nil {
+		if q, ok := pl.Requests[corev1.ResourceMemory]; ok {
+			v := q.AsApproximateFloat64()
+			r.Request = &v
+		}
+		if q, ok := pl.Limits[corev1.ResourceMemory]; ok {
+			v := q.AsApproximateFloat64()
+			r.Limit = &v
+		}
+		if r.Request != nil || r.Limit != nil {
+			return r
+		}
+	}
+	cs := append([]corev1.Container(nil), p.Spec.Containers...)
+	for _, c := range p.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			cs = append(cs, c)
+		}
+	}
+	var req, lim float64
+	allReq := len(cs) > 0
+	allLim := allReq
+	for _, c := range cs {
+		if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+			req += q.AsApproximateFloat64()
+		} else {
+			allReq = false
+		}
+		if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+			lim += q.AsApproximateFloat64()
+		} else {
+			allLim = false
+		}
+	}
+	if allReq {
+		r.Request = &req
+	}
+	if allLim {
+		r.Limit = &lim
+	}
+	return r
+}
+
 // cannot is why the pod's CPU limit cannot be changed in place without side
 // effects, or "" when it can. Most reasons are what the resize subresource refuses
 // or does to a pod: a limit added to a BestEffort pod changes its QoS class and is
 // refused; a limit added to a Burstable pod that had none is accepted but can never
 // be removed again; a Guaranteed pod's limit is its request, so changing the limit
-// alone changes the class. The rest protect the agent's own record: a pod another
-// node changed, or whose record cannot be read, is left alone rather than
-// overwritten.
-func cannot(p corev1.Pod, nodeID string) string {
+// alone changes the class.
+func cannot(p corev1.Pod) string {
 	if p.Status.Phase != corev1.PodRunning {
 		return "not running"
 	}
@@ -243,14 +319,6 @@ func cannot(p corev1.Pod, nodeID string) string {
 	}
 	if len(p.Spec.Containers) != 1 {
 		return "more than one container: the limit cannot be split by the agent"
-	}
-	if u, present, readable := decode(p); present {
-		if !readable {
-			return "unreadable " + Annotation + " annotation"
-		}
-		if u.NodeID != nodeID {
-			return "changed by another node: " + u.NodeID
-		}
 	}
 	if p.Status.QOSClass == corev1.PodQOSBestEffort {
 		return "BestEffort: a limit would change the pod's QoS class"
@@ -303,135 +371,6 @@ func hasSidecar(p corev1.Pod) bool {
 	return false
 }
 
-// Apply caps the pod's CPU limit and records the undo on the pod. The record is
-// written first: a record without a cap reverts as a no-op, while a cap without a
-// record would never be given back. If the resize then fails the record stays,
-// because the resize may have been applied although the call reported failure. A
-// pod this node already changed keeps the original from before its first change.
-func (r *Runtime) Apply(ctx context.Context, subject string, c runtime.Change) (runtime.Undo, error) {
-	if c.Action != runtime.ActionCPULimit {
-		return runtime.Undo{}, fmt.Errorf("kubernetes cannot apply action %q", c.Action)
-	}
-	p, err := r.find(ctx, subject)
-	if err != nil {
-		return runtime.Undo{}, err
-	}
-	if why := cannot(p, r.env.NodeID); why != "" {
-		return runtime.Undo{}, fmt.Errorf("%s/%s cannot take a cpu.limit: %s", p.Namespace, p.Name, why)
-	}
-	original := cpuOf(p)
-	if prev, present, readable := decode(p); present && readable && prev.NodeID == r.env.NodeID {
-		original = prev.Original
-	}
-	milli := millis(c.CPULimit)
-	if wouldBeGuaranteed(p, milli) {
-		return runtime.Undo{}, fmt.Errorf("%s/%s cannot take a cpu.limit of %dm: equal to its request, with memory "+
-			"request equal to limit, it would make the pod Guaranteed, a QoS class change", p.Namespace, p.Name, milli)
-	}
-	u := runtime.Undo{
-		Runtime:    "kubernetes",
-		NodeID:     r.env.NodeID,
-		Subject:    subject,
-		Action:     c.Action,
-		Original:   original,
-		Applied:    float64(milli) / 1000,
-		Expires:    c.Expires,
-		DecisionID: c.DecisionID,
-	}
-	b, err := json.Marshal(u)
-	if err != nil {
-		return runtime.Undo{}, err
-	}
-	if err := r.annotate(ctx, p, string(b)); err != nil {
-		return runtime.Undo{}, err
-	}
-	if err := r.resize(ctx, p, milli); err != nil {
-		return runtime.Undo{}, err
-	}
-	return u, nil
-}
-
-// Revert resizes the pod back to the limit it had and removes the record. A pod
-// already at that limit, as after a resize that never took, is not resized: only
-// the record is cleared, so a resize the API keeps refusing cannot keep a change
-// in force that is not there. A limit
-// of nil is an error: the runtime never accepts a pod without one, so an undo
-// without one did not come from here. A pod whose record is another node's or unreadable is left
-// untouched and the revert is an error; with no record at all the undo in hand is
-// authoritative and is restored. A pod
-// that has finished is gone.
-func (r *Runtime) Revert(ctx context.Context, u runtime.Undo) error {
-	if u.Original.Limit == nil {
-		return fmt.Errorf("revert %s: the original has no CPU limit, which this runtime never records", u.Subject)
-	}
-	p, err := r.find(ctx, u.Subject)
-	if err != nil {
-		return err
-	}
-	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-		return fmt.Errorf("%s/%s has finished: %w", p.Namespace, p.Name, runtime.ErrGone)
-	}
-	rec, present, readable := decode(p)
-	if present && (!readable || rec.NodeID != r.env.NodeID) {
-		return fmt.Errorf("revert %s: the pod carries a %s record that is not node %s's; nothing restored", u.Subject, Annotation, r.env.NodeID)
-	}
-	if want := millis(*u.Original.Limit); !atLimit(p, want) {
-		if err := r.resize(ctx, p, want); err != nil {
-			return err
-		}
-	}
-	if !present {
-		return nil // no record to clear: the undo in hand is authoritative
-	}
-	return r.annotate(ctx, p, "")
-}
-
-// Changed lists the changes nodeID recorded on this node's pods, soonest-expiring
-// first, then by subject.
-func (r *Runtime) Changed(ctx context.Context, nodeID string) ([]runtime.Undo, error) {
-	ps, err := r.pods(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var out []runtime.Undo
-	for _, p := range ps {
-		// A record that names another pod, copied here by a template or by hand, is not this pod's change.
-		if u, present, readable := decode(p); present && readable && u.NodeID == nodeID && u.Subject == subjectOf(p) {
-			out = append(out, u)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].Expires.Equal(out[j].Expires) {
-			return out[i].Expires.Before(out[j].Expires)
-		}
-		return out[i].Subject < out[j].Subject
-	})
-	return out, nil
-}
-
-// atLimit reports whether the pod's single container already has a CPU limit of
-// milli millicores.
-func atLimit(p corev1.Pod, milli int64) bool {
-	if len(p.Spec.Containers) != 1 {
-		return false
-	}
-	l, ok := p.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
-	return ok && l.MilliValue() == milli
-}
-
-// decode is the undo on the pod's annotation: whether the annotation is there,
-// and whether it could be read.
-func decode(p corev1.Pod) (u runtime.Undo, present, readable bool) {
-	s, present := p.Annotations[Annotation]
-	if !present {
-		return runtime.Undo{}, false, false
-	}
-	if err := json.Unmarshal([]byte(s), &u); err != nil {
-		return runtime.Undo{}, true, false
-	}
-	return u, true, true
-}
-
 // millis is a limit in millicores, rounded down and never below 1m.
 func millis(limit float64) int64 {
 	m := int64(math.Floor(limit*1000 + 1e-6))
@@ -457,26 +396,12 @@ func (r *Runtime) resize(ctx context.Context, p corev1.Pod, milli int64) error {
 	return r.wrap(err, p, "resize")
 }
 
-// annotate sets the change annotation, or removes it when value is empty.
-func (r *Runtime) annotate(ctx context.Context, p corev1.Pod, value string) error {
-	var v any
-	if value != "" {
-		v = value
-	}
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{Annotation: v}}})
-	if err != nil {
-		return err
-	}
-	_, err = r.client.CoreV1().Pods(p.Namespace).Patch(ctx, p.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-	return r.wrap(err, p, "annotate")
-}
-
 func (r *Runtime) wrap(err error, p corev1.Pod, what string) error {
 	if err == nil {
 		return nil
 	}
 	if isThisPodNotFound(err, p) {
-		return fmt.Errorf("%s/%s: %w", p.Namespace, p.Name, runtime.ErrGone)
+		return fmt.Errorf("%s/%s: %w", p.Namespace, p.Name, actuators.ErrGone)
 	}
 	return fmt.Errorf("%s %s/%s: %w", what, p.Namespace, p.Name, err)
 }

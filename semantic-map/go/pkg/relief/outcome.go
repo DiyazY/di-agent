@@ -7,18 +7,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/actuators"
 	"github.com/DiyazY/di-agent/pkg/runtime"
 )
 
 // What became of an action. An action with no outcome is in flight: applied
 // and waiting for Settle to pass so its effect can be judged.
 const (
-	OutcomeKept     = "kept"     // it helped; the cap stays until release or expiry
-	OutcomeReverted = "reverted" // it did not help and was undone
-	OutcomeReleased = "released" // pressure ended and the cap was given back
-	OutcomeExpired  = "expired"  // it outlived its expiry and was given back
-	OutcomeGone     = "gone"     // the workload left; there was nothing to give back
-	OutcomeManual   = "manual"   // an operator undid it
+	OutcomeKept       = "kept"        // it helped; the cap stays until release or expiry
+	OutcomeReverted   = "reverted"    // it did not help and was undone
+	OutcomeReleased   = "released"    // pressure ended and the cap was given back
+	OutcomeExpired    = "expired"     // it outlived its expiry and was given back
+	OutcomeGone       = "gone"        // the workload left; there was nothing to give back
+	OutcomeManual     = "manual"      // an operator undid it
+	OutcomeNotApplied = "not_applied" // it never took effect: still read as before once Settle had passed
 )
 
 const (
@@ -40,27 +42,173 @@ const (
 
 // expire gives back every action past its expiry, whatever the phase and
 // whether or not the loop is paused: a change the agent can no longer vouch for
-// must not outlive the time it was granted. One the runtime will not give back
-// stays in force and is tried again next tick.
-func (l *Loop) expire(ctx context.Context, now time.Time) {
+// must not outlive the time it was granted. One the actuator will not give back
+// stays in force and is tried again next tick, and so is every one when the
+// runtime cannot be listed: a change is given back through the workload the
+// runtime lists, which is what an actuator finds it by.
+func (l *Loop) expire(ctx context.Context, now time.Time, workloads lister) {
 	l.mu.Lock()
 	var due []*Action
 	for _, a := range l.liveLocked() {
-		if !now.Before(a.Undo.Expires) {
+		if !now.Before(a.Entry.Expires) {
 			due = append(due, a)
 		}
 	}
 	l.mu.Unlock()
 	for _, a := range due {
-		if err := l.giveBack(ctx, now, a, OutcomeExpired, "expired", a.cooldown); err != nil {
+		err := l.giveBack(ctx, now, a, OutcomeExpired, "expired", "the change expired", a.cooldown, workloads)
+		switch {
+		case errors.Is(err, errNoListing):
+			return // logged by the listing; every due change is retried next tick
+		case err != nil:
 			l.undoFailed(a, "expiring", err)
 		}
 	}
+	l.expireUnread(ctx, now, workloads)
 }
 
-// undoFailed records that the runtime refused to undo a's change: counted and
+// maxReSets bounds how many more times a given-back change is set to its
+// original when it does not read back as it. The waits double from twice the
+// loop's interval: ×2, ×4, ×8, at most ×2^maxBackoffShift.
+const (
+	maxReSets       = 3
+	maxBackoffShift = 6
+)
+
+// expireUnread gives back, from the ledger's record itself, every change whose
+// setting could not be read and whose expiry has passed: its original is set
+// through the workload the runtime lists, or through its subject. One the
+// actuator says is gone is recorded gone; one it refuses stays unread, in force,
+// and is tried again next tick.
+func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister) {
+	l.mu.Lock()
+	var due []Unread
+	for _, u := range l.unread {
+		switch {
+		case u.live || now.Before(u.Entry.Expires):
+		case u.GivenBack && (u.reSets >= maxReSets || now.Before(u.nextSet)):
+			// Given back already: set again only a few times, with backoff.
+		default:
+			due = append(due, *u)
+		}
+	}
+	l.mu.Unlock()
+	if len(due) == 0 {
+		return
+	}
+	ws, ok := workloads()
+	if !ok {
+		return
+	}
+	for _, u := range due {
+		e := u.Entry
+		w, _ := workload(ws, e.Subject)
+		err := l.cfg.Acting.Revert(ctx, w, e)
+		if err != nil && !errors.Is(err, actuators.ErrGone) {
+			l.mu.Lock()
+			if cur := l.unread[e.Subject]; cur != nil {
+				cur.Error = err.Error()
+				switch {
+				case cur.GivenBack:
+					// Only a Set that went through and still does not read back
+					// counts toward the budget; a refusal backs off all the same.
+					if errors.Is(err, actuators.ErrUnconfirmed) {
+						cur.reSets++
+					}
+					cur.tries++
+					cur.nextSet = now.Add(l.cfg.Interval << min(cur.tries+1, maxBackoffShift))
+					if cur.reSets >= maxReSets {
+						cur.Error += stoppedNote
+					}
+				case errors.Is(err, actuators.ErrUnconfirmed):
+					cur.GivenBack, cur.nextSet = true, now.Add(l.cfg.Interval<<1)
+				}
+			}
+			l.mu.Unlock()
+			l.cfg.Logf("relief: giving back the unread change to %s from the ledger: %v (retrying next tick)", e.Subject, err)
+			continue
+		}
+		a := l.taken(e, l.cooldowns(ws)(e.Subject))
+		l.mu.Lock()
+		delete(l.unread, e.Subject)
+		l.history = appendHistory(l.history, a)
+		l.mu.Unlock()
+		if errors.Is(err, actuators.ErrGone) {
+			l.gone(now, a, "the actuator no longer finds the workload")
+			continue
+		}
+		l.expiredFromRecord(now, a, u)
+	}
+}
+
+// expiredFromRecord journals and closes a change given back at its expiry from
+// the ledger's record, its setting having been unreadable.
+func (l *Loop) expiredFromRecord(now time.Time, a *Action, u Unread) {
+	b := l.cfg.Map.Decide(l.id("expired"), l.giveBackAsk(a.Subject, "the change expired"))
+	b.Input("act", a.DecisionID)
+	b.Input("entry", u.Entry)
+	b.Input("unread", u.Error)
+	b.Caveat("its setting could not be read; it was given back from the ledger's record of what it replaced")
+	b.Commit(map[string]any{OutcomeExpired: a.Subject})
+	l.end(now, a, OutcomeExpired, a.cooldown)
+}
+
+// lister lists the workloads the runtime runs, at most once per pass and only
+// when a step needs them; false when the listing failed.
+type lister func() ([]runtime.Workload, bool)
+
+// errNoListing is why nothing is given back in a pass whose listing failed.
+var errNoListing = errors.New("the runtime's workloads could not be listed; the change stays in force until they can")
+
+// lister is a lister over the runtime under ctx: the first call lists, the rest
+// reuse what it found, and a failed listing is logged once and not retried.
+func (l *Loop) lister(ctx context.Context) lister {
+	var (
+		ws             []runtime.Workload
+		listed, failed bool
+	)
+	return func() ([]runtime.Workload, bool) {
+		if !listed && !failed {
+			var err error
+			if ws, err = l.cfg.Runtime.Workloads(ctx); err != nil {
+				l.cfg.Logf("relief: listing workloads: %v", err)
+				failed = true
+			} else {
+				listed = true
+			}
+		}
+		return ws, listed
+	}
+}
+
+// undo gives a's change back through the workload the runtime lists, so an
+// actuator that finds a workload by more than its subject, as memory.high finds
+// a pod's cgroup by its UID and QoS class, has all of it. A workload the runtime
+// does not list is given back through its subject alone, which an actuator
+// finds it by (memory.high by the UID in pod:<uid>): the listing does not decide
+// that a workload left, the actuator does. gone reports one the actuator answers
+// ErrGone for, with why; its entry has then been deleted. Any other refusal keeps
+// the entry, to be retried. errNoListing means nothing was tried: the change
+// stays in force for a later pass.
+func (l *Loop) undo(ctx context.Context, a *Action, workloads lister) (gone bool, why string, err error) {
+	ws, ok := workloads()
+	if !ok {
+		return false, "", errNoListing
+	}
+	w, _ := workload(ws, a.Subject)
+	err = l.cfg.Acting.Revert(ctx, w, a.Entry)
+	switch {
+	case errors.Is(err, actuators.ErrGone):
+		return true, "the actuator no longer finds the workload", nil
+	case err != nil:
+		return false, "", err
+	}
+	return false, "", nil
+}
+
+// undoFailed records that the actuator refused to undo a's change: counted and
 // kept on the action, so Actions and Status show a change stuck in force, logged
-// every time, and journalled only on the first refusal, so a runtime that refuses
+// every time, and journalled only on the first refusal, so an actuator that refuses
 // for an hour is one record rather than 240. The change stays in force and the
 // undo is retried on the next tick. Called under the pass lock, with mu not held.
 func (l *Loop) undoFailed(a *Action, what string, err error) {
@@ -75,10 +223,10 @@ func (l *Loop) undoFailed(a *Action, what string, err error) {
 	}
 	b := l.cfg.Map.Decide(l.id("stuck"), fmt.Sprintf("give back the change to %s?", a.Subject))
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Input("while", what)
 	b.Input("error", err.Error())
-	b.Caveat("the runtime refused to undo the change: it stays in force and is retried every tick; later refusals are counted on the action, not journalled")
+	b.Caveat("the actuator refused to undo the change: it stays in force and is retried every tick; later refusals are counted on the action, not journalled")
 	b.Commit(map[string]any{"stuck": a.Subject})
 }
 
@@ -87,7 +235,7 @@ func (l *Loop) undoFailed(a *Action, what string, err error) {
 // action is always kept, as there is no pre-cap baseline to judge it by. The
 // judgement needs a fresh reading taken after Settle; one taken before it says
 // nothing about the cap's effect. A workload the runtime no longer lists is
-// gone, and its slot is freed once the runtime has let go of the change.
+// gone, and its slot is freed once the actuator has let go of the change.
 func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at time.Time, fresh bool, workloads func() ([]runtime.Workload, bool)) {
 	l.mu.Lock()
 	a := l.inFlight
@@ -99,18 +247,22 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	if !ok {
 		return
 	}
-	if !hasSubject(ws, a.Subject) {
-		// Revert anyway, so a runtime that still holds the change gives it up;
-		// the undo is dropped only once it has.
-		if err := l.cfg.Runtime.Revert(ctx, a.Undo); err != nil && !errors.Is(err, runtime.ErrGone) {
-			l.undoFailed(a, "letting go of", err)
-			return
+	w, listed := workload(ws, a.Subject)
+	if !listed {
+		// Nothing to judge it against: the change is given back through its
+		// subject, and is gone only if the actuator says so.
+		if err := l.giveBack(ctx, now, a, OutcomeReleased, "release", "the runtime no longer lists the workload", a.cooldown, workloads); err != nil {
+			l.undoFailed(a, "giving back", err)
 		}
-		l.gone(now, a, "the runtime no longer lists the workload")
+		return
+	}
+	if l.awaiting[a.Subject] {
+		// Its latest write, a step or the restore of the one before, has not yet
+		// settled: nothing is judged or written over it until it has.
 		return
 	}
 	if a.revertPending {
-		l.revertFailed(ctx, now, a, a.VerifyID)
+		l.revertFailed(ctx, now, w, a, a.VerifyID)
 		return
 	}
 	if !fresh || at.Before(a.ActedAt.Add(l.c.Settle)) {
@@ -127,8 +279,8 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		verdict = "keep"
 	}
 	id := l.id("verify")
-	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s relieve node CPU contention?", a.Subject))
-	b.Property(NodeContention)
+	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s's %s through %s relieve %s?", a.Subject, l.d.Resource, l.d.Action, l.d.Relieves))
+	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
 	b.Input("predicted", a.Plan.Predicted)
 	b.Input("observed", observed)
@@ -155,49 +307,64 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 	}
 	a.revertPending = true
 	l.mu.Unlock()
-	l.revertFailed(ctx, now, a, id)
+	l.revertFailed(ctx, now, w, a, id)
 }
 
 // revertFailed undoes a step that did not help and puts its workload on a long
 // cooldown. A first step is reverted; a further step is undone by putting back
-// the cap before it, which stays kept. A revert the runtime refuses is retried
-// on the next tick without judging the step again.
-func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verifyID string) {
+// the cap before it, through Restore, which no Check gates, and that cap stays
+// kept. A revert the actuator refuses is retried
+// on the next tick without judging the step again. A restore accepted but not
+// yet seen to take (left pending) keeps the revert owed until it settles.
+func (l *Loop) revertFailed(ctx context.Context, now time.Time, w runtime.Workload, a *Action, verifyID string) {
 	var (
-		undo runtime.Undo
-		err  error
+		entry actuators.Entry
+		err   error
 	)
 	if a.prev != nil {
 		p := a.prev
-		undo, err = l.cfg.Runtime.Apply(ctx, a.Subject, runtime.Change{Action: runtime.ActionCPULimit,
-			CPULimit: p.Undo.Applied, Expires: p.Undo.Expires, DecisionID: p.DecisionID})
+		entry, err = l.cfg.Acting.Restore(ctx, w, l.d.Action, p.Entry.Applied, p.Entry.Expires, p.DecisionID)
 		if err != nil {
-			l.reconciled = false // what the runtime holds now is asked again, as after any failed Apply
+			l.reconciled = false // the ledger is reconciled again, as after any failed Apply
 		}
 	} else {
-		err = l.cfg.Runtime.Revert(ctx, a.Undo)
+		err = l.cfg.Acting.Revert(ctx, w, a.Entry)
 	}
 	switch {
-	case errors.Is(err, runtime.ErrGone):
-		l.gone(now, a, "the runtime no longer has the workload")
+	case errors.Is(err, actuators.ErrGone):
+		l.gone(now, a, "the actuator no longer finds the workload")
 		return
 	case err != nil:
 		l.undoFailed(a, "reverting", err)
 		return
 	}
+	if entry.Pending {
+		// Accepted, but not yet seen to take: the revert stays owed until the
+		// restore settles. The next reconcile reads it again: one that lands
+		// completes the revert, one that never took leaves it to be retried.
+		l.reconciled = false
+		return
+	}
+	l.reverted(now, a, entry, verifyID)
+}
+
+// reverted records that a's step that did not help was undone: reverted, or,
+// for a further step, its earlier step restored (entry, its record), which
+// stays kept. Its workload cools down for failedCooldown times its cooldown.
+func (l *Loop) reverted(now time.Time, a *Action, entry actuators.Entry, verifyID string) {
 	cooldown := failedCooldown * a.cooldown
-	question := fmt.Sprintf("give %s back its CPU: capping it did not help", a.Subject)
+	question := l.giveBackAsk(a.Subject, "capping it did not help")
 	if a.prev != nil {
-		question = fmt.Sprintf("put %s back at its earlier cap: the further step did not help", a.Subject)
+		question = fmt.Sprintf("put %s back at its earlier %s: the further step did not help", a.Subject, l.d.Action)
 	}
 	b := l.cfg.Map.Decide(l.id("revert"), question)
 	b.Input("act", a.DecisionID)
 	if verifyID != "" {
 		b.Input("verify", verifyID)
 	}
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	if a.prev != nil {
-		b.Input("restored", map[string]any{"act": a.prev.DecisionID, "to_cores": a.prev.Undo.Applied})
+		b.Input("restored", map[string]any{"act": a.prev.DecisionID, "to": a.prev.Entry.Applied, "unit": l.d.Unit})
 	}
 	b.Note("attribution failed; cooling %s down for %s", a.Subject, cooldown)
 	b.Commit(map[string]any{"reverted": a.Subject})
@@ -208,13 +375,13 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 		id, failed := a.ID, a.VerifyID
 		*a = *p
 		// The verify that caused the revert is the one an operator wants, not the earlier step's.
-		a.ID, a.Undo, a.Outcome, a.revertPending, a.VerifyID = id, undo, OutcomeKept, false, failed
+		a.ID, a.Entry, a.Outcome, a.revertPending, a.VerifyID = id, entry, OutcomeKept, false, failed
 		a.RevertAttempts, a.LastError = 0, "" // the undo went through; the earlier cap is in force anew
 		if l.inFlight == a {
 			l.inFlight = nil
 		}
-		l.kept = append(l.kept, a)
-		l.cooling[a.Subject] = now.Add(cooldown)
+		l.kept = append(removeAction(l.kept, a), a)
+		l.budget.Cool(a.Subject, now.Add(cooldown))
 		l.mu.Unlock()
 		return
 	}
@@ -224,12 +391,13 @@ func (l *Loop) revertFailed(ctx context.Context, now time.Time, a *Action, verif
 
 // release gives back the most recent kept change, one per Settle, whenever the
 // node is not relieving: after pressure has eased, and after a restart that
-// found caps on a calm node. One the runtime will not give back does not hold up
+// found caps on a calm node. One the actuator will not give back does not hold up
 // the rest: the next most recent is tried in the same tick, and the refused one
-// is tried again at the next release, a Settle later. In Releasing, with nothing left, it ends the
-// phase. An action in flight is judged first, so it is either kept and
-// released in turn or reverted.
-func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, phase Phase) {
+// is tried again at the next release, a Settle later. A pass that cannot list
+// the workloads gives back nothing and tries again next tick. In Releasing, with
+// nothing left, it ends the phase. An action in flight is judged first, so it is
+// either kept and released in turn or reverted.
+func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, phase Phase, workloads lister) {
 	l.mu.Lock()
 	if l.inFlight != nil {
 		l.mu.Unlock()
@@ -257,10 +425,12 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 
 	var skipped []string
 	for i, a := range kept {
-		err := l.cfg.Runtime.Revert(ctx, a.Undo)
+		gone, why, err := l.undo(ctx, a, workloads)
 		switch {
-		case errors.Is(err, runtime.ErrGone):
-			l.gone(now, a, "the runtime no longer has the workload")
+		case errors.Is(err, errNoListing):
+			return
+		case gone:
+			l.gone(now, a, why)
 			return
 		case err != nil:
 			l.undoFailed(a, "releasing", err)
@@ -273,18 +443,18 @@ func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, pha
 }
 
 // recordRelease journals and records the release of a, whose revert went
-// through. skipped lists the newer actions the runtime would not give back first.
+// through. skipped lists the newer actions the actuator would not give back first.
 func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
-	b := l.cfg.Map.Decide(l.id("release"), fmt.Sprintf("give %s back its CPU: node CPU contention has eased", a.Subject))
-	b.Property(NodeContention)
+	b := l.cfg.Map.Decide(l.id("release"), l.giveBackAsk(a.Subject, l.d.Relieves+" has eased"))
+	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Input("pressure", pressure)
 	b.Input("phase", string(phase))
 	b.Note("released most recent first; cooling %s down for %s", a.Subject, cooldown)
 	if len(skipped) > 0 {
 		b.Input("skipped", skipped)
-		b.Note("newer changes the runtime would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
+		b.Note("newer changes the actuator would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
 	}
 	b.Commit(map[string]any{"released": a.Subject, "cooldown": cooldown.String()})
 	l.end(now, a, OutcomeReleased, cooldown)
@@ -299,24 +469,23 @@ func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase P
 	}
 }
 
-// giveBack reverts an action for a reason other than its verdict or a release:
-// expiry or an operator. A workload that is gone is recorded as such.
-func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, kind string, cooldown time.Duration) error {
-	err := l.cfg.Runtime.Revert(ctx, a.Undo)
+// giveBack reverts an action for a reason other than its verdict or a release
+// with pressure eased: expiry, an operator, or a workload the runtime no longer
+// lists, through undo. A workload that is gone is recorded as such; one that
+// cannot be listed is an error wrapping errNoListing, and its change stays in
+// force. reason is why it is given back, as the decision asks it.
+func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, kind, reason string, cooldown time.Duration, workloads lister) error {
+	gone, why, err := l.undo(ctx, a, workloads)
 	switch {
-	case errors.Is(err, runtime.ErrGone):
-		l.gone(now, a, "the runtime no longer has the workload")
-		return nil
 	case err != nil:
 		return fmt.Errorf("reverting %s on %s (%s): %w", a.ID, a.Subject, outcome, err)
+	case gone:
+		l.gone(now, a, why)
+		return nil
 	}
-	question := fmt.Sprintf("give %s back its CPU: the change expired", a.Subject)
-	if outcome == OutcomeManual {
-		question = fmt.Sprintf("give %s back its CPU: an operator asked", a.Subject)
-	}
-	b := l.cfg.Map.Decide(l.id(kind), question)
+	b := l.cfg.Map.Decide(l.id(kind), l.giveBackAsk(a.Subject, reason))
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Note("cooling %s down for %s", a.Subject, cooldown)
 	b.Commit(map[string]any{outcome: a.Subject})
 	l.end(now, a, outcome, cooldown)
@@ -329,7 +498,7 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 func (l *Loop) gone(now time.Time, a *Action, why string) {
 	b := l.cfg.Map.Decide(l.id("gone"), fmt.Sprintf("what became of the change to %s?", a.Subject))
 	b.Input("act", a.DecisionID)
-	b.Input("undo", a.Undo)
+	b.Input("entry", a.Entry)
 	b.Note("%s; the change is dropped", why)
 	b.Commit(map[string]any{"gone": a.Subject})
 	l.end(now, a, OutcomeGone, 0)
@@ -342,12 +511,17 @@ func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Durat
 	defer l.mu.Unlock()
 	a.Outcome, a.revertPending = outcome, false
 	a.RevertAttempts, a.LastError = 0, ""
+	for id, sp := range l.spent {
+		if sp.subject == a.Subject {
+			delete(l.spent, id) // a closed change's kept spend is settled
+		}
+	}
 	if l.inFlight == a {
 		l.inFlight = nil
 	}
 	l.kept = removeAction(l.kept, a)
 	if cooldown > 0 {
-		l.cooling[a.Subject] = now.Add(cooldown)
+		l.budget.Cool(a.Subject, now.Add(cooldown))
 	}
 }
 
@@ -362,13 +536,26 @@ func backoff(base time.Duration, k int) time.Duration {
 }
 
 func hasSubject(ws []runtime.Workload, subject string) bool {
+	_, ok := workload(ws, subject)
+	return ok
+}
+
+// workload is the listed workload with subject, or one named only by it when ws
+// does not list it, which an actuator finds it by.
+func workload(ws []runtime.Workload, subject string) (runtime.Workload, bool) {
 	for _, w := range ws {
 		if w.Subject == subject {
-			return true
+			return w, true
 		}
 	}
-	return false
+	return bySubject(subject), false
 }
+
+// bySubject is a workload named only by its subject, for giving back a change
+// to one the runtime does not list: the actuator finds it by the subject, or
+// answers ErrGone, or, when the subject is not enough, ErrInvalidIdentity, which
+// keeps the entry.
+func bySubject(subject string) runtime.Workload { return runtime.Workload{Subject: subject} }
 
 // removeAction drops a from as without disturbing the order of the rest.
 func removeAction(as []*Action, a *Action) []*Action {
@@ -392,7 +579,6 @@ func appendHistory(h []*Action, a *Action) []*Action {
 func copyAction(a *Action) Action {
 	c := *a
 	c.Observed = cloneFloat(a.Observed)
-	c.Undo.Original = runtime.Resource{Request: cloneFloat(a.Undo.Original.Request), Limit: cloneFloat(a.Undo.Original.Limit)}
 	if a.SharesAtAct != nil {
 		c.SharesAtAct = make(map[string]float64, len(a.SharesAtAct))
 		for s, v := range a.SharesAtAct {

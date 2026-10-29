@@ -1,0 +1,17 @@
+# The memory relief phase's victim: a page-cache working set within its memory request.
+# It writes a 1 GiB file into an emptyDir on disk once, then re-reads it every second.
+# Its usage stays under its 1280Mi request, so it is promised memory and protected: the
+# agent never caps it. The node has no swap, so only file pages can be reclaimed: when
+# another workload's page cache pushes these out, re-reading them is refaults, which is
+# the victim's memory pressure — memory_contention_ratio.
+apiVersion: v1
+kind: Pod
+metadata: { name: mem-victim, labels: { check: casestudy, di-agent/group: relief } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    command: ["sh", "-c", "dd if=/dev/zero of=/data/f bs=1M count=1024 2>/dev/null; sync; while true; do cat /data/f >/dev/null; sleep 1; done"]
+    resources: { requests: { cpu: 100m, memory: 1280Mi }, limits: { cpu: 500m } }
+    volumeMounts: [{ name: data, mountPath: /data }]
+  volumes: [{ name: data, emptyDir: {} }]
