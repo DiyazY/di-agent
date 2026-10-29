@@ -34,7 +34,7 @@ type Status struct {
 	PredictionsHeld float64              `json:"predictions_held"`          // kept / (kept+reverted)
 	Stuck           int                  `json:"stuck,omitempty"`           // changes in force whose undo the actuator has refused, or whose setting it cannot read
 	Unread          []Unread             `json:"unread,omitempty"`          // the ledger's changes whose setting cannot be read, retried every tick
-	ReconcileError  string               `json:"reconcile_error,omitempty"` // why the latest reconcile failed; empty when it succeeded
+	ReconcileError  string               `json:"reconcile_error,omitempty"` // why the latest reconcile failed, or why a step that never took could not be read again (only its workload held)
 	Cooling         map[string]time.Time `json:"cooling,omitempty"`
 }
 
