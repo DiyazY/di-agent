@@ -1,0 +1,97 @@
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: di-agent
+  labels:
+    app: di-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: di-agent
+  template:
+    metadata:
+      labels:
+        app: di-agent
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.agent.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: di-agent
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.agent.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: REGIME
+              value: {{ .Values.agent.regime | quote }}
+            - name: PROFILE
+              value: {{ .Values.agent.profile | quote }}
+            - name: PORT
+              value: {{ .Values.agent.port | quote }}
+            - name: COLLECT_INTERVAL
+              value: {{ .Values.agent.collectInterval | quote }}
+            - name: PROPOSER
+              value: {{ .Values.agent.proposer | quote }}
+            - name: NETDATA_URL
+              value: ""
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: CGROUP_ROOT
+              value: /host/cgroup
+            {{- if .Values.datasetCollector.enabled }}
+            - name: DATASET_COLLECTOR_URL
+              value: "http://dataset-collector:8000/collect"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.agent.port }}
+          volumeMounts:
+            - name: host-cgroup
+              mountPath: /host/cgroup
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+      volumes:
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: di-agent
+  labels:
+    app: di-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: di-agent
+  ports:
+    - name: http
+      port: {{ .Values.agent.port }}
+      targetPort: http
+{{- end }}

@@ -1,0 +1,82 @@
+# Second telemetry-writer instance that reads the topics mirrored by
+# telemetry-cloud-sync back out of Azure Event Hubs and writes them into a
+# cloud InfluxDB, so the cloud store eventually converges with the edge one.
+# Disabled unless .Values.telemetryWriterCloud.enabled is true. Only valid
+# when telemetryCloudSync.target is "eventhub".
+{{- if .Values.telemetryWriterCloud.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-writer-cloud
+  labels:
+    app: telemetry-writer-cloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-writer-cloud
+  template:
+    metadata:
+      labels:
+        app: telemetry-writer-cloud
+      {{- include "diagent.podAnnotations" (dict "root" . "promPort" "8000") | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.telemetryWriterCloud.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telemetry-writer-cloud
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.telemetryWriterCloud.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KAFKA_BROKERS
+              value: "{{ .Values.telemetryCloudSync.eventHub.namespaceFqdn }}:9093"
+            - name: KAFKA_SECURITY_PROTOCOL
+              value: "SASL_SSL"
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryCloudSync.eventHub.existingSecret }}
+                  key: connection-string
+            - name: GENSET_KAFKA_TOPIC
+              value: {{ .Values.genset.kafkaTopic | quote }}
+            - name: PROPULSION_KAFKA_TOPIC
+              value: {{ .Values.propulsion.kafkaTopic | quote }}
+            - name: BATTERY_KAFKA_TOPIC
+              value: {{ .Values.battery.kafkaTopic | quote }}
+            - name: AUXLOAD_KAFKA_TOPIC
+              value: {{ .Values.auxload.kafkaTopic | quote }}
+            - name: SHORE_POWER_KAFKA_TOPIC
+              value: {{ .Values.shorePower.kafkaTopic | quote }}
+            - name: SWITCHBOARD_KAFKA_TOPIC
+              value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
+            - name: DATASET_KAFKA_TOPIC
+              value: {{ .Values.streamer.kafkaTopic | quote }}
+            # Not mirrored by telemetry-cloud-sync today; point at a topic
+            # that won't exist so the writer simply never sees navigation data.
+            - name: NAVIGATION_KAFKA_TOPIC
+              value: "navigation.telemetry.unmirrored"
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.telemetryWriterCloud.kafkaGroupId | quote }}
+            - name: LOG_EVERY_N_MESSAGES
+              value: {{ .Values.telemetryWriterCloud.logEveryNMessages | quote }}
+            - name: STRICT_VALIDATION
+              value: {{ .Values.telemetryWriterCloud.strictValidation | quote }}
+            - name: INFLUXDB_URL
+              value: {{ .Values.telemetryWriterCloud.influxdb.url | quote }}
+            - name: INFLUXDB_ORG
+              value: {{ .Values.telemetryWriterCloud.influxdb.org | quote }}
+            - name: INFLUXDB_BUCKET
+              value: {{ .Values.telemetryWriterCloud.influxdb.bucket | quote }}
+            - name: INFLUXDB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.telemetryWriterCloud.influxdb.existingSecret }}
+                  key: admin-token
+          resources:
+            {{- toYaml .Values.telemetryWriterCloud.resources | nindent 12 }}
+{{- end }}

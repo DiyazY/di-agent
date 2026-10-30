@@ -1,0 +1,67 @@
+{{- if .Values.navigation.enabled }}
+# Navigation simulator: one vessel's NMEA 2000 sensor suite (GNSS, heading,
+# wind, depth, attitude) on a virtual CAN bus. Exposes the REST API on :8000
+# and a custom CAN-frame debug stream on the configured TCP port, alongside
+# the navigation.telemetry Kafka topic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: navigation
+  labels:
+    app: navigation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: navigation
+  template:
+    metadata:
+      labels:
+        app: navigation
+      {{- include "diagent.podAnnotations" (dict "root" . "promPort" "8000") | nindent 6 }}
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.navigation.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: navigation
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.navigation.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+            - containerPort: {{ .Values.navigation.n2kGatewayPort }}
+          env:
+            - name: VESSEL_NAME
+              value: {{ .Values.navigation.vesselName | quote }}
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.navigation.kafkaTopic | quote }}
+            - name: N2K_PORT
+              value: {{ .Values.navigation.n2kGatewayPort | quote }}
+            - name: INITIAL_SPEED_KNOTS
+              value: {{ .Values.navigation.initialSpeedKnots | quote }}
+            - name: NAV_TIME_SCALE
+              value: {{ .Values.navigation.timeScale | quote }}
+          resources:
+            {{- toYaml .Values.navigation.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: navigation
+  labels:
+    app: navigation
+spec:
+  selector:
+    app: navigation
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: n2k
+      port: {{ .Values.navigation.n2kGatewayPort }}
+      targetPort: {{ .Values.navigation.n2kGatewayPort }}
+{{- end }}

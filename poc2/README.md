@@ -1,90 +1,188 @@
-# PoC2: distributed multi-node di-agent lab
+# PoC2: local di-agent lab on libvirt VMs
 
-This directory contains the second proof-of-concept for the di-agent project: a local Kubernetes lab built from libvirt virtual machines, with a full telemetry and coordination pipeline around the agent runtime.
+This directory is the second proof-of-concept for the di-agent project: a small Kubernetes lab that runs on libvirt virtual machines, with a distributed telemetry stack and a trust-based coordination experiment.
 
-The purpose is not just to "start a cluster." This PoC simulates a small edge environment where multiple di-agent nodes run on separate VMs, discover each other as peers, generate workload and telemetry data, and demonstrate trust-weighted routing decisions under changing conditions.
+The important thing to understand is that PoC2 is not just a cluster bootstrap. It is a reproducible environment for testing a specific thesis:
 
-## What happens in this PoC
+- multiple agent instances run on different machines,
+- each node observes a different workload pattern,
+- the nodes exchange peer trust information,
+- a coordinator observes how routing recommendations change when trust drops.
 
-The flow is:
+## What is actually required to run this PoC
 
-1. Terraform creates a small libvirt VM fleet.
-2. A cluster bootstrap script installs kubeadm Kubernetes, k3s, or KubeEdge across those VMs.
-3. Kafka is deployed as a single-broker KRaft service.
-4. di-agent is built and deployed as one pod per worker node.
-5. Each agent registers the others as peers and sets trust values.
-6. Synthetic workloads emit telemetry into Kafka.
-7. A telemetry bridge writes Kafka data into InfluxDB.
-8. Grafana visualizes the stored metrics.
-9. A coordinator script polls each node and triggers a trust-drain event to demonstrate rerouting logic.
+This is the minimal working stack the project expects:
 
-In other words, this is a realistic-ish distributed test bed for evaluating the same trust and routing ideas that are central to the di-agent research.
+- Linux host with libvirt + KVM + QEMU enabled
+- Terraform installed and configured for libvirt
+- Docker for building the custom images used by the app stack
+- Helm 3 installed
+- kubectl and a valid kubeconfig after cluster bootstrap
+- SSH access to the VMs, using the key at `$HOME/.ssh/id_ed25519_vms`
+- a container registry for the chart-managed services (`ghcr.io/...` by default)
+- access to Ubuntu cloud images so Terraform can create VM disks
 
-## Topology
+The default topology is simple and intentional:
 
-The default topology is:
+- `ubuntu-vm1` = Kubernetes control plane
+- `ubuntu-vm2`, `ubuntu-vm3`, ... = worker nodes
 
-- VM1: Kubernetes control-plane node
-- VM2: worker node, Kafka, InfluxDB, Grafana, telemetry writer
-- VM3: worker node, genset workload generator
-- VM4: additional worker node, optional for expansion
+The first VM in the list is the control plane; all remaining VMs are treated as workers.
 
-The scripts are written so the first VM in the list is treated as the control plane and later VMs become workers.
+## What this PoC deploys
 
-## Core components
+The deployment consists of two separate layers:
 
-- Terraform: builds the VMs and libvirt storage pool in `main.tf`
-- kubeadm bootstrap: `scripts/02-k8s.sh`
-- k3s bootstrap: `scripts/02-k3s.sh`
-- KubeEdge bootstrap: `scripts/03-kubeedge.sh` (requires an existing control plane)
-- Helm deployment: `helm/di-agent-system`
-- di-agent deployment: `scripts/04-agent.sh`
-- peer registration: `scripts/05-peers.sh`
-- image builds: `scripts/build-push-images.sh`
-- trust-routing demo: `scripts/coordinator.sh`
+1. Infrastructure and cluster layer
+   - VM creation via Terraform in `main.tf`
+   - Kubernetes bootstrap via `scripts/02-k8s.sh`
+   - one cluster for the VM fleet
 
-## Prerequisites
+2. Application and demo layer
+   - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector; legacy simulators and the playground are disabled by default
+   - `scripts/03-agent.sh` builds and deploys the Go `di-agent` binary as one pod per worker VM
+   - `scripts/04-peers.sh` registers each agent as a peer of the others and sets trust values
+   - `scripts/coordinator.sh` runs the trust-drain/routing experiment
 
-- Terraform
-- libvirt / KVM / QEMU
-- Ubuntu cloud image access
-- SSH key for the VMs
-- Docker for building images used by the cluster
-- `kubectl` and kube config access after bootstrap
-- `virsh` and a default libvirt network
-- `envsubst` for templated manifests
+The default `make all` workflow deploys the multi-node `di-agent` fleet separately, one pod per worker VM, to model host-level peer nodes directly on the VM network. `agent.enabled=true` in Helm is an alternative single-agent deployment; do not enable it together with `make agent`.
 
-The scripts expect the SSH key to be at:
+## Required secrets and configuration
 
-- `$HOME/.ssh/id_ed25519_vms`
+Before the chart is installed, the chart expects a namespace and credentials for the telemetry services.
 
-## Quick start
+```bash
+kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n default create secret generic influxdb-credentials \
+  --from-literal=admin-user="$INFLUXDB_ADMIN_USER" \
+  --from-literal=admin-password="$INFLUXDB_ADMIN_PASSWORD" \
+  --from-literal=admin-token="$INFLUXDB_ADMIN_TOKEN"
+kubectl -n default create secret generic grafana-credentials \
+  --from-literal=admin-user="$GRAFANA_ADMIN_USER" \
+  --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD"
+```
 
-From this directory, choose one cluster distribution:
+This is required because `helm/di-agent-system/values.yaml` references:
+
+- `influxdb.existingSecret: influxdb-credentials`
+- `grafana.existingSecret: grafana-credentials`
+
+### PostgreSQL engine dataset
+
+The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
+
+```bash
+kubectl -n default create secret generic postgres-credentials \
+  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
+kubectl -n default create secret generic data-url --from-literal=data-url="$DATA_URL"
+helm upgrade --install di-agent-system poc2/helm/di-agent-system --wait --timeout 30m
+```
+
+Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=false` to skip it.
+
+### PostgreSQL replay and simulation modes
+
+The streamer defaults to `synthetic` mode, generating bounded, correlated samples from the selected run's measured signal profiles and carrying its `run_metadata` in each message. Set `streamer.mode=real` to replay the actual stored samples. Both modes publish generic engine signals to `dataset.telemetry`; telemetry-writer writes them to InfluxDB's `dataset_timeseries` measurement with `run_id`, `source`, `signal`, and `origin` tags. If PostgreSQL data is unavailable, the streamer reports the error through `/status` and retries; it never silently substitutes synthetic values for a requested real stream.
+
+The `dataset-collector` consumes `dataset.telemetry` and exposes di-agent's HTTP collector protocol. To have the first agent deployed by `make agent` poll it, set `DATASET_COLLECTOR_URL=http://dataset-collector.default.svc.cluster.local:8000/collect`; otherwise the URL is empty and agents collect their local cgroup metrics only. Alternatively, run a single Helm-managed agent with `make helm-install HELM_ARGS="--set agent.enabled=true"` and do not run `make agent`.
+
+The collector averages all new Kafka values for each run and signal over one agent collection window, then returns one sample per run/signal. The default agent poll interval is 5s (`AGENT_COLLECT_INTERVAL` for `make agent`, or `agent.collectInterval` for the Helm-managed agent): a 1-step/s stream is averaged over the values received in those 5 seconds; faster streams contribute more values, and a signal with no new events is omitted. The collector adapts to the actual Kafka arrivals, so no rate setting needs to be synchronized with the streamer. Each event must include per-signal `unit` and `[min, max]` `range` values under `metadata.signals`; for example, `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. The collector forwards these as `unit` and `range`, with `metric_type=<signal>` and `subject=engine:<run_id>`. Source and `origin` are labels. These are intentionally unrouted in `semantic-map/domain_spec.json`; the agent accepts and records them as scoped properties but does not summarize them into constructs. The existing `RC` and `PS` constructs describe host resource cost and pressure, not engine signals.
+
+The supplied PostgreSQL dataset has engine/run metadata, but no per-signal physical units or operating ranges. In both stream modes, replay-streamer preserves raw values and supplements each event's metadata with `unit: "dataset-native"` and observed min/max bounds pooled across all sources for that signal in the selected run. These are normalization bounds, not claimed physical operating limits. Constant signals get symmetric padding of 1% of their absolute value (at least 1 dataset-native unit) to keep the range nonzero. Generated declarations carry `unit_source: "dataset-native"` and `range_source: "observed"` and are logged. Explicit units and ranges in `run_metadata` take precedence, including JSON `signals` and flattened `<signal>.unit`/`<signal>.range` keys; invalid explicit declarations fail visibly rather than being replaced. PostgreSQL rows are not modified.
+
+The chart's Prometheus service scrapes annotated application `/metrics` endpoints. The telemetry writer commits Kafka offsets only after successful InfluxDB writes; malformed records are fatal and left uncommitted with `STRICT_VALIDATION=true`, while `false` logs and drops them before committing.
+
+Cloud sync commits only the processed record's offset after delivery or an explicitly logged permanent rejection. Transient errors are retried without advancing offsets, and records fetched later in the same Kafka batch remain uncommitted until processed.
+
+```bash
+make images IMAGES="replay-streamer telemetry-writer data-ingest dataset-collector"
+make helm-install
+# Select real samples instead:
+make helm-install STREAMER_MODE=real
+# Real samples, 5 time steps every 500 ms:
+make helm-install STREAMER_MODE=real STREAMER_INTERVAL_MS=500 STREAMER_POINTS=5
+# Any other chart value, e.g. enable the legacy genset simulator:
+make helm-install HELM_ARGS="--set genset.enabled=true"
+# Change emission rate while running:
+kubectl port-forward svc/replay-streamer 8000:8000
+curl -X PUT http://localhost:8000/config \
+  -H 'Content-Type: application/json' \
+  -d '{"interval_ms":500,"points_per_interval":5}'
+```
+
+#### Streamer control API (runtime changes)
+
+The streamer exposes `replay-streamer:8000` inside the cluster (use `kubectl port-forward svc/replay-streamer 8000:8000` from your machine).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness (503 only if the worker thread died) |
+| `GET /status` | Active config, `state` (`running`/`error`), `published` count, `last_error` |
+| `GET /metrics` | Prometheus HTTP request metrics, scraped by the Helm deployment |
+| `PUT /config` | Partial update; send only the fields you want to change |
+
+`PUT /config` fields (all optional): `mode` (`real`\|`synthetic`), `run_id`, `interval_ms` (10–3,600,000), `points_per_interval` (1–10,000), `loop` (bool), `random_seed` (int, synthetic only). A "point" is one time step: every signal still active at that step emits one sample, so samples per tick = `points_per_interval` × active signals. Defaults: 1 step every 1000 ms. Changes apply within ~0.25 s without a restart.
+
+```bash
+# Switch to another run, in real mode
+curl -X PUT localhost:8000/config -H 'Content-Type: application/json' \
+  -d '{"mode":"real","run_id":"1000rpm_150kW_0001_2"}'
+# Pause-like slow replay: 1 point every 10 s
+curl -X PUT localhost:8000/config -H 'Content-Type: application/json' \
+  -d '{"interval_ms":10000,"points_per_interval":1}'
+curl localhost:8000/status
+```
+
+API changes are in memory only: a pod restart or a new `make helm-install` returns to the Helm/`STREAMER_*` values. Use those for permanent settings.
+
+`streamer.runId` selects the dataset (default `1000rpm_150kW_0001`). All of the run's sources (`short` and every `long_*` file) are streamed together: they share the same time grid (`t` steps of 7200 from 0), so each tick emits the next `pointsPerInterval` time steps for every signal, and shorter sources simply end before the longer ones (the run then loops if `loop=true`).
+
+At ingest, each multi-signal CSV is split into one file per signal next to it in `data/` (`<run>_timeseries_<source>_<signal>.csv`, containing only `Data1_<signal>` and `Data1_time_<signal>`); the split files are what is loaded into PostgreSQL. Files that are already split can be placed in `data/` (or the `DATA_URL` share) as-is and are loaded directly. Run `DATA_DIR=poc2/data python3 poc2/data-ingest/ingest.py --split-only` to produce them locally without a database. To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
+
+### Optional: cloud eventual-consistency sync
+
+`telemetryCloudSync` mirrors telemetry Kafka topics to Azure (Event Hubs or IoT Hub), and `telemetryWriterCloud` is a second telemetry-writer that reads them back out of Event Hubs into a cloud-hosted InfluxDB, so the cloud store eventually converges with the edge one. Both are disabled by default. To enable them:
+
+```bash
+kubectl -n default create secret generic eventhub-credentials \
+  --from-literal=connection-string="$EVENTHUB_CONNECTION_STRING"
+kubectl -n default create secret generic influxdb-cloud-credentials \
+  --from-literal=admin-token="$INFLUXDB_CLOUD_ADMIN_TOKEN"
+```
+
+then set `telemetryCloudSync.enabled=true`, `telemetryCloudSync.target=eventhub`, `telemetryWriterCloud.enabled=true`, and `telemetryWriterCloud.influxdb.url` to your cloud InfluxDB endpoint. The optional IoT Hub configuration also needs a `dataset-connection-string` key for the replay topic.
+
+You should also set the registry and tag before installing the chart if you are not using the defaults:
+
+```bash
+make images REGISTRY=ghcr.io/your-org TAG=v1
+make helm-install REGISTRY=ghcr.io/your-org TAG=v1
+```
+
+The chart also expects the enabled service build contexts under `system/` and `playground/` to exist and to be buildable with Docker.
+
+## End-to-end workflow
+
+Use this sequence from this directory:
 
 ```bash
 make provision
-make k8s       # kubeadm, or use: make k3s
+make k8s
 make images
 make helm-install
 make agent
 make peers
+make demo
 ```
 
-For KubeEdge, use a control-plane VM and separate edge VMs. The edge VMs must
-not also run a k3s or kubeadm worker:
+That sequence does the following:
 
-```bash
-make kubeedge VMS="ubuntu-vm1 ubuntu-vm2 ubuntu-vm3"
-```
-
-The remaining Helm deployment commands are:
-
-```bash
-make helm-upgrade
-```
-
-This is the intended end-to-end setup sequence. The project is not a single monolithic deployment; it is a scripted pipeline that stages infrastructure, then service workloads, then telemetry and demo traffic.
+1. `make provision` creates the libvirt VMs.
+2. `make k8s` bootstraps the cluster on the VMs.
+3. `make images` builds and pushes the workload images used by the Helm chart.
+4. `make helm-install` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector. Legacy simulations and playground remain off by default.
+5. `make agent` builds the Go agent binary and imports the image into each worker node; it then deploys one `di-agent` pod per VM.
+6. `make peers` registers each agent as a peer on the others and assigns trust values.
+7. `make demo` executes the coordinator loop that probes `/cost`, inspects recommendations, and lowers trust to show rerouting.
 
 ## Useful commands
 
@@ -95,99 +193,51 @@ make demo
 make teardown
 ```
 
-The demo script runs a multi-round coordinator loop that:
+The demo is the proof-of-value. It does the following:
 
-- calls `/cost` on each agent
-- identifies the busiest node
-- asks that node for a routing recommendation
-- drops trust for one peer half-way through the experiment
-- shows how the recommendation changes when trust falls below the threshold
+- calls `/cost` on each agent,
+- identifies the highest-cost node,
+- asks that node for a recommendation,
+- reduces trust on one peer mid-run,
+- demonstrates that routing changes when trust crosses the effective threshold.
 
-## Important config files
+## Important project files
 
-- `main.tf`: libvirt domain definition and VM disk setup
-- `variables.tf`: VM count and image settings
-- `providers.tf`: provider configuration for libvirt
-- `config/.env.example`: environment variables for the runtime services
-- `config/*.yaml`: Kubernetes manifests rendered per deployment
-- `scripts/*.sh`: orchestration steps
+The files that matter for understanding or running the PoC are:
 
-## Filesystem layout
-
-```text
-poc2/
-├── config/
-│   ├── .env
-│   ├── .env.example
-│   ├── cloud_init.yml
-│   ├── metadata.yml
-│   ├── kafka-deployment.yaml
-│   ├── influxdb-deployment.yaml
-│   ├── grafana-deployment.yaml
-│   ├── genset-deployment.yaml
-│   ├── switchboard-deployment.yaml
-│   ├── propulsion-deployment.yaml
-│   ├── battery-deployment.yaml
-│   ├── auxload-deployment.yaml
-│   └── telemetry-writer-deployment.yaml
-├── scripts/
-│   ├── 01-provision.sh
-│   ├── 02-k8s.sh
-│   ├── 03-kafka.sh
-│   ├── 04-agent.sh
-│   ├── 05-peers.sh
-│   ├── 06-genset.sh
-│   ├── 06a-switchboard.sh
-│   ├── 06b-propulsion.sh
-│   ├── 06c-battery.sh
-│   ├── 06d-auxload.sh
-│   ├── 07-influxdb.sh
-│   ├── 07b-telemetry-writer.sh
-│   ├── 08-grafana.sh
-│   ├── coordinator.sh
-│   ├── deploy.sh
-│   ├── teardown.sh
-│   └── ...
-├── system/
-│   ├── genset/
-│   ├── switchboard/
-│   ├── propulsion/
-│   ├── battery/
-│   ├── auxiliary-load/
-│   └── telemetry-writer/
-├── main.tf
-├── variables.tf
-├── providers.tf
-├── Makefile
-├── README.md
-└── terraform.tfstate*
-```
+- `main.tf`: libvirt VM definition and disk layout
+- `variables.tf`: VM and image configuration
+- `providers.tf`: libvirt provider setup
+- `scripts/01-provision.sh`: creates the VM fleet
+- `scripts/02-k8s.sh`: bootstraps the cluster
+- `scripts/03-agent.sh`: builds and deploys the `di-agent` pods
+- `scripts/04-peers.sh`: registers peers and trust values
+- `scripts/coordinator.sh`: runs the trust-based recommendation demo
+- `scripts/build-push-images.sh`: builds/pushes the runtime service images
+- `helm/di-agent-system/values.yaml`: all chart defaults and required secrets
+- `helm/di-agent-system/templates/`: Kubernetes manifests for Kafka, InfluxDB, Grafana, data services, and the optional single Helm-managed agent
+- `system/replay-streamer`: configurable PostgreSQL-to-Kafka real/synthetic data source
+- `system/dataset-collector`: Python Kafka-to-di-agent HTTP collector
+- `system/*`: legacy workload generators and telemetry services
 
 ## What the system is proving
 
-This PoC is meant to test the following idea in a controllable lab environment:
+PoC2 is designed to validate a distributed coordination scenario in a controlled local environment:
 
-- multiple agents start with similar priors
-- each agent learns from different workload histories
-- peer trust diverges over time
-- a routing recommendation must account for confidence and trust, not just raw load
-- a trust drop should change the recommended next hop, demonstrating adaptive rerouting
+- nodes start with similar priors,
+- local workloads diverge,
+- trust values diverge between peers,
+- recommendations are no longer purely cost-driven,
+- traffic shifts when a previously trusted peer loses trust.
 
-The coordinator script is the visible manifestation of that behavior: it polls the agents, inspects their routing recommendations, and then intentionally lowers the trust on one peer to demonstrate the system's self-correction.
-
-## Notes
-
-- The first VM is the Kubernetes API endpoint and is treated as the control plane.
-- The scripts usually default to host networking so pods can directly reach each other and external services.
-- Kafka and InfluxDB are intentionally placed on the same worker node by default for simplicity in a small testbed.
-- The environment is a lab, not production infrastructure. It is meant for exercising trust-aware coordination patterns in a repeatable local environment.
+This is an operational test bed for the di-agent concept, not a production-ready cluster design.
 
 ## Cleanup
 
-To remove the environment:
+To destroy the VM fleet and associated libvirt resources:
 
 ```bash
 make teardown
 ```
 
-This destroys the VMs and associated libvirt resources created by the PoC.
+This leaves the host in a clean state after the PoC is finished.

@@ -2,5 +2,6 @@
   "gensetIds": ["genset"],
   "propulsionIds": ["propulsion"],
   "batteryIds": ["battery"],
-  "auxloadIds": ["auxload"]
+  "auxloadIds": ["auxload"],
+  "shorePower": true
 }

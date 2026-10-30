@@ -1,0 +1,151 @@
+{{- if .Values.postgres.enabled }}
+# Single-instance PostgreSQL holding the engine-test dataset, reachable
+# in-cluster at postgres:5432. Data is loaded by the postgres-ingest Job.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.postgres.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      containers:
+        - name: postgres
+          image: {{ include "diagent.publicImage" .Values.postgres.image }}
+          ports:
+            - containerPort: {{ .Values.postgres.port }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+  {{- if .Values.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size | quote }}
+        {{- if .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ .Values.postgres.persistence.storageClass | quote }}
+        {{- end }}
+  {{- else }}
+      volumes:
+        - name: postgres-data
+          emptyDir: {}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: {{ .Values.postgres.port }}
+      targetPort: {{ .Values.postgres.port }}
+{{- if .Values.postgres.ingest.enabled }}
+---
+# Loads the CSV dataset into PostgreSQL after every install/upgrade. Idempotent:
+# files already loaded (same name + size) are skipped, so re-runs are cheap.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-ingest
+  labels:
+    app: postgres-ingest
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: postgres-ingest
+    spec:
+      restartPolicy: OnFailure
+      {{- include "diagent.nodeSelector" (dict "local" .Values.postgres.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "diagent.publicImage" .Values.postgres.image }}
+          command: ["sh", "-c", "until pg_isready -h postgres -p {{ .Values.postgres.port }}; do sleep 2; done"]
+      containers:
+        - name: ingest
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.postgres.ingest.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.database | quote }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: password
+            - name: DATA_DIR
+              value: /data
+            {{- if .Values.postgres.ingest.dataUrlSecret }}
+            - name: DATA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.ingest.dataUrlSecret }}
+                  key: data-url
+            {{- end }}
+          resources:
+            {{- toYaml .Values.postgres.ingest.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}
+{{- end }}

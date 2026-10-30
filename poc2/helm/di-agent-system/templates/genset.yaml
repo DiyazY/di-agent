@@ -1,3 +1,4 @@
+{{- if .Values.genset.enabled }}
 # One Deployment + Service per genset instance (genset-1..genset-N),
 # matching the addressable-per-instance pattern the playground frontend
 # depends on (see templates/playground.yaml).
@@ -21,6 +22,7 @@ spec:
       labels:
         app: genset
         genset-id: {{ $name }}
+      {{- include "diagent.podAnnotations" (dict "root" $ "promPort" "8000") | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" $.Values.genset.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
       {{- with $.Values.global.imagePullSecrets }}
@@ -33,6 +35,7 @@ spec:
           imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
           ports:
             - containerPort: 8000
+            - containerPort: {{ $.Values.genset.modbusPort }}
           env:
             - name: GENSET_ID
               value: {{ $name | quote }}
@@ -40,6 +43,8 @@ spec:
               value: "kafka:{{ $.Values.kafka.port }}"
             - name: KAFKA_TOPIC
               value: {{ $.Values.genset.kafkaTopic | quote }}
+            - name: MODBUS_PORT
+              value: {{ $.Values.genset.modbusPort | quote }}
           resources:
             {{- toYaml $.Values.genset.resources | nindent 12 }}
 ---
@@ -54,7 +59,12 @@ spec:
   selector:
     genset-id: {{ $name }}
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
+    - name: modbus
+      port: {{ $.Values.genset.modbusPort }}
+      targetPort: {{ $.Values.genset.modbusPort }}
 ---
+{{- end }}
 {{- end }}

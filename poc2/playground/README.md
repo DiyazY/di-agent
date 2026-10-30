@@ -16,6 +16,24 @@ VITE_PROPULSION_TARGET=http://<propulsion-ip>:8000 \
 npm run dev
 ```
 
+Run the Cypress tests against a local preview server in another terminal:
+
+```bash
+npm run build
+npm run preview
+npm run cy:run
+```
+
+`npm run cy:run` (playground.cy.ts) stubs the config and simulator APIs, so
+it does not require a live cluster or simulator services.
+
+`npm run cy:run:live` (playground.live.cy.ts) makes no use of `cy.intercept`
+and instead calls the real genset/battery/propulsion/auxload/switchboard
+APIs, so it requires the Kubernetes cluster to be up with all those
+services running and reachable at the configured `baseUrl` (e.g. via
+`CYPRESS_BASE_URL=http://<vm-ip>:<node-port> npm run cy:run:live`, or port-forward
+the playground service to `localhost:4173`).
+
 The dev server proxies `/api/genset/*` and `/api/propulsion/*` to those
 targets (see [vite.config.ts](vite.config.ts)), so the browser only ever
 talks to the same origin (no CORS setup needed).

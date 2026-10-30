@@ -1,8 +1,12 @@
+{{- if .Values.battery.enabled }}
 # One Deployment + Service per battery instance (battery-1..N); publishes
 # power supply like a genset, summed by the switchboard into bus supply.
+# Each instance simulates the model picked round-robin from .Values.battery.models.
 {{- range $i := until (.Values.battery.count | int) }}
 {{- $n := add1 $i }}
 {{- $name := printf "battery-%d" $n }}
+{{- $models := $.Values.battery.models }}
+{{- $model := index $models (mod $i (len $models)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,6 +24,7 @@ spec:
       labels:
         app: battery
         battery-id: {{ $name }}
+      {{- include "diagent.podAnnotations" (dict "root" $ "promPort" "8000") | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" $.Values.battery.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
       {{- with $.Values.global.imagePullSecrets }}
@@ -32,13 +37,18 @@ spec:
           imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
           ports:
             - containerPort: 8000
+            - containerPort: {{ $.Values.battery.modbusPort }}
           env:
             - name: BATTERY_ID
               value: {{ $name | quote }}
+            - name: BATTERY_MODEL
+              value: {{ $model | quote }}
             - name: KAFKA_BROKERS
               value: "kafka:{{ $.Values.kafka.port }}"
             - name: KAFKA_TOPIC
               value: {{ $.Values.battery.kafkaTopic | quote }}
+            - name: MODBUS_PORT
+              value: {{ $.Values.battery.modbusPort | quote }}
           resources:
             {{- toYaml $.Values.battery.resources | nindent 12 }}
 ---
@@ -53,7 +63,12 @@ spec:
   selector:
     battery-id: {{ $name }}
   ports:
-    - port: 8000
+    - name: http
+      port: 8000
       targetPort: 8000
+    - name: modbus
+      port: {{ $.Values.battery.modbusPort }}
+      targetPort: {{ $.Values.battery.modbusPort }}
 ---
+{{- end }}
 {{- end }}

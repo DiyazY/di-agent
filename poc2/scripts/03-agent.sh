@@ -4,8 +4,7 @@
 #
 # Usage: ./03-agent.sh [vm1 vm2 vm3]
 #   VM names default to ubuntu-vm1 ubuntu-vm2 ubuntu-vm3.
-#   The first VM is the control-plane and gets REGIME=bursty; all others
-#   get REGIME=stable.
+#   The first worker VM gets REGIME=bursty; all other workers get REGIME=stable.
 
 set -euo pipefail
 
@@ -26,7 +25,11 @@ SEM_DIR="$(dirname "$POC_DIR")/semantic-map"
 GO_SRC="$(dirname "$POC_DIR")/semantic-map/go"
 BINARY_OUT="./cmd/agent/tmp/di-agent-poc"
 BUILD_GOOS="${BUILD_GOOS:-linux}"
-BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-$(go env GOARCH)}}"
+if command -v go >/dev/null 2>&1; then
+    BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-$(go env GOARCH)}}"
+else
+    BUILD_GOARCH="${BUILD_GOARCH:-${GOARCH:-amd64}}"
+fi
 IMAGE_NAME="${IMAGE_NAME:-di-agent}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 
@@ -64,6 +67,8 @@ fi
 # any particular VM, so it's reachable at its cluster DNS name.
 KAFKA_NAMESPACE="${KAFKA_NAMESPACE:-default}"
 KAFKA_BROKERS="${KAFKA_BROKERS:-kafka.${KAFKA_NAMESPACE}.svc.cluster.local:9092}"
+DATASET_COLLECTOR_URL="${DATASET_COLLECTOR_URL:-}"
+COLLECT_INTERVAL="${COLLECT_INTERVAL:-5s}"
 
 # ── build ─────────────────────────────────────────────────────────────────────
 info "Building di-agent for ${BUILD_GOOS}/${BUILD_GOARCH} from $GO_SRC ..."
@@ -72,25 +77,34 @@ if [ ! -d "$GO_SRC" ]; then
     exit 1
 fi
 
-(
-    cd "$GO_SRC"
-    GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" go build -o "$BINARY_OUT" ./cmd/agent/
-)
-ok "Binary built: $BINARY_OUT ($(du -sh "$BINARY_OUT" | cut -f1))"
+if command -v go >/dev/null 2>&1; then
+    (
+        cd "$GO_SRC"
+        mkdir -p "$(dirname "$BINARY_OUT")"
+        GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" go build -o "$BINARY_OUT" ./cmd/agent/
+    )
+else
+    info "go not found on host; building inside a golang container"
+    GO_IMAGE="${GO_IMAGE:-golang:1.26.0}"
+    mkdir -p "$GO_SRC/$(dirname "$BINARY_OUT")"
+    docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/tmp/gocache \
+        -e GOOS="$BUILD_GOOS" -e GOARCH="$BUILD_GOARCH" -e CGO_ENABLED=0 \
+        -v "$GO_SRC":/src -w /src "$GO_IMAGE" go build -o "$BINARY_OUT" ./cmd/agent/
+fi
+ok "Binary built: $GO_SRC/$BINARY_OUT ($(du -sh "$GO_SRC/$BINARY_OUT" | cut -f1))"
 
 # ── image ─────────────────────────────────────────────────────────────────────
 info "Building docker image ${IMAGE_NAME}:${IMAGE_TAG} ..."
 if docker images "${IMAGE_NAME}:${IMAGE_TAG}" --format "{{.Repository}}" | grep -q .; then
-    info "Image already exists, skipping build"
-else
-    (
-        cd "$SEM_DIR"
-        docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
-    ) || {
-        err "Docker build failed"
-        exit 1
-    }
+    info "Refreshing existing local image ${IMAGE_NAME}:${IMAGE_TAG}"
 fi
+(
+    cd "$SEM_DIR"
+    docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+) || {
+    err "Docker build failed"
+    exit 1
+}
 ok "Image ready: ${IMAGE_NAME}:${IMAGE_TAG}"
 
 # ── distribute image (no registry: import straight into each node's containerd) ─
@@ -121,8 +135,15 @@ CP_IP=$(get_vm_ip "$CONTROL_PLANE_VM")
 info "Applying di-agent manifests via kubectl on $CONTROL_PLANE_VM ..."
 
 {
-    for vm in "${WORKER_VMS[@]}"; do
-        regime="stable"
+    for worker_idx in "${!WORKER_VMS[@]}"; do
+        vm="${WORKER_VMS[$worker_idx]}"
+        if [ "$worker_idx" -eq 0 ]; then
+            regime="bursty"
+            dataset_url="${DATASET_COLLECTOR_URL}"
+        else
+            regime="stable"
+            dataset_url=""
+        fi
         cat <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -160,6 +181,10 @@ spec:
               value: "${regime}"
             - name: KAFKA_BROKERS
               value: "${KAFKA_BROKERS}"
+            - name: DATASET_COLLECTOR_URL
+              value: "${dataset_url}"
+            - name: COLLECT_INTERVAL
+              value: "${COLLECT_INTERVAL}"
           ports:
             - containerPort: 9090
 ---
@@ -173,5 +198,3 @@ info "Waiting for di-agent pods to be Ready ..."
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config wait --for=condition=Ready pod -l app=di-agent --timeout=180s"
 ssh_vm "$CP_IP" "kubectl --kubeconfig=\$HOME/.kube/config get pods -o wide -l app=di-agent"
 ok "All di-agent pods Ready"
-
-

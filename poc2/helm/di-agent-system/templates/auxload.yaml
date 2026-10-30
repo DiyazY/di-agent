@@ -1,3 +1,4 @@
+{{- if .Values.auxload.enabled }}
 # One Deployment + Service per auxiliary (hotel) load instance
 # (auxload-1..N); requests power from, and is allocated power by, the
 # switchboard, same as propulsion.
@@ -21,6 +22,7 @@ spec:
       labels:
         app: auxload
         auxload-id: {{ $name }}
+      {{- include "diagent.podAnnotations" (dict "root" $ "promPort" "8000") | nindent 6 }}
     spec:
       {{- include "diagent.nodeSelector" (dict "local" $.Values.auxload.nodeSelector "global" $.Values.global.nodeSelector) | nindent 6 }}
       {{- with $.Values.global.imagePullSecrets }}
@@ -63,4 +65,5 @@ spec:
     - port: 8000
       targetPort: 8000
 ---
+{{- end }}
 {{- end }}
