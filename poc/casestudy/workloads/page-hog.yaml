@@ -2,14 +2,14 @@
 # ANON_GIB GiB of anonymous memory and holds it for its whole life (one dd per GiB, each
 # holding a 1 GiB buffer it has filled, blocked writing to a pipe nobody reads): the node has
 # no swap, so that memory cannot be reclaimed and shrinks the room left for page cache. Then it
-# adds a 256 MiB file to an emptyDir on disk every minute and re-reads the whole set every
-# pass, so its pages stay hot. It stops growing for good once a pass refaults more than a
-# tenth of its set (the set no longer fits beside the other workloads' pages): past that it
-# would be a streaming reader, whose pages the kernel evicts before anyone else's, and would
-# stop competing (runs 1 and 2). It also holds while the node's MemAvailable is under 5% and
-# resumes above 10%; the set is capped at 40 files (10 GiB). Burstable, so memory.high may be
-# set on it, and above its request, so it is a candidate; memory.high can reclaim only its
-# file pages.
+# keeps a set of 256 MiB files in an emptyDir on disk and re-reads the whole set every pass.
+# It grows the set by one file a minute until mem-victim (VICTIM_UID, read from the host's
+# cgroup tree) refaults at 0.05/s or more, five times the agent's gate, and holds while it
+# does: whether the kernel evicts the victim's cache or the hog's own depends on aging the
+# workload does not control, so the hog grows until the victim is the one hit (run
+# 2026-10-30b). It also holds while the node's MemAvailable is under 5% and resumes above
+# 10%; the set is capped at 40 files (10 GiB). Burstable, so memory.high may be set on it,
+# and above its request, so it is a candidate; memory.high can reclaim only its file pages.
 apiVersion: v1
 kind: Pod
 metadata: { name: page-hog, labels: { check: casestudy, di-agent/group: relief } }
@@ -23,26 +23,31 @@ spec:
     - |
       i=0; while [ $i -lt "$ANON_GIB" ]; do (dd if=/dev/zero bs=1G count=1 2>/dev/null | sleep 2147483647) & i=$((i + 1)); done
       echo "$(date +%T) holding ${ANON_GIB} GiB anonymous"
-      refaults() { awk '$1=="workingset_refault_file"{print $2}' /sys/fs/cgroup/memory.stat; }
-      n=0; last=0; hold=0; full=0
+      v=$(find /host-cg -maxdepth 4 -type d \( -name "pod$VICTIM_UID" -o -name "*pod$(echo "$VICTIM_UID" | tr - _).slice" \) | head -1)
+      [ -n "$v" ] || { echo "no cgroup for mem-victim $VICTIM_UID"; exit 1; }
+      echo "$(date +%T) watching $v"
+      vstat() { awk '$1=="workingset_refault_file"{r=$2} $1=="file"{f=$2} END{print r, f}' "$v/memory.stat"; }
+      n=0; last=$(date +%s); hold=0; set -- $(vstat); r0=$1
       while true; do
         now=$(date +%s)
         avail=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print int(a*100/t)}' /proc/meminfo)
         if [ "$avail" -lt 5 ]; then hold=1; elif [ "$avail" -gt 10 ]; then hold=0; fi
-        if [ $hold -eq 0 ] && [ $full -eq 0 ] && [ $n -lt 40 ] && [ $((now - last)) -ge 60 ]; then
-          dd if=/dev/zero of=/data/f$n bs=1M count=256 2>/dev/null
-          n=$((n + 1)); last=$now
-          echo "$(date +%T) files=$n ($((n * 256)) MiB) MemAvailable=${avail}%"
+        if [ $((now - last)) -ge 60 ]; then
+          set -- $(vstat)
+          # the victim's refault ratio over the minute, in hundredths per second
+          rate=$(awk -v d=$(($1 - r0)) -v f=$2 -v s=$((now - last)) 'BEGIN{ if (f < 4096) f = 4096; print int(d * 4096 / s / f * 100) }')
+          r0=$1; last=$now
+          if [ $hold -eq 0 ] && [ "$rate" -lt 5 ] && [ $n -lt 40 ]; then
+            dd if=/dev/zero of=/data/f$n bs=1M count=256 2>/dev/null
+            n=$((n + 1))
+            echo "$(date +%T) files=$n ($((n * 256)) MiB) MemAvailable=${avail}%"
+          else
+            echo "$(date +%T) holding files=$n victim refaults=$(awk -v r=$rate 'BEGIN{printf "%.2f", r/100}')/s MemAvailable=${avail}%"
+          fi
         fi
-        r0=$(refaults)
         cat /data/f* >/dev/null 2>&1
-        d=$(( $(refaults) - r0 ))
-        # A 256 MiB file is 65536 pages.
-        if [ $full -eq 0 ] && [ $n -gt 0 ] && [ $d -gt $((n * 6553)) ]; then
-          full=1; echo "$(date +%T) full at files=$n: a pass refaulted $d pages; holding the set"
-        fi
       done
-    env: [{ name: ANON_GIB, value: "6" }]
+    env: [{ name: ANON_GIB, value: "6" }, { name: VICTIM_UID, value: "__VICTIM_UID__" }]
     resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { cpu: "1" } }
-    volumeMounts: [{ name: data, mountPath: /data }]
-  volumes: [{ name: data, emptyDir: {} }]
+    volumeMounts: [{ name: data, mountPath: /data }, { name: cg, mountPath: /host-cg, readOnly: true }]
+  volumes: [{ name: data, emptyDir: {} }, { name: cg, hostPath: { path: /sys/fs/cgroup/kubepods, type: Directory } }]

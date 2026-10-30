@@ -7,7 +7,7 @@
 # Phase 1 (default 45 min): a fresh map on agent-relief.yaml with the ledger in <out-dir>;
 # mem-victim (a page-cache working set within its request) and then page-hog (6 GiB of
 # anonymous memory held, then page cache growing 256 MiB a minute past its request, no limit,
-# until its set no longer fits). Expected: memory.high on page-hog,
+# until mem-victim refaults at 0.05/s). Expected: memory.high on page-hog,
 # kept, memory_contention_ratio lower after settle than at act, mem-victim never acted on.
 # Ollama holds 6-9 GB; with page-hog's 6 GiB held, its file set fills the room left in under
 # ten minutes. run-2026-10-23-memrelief/results.md says what the runs showed.
@@ -115,7 +115,7 @@ finish() {
 sleep 120; tick; mark "baseline taken"
 "${K[@]}" apply -f workloads/mem-victim.yaml >/dev/null && mark "applied mem-victim ($(uid mem-victim))"
 sleep 60
-"${K[@]}" apply -f workloads/page-hog.yaml >/dev/null; sleep 5; HOG_UID=$(uid page-hog); mark "applied page-hog ($HOG_UID)"
+sed "s/__VICTIM_UID__/$(uid mem-victim)/" workloads/page-hog.yaml | "${K[@]}" apply -f - >/dev/null; sleep 5; HOG_UID=$(uid page-hog); mark "applied page-hog ($HOG_UID)"
 observe "$P1" mem-victim page-hog
 "${K[@]}" logs page-hog >"$OUT/page-hog.log" 2>/dev/null || true
 "${K[@]}" delete pod page-hog mem-victim --wait=true >/dev/null; mark "deleted page-hog and mem-victim"
