@@ -852,6 +852,26 @@ func TestADominantWorkloadIsSteppedAgainAndReleasedOnce(t *testing.T) {
 	}
 }
 
+// Below enter, relief takes no further step even while it is still relieving
+// (exit_for not yet held): the cap has done its work, and a step on a pressure
+// that is already gone has nothing to relieve (run 2026-10-30c stepped at 0.0003).
+func TestNoFurtherStepBelowEnter(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.act("pod:a")
+	h.run(2*time.Minute, 0.15) // under enter 0.25, over exit 0.10
+	if a := h.action("pod:a"); a.Outcome != "kept" {
+		t.Fatalf("pod:a %+v; want the first step kept", a)
+	}
+	record(t, h.m, usage("pod:a"), "pod:a", 0.3, h.now)
+	h.run(2*time.Minute, 0.15)
+	if l := h.limit("pod:a"); l == nil || !near(*l, 1.2) {
+		t.Fatalf("limit %v; want the first cap, 1.2, and no second step", l)
+	}
+	if p := h.l.Status().Phase; p != Relieving {
+		t.Fatalf("phase %s; want still relieving", p)
+	}
+}
+
 func TestAFailedSecondStepReturnsToTheFirst(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 	h.act("pod:a")

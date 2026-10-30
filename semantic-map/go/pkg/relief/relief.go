@@ -387,7 +387,9 @@ func (l *Loop) Tick(ctx context.Context) {
 		return
 	}
 	if phase == Relieving {
-		if l.reconciled {
+		// A step only while pressure is over enter: below it the caps in force
+		// are doing their work, and a further one would relieve nothing.
+		if l.reconciled && pressure > l.c.Enter {
 			l.relieve(ctx, now, pressure, workloads)
 		}
 		return
