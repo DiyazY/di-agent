@@ -734,6 +734,7 @@ fraction.
 | `memory_events_high`    | —         | worse    | per subject: times over `memory.high` in the window (`memory.events` `high` delta), `count` on [0, 1e9]; none for the node; unrouted |
 | `memory_events_max`     | —         | worse    | per subject: times at `memory.max` in the window (`memory.events` `max` delta), `count` on [0, 1e9]; unrouted |
 | `memory_oom_kills`      | —         | worse    | per subject: processes OOM-killed in the window (`memory.events` `oom_kill` delta), `count` on [0, 1e9]; unrouted |
+| `memory_refault_ratio`  | —         | worse    | per subject: file pages refaulted per second over its page cache (`memory.stat` `workingset_refault_file` delta × page size / window / max(`file`, one page)), `1/s` on [0, 1000]; no reading across a counter reset; unrouted; gates io stall in `memory_contention_ratio` |
 
 The catalogue names the types a collector or a test can reference; it is not the
 limit of what the map accepts. The set of `MetricType`s the map actually admits is

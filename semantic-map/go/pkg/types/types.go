@@ -250,6 +250,7 @@ type OutcomeSimulation struct {
 //	MemoryEventsHigh     memory.events high: times over memory.high in the window (count)
 //	MemoryEventsMax      memory.events max: times at memory.max in the window (count)
 //	MemoryOOMKills       memory.events oom_kill: OOM kills in the window (count)
+//	MemoryRefaultRatio   memory.stat file pages refaulted per second over the page cache (1/s)
 //	PodStartupMs         pod creation → running, against a budget
 //	SchedulingLatencyMs  pod pending → scheduled, against a budget
 //	NetworkRxBps         receive throughput, against link capacity
@@ -277,9 +278,11 @@ const (
 	// MemoryContentionRatio is node-level, on [0,1].
 	MemoryContentionRatio MetricType = "memory_contention_ratio"
 	// The memory.events counts are per subject, per window, on [0, 1e9].
-	MemoryEventsHigh    MetricType = "memory_events_high"
-	MemoryEventsMax     MetricType = "memory_events_max"
-	MemoryOOMKills      MetricType = "memory_oom_kills"
+	MemoryEventsHigh MetricType = "memory_events_high"
+	MemoryEventsMax  MetricType = "memory_events_max"
+	MemoryOOMKills   MetricType = "memory_oom_kills"
+	// MemoryRefaultRatio is per subject, in 1/s on [0, 1000].
+	MemoryRefaultRatio  MetricType = "memory_refault_ratio"
 	PodStartupMs        MetricType = "pod_startup_ms"
 	SchedulingLatencyMs MetricType = "scheduling_latency_ms"
 	NetworkRxBps        MetricType = "network_rx_bps"

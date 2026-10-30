@@ -2,6 +2,7 @@ package minimal
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -399,5 +400,61 @@ func TestMemoryContentionIsNotZeroForUnreadPods(t *testing.T) {
 	}
 	if s := collect(4_000_000, 1); s == nil || s.Value != 0.3 { // flat high count: counted, stall 0.3
 		t.Fatalf("memory_contention_ratio %v; want 0.3, the stall of the pod read", s)
+	}
+}
+
+// writeMemStat writes a memory.stat with the two fields the collector reads among others.
+func writeMemStat(t *testing.T, dir string, refaultFile, file uint64) {
+	t.Helper()
+	body := fmt.Sprintf("anon 4096\nfile %d\nshmem 0\nworkingset_refault_anon 0\nworkingset_refault_file %d\nworkingset_activate_file 0\n", file, refaultFile)
+	if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCollectorEmitsMemoryRefaultRatio: memory_refault_ratio is file pages refaulted per
+// second over the cgroup's page cache, needs a window, has no reading across a counter
+// reset, and divides by one page when the cache is empty.
+func TestCollectorEmitsMemoryRefaultRatio(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	p := float64(os.Getpagesize())
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	collect := func() map[string]map[types.MetricType]*types.MetricSample {
+		t.Helper()
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(10 * time.Second)
+		return bySubject(samples)
+	}
+	pod := "pod:" + testUID
+	writeMemStat(t, podA, 0, uint64(100*p))
+	if s := collect()[pod][types.MemoryRefaultRatio]; s != nil {
+		t.Fatalf("first collect emitted memory_refault_ratio %v; a rate needs a window", s.Value)
+	}
+	writeMemStat(t, podA, 1000, uint64(100*p))
+	got := collect()
+	s := got[pod][types.MemoryRefaultRatio]
+	if s == nil || math.Abs(s.Value-1.0) > 1e-9 {
+		t.Fatalf("memory_refault_ratio %v; want 1.0 (1000 pages in 10 s over 100 pages)", s)
+	}
+	if s.Unit != "1/s" || s.Range == nil || *s.Range != [2]float64{0, 1000} {
+		t.Fatalf("memory_refault_ratio unit %q range %v; want 1/s on [0,1000]", s.Unit, s.Range)
+	}
+	for subj, ms := range got {
+		if subj != pod && ms[types.MemoryRefaultRatio] != nil {
+			t.Errorf("%q emitted memory_refault_ratio without a memory.stat", subj)
+		}
+	}
+	writeMemStat(t, podA, 500, uint64(100*p)) // recreated
+	if s := collect()[pod][types.MemoryRefaultRatio]; s != nil {
+		t.Fatalf("after a counter reset memory_refault_ratio %v; want no reading that window", s.Value)
+	}
+	writeMemStat(t, podA, 600, 0)
+	if s := collect()[pod][types.MemoryRefaultRatio]; s == nil || math.Abs(s.Value-10.0) > 1e-9 {
+		t.Fatalf("empty cache: memory_refault_ratio %v; want 10 (100 pages in 10 s over one page)", s)
 	}
 }
