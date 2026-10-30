@@ -458,3 +458,61 @@ func TestCollectorEmitsMemoryRefaultRatio(t *testing.T) {
 		t.Fatalf("empty cache: memory_refault_ratio %v; want 10 (100 pages in 10 s over one page)", s)
 	}
 }
+
+// TestMemoryContentionGatesIOPressure: a pod's io stall counts as memory contention only
+// while it refaults its own page cache at refaultGate or faster; the two stalls combine
+// by max, and a self-limited pod stays out.
+func TestMemoryContentionGatesIOPressure(t *testing.T) {
+	nan := math.NaN()
+	for _, tc := range []struct {
+		name string
+		pod  podMem
+		want float64
+	}{
+		{"refaulting", podMem{psi: 0, ioPSI: .14, refault: 9}, .14},
+		{"below the gate", podMem{psi: 0, ioPSI: .14, refault: .005}, 0},
+		{"no refault reading", podMem{psi: 0, ioPSI: .14, refault: nan}, 0},
+		{"memory stall larger", podMem{psi: .3, ioPSI: .14, refault: 9}, .3},
+		{"max, not sum", podMem{psi: .1, ioPSI: .14, refault: 9}, .14},
+		{"self-limited", podMem{psi: 0, ioPSI: .5, refault: 9, selfLimited: true}, 0},
+	} {
+		if got := memoryContention([]podMem{tc.pod}, nil, false); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCollectorCountsRefaultingPodsIOPressure: end to end, a promised pod stalled on I/O
+// while it refaults its cache sets the node's memory contention; the same io stall
+// without refaults does not.
+func TestCollectorCountsRefaultingPodsIOPressure(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t) // podA burstable
+	p := float64(os.Getpagesize())
+	writePSI(t, root, "memory.pressure", 0)
+	writePSI(t, podA, "memory.pressure", 0)
+	writePSI(t, podA, "io.pressure", 0)
+	writeMemEvents(t, podA, 0, 0, 0)
+	writeMemStat(t, podA, 0, uint64(100*p))
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 8,
+		MemTotalBytes: 4 << 30, ProcRoot: procRoot, Now: func() time.Time { return clock }})
+	collect := func() *types.MetricSample {
+		t.Helper()
+		samples, err := c.Collect()
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(10 * time.Second)
+		return bySubject(samples)[""][types.MemoryContentionRatio]
+	}
+	collect()
+	writePSI(t, podA, "io.pressure", 1_400_000) // 0.14 of 10 s
+	writeMemStat(t, podA, 1000, uint64(100*p))  // 1.0/s
+	if s := collect(); s == nil || math.Abs(s.Value-0.14) > 1e-9 {
+		t.Fatalf("refaulting pod stalled on io: %v; want 0.14", s)
+	}
+	writePSI(t, podA, "io.pressure", 2_800_000) // another 0.14, no refaults
+	if s := collect(); s == nil || s.Value != 0 {
+		t.Fatalf("io stall without refaults: %v; want 0", s)
+	}
+}

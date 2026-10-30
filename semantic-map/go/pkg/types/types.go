@@ -246,7 +246,8 @@ type OutcomeSimulation struct {
 //	CPUContentionRatio   PSI cpu.some stall less the cgroup's own throttled time; the
 //	                     node's is the worst-off subject's (cgroup collector)
 //	MemoryContentionRatio node only: the worst PSI memory.some stall of a promised pod
-//	                     within its memory request and not limiting itself
+//	                     within its memory request and not limiting itself, or its
+//	                     io.some stall while it refaults its page cache
 //	MemoryEventsHigh     memory.events high: times over memory.high in the window (count)
 //	MemoryEventsMax      memory.events max: times at memory.max in the window (count)
 //	MemoryOOMKills       memory.events oom_kill: OOM kills in the window (count)

@@ -79,7 +79,9 @@ import (
 // memory_contention_ratio is node-level only: the worst memory_pressure_ratio of a pod
 // promised memory (not BestEffort, not a unit) that is not limiting itself — its
 // memory_events_high and memory_events_max did not rise — and, when CgroupOptions.Requests
-// holds the pods' requests, is within its memory request (memory.current ≤ request). It is
+// holds the pods' requests, is within its memory request (memory.current ≤ request); a pod
+// refaulting its page cache at refaultGate or faster counts its io_pressure_ratio when that
+// is larger (memoryContention). It is
 // emitted for a window in which the node itself has a memory_pressure_ratio. A pod is read
 // when it has a memory_pressure_ratio and a memory.events delta this window (unknown whether
 // it limits itself is not "not limiting itself"). The value is the worst among the pods read
@@ -626,12 +628,16 @@ func (c *CgroupCollector) podCPULocked(subject, dir string, samples []*types.Met
 // first seen, or its counters went backwards): whether it is limiting itself is unknown,
 // and unknown is not "not self-limited".
 func (c *CgroupCollector) podMemLocked(subject, uid string, samples []*types.MetricSample) (podMem, bool) {
-	pm := podMem{uid: uid, current: math.NaN()}
+	pm := podMem{uid: uid, current: math.NaN(), refault: math.NaN()}
 	var have, hasHigh, hasMax bool
 	for _, s := range samples {
 		switch s.MetricType {
 		case types.MemoryPressureRatio:
 			pm.psi, have = s.Value, true
+		case types.IOPressureRatio:
+			pm.ioPSI = s.Value
+		case types.MemoryRefaultRatio:
+			pm.refault = s.Value
 		case types.MemoryEventsHigh:
 			pm.selfLimited, hasHigh = pm.selfLimited || s.Value > 0, true
 		case types.MemoryEventsMax:

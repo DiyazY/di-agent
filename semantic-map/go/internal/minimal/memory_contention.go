@@ -34,16 +34,25 @@ func (r *Requests) Load() (map[string]float64, bool) {
 
 // podMem is what memoryContention needs of one pod promised memory (not BestEffort) with a
 // memory stall reading this window: its memory.current in bytes (NaN when unread), its PSI
-// memory "some" stall share, and whether it was limiting itself — its memory.events high or
-// max rose this window.
+// memory and io "some" stall shares, its memory_refault_ratio (NaN when unread), and
+// whether it was limiting itself — its memory.events high or max rose this window.
 type podMem struct {
-	uid          string
-	current, psi float64
-	selfLimited  bool
+	uid                 string
+	current, psi, ioPSI float64
+	refault             float64
+	selfLimited         bool
 }
 
+// refaultGate is the memory_refault_ratio (1/s) from which a pod's io stall counts as
+// memory contention: its whole page cache read back within 100 s. A pod that reads its
+// files with read(2) and is pushed out of its cache stalls on I/O, not on memory — on an
+// MGLRU kernel such a refault is memory PSI only for pages in the highest access tier —
+// and io stall without refaults is a busy disk, which no memory cap relieves.
+const refaultGate = 0.01
+
 // memoryContention is the node's memory contention: the worst memory stall of a pod that is
-// waiting on memory other pods hold rather than on its own limit. A pod pressing against its
+// waiting on memory other pods hold rather than on its own limit. A pod's stall is its memory
+// PSI, or its io PSI when larger and the pod refaults at refaultGate or faster. A pod pressing against its
 // own memory.high or memory.max stalls on its own reclaim, and relieving the node would not
 // help it; a pod using more than it requested was promised only its request, so its stall
 // is the share it took past it. With requests unknown (haveReq false: no runtime, or none
@@ -62,7 +71,11 @@ func memoryContention(pods []podMem, req map[string]float64, haveReq bool) float
 				continue
 			}
 		}
-		worst = math.Max(worst, p.psi)
+		stall := p.psi
+		if p.refault >= refaultGate {
+			stall = math.Max(stall, p.ioPSI)
+		}
+		worst = math.Max(worst, stall)
 	}
 	return worst
 }
