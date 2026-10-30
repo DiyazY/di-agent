@@ -50,8 +50,8 @@ func TestBothLeversBuiltByDefault(t *testing.T) {
 		Action: "cpu.limit", Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
 		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}, {
-		Action: "memory.high", Enter: 0.20, Exit: 0.05, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
-		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
+		Action: "memory.high", Enter: 0.08, Exit: 0.03, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Step: 0.25, MinEffect: 0.01, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}}
 	if len(loops) != len(want) {
 		t.Fatalf("%d loops; want %d", len(loops), len(want))

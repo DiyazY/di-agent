@@ -317,8 +317,12 @@ func defaultLevers() []Lever {
 		Action: "cpu.limit", Enter: 0.25, Exit: 0.10, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
 		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}, {
-		Action: "memory.high", Enter: 0.20, Exit: 0.05, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
-		Step: 0.25, MinEffect: 0.03, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
+		// Memory enters lower than CPU: a protected pod whose page cache is
+		// pushed out stalls about 0.11 of its time (casestudy run
+		// 2026-10-30-memrelief). min_effect keeps CPU's ratio to enter (1/8),
+		// so a usage-basis step at enter can clear it.
+		Action: "memory.high", Enter: 0.08, Exit: 0.03, EnterFor: time.Minute, ExitFor: 3 * time.Minute,
+		Step: 0.25, MinEffect: 0.01, VictimShare: 0.05, Settle: 2 * time.Minute, Expiry: time.Hour,
 	}}
 }
 

@@ -12,7 +12,7 @@
 # Ollama holds 6-9 GB; with page-hog's 6 GiB held, its file set fills the room left in under
 # ten minutes. run-2026-10-23-memrelief/results.md says what the runs showed.
 # Phase 2 (default 10 min; 0 skips it): mem-squeeze alone, which limits itself at its own 64Mi limit.
-# Expected: no memory action, memory_contention_ratio < 0.20 while its memory_events_high or
+# Expected: no memory action, memory_contention_ratio < 0.08 while its memory_events_high or
 # memory_events_max rise. (mem-wave holds 400 MB under a 600Mi limit and never reaches it.)
 #
 # Every 30 s poll.jsonl gets one line per endpoint ({t, endpoint, status, body}) and
