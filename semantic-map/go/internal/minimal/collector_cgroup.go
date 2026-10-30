@@ -71,10 +71,17 @@ import (
 // (hierarchical, so a pod's include its containers'), declared as "count" on [0, 1e9].
 // The node has none: a cgroup v2 root has no memory.events.
 //
+// memory_refault_ratio is how fast a subject loses its page cache and reads it back: file
+// pages refaulted in the window (memory.stat workingset_refault_file) times the page
+// size, per second, over its page cache (memory.stat file, at least one page), declared
+// as "1/s" on [0, 1000]. 1 is the whole cache read back once a second.
+//
 // memory_contention_ratio is node-level only: the worst memory_pressure_ratio of a pod
 // promised memory (not BestEffort, not a unit) that is not limiting itself — its
 // memory_events_high and memory_events_max did not rise — and, when CgroupOptions.Requests
-// holds the pods' requests, is within its memory request (memory.current ≤ request). It is
+// holds the pods' requests, is within its memory request (memory.current ≤ request); a pod
+// refaulting its page cache at refaultGate or faster counts its io_pressure_ratio when that
+// is larger (memoryContention). It is
 // emitted for a window in which the node itself has a memory_pressure_ratio. A pod is read
 // when it has a memory_pressure_ratio and a memory.events delta this window (unknown whether
 // it limits itself is not "not limiting itself"). The value is the worst among the pods read
@@ -200,6 +207,10 @@ type cpuSnapshot struct {
 	// hasMemEvents is false where the file, or one of the fields, is absent.
 	memEvents    [len(memEventFields)]uint64
 	hasMemEvents bool
+	// refaultFile and memFile are memory.stat's workingset_refault_file (pages,
+	// cumulative) and file (bytes); hasMemStat is false where either is absent.
+	refaultFile, memFile uint64
+	hasMemStat           bool
 }
 
 // memEventFields are the memory.events counters read per cgroup, and the metric each
@@ -236,6 +247,7 @@ var cgroupAvailMetrics = []types.MetricType{
 	types.MemoryEventsHigh,
 	types.MemoryEventsMax,
 	types.MemoryOOMKills,
+	types.MemoryRefaultRatio,
 }
 
 // NewCgroupCollector creates a collector with the daemon defaults: subjects on,
@@ -459,6 +471,9 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 	if ev, err := readMemEvents(filepath.Join(dir, "memory.events")); err == nil {
 		snap.memEvents, snap.hasMemEvents = ev, true
 	}
+	if rf, file, err := readMemStat(filepath.Join(dir, "memory.stat")); err == nil {
+		snap.refaultFile, snap.memFile, snap.hasMemStat = rf, file, true
+	}
 	for i, r := range psiResources {
 		v, err := readStallUsec(filepath.Join(dir, r.file))
 		snap.stall[i], snap.hasStall[i] = v, err == nil
@@ -522,6 +537,11 @@ func (c *CgroupCollector) collectOneLocked(subject, dir string, labels map[strin
 			n := math.Min(float64(snap.memEvents[i]-prev.memEvents[i]), countRange[1])
 			samples = append(samples, c.sampleIn(countRange, f.metric, unitCount, n, now, prev.ts, subject, labels))
 		}
+	}
+	if snap.hasMemStat && prev.hasMemStat && snap.refaultFile >= prev.refaultFile {
+		page := float64(os.Getpagesize())
+		v := float64(snap.refaultFile-prev.refaultFile) * page / (float64(elapsedUs) / 1e6) / math.Max(float64(snap.memFile), page)
+		samples = append(samples, c.sampleIn(refaultRange, types.MemoryRefaultRatio, unitPerSecond, math.Min(v, refaultRange[1]), now, prev.ts, subject, labels))
 	}
 	if subject != "" {
 		if v, ok := contention(prev, snap, elapsedUs); ok {
@@ -608,12 +628,16 @@ func (c *CgroupCollector) podCPULocked(subject, dir string, samples []*types.Met
 // first seen, or its counters went backwards): whether it is limiting itself is unknown,
 // and unknown is not "not self-limited".
 func (c *CgroupCollector) podMemLocked(subject, uid string, samples []*types.MetricSample) (podMem, bool) {
-	pm := podMem{uid: uid, current: math.NaN()}
+	pm := podMem{uid: uid, current: math.NaN(), refault: math.NaN()}
 	var have, hasHigh, hasMax bool
 	for _, s := range samples {
 		switch s.MetricType {
 		case types.MemoryPressureRatio:
 			pm.psi, have = s.Value, true
+		case types.IOPressureRatio:
+			pm.ioPSI = s.Value
+		case types.MemoryRefaultRatio:
+			pm.refault = s.Value
 		case types.MemoryEventsHigh:
 			pm.selfLimited, hasHigh = pm.selfLimited || s.Value > 0, true
 		case types.MemoryEventsMax:
@@ -764,6 +788,9 @@ var shareRange = [2]float64{0, 1}
 // countRange bounds a count of events in one window.
 var countRange = [2]float64{0, 1e9}
 
+// refaultRange bounds memory_refault_ratio.
+var refaultRange = [2]float64{0, 1000}
+
 const (
 	// unitNodeShare: a fraction of what the whole node has (CPU, memory), for the
 	// node and for every subject alike — a pod's share is of the node, never of its
@@ -779,6 +806,8 @@ const (
 	unitPeriodShare = "share-of-periods"
 	// unitCount: how many times something happened in the window.
 	unitCount = "count"
+	// unitPerSecond: a rate, times per second.
+	unitPerSecond = "1/s"
 )
 
 // sample builds a MetricSample with a deterministic event_id over
@@ -914,6 +943,36 @@ func readCPUSteal(path string) (steal, total uint64, ok bool) {
 		return steal, total, true
 	}
 	return 0, 0, false
+}
+
+// readMemStat returns memory.stat's workingset_refault_file (pages) and file (bytes).
+// An error when the file is unreadable or lacks either: a counter read as 0 would
+// become a spurious delta when it appears.
+func readMemStat(path string) (refaultFile, file uint64, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	var hasRefault, hasFile bool
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 || (f[0] != "workingset_refault_file" && f[0] != "file") {
+			continue
+		}
+		v, err := strconv.ParseUint(f[1], 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s: %s: %w", path, f[0], err)
+		}
+		if f[0] == "file" {
+			file, hasFile = v, true
+		} else {
+			refaultFile, hasRefault = v, true
+		}
+	}
+	if !hasRefault || !hasFile {
+		return 0, 0, fmt.Errorf("%s lacks workingset_refault_file or file", path)
+	}
+	return refaultFile, file, nil
 }
 
 // readMemEvents returns the cumulative counters of a cgroup v2 memory.events file, in

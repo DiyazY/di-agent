@@ -751,8 +751,9 @@ loops:
         enter: 0.25     # CPU contention (stall less own throttling) that starts relief, held for enter_for
         exit: 0.10      # contention below which caps are given back, held for exit_for
       - action: memory.high
-        enter: 0.20     # memory stall of a pod within its request, not limiting itself
-        exit: 0.05
+        enter: 0.08     # memory stall of a pod within its request, not limiting itself
+        exit: 0.03
+        min_effect: 0.01
         step: 0.25      # each step lowers memory.high by a quarter of what the pod uses
 actuation:
   ledger: ""            # "": actions.json beside persist.file
