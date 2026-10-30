@@ -6,7 +6,7 @@ global:
   # Prefixed onto every chart-built image's repository. Public images (kafka,
   # influxdb, grafana) are referenced by their upstream repository and are
   # not affected by this value.
-  imageRegistry: ghcr.io/chuducanh242002
+  imageRegistry: ghcr.io/diyazy
   imageTag: latest
   # Always is required so pods actually re-pull ":latest" on restart instead
   # of reusing a node's cached image.
@@ -82,8 +82,7 @@ switchboard:
   kafkaTopic: switchboard.telemetry
   requestKafkaTopic: switchboard.requests
   # Interval (seconds) the switchboard polls each genset/battery Modbus TCP
-  # server at, mirroring a PMS's field-bus supervision loop. Read-only:
-  # never feeds the Kafka-derived allocation logic (see GET /modbus).
+  # server at; these readings provide the supply inputs to allocation.
   modbusPollIntervalS: 2
   nodeSelector: {}
   resources: {}
@@ -150,7 +149,7 @@ navigation:
     repository: navigation
     tag: ""
   kafkaTopic: navigation.telemetry
-  # Actisense-ASCII NMEA 2000 gateway TCP port (canboat n2kd convention).
+  # Custom TCP CAN-frame debug gateway port.
   n2kGatewayPort: 2597
   vesselName: vessel-1
   initialSpeedKnots: "8"

@@ -67,7 +67,7 @@ fi
 # any particular VM, so it's reachable at its cluster DNS name.
 KAFKA_NAMESPACE="${KAFKA_NAMESPACE:-default}"
 KAFKA_BROKERS="${KAFKA_BROKERS:-kafka.${KAFKA_NAMESPACE}.svc.cluster.local:9092}"
-DATASET_COLLECTOR_URL=${DATASET_COLLECTOR_URL-"http://dataset-collector.${KAFKA_NAMESPACE}.svc.cluster.local:8000/collect"}
+DATASET_COLLECTOR_URL="${DATASET_COLLECTOR_URL:-}"
 COLLECT_INTERVAL="${COLLECT_INTERVAL:-5s}"
 
 # ── build ─────────────────────────────────────────────────────────────────────

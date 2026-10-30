@@ -39,7 +39,7 @@ POC_DIR="$(dirname "$SCRIPT_DIR")"
 SYSTEM_DIR="$POC_DIR/system"
 SEMANTIC_MAP_DIR="$(dirname "$POC_DIR")/semantic-map"
 
-REGISTRY="${REGISTRY:-ghcr.io/chuducanh242002}"
+REGISTRY="${REGISTRY:-ghcr.io/diyazy}"
 TAG="${TAG:-latest}"
 
 ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload navigation telemetry-writer telemetry-cloud-sync playground data-ingest replay-streamer dataset-collector di-agent)

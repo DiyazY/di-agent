@@ -1,8 +1,8 @@
 {{- if .Values.navigation.enabled }}
 # Navigation simulator: one vessel's NMEA 2000 sensor suite (GNSS, heading,
 # wind, depth, attitude) on a virtual CAN bus. Exposes the REST API on :8000
-# and an Actisense-ASCII gateway on the N2K port (2597, the canboat n2kd
-# convention), alongside the navigation.telemetry Kafka topic.
+# and a custom CAN-frame debug stream on the configured TCP port, alongside
+# the navigation.telemetry Kafka topic.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

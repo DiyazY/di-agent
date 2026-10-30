@@ -33,7 +33,7 @@ HELM_RELEASE ?= di-agent-system
 HELM_NAMESPACE ?= default
 # The postgres-ingest hook splits and loads ~170 MB of CSVs; Helm's 5m default is too short.
 HELM_TIMEOUT ?= 30m
-REGISTRY ?= ghcr.io/chuducanh242002
+REGISTRY ?= ghcr.io/diyazy
 TAG ?= latest
 
 # Optional replay-streamer overrides for helm-install/helm-template. Unset
@@ -44,8 +44,8 @@ STREAMER_RUN_ID ?=
 STREAMER_INTERVAL_MS ?=
 STREAMER_POINTS ?=
 STREAMER_LOOP ?=
-# URL consumed by the first agent in the direct multi-node deployment.
-DATASET_COLLECTOR_URL ?= http://dataset-collector.$(HELM_NAMESPACE).svc.cluster.local:8000/collect
+# Optional URL consumed by the first agent in the direct multi-node deployment.
+DATASET_COLLECTOR_URL ?=
 AGENT_COLLECT_INTERVAL ?= 5s
 # Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
 HELM_ARGS ?=
@@ -183,9 +183,8 @@ get-ip-%:
 help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → helm-install → agent → peers"
-	@echo "  images       - Build+push genset/switchboard/propulsion/battery/auxload/"
-	@echo "                 telemetry-writer/telemetry-cloud-sync/playground/data-ingest/replay-streamer/"
-	@echo "                 dataset-collector/di-agent images to REGISTRY (default $(REGISTRY))"
+	@echo "  images       - Build+push all service images (including navigation and"
+	@echo "                 telemetry-cloud-sync) to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
@@ -198,8 +197,8 @@ help:
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
-	@echo "  agent        - Deploy di-agent on worker VMs; the first agent consumes dataset telemetry"
-	@echo "                 Options: AGENT_COLLECT_INTERVAL, DATASET_COLLECTOR_URL"
+	@echo "  agent        - Deploy di-agent on worker VMs"
+	@echo "                 Optional dataset collection: DATASET_COLLECTOR_URL, AGENT_COLLECT_INTERVAL"
 	@echo "                 Alternative: HELM_ARGS=\"--set agent.enabled=true\" (do not use both)"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
 	@echo "  status       - Check /cost endpoint on all VMs"
