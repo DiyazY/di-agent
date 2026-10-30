@@ -1,13 +1,10 @@
 """Minimal NMEA 2000 (CAN bus) emulation for the navigation simulator.
 
-Implements the PGN encoders and bus framing used by the simulated sensors,
-plus an Actisense-ASCII (N2K ASCII) TCP gateway that plays the role a real
-NMEA2000<->Ethernet gateway (Actisense NGT-1, Yacht Devices YDEN) plays on a
-vessel: every CAN frame on the bus is forwarded to connected TCP clients as
-one ASCII line, so the raw bus traffic can be observed with `nc` or decoded
-with canboat's `analyzer`.
+Implements PGN encoders and bus framing used by the simulated sensors, plus
+a custom TCP debug gateway that forwards each CAN frame as an ASCII line.
+The output is not an Actisense or canboat wire format.
 
-ASCII line format (one CAN frame per line, canboat plain-format compatible):
+Debug line format (one CAN frame per line):
 
     HH:MM:SS.mmm <prio> <pgn> <src> <dst> <len> <b0> <b1> ... <bN>
 
@@ -171,12 +168,11 @@ def encode_distance_log(
 
 
 class Nmea2000Gateway:
-    """Virtual NMEA 2000 bus segment with an Actisense-ASCII TCP gateway.
+    """Virtual NMEA 2000 bus segment with a custom TCP debug gateway.
 
     Sensors call broadcast() with an encoded PGN payload; the gateway applies
     single-frame or fast-packet framing and forwards every CAN frame as one
-    ASCII line to all connected TCP clients, mirroring how an Actisense
-    NGT-1 exposes a real bus.
+    ASCII debug line to connected TCP clients.
     """
 
     def __init__(self, host: str = "0.0.0.0", port: int = 2597, max_clients: int = 8) -> None:

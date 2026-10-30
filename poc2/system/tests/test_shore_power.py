@@ -1,8 +1,8 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
-from conftest import load_component_modules
-from starlette.testclient import TestClient
+from conftest import api_test_client, load_component_modules
 
 
 @pytest.fixture
@@ -36,25 +36,35 @@ def test_shore_power_controller(shore_power_modules):
     with pytest.raises(ValueError):
         controller.set_target_power_ratio(1.5)
 
+    controller._session = MagicMock()
+    controller._session.post.side_effect = shore_power_modules["controller"].requests.RequestException(
+        "battery unavailable"
+    )
+    controller._charge_battery(100)
+    assert controller.get_health()["battery_forward_error"] == "battery unavailable"
+    controller._session.post.side_effect = None
+    controller._session.post.return_value.raise_for_status.return_value = None
+    controller._charge_battery(100)
+    assert controller.get_health()["battery_forward_error"] is None
+
 
 def test_shore_power_api_endpoints(shore_power_modules):
-    app = shore_power_modules["main"].app
-    client = TestClient(app, raise_server_exceptions=False)
+    main = shore_power_modules["main"]
+    with api_test_client(main.app, main.controller) as client:
+        res = client.get("/health")
+        assert res.status_code == 503
 
-    res = client.get("/health")
-    assert res.status_code in (200, 503)
+        res = client.get("/status")
+        assert res.status_code == 200
+        assert "connected" in res.json()
 
-    res = client.get("/status")
-    assert res.status_code == 200
-    assert "connected" in res.json()
+        res = client.post("/connect", json={"connected": True})
+        assert res.status_code == 200
+        assert res.json()["connected"] is True
 
-    res = client.post("/connect", json={"connected": True})
-    assert res.status_code == 200
-    assert res.json()["connected"] is True
+        res = client.get("/power")
+        assert res.status_code == 200
 
-    res = client.get("/power")
-    assert res.status_code == 200
-
-    res = client.post("/power", json={"power_ratio": 0.7})
-    assert res.status_code == 200
-    assert res.json()["target_power_ratio"] == 0.7
+        res = client.post("/power", json={"power_ratio": 0.7})
+        assert res.status_code == 200
+        assert res.json()["target_power_ratio"] == 0.7

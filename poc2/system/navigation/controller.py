@@ -22,7 +22,7 @@ KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "navigation.telemetry")
 # matching "rapid update" PGN rates; Kafka gets 1 Hz aggregates.
 TICK_INTERVAL_S = float(os.environ.get("TICK_INTERVAL_S", "0.2"))
 KAFKA_EVERY_N_TICKS = int(os.environ.get("KAFKA_EVERY_N_TICKS", "5"))
-# Actisense-ASCII gateway port; 2597 is the canboat n2kd convention.
+# Custom TCP CAN-frame debug gateway port.
 N2K_HOST = os.environ.get("N2K_HOST", "0.0.0.0")
 N2K_PORT = int(os.environ.get("N2K_PORT", "2597"))
 VESSEL_NAME = os.environ.get("VESSEL_NAME", "vessel-1")

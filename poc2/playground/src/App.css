@@ -15,6 +15,14 @@
   margin-bottom: 2rem;
 }
 
+.config-error {
+  color: #fecaca;
+  background: #7f1d1d;
+  border: 1px solid #ef4444;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
 .panels {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -213,4 +221,3 @@
   background: #3b82f6;
   transition: width 0.5s linear;
 }
-

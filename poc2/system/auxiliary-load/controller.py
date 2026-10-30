@@ -150,7 +150,10 @@ class AuxLoadController:
             self._errors.append(message)
 
     def _send(self, topic: str, *, key: str, value: dict) -> None:
-        self._producer.send(topic, key=key, value=value).get(timeout=5)
+        try:
+            self._producer.send(topic, key=key, value=value).get(timeout=5)
+        except KafkaTimeoutError as error:
+            logger.warning("Kafka send to %s timed out; telemetry loop will continue: %s", topic, error)
 
     def _consume_allocations(self) -> None:
         try:

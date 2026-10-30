@@ -12,19 +12,14 @@ export default function App() {
   // discovered from config.json (see nginx.conf.template and
   // scripts/09-playground.sh).
   const [config, setConfig] = useState<PlaygroundConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchConfig()
       .then(setConfig)
-      .catch(() =>
-        setConfig({
-          gensetIds: [],
-          propulsionIds: [],
-          batteryIds: [],
-          auxloadIds: [],
-          shorePower: false,
-        })
-      );
+      .catch((error: unknown) => {
+        setConfigError(error instanceof Error ? error.message : "Unable to load playground configuration.");
+      });
   }, []);
 
   return (
@@ -33,6 +28,11 @@ export default function App() {
       <p className="subtitle">
         Live control panel for the genset, battery, propulsion and auxiliary-load simulators.
       </p>
+      {configError && (
+        <p className="config-error" role="alert">
+          Playground configuration could not be loaded: {configError}
+        </p>
+      )}
       <div className="panels">
         {/* ?? [] guards against a stale config.json (e.g. an old playground
             image) that predates the battery/auxload fields. */}
@@ -59,4 +59,3 @@ export default function App() {
     </div>
   );
 }
-

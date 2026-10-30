@@ -3,8 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import load_component_modules
-from starlette.testclient import TestClient
+from conftest import api_test_client, load_component_modules
 
 
 @pytest.fixture
@@ -65,28 +64,22 @@ def test_aux_load_controller_allocation_stale(auxload_modules):
 
 
 def test_aux_load_api_endpoints(auxload_modules):
-    app = auxload_modules["main"].app
-    client = TestClient(app, raise_server_exceptions=False)
+    main = auxload_modules["main"]
+    with api_test_client(main.app, main.controller) as client:
+        res = client.get("/health")
+        assert res.status_code == 503
 
-    # Health check
-    res = client.get("/health")
-    assert res.status_code in (200, 503)
+        res = client.get("/status")
+        assert res.status_code == 200
+        assert "target_load_ratio" in res.json()
 
-    # Get Status
-    res = client.get("/status")
-    assert res.status_code == 200
-    assert "target_load_ratio" in res.json()
+        res = client.get("/load")
+        assert res.status_code == 200
+        assert "target_load_ratio" in res.json()
 
-    # Get /load
-    res = client.get("/load")
-    assert res.status_code == 200
-    assert "target_load_ratio" in res.json()
+        res = client.post("/load", json={"load_ratio": 0.6})
+        assert res.status_code == 200
+        assert res.json()["target_load_ratio"] == 0.6
 
-    # POST /load valid
-    res = client.post("/load", json={"load_ratio": 0.6})
-    assert res.status_code == 200
-    assert res.json()["target_load_ratio"] == 0.6
-
-    # POST /load invalid
-    res = client.post("/load", json={"load_ratio": 2.0})
-    assert res.status_code == 422
+        res = client.post("/load", json={"load_ratio": 2.0})
+        assert res.status_code == 422

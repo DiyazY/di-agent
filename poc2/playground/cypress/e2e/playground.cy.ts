@@ -85,6 +85,15 @@ describe("di-agent playground", () => {
     cy.contains("voyage conditions").should("be.visible");
   });
 
+  it("shows an error when playground configuration cannot be loaded", () => {
+    cy.intercept("GET", "/config.json", { statusCode: 503, body: "unavailable" });
+    cy.visit("/");
+
+    cy.get('[role="alert"]')
+      .should("be.visible")
+      .and("contain", "Playground configuration could not be loaded");
+  });
+
   it("calculates and applies voyage recommendations", () => {
     cy.visit("/");
 

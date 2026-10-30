@@ -1,9 +1,10 @@
 import time
+from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import load_component_modules
-from starlette.testclient import TestClient
+from conftest import api_test_client, load_component_modules
 
 
 @pytest.fixture
@@ -84,15 +85,94 @@ def test_deserialize_kafka_payload(switchboard_modules):
 
 
 def test_switchboard_api_endpoints(switchboard_modules):
-    app = switchboard_modules["main"].app
-    client = TestClient(app, raise_server_exceptions=False)
+    main = switchboard_modules["main"]
+    with api_test_client(main.app, main.controller) as client:
+        res = client.get("/health")
+        assert res.status_code == 503
 
-    res = client.get("/health")
-    assert res.status_code in (200, 503)
+        res = client.get("/status")
+        assert res.status_code == 200
+        assert "available_supply_kw" in res.json()
 
-    res = client.get("/status")
-    assert res.status_code == 200
-    assert "available_supply_kw" in res.json()
+        res = client.get("/modbus")
+        assert res.status_code == 200
 
-    res = client.get("/modbus")
-    assert res.status_code == 200
+
+def test_modbus_server_registers_decode_as_switchboard_supply(switchboard_modules, monkeypatch):
+    from conftest import load_component_modules
+
+    genset_server = load_component_modules("genset", ["modbus_server"])["modbus_server"]
+    polling_client = switchboard_modules["modbus_client"]
+    server = genset_server.GensetModbusServer(controller=MagicMock())
+    server.sync_from_status({
+        "target_load_ratio": 0.5,
+        "current_load_ratio": 0.4,
+        "speed_rpm": 1200,
+        "anomaly_enabled": False,
+        "last_message": {"power_kw": 1800, "co2_kg_per_s": 0.12, "nox_kg_per_s": 0.03},
+    })
+    registers = server._input.getValues(0, 10)
+    fake_client = MagicMock()
+    fake_client.read_input_registers.return_value = SimpleNamespace(
+        registers=registers,
+        isError=lambda: False,
+    )
+
+    decoded = polling_client._GensetPoller.read(fake_client)
+
+    assert decoded == {
+        "current_load_ratio": pytest.approx(0.4),
+        "power_kw": pytest.approx(1800),
+        "speed_rpm": pytest.approx(1200),
+        "co2_kg_per_s": pytest.approx(0.12),
+        "nox_kg_per_s": pytest.approx(0.03),
+    }
+
+
+def test_unexpected_modbus_poller_error_is_reported(switchboard_modules, monkeypatch):
+    modbus_module = switchboard_modules["modbus_client"]
+    fake_client = MagicMock()
+    fake_client.connected = True
+    monkeypatch.setattr(modbus_module, "ModbusTcpClient", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(
+        modbus_module._GensetPoller,
+        "read",
+        MagicMock(side_effect=RuntimeError("bad register response")),
+    )
+    poller = modbus_module.ModbusPollingClient("genset-1@localhost:5020", "", 0.01)
+
+    poller.start()
+    deadline = time.monotonic() + 1
+    while poller.get_health()["last_error"] is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    health = poller.get_health()
+    status = poller.get_status()
+    poller.stop()
+
+    assert health["status"] == "error"
+    assert health["thread_running"] is True
+    assert "bad register response" in health["last_error"]
+    assert status["genset-1"]["stale"] is True
+
+
+def test_stale_modbus_supply_is_excluded_from_allocation(switchboard_modules, monkeypatch):
+    controller = switchboard_modules["controller"].SwitchboardController()
+    monkeypatch.setattr(
+        controller._modbus_client,
+        "get_status",
+        lambda: {
+            "genset-1": {
+                "source_type": "genset",
+                "stale": True,
+                "fetched_at": time.time(),
+                "power_kw": 1800,
+                "co2_kg_per_s": 0.12,
+                "nox_kg_per_s": 0.03,
+            },
+        },
+    )
+
+    status = controller.get_status()
+
+    assert status["gensets"]["genset-1"]["stale"] is True
+    assert status["available_supply_kw"] == 0

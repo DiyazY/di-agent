@@ -1,5 +1,6 @@
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from conftest import load_component_modules
@@ -123,3 +124,106 @@ def test_dataset_topic_writes_generic_signal_point(writer_modules):
     assert "t_source=7200" in line
     assert "value=-11.5" in line
     assert line.endswith("123000000001")
+
+
+def test_consumer_disables_auto_commit(writer_modules, monkeypatch):
+    writer = writer_modules["writer"]
+    consumer = MagicMock()
+    monkeypatch.setattr(writer, "KafkaConsumer", MagicMock(return_value=consumer))
+
+    assert writer._make_consumer() is consumer
+    writer.KafkaConsumer.assert_called_once()
+    assert writer.KafkaConsumer.call_args.kwargs["enable_auto_commit"] is False
+
+
+def test_record_commit_advances_only_past_processed_offset(writer_modules):
+    writer = writer_modules["writer"]
+    consumer = MagicMock()
+    record = type(
+        "ConsumerRecord",
+        (),
+        {"topic": "genset.telemetry", "partition": 2, "offset": 41},
+    )()
+
+    writer._commit_record(consumer, record)
+
+    commit_offsets = consumer.commit.call_args.args[0]
+    partition = writer.TopicPartition("genset.telemetry", 2)
+    assert commit_offsets[partition].offset == 42
+
+
+def test_permissive_validation_drops_and_commits_malformed_record(writer_modules):
+    writer = writer_modules["writer"]
+    consumer = MagicMock()
+    write_api = MagicMock()
+    record = type(
+        "ConsumerRecord",
+        (),
+        {"topic": "genset.telemetry", "partition": 0, "offset": 4, "value": {}},
+    )()
+
+    written = writer._process_record(consumer, write_api, record, strict_validation=False)
+
+    assert written is False
+    consumer.commit.assert_called_once()
+    write_api.write.assert_not_called()
+
+
+def test_successful_write_precedes_offset_commit(writer_modules):
+    writer = writer_modules["writer"]
+    events = []
+    consumer = MagicMock()
+    consumer.commit.side_effect = lambda *_args, **_kwargs: events.append("commit")
+    write_api = MagicMock()
+    write_api.write.side_effect = lambda **_kwargs: events.append("write")
+    record = type(
+        "ConsumerRecord",
+        (),
+        {
+            "topic": "genset.telemetry",
+            "partition": 0,
+            "offset": 4,
+            "value": {"genset_id": "g1", "timestamp": time.time()},
+        },
+    )()
+
+    assert writer._process_record(consumer, write_api, record, strict_validation=True) is True
+    assert events == ["write", "commit"]
+
+
+def test_strict_validation_leaves_malformed_record_uncommitted(writer_modules):
+    writer = writer_modules["writer"]
+    consumer = MagicMock()
+    write_api = MagicMock()
+    record = type(
+        "ConsumerRecord",
+        (),
+        {"topic": "genset.telemetry", "partition": 0, "offset": 4, "value": {}},
+    )()
+
+    with pytest.raises(ValueError, match="Malformed Kafka message"):
+        writer._process_record(consumer, write_api, record, strict_validation=True)
+
+    consumer.commit.assert_not_called()
+
+
+def test_influx_write_failure_leaves_record_uncommitted(writer_modules):
+    writer = writer_modules["writer"]
+    consumer = MagicMock()
+    write_api = MagicMock()
+    write_api.write.side_effect = ValueError("InfluxDB unavailable")
+    record = type(
+        "ConsumerRecord",
+        (),
+        {
+            "topic": "genset.telemetry",
+            "partition": 0,
+            "offset": 4,
+            "value": {"genset_id": "g1", "timestamp": time.time()},
+        },
+    )()
+
+    with pytest.raises(ValueError, match="InfluxDB unavailable"):
+        writer._process_record(consumer, write_api, record, strict_validation=False)
+
+    consumer.commit.assert_not_called()

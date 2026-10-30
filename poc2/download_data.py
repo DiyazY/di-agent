@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEST = Path(__file__).resolve().parent / "data"
+REQUEST_TIMEOUT_S = 30
 
 
 def load_env():
@@ -36,7 +37,7 @@ def main():
     opener = urllib.request.build_opener(
         urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     # Following the share link redirects to the folder and sets an anonymous session cookie.
-    final = opener.open(url).geturl()
+    final = opener.open(url, timeout=REQUEST_TIMEOUT_S).geturl()
     parsed = urllib.parse.urlparse(final)
     folder = urllib.parse.parse_qs(parsed.query)["id"][0]
     site = "/".join(folder.split("/")[:3])  # /personal/<user>
@@ -46,7 +47,7 @@ def main():
     req = urllib.request.Request(
         f"{base}/GetFolderByServerRelativeUrl('{folder_q}')/Files?$select=Name,ServerRelativeUrl,Length",
         headers={"Accept": "application/json;odata=nometadata"})
-    files = json.load(opener.open(req))["value"]
+    files = json.load(opener.open(req, timeout=REQUEST_TIMEOUT_S))["value"]
     csvs = [f for f in files if f["Name"].lower().endswith(".csv")]
 
     DEST.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,9 @@ def main():
             continue
         print(f"get    {f['Name']} ({size / 1e6:.1f} MB)")
         rel = urllib.parse.quote(f["ServerRelativeUrl"], safe="")
-        with opener.open(f"{base}/GetFileByServerRelativeUrl('{rel}')/$value") as r, \
+        with opener.open(
+                f"{base}/GetFileByServerRelativeUrl('{rel}')/$value",
+                timeout=REQUEST_TIMEOUT_S) as r, \
                 open(target.with_suffix(".part"), "wb") as out:
             while chunk := r.read(1 << 20):
                 out.write(chunk)

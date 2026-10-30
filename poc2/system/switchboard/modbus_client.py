@@ -93,10 +93,14 @@ class ModbusPollingClient:
         ]
         self._poll_interval_s = poll_interval_s
         self._lock = threading.Lock()
-        self._status: dict[str, dict] = {}
+        self._status: dict[str, dict] = {
+            target_id: {"source_type": source_type, "stale": True}
+            for source_type, target_id, _host, _port in self._targets
+        }
         self._clients: dict[str, ModbusTcpClient] = {}
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._last_error: str | None = None
 
     def start(self) -> None:
         if not self._targets:
@@ -115,14 +119,33 @@ class ModbusPollingClient:
         with self._lock:
             return {target_id: dict(value) for target_id, value in self._status.items()}
 
+    def get_health(self) -> dict:
+        running = not self._targets or (
+            self._thread is not None and self._thread.is_alive()
+        )
+        with self._lock:
+            stale_sources = any(value.get("stale", True) for value in self._status.values())
+            return {
+                "status": "ok" if running and self._last_error is None and not stale_sources else "error",
+                "thread_running": running,
+                "last_error": self._last_error,
+                "stale_sources": sum(value.get("stale", True) for value in self._status.values()),
+            }
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             for source_type, target_id, host, port in self._targets:
-                self._poll_one(source_type, target_id, host, port)
+                try:
+                    self._poll_one(source_type, target_id, host, port)
+                except Exception as error:
+                    logger.exception("Unexpected Modbus poll failure for %s", target_id)
+                    self._mark_stale(source_type, target_id, error)
             self._stop_event.wait(self._poll_interval_s)
 
     def _poll_one(self, source_type: str, target_id: str, host: str, port: int) -> None:
-        client = self._clients.setdefault(target_id, ModbusTcpClient(host, port=port))
+        client = self._clients.get(target_id)
+        if client is None:
+            client = self._clients.setdefault(target_id, ModbusTcpClient(host, port=port))
         try:
             if not client.connected and not client.connect():
                 raise ModbusException(f"could not connect to {host}:{port}")
@@ -134,9 +157,15 @@ class ModbusPollingClient:
                     "fetched_at": time.time(),
                     **values,
                 }
+                if not any(value.get("stale", True) for value in self._status.values()):
+                    self._last_error = None
         except (ModbusException, OSError) as error:
             logger.warning("Modbus poll of %s (%s:%s) failed: %s", target_id, host, port, error)
-            with self._lock:
-                existing = self._status.get(target_id, {"source_type": source_type})
-                existing["stale"] = True
-                self._status[target_id] = existing
+            self._mark_stale(source_type, target_id, error)
+
+    def _mark_stale(self, source_type: str, target_id: str, error: Exception) -> None:
+        with self._lock:
+            existing = self._status.get(target_id, {"source_type": source_type})
+            existing["stale"] = True
+            self._status[target_id] = existing
+            self._last_error = str(error)

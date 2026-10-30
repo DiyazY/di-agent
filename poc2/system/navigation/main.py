@@ -93,6 +93,5 @@ def set_anomaly(request: AnomalyRequest) -> dict:
 
 @app.get("/nmea2000/latest")
 def nmea2000_latest() -> dict:
-    """Most recent Actisense-ASCII frame per PGN, for quick bus inspection
-    without opening a TCP connection to the gateway."""
+    """Most recent custom CAN debug frame per PGN."""
     return {"frames": controller.get_latest_frames()}

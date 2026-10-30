@@ -52,11 +52,12 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS timeseries_replay_idx "
     "ON timeseries (run_id, source, t, signal)",
 )
+REQUEST_TIMEOUT_S = 30
 
 
 def download(url):
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    final = opener.open(url).geturl()
+    final = opener.open(url, timeout=REQUEST_TIMEOUT_S).geturl()
     parsed = urllib.parse.urlparse(final)
     folder = urllib.parse.parse_qs(parsed.query)["id"][0]
     base = f"{parsed.scheme}://{parsed.netloc}{'/'.join(folder.split('/')[:3])}/_api/web"
@@ -65,7 +66,7 @@ def download(url):
         "?$select=Name,ServerRelativeUrl,Length",
         headers={"Accept": "application/json;odata=nometadata"})
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for f in json.load(opener.open(req))["value"]:
+    for f in json.load(opener.open(req, timeout=REQUEST_TIMEOUT_S))["value"]:
         target = DATA_DIR / f["Name"]
         if not f["Name"].lower().endswith(".csv") or (
                 target.exists() and target.stat().st_size == int(f["Length"])):
@@ -73,7 +74,10 @@ def download(url):
         print(f"get {f['Name']}", flush=True)
         rel = urllib.parse.quote(f["ServerRelativeUrl"], safe="")
         part = target.with_suffix(".part")
-        with opener.open(f"{base}/GetFileByServerRelativeUrl('{rel}')/$value") as r, open(part, "wb") as out:
+        with opener.open(
+            f"{base}/GetFileByServerRelativeUrl('{rel}')/$value",
+            timeout=REQUEST_TIMEOUT_S,
+        ) as r, open(part, "wb") as out:
             while chunk := r.read(1 << 20):
                 out.write(chunk)
         part.rename(target)

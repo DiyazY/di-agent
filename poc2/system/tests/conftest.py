@@ -1,6 +1,10 @@
+from contextlib import contextmanager
 import importlib
 import sys
 from pathlib import Path
+from unittest.mock import patch
+
+from starlette.testclient import TestClient
 
 SYSTEM_DIR = Path(__file__).resolve().parent.parent
 
@@ -47,3 +51,11 @@ def load_component_modules(component_name: str, module_names: list[str]):
         loaded[mod_name] = importlib.import_module(mod_name)
     return loaded
 
+
+@contextmanager
+def api_test_client(app, controller):
+    with patch.object(controller, "start") as start, patch.object(controller, "stop") as stop:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            yield client
+        start.assert_called_once_with()
+        stop.assert_called_once_with()

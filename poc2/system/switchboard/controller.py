@@ -165,8 +165,15 @@ class SwitchboardController:
         thread_status = {
             name: thread is not None and thread.is_alive() for name, thread in threads.items()
         }
-        healthy = all(thread_status.values()) and not errors
-        return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+        modbus_health = self._modbus_client.get_health()
+        thread_status["modbus_poller"] = modbus_health["thread_running"]
+        healthy = all(thread_status.values()) and not errors and modbus_health["status"] == "ok"
+        return {
+            "status": "ok" if healthy else "error",
+            "threads": thread_status,
+            "errors": errors,
+            "modbus": modbus_health,
+        }
 
     def get_modbus_status(self) -> dict:
         """Raw per-target view of the same Modbus polling this controller
@@ -178,7 +185,10 @@ class SwitchboardController:
             self._errors.append(message)
 
     def _send(self, topic: str, *, key: str, value: dict) -> None:
-        self._producer.send(topic, key=key, value=value).get(timeout=5)
+        try:
+            self._producer.send(topic, key=key, value=value).get(timeout=5)
+        except KafkaTimeoutError as error:
+            logger.warning("Kafka send to %s timed out; allocation loop will continue: %s", topic, error)
 
     def _is_stale(self, received_at: float) -> bool:
         return time.time() - received_at > STALE_TIMEOUT_S

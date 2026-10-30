@@ -2,7 +2,7 @@ import json
 import os
 import time
 
-from kafka import KafkaConsumer, KafkaProducer
+from kafka import KafkaConsumer, KafkaProducer, OffsetAndMetadata, TopicPartition
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
 KAFKA_TOPICS = [
@@ -35,11 +35,14 @@ RETRY_BACKOFF_S = float(os.environ.get("RETRY_BACKOFF_S", "5"))
 LOG_EVERY_N_MESSAGES = int(os.environ.get("LOG_EVERY_N_MESSAGES", "50"))
 
 
-def _make_consumer() -> KafkaConsumer:
+def _make_consumer(topics: list[str] | None = None) -> KafkaConsumer:
+    subscribed_topics = KAFKA_TOPICS if topics is None else topics
+    if not subscribed_topics:
+        raise RuntimeError("no Kafka topics have configured cloud sinks")
     while True:
         try:
             return KafkaConsumer(
-                *KAFKA_TOPICS,
+                *subscribed_topics,
                 bootstrap_servers=KAFKA_BROKERS,
                 group_id=KAFKA_GROUP_ID,
                 # Raw passthrough: mirrored bytes are re-published as-is,
@@ -108,6 +111,10 @@ def _make_iothub_clients() -> dict:
     return clients
 
 
+def _topics_with_sinks(topics: list[str], clients: dict) -> list[str]:
+    return [topic for topic in topics if topic in clients]
+
+
 def _send_to_iothub(clients: dict, record) -> str:
     from azure.iot.device import Message
 
@@ -122,46 +129,85 @@ def _send_to_iothub(clients: dict, record) -> str:
     return record.topic
 
 
-def main() -> None:
-    consumer = _make_consumer()
+_PERMANENT_ERROR_NAMES = {
+    "MessageSizeTooLargeError",
+    "TopicAuthorizationFailedError",
+    "AuthorizationFailedError",
+    "CredentialError",
+    "IoTHubClientError",
+}
 
+
+def _is_retryable_error(error: Exception) -> bool:
+    transient = getattr(error, "is_transient", None)
+    if transient is not None:
+        return bool(transient)
+    retriable = getattr(error, "retriable", None)
+    if callable(retriable):
+        return bool(retriable())
+    return type(error).__name__ not in _PERMANENT_ERROR_NAMES
+
+
+def _sync_records(consumer, send, *, retry_backoff_s: float, log_every_n_messages: int) -> dict:
+    stats = {"seen": 0, "synced": 0, "failed": 0}
+    for record in consumer:
+        stats["seen"] += 1
+        while True:
+            try:
+                send(record)
+                stats["synced"] += 1
+                break
+            except Exception as exc:  # noqa: BLE001 - cloud SDK errors vary by sink
+                stats["failed"] += 1
+                if not _is_retryable_error(exc):
+                    print(
+                        f"Dropping non-retryable {SYNC_TARGET} message from "
+                        f"{record.topic}: {exc}"
+                    )
+                    break
+                print(
+                    f"Failed to mirror message from {record.topic} to {SYNC_TARGET}: {exc}; "
+                    f"retrying in {retry_backoff_s}s"
+                )
+                time.sleep(retry_backoff_s)
+        consumer.commit({
+            TopicPartition(record.topic, record.partition): OffsetAndMetadata(record.offset + 1, ""),
+        })
+        if log_every_n_messages and stats["seen"] % log_every_n_messages == 0:
+            print(
+                "telemetry-cloud-sync stats: "
+                f"seen={stats['seen']} synced={stats['synced']} failed={stats['failed']}"
+            )
+    return stats
+
+
+def main() -> None:
     if SYNC_TARGET == "iothub":
         sinks = _make_iothub_clients()
+        topics = _topics_with_sinks(KAFKA_TOPICS, sinks)
+        if not topics:
+            for client in sinks.values():
+                client.shutdown()
+            raise RuntimeError("no configured IoT Hub sinks match SYNC_KAFKA_TOPICS")
+        consumer = _make_consumer(topics)
         send = lambda record: _send_to_iothub(sinks, record)  # noqa: E731
         print(f"Mirroring {KAFKA_TOPICS} from {KAFKA_BROKERS} to Azure IoT Hub devices {list(sinks)}")
     elif SYNC_TARGET == "eventhub":
         sinks = _make_eventhub_producer()
+        consumer = _make_consumer()
         send = lambda record: _send_to_eventhub(sinks, record)  # noqa: E731
         print(f"Mirroring {KAFKA_TOPICS} from {KAFKA_BROKERS} to Event Hubs namespace {EVENTHUB_NAMESPACE_FQDN}")
     else:
         raise RuntimeError(f"Unknown SYNC_TARGET {SYNC_TARGET!r}; expected 'eventhub' or 'iothub'")
 
     stats = {"seen": 0, "synced": 0, "failed": 0}
-
     try:
-        for record in consumer:
-            stats["seen"] += 1
-            # Retry indefinitely without advancing the Kafka offset, so a
-            # disconnected cloud endpoint just delays sync (bounded by local
-            # Kafka retention) instead of dropping messages.
-            while True:
-                try:
-                    send(record)
-                    stats["synced"] += 1
-                    break
-                except Exception as exc:  # noqa: BLE001 - cloud endpoint may be unreachable/rejecting
-                    stats["failed"] += 1
-                    print(
-                        f"Failed to mirror message from {record.topic} to {SYNC_TARGET}: {exc}; "
-                        f"retrying in {RETRY_BACKOFF_S}s"
-                    )
-                    time.sleep(RETRY_BACKOFF_S)
-            consumer.commit()
-            if LOG_EVERY_N_MESSAGES and stats["seen"] % LOG_EVERY_N_MESSAGES == 0:
-                print(
-                    "telemetry-cloud-sync stats: "
-                    f"seen={stats['seen']} synced={stats['synced']} failed={stats['failed']}"
-                )
+        stats = _sync_records(
+            consumer,
+            send,
+            retry_backoff_s=RETRY_BACKOFF_S,
+            log_every_n_messages=LOG_EVERY_N_MESSAGES,
+        )
     finally:
         print(
             "telemetry-cloud-sync final stats: "

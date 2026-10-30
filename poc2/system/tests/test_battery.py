@@ -2,8 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import load_component_modules
-from starlette.testclient import TestClient
+from conftest import api_test_client, load_component_modules
 
 
 @pytest.fixture
@@ -93,29 +92,26 @@ def test_battery_controller(battery_modules):
 
 
 def test_battery_api_endpoints(battery_modules):
-    app = battery_modules["main"].app
-    client = TestClient(app, raise_server_exceptions=False)
+    main = battery_modules["main"]
+    with api_test_client(main.app, main.controller) as client:
+        res = client.get("/health")
+        assert res.status_code == 503
 
-    res = client.get("/health")
-    assert res.status_code in (200, 503)
+        res = client.get("/status")
+        assert res.status_code == 200
+        assert "soc" in res.json()
 
-    res = client.get("/status")
-    assert res.status_code == 200
-    assert "soc" in res.json()
+        res = client.get("/load")
+        assert res.status_code == 200
+        res = client.post("/load", json={"load_ratio": 0.4})
+        assert res.status_code == 200
+        assert res.json()["target_load_ratio"] == 0.4
 
-    # Load endpoints
-    res = client.get("/load")
-    assert res.status_code == 200
-    res = client.post("/load", json={"load_ratio": 0.4})
-    assert res.status_code == 200
-    assert res.json()["target_load_ratio"] == 0.4
-
-    # Charge endpoints
-    res = client.get("/charge")
-    assert res.status_code == 200
-    res = client.post("/charge", json={"power_kw": 250.0})
-    assert res.status_code == 200
-    assert res.json()["target_charge_power_kw"] == 250.0
+        res = client.get("/charge")
+        assert res.status_code == 200
+        res = client.post("/charge", json={"power_kw": 250.0})
+        assert res.status_code == 200
+        assert res.json()["target_charge_power_kw"] == 250.0
 
     # Anomaly endpoints
     res = client.get("/anomaly")

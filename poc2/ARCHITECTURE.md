@@ -60,9 +60,9 @@ Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and 
 
 The replay-streamer reads every source (`short` and `long_*`) of the selected `run_id` from PostgreSQL, merged by source time `t` (all sources share one time grid; shorter ones end first). In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` (time steps per tick; default 1 step per 1000 ms) control the emission rate.
 
-The dataset collector consumes `dataset.telemetry` and implements the agent's HTTP collector protocol. The first agent deployed by `scripts/03-agent.sh` polls it; the other agents collect their local cgroup metrics only. The chart also provides an optional single-agent Deployment, but it must not be enabled alongside the multi-node script.
+The dataset collector consumes `dataset.telemetry` and implements the agent's HTTP collector protocol. When `DATASET_COLLECTOR_URL` is configured, the first agent deployed by `scripts/03-agent.sh` polls it; otherwise all agents collect only local cgroup metrics. The chart also provides an optional single-agent Deployment, but it must not be enabled alongside the multi-node script.
 
-The collector averages all new Kafka values for each `(run_id, signal)` during one agent collection window, returning one sample per key. Its default source polling interval is 5s, independent of the streamer's interval and points-per-tick: faster streams simply contribute more samples to that window, and signals with no new events are omitted. Samples use `metric_type=<signal>`, `subject=engine:<run_id>`, `unit=unknown`, and no range, with source and origin labels. Since these are engine signals rather than host resource/pressure measurements, they remain unrouted in `semantic-map/domain_spec.json`: the agent records them as scoped properties, but no existing construct summarizes them.
+The collector averages all new Kafka values for each `(run_id, signal)` during one agent collection window, returning one sample per key. Its default source polling interval is 5s, independent of the streamer's interval and points-per-tick: faster streams simply contribute more samples to that window, and signals with no new events are omitted. Events provide per-signal units and ranges as `metadata.signals` JSON keyed by signal, for example `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. Replay-streamer preserves explicit declarations from PostgreSQL; when absent in the supplied dataset, both real and synthetic modes preserve raw values and declare `dataset-native` units with observed min/max ranges pooled across sources. Constant signals receive symmetric padding of 1% (at least 1 unit). Generated metadata records its provenance and is logged, without inventing physical units or changing database rows. The collector forwards those values as `unit` and `range`, with source and origin labels. Since these are engine signals rather than host resource/pressure measurements, they remain unrouted in `semantic-map/domain_spec.json`: the agent records them as scoped properties, but no existing construct summarizes them. Replay-streamer also exposes HTTP instrumentation at `/metrics` for Prometheus.
 
 ### 2) Direct pod deployment for the agent mesh
 
@@ -127,17 +127,19 @@ The services in `system/` model power-system components rather than generic appl
 - `propulsion`: power consumer
 - `auxiliary-load`: another power consumer
 - `switchboard`: central allocation authority
-- `navigation`: vessel navigation sensors (GNSS, heading, wind, depth, attitude) broadcasting NMEA 2000 PGNs on a virtual CAN bus, bridged to TCP by an Actisense-ASCII gateway (port 2597)
+- `navigation`: vessel navigation sensors (GNSS, heading, wind, depth, attitude) broadcasting NMEA 2000 PGNs on a virtual CAN bus, with a custom TCP CAN-frame debug stream (port 2597; not Actisense/canboat wire format)
 
-These components generate and consume telemetry, and the switchboard decides who gets power based on priority and available supply.
+These components generate and consume telemetry. The switchboard reads genset and battery supply from Modbus, ignores stale source readings and consumer requests, and allocates available power by descending consumer priority. Higher-priority consumers are served first; if supply is insufficient, lower-priority consumers receive partial or zero allocations (load shedding).
 
 ### Telemetry writer
 
 `system/telemetry-writer` consumes the Kafka topics and maps them to InfluxDB measurements. This bridge is essential because the simulation services publish machine-readable events, while Grafana expects a time-series database.
 
+The writer commits Kafka offsets only after a successful InfluxDB write. Malformed records are committed as intentionally dropped when `STRICT_VALIDATION=false`; with strict validation enabled, the writer exits without committing the invalid record so the failure is visible. The chart's Prometheus service scrapes annotated application `/metrics` endpoints, including telemetry and HTTP instrumentation; Grafana dashboards can query those metrics alongside InfluxDB telemetry.
+
 ### InfluxDB and Grafana
 
-The chart provisions InfluxDB and Grafana and preconfigures Grafana's datasource to point at InfluxDB. This allows the operator to observe system health and telemetry without separate manual config.
+The chart provisions InfluxDB and Grafana and preconfigures Grafana datasources for InfluxDB telemetry and Prometheus application metrics. This allows the operator to observe system health and telemetry without separate manual config.
 
 The practical requirement is simple: the InfluxDB credentials must exist before `helm install` or the chart will fail to initialize the datasource.
 
@@ -182,7 +184,9 @@ This project has a few hard boundaries that matter in practice:
 - The `di-agent` binary is built from the `semantic-map` Go sources and deployed separately.
 - The telemetry service credentials are required before chart deployment.
 
-These boundaries keep the lab understandable: one step creates the nodes, one step creates the cluster, one step deploys services, and one step deploys the peer agent mesh.
+The scripts support kubeadm (with Flannel), k3s, and a KubeEdge CloudCore/EdgeCore deployment path. These boundaries keep the lab understandable: one step creates the nodes, one step creates the cluster, one step deploys services, and one step deploys the peer agent mesh.
+
+The multi-node agent script configures each pod with `NODE_ID`, `REGIME`, `KAFKA_BROKERS`, and `COLLECT_INTERVAL`. `DATASET_COLLECTOR_URL` is optional and defaults to empty; the first worker only receives the collector URL when it is configured. The Makefile exposes `DATASET_COLLECTOR_URL` and `AGENT_COLLECT_INTERVAL` for deployments that enable dataset collection.
 
 ## Execution flow
 

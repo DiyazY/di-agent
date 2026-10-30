@@ -2,8 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import load_component_modules
-from starlette.testclient import TestClient
+from conftest import api_test_client, load_component_modules
 
 
 @pytest.fixture
@@ -83,32 +82,31 @@ def test_navigation_controller(nav_modules):
 
 
 def test_navigation_api_endpoints(nav_modules):
-    app = nav_modules["main"].app
-    client = TestClient(app, raise_server_exceptions=False)
+    main = nav_modules["main"]
+    with api_test_client(main.app, main.controller) as client:
+        res = client.get("/health")
+        assert res.status_code == 503
 
-    res = client.get("/health")
-    assert res.status_code in (200, 503)
+        res = client.get("/status")
+        assert res.status_code == 200
+        assert "truth" in res.json()
 
-    res = client.get("/status")
-    assert res.status_code == 200
-    assert "truth" in res.json()
+        res = client.get("/speed")
+        assert res.status_code == 200
 
-    res = client.get("/speed")
-    assert res.status_code == 200
+        res = client.post("/speed", json={"speed_knots": 14.5})
+        assert res.status_code == 200
+        assert res.json()["speed_target_knots"] == 14.5
 
-    res = client.post("/speed", json={"speed_knots": 14.5})
-    assert res.status_code == 200
-    assert res.json()["speed_target_knots"] == 14.5
+        res = client.get("/route")
+        assert res.status_code == 200
+        assert "waypoints" in res.json()
 
-    res = client.get("/route")
-    assert res.status_code == 200
-    assert "waypoints" in res.json()
-
-    res = client.get("/anomaly")
-    assert res.status_code == 200
-    res = client.post("/anomaly", json={"enabled": True})
-    assert res.status_code == 200
-    assert res.json()["anomaly_enabled"] is True
+        res = client.get("/anomaly")
+        assert res.status_code == 200
+        res = client.post("/anomaly", json={"enabled": True})
+        assert res.status_code == 200
+        assert res.json()["anomaly_enabled"] is True
 
     res = client.get("/nmea2000/latest")
     assert res.status_code == 200

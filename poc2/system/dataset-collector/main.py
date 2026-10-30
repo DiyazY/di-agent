@@ -28,6 +28,8 @@ if MAX_ACTIVE_SERIES < 1:
 
 @dataclass
 class Aggregate:
+    unit: str
+    value_range: tuple[float, float]
     count: int = 0
     mean: float = 0.0
     sources: set[str] = field(default_factory=set)
@@ -42,6 +44,53 @@ class Aggregate:
         else:
             self.sources.add(source)
         self.origins.add(origin)
+
+
+def _signal_metadata(metadata: Any, signal: str) -> tuple[str, tuple[float, float]]:
+    if not isinstance(metadata, dict):
+        raise ValueError("run metadata must be an object")
+
+    signals = metadata.get("signals", metadata)
+    if isinstance(signals, str):
+        try:
+            signals = json.loads(signals)
+        except json.JSONDecodeError as exc:
+            raise ValueError("run metadata signals must be valid JSON") from exc
+
+    details = signals.get(signal) if isinstance(signals, dict) else None
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"metadata for signal {signal!r} must be valid JSON") from exc
+    if not isinstance(details, dict):
+        unit = metadata.get(f"{signal}.unit", metadata.get(f"{signal}_unit"))
+        raw_range = metadata.get(f"{signal}.range", metadata.get(f"{signal}_range"))
+        details = {"unit": unit, "range": raw_range}
+
+    unit = details.get("unit")
+    raw_range = details.get("range")
+    if raw_range is None and "minimum" in details and "maximum" in details:
+        raw_range = [details["minimum"], details["maximum"]]
+    if isinstance(raw_range, str):
+        try:
+            raw_range = json.loads(raw_range)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"range metadata for signal {signal!r} must be valid JSON") from exc
+    if (
+        not isinstance(unit, str)
+        or not unit.strip()
+        or not isinstance(raw_range, (list, tuple))
+        or len(raw_range) != 2
+    ):
+        raise ValueError(f"run metadata must declare unit and [min, max] range for {signal!r}")
+    try:
+        lower, upper = (float(value) for value in raw_range)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"range metadata for signal {signal!r} must be numeric") from exc
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+        raise ValueError(f"range metadata for signal {signal!r} must be finite and increasing")
+    return unit.strip(), (lower, upper)
 
 
 class DatasetCollector:
@@ -111,6 +160,7 @@ class DatasetCollector:
             source = message["source"]
             origin = message["origin"]
             value = float(message["value"])
+            unit, value_range = _signal_metadata(message.get("metadata"), signal)
             if not isinstance(run_id, str) or not run_id or len(run_id) > 200:
                 raise ValueError("run_id must be a non-empty string")
             if not isinstance(signal, str) or len(signal) > 200 or not METRIC_RE.fullmatch(signal):
@@ -143,8 +193,12 @@ class DatasetCollector:
                     self._dropped += 1
                     logger.warning("Dropping dataset message: active series limit reached")
                     return False
-                aggregate = Aggregate()
+                aggregate = Aggregate(unit=unit, value_range=value_range)
                 self._pending[key] = aggregate
+            elif aggregate.unit != unit or aggregate.value_range != value_range:
+                self._dropped += 1
+                logger.warning("Dropping conflicting metadata for signal %r within run %r", signal, run_id)
+                return False
             self._available.add(signal)
             aggregate.add(value, source, origin)
             self._received += 1
@@ -185,7 +239,8 @@ class DatasetCollector:
                 "value": aggregate.mean,
                 "timestamp_unix": now_unix,
                 "subject": f"engine:{run_id}",
-                "unit": "unknown",
+                "unit": aggregate.unit,
+                "range": list(aggregate.value_range),
                 "labels": labels,
             })
         return {"seq": seq, "samples": samples}

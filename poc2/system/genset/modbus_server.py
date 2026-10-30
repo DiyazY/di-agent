@@ -47,6 +47,8 @@ def _encode_float(value: float) -> list[int]:
 
 
 def _decode_float(registers: list[int]) -> float:
+    if len(registers) < 2:
+        raise ValueError("float register value requires two registers")
     return struct.unpack(">f", struct.pack(">HH", registers[0], registers[1]))[0]
 
 
@@ -58,18 +60,21 @@ class _CallbackDataBlock(ModbusSequentialDataBlock):
         super().__init__(0, values)
         self._on_write = on_write
         self._syncing = False
+        self._sync_lock = threading.RLock()
 
     def setValues(self, address, values) -> None:
-        super().setValues(address, values)
-        if not self._syncing:
-            self._on_write(address, values)
+        with self._sync_lock:
+            super().setValues(address, values)
+            if not self._syncing:
+                self._on_write(address, values)
 
     def sync(self, address, values) -> None:
-        self._syncing = True
-        try:
-            self.setValues(address, values)
-        finally:
-            self._syncing = False
+        with self._sync_lock:
+            self._syncing = True
+            try:
+                self.setValues(address, values)
+            finally:
+                self._syncing = False
 
 
 class GensetModbusServer:

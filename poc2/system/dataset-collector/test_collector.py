@@ -3,7 +3,9 @@ import unittest
 
 from fastapi import HTTPException
 
-from main import DatasetCollector
+from conftest import load_component_modules
+
+DatasetCollector = load_component_modules("dataset-collector", ["main"])["main"].DatasetCollector
 
 
 class DatasetCollectorTests(unittest.TestCase):
@@ -25,6 +27,11 @@ class DatasetCollectorTests(unittest.TestCase):
                 "source": source,
                 "value": value,
                 "origin": origin,
+                "metadata": {
+                    "signals": {
+                        signal: {"unit": "rpm", "range": [0, 6000]},
+                    },
+                },
             })
         )
 
@@ -39,8 +46,8 @@ class DatasetCollectorTests(unittest.TestCase):
         self.assertEqual(len(reply["samples"]), 1)
         sample = reply["samples"][0]
         self.assertEqual(sample["value"], 2)
-        self.assertEqual(sample["unit"], "unknown")
-        self.assertNotIn("range", sample)
+        self.assertEqual(sample["unit"], "rpm")
+        self.assertEqual(sample["range"], [0, 6000])
         self.assertEqual(sample["subject"], "engine:run-1")
         self.assertEqual(sample["labels"]["dataset_source"], "long_333000,short")
 
@@ -65,10 +72,35 @@ class DatasetCollectorTests(unittest.TestCase):
             [],
         )
 
+    def test_requires_signal_unit_and_range_metadata(self):
+        self.assertFalse(self.collector.ingest_json(json.dumps({
+            "run_id": "run-1",
+            "signal": "Speed",
+            "source": "short",
+            "value": 1.0,
+            "origin": "real",
+            "metadata": {},
+        })))
+        self.assertEqual(self.collector.status()["dropped"], 1)
+
     def test_requires_hello_before_collect(self):
         collector = DatasetCollector()
         with self.assertRaises(HTTPException):
             collector.collect({"seq": 1, "now_unix": 1761200000})
+
+    def test_conflicting_metadata_is_logged_and_dropped_without_losing_batch(self):
+        self.assertTrue(self.add(value=1000))
+        message = {
+            "run_id": "run-1", "signal": "Speed", "source": "short",
+            "origin": "real", "value": 1100,
+            "metadata": {"signals": {"Speed": {"unit": "rpm", "range": [0, 7000]}}},
+        }
+        with self.assertLogs("dataset-collector", level="WARNING"):
+            self.assertFalse(self.collector.ingest_json(json.dumps(message)))
+        self.assertEqual(self.collector.status()["dropped"], 1)
+        reply = self.collector.collect({"seq": 1, "now_unix": 1761200000})
+        self.assertEqual(reply["samples"][0]["value"], 1000)
+        self.assertEqual(reply["samples"][0]["range"], [0, 6000])
 
 
 if __name__ == "__main__":

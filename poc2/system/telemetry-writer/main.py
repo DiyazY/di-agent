@@ -4,7 +4,7 @@ import time
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
-from kafka import KafkaConsumer
+from kafka import KafkaConsumer, OffsetAndMetadata, TopicPartition
 from prometheus_client import Counter, start_http_server
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092").split(",")
@@ -180,6 +180,7 @@ def _make_consumer() -> KafkaConsumer:
                 value_deserializer=lambda v: json.loads(v.decode("utf-8")),
                 key_deserializer=lambda k: k.decode("utf-8") if k is not None else None,
                 auto_offset_reset="latest",
+                enable_auto_commit=False,
                 **extra_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - broker may not be up yet
@@ -254,6 +255,28 @@ def _to_points(message: dict, topic: str | None = None) -> list[Point]:
     return points
 
 
+def _commit_record(consumer: KafkaConsumer, record) -> None:
+    partition = TopicPartition(record.topic, record.partition)
+    consumer.commit({partition: OffsetAndMetadata(record.offset + 1, "")})
+
+
+def _process_record(consumer, write_api, record, strict_validation: bool) -> bool:
+    try:
+        points = _to_points(record.value, record.topic)
+    except (KeyError, ValueError, TypeError) as exc:
+        MESSAGES_DROPPED.inc()
+        if strict_validation:
+            raise ValueError(f"Malformed Kafka message on {record.topic}: {exc}") from exc
+        print(f"Skipping malformed message {record.value!r}: {exc}")
+        _commit_record(consumer, record)
+        return False
+
+    write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+    MESSAGES_WRITTEN.inc()
+    _commit_record(consumer, record)
+    return True
+
+
 def main() -> None:
     start_http_server(METRICS_PORT)
     consumer = _make_consumer()
@@ -269,18 +292,10 @@ def main() -> None:
             message = record.value
             stats["seen"] += 1
             MESSAGES_SEEN.inc()
-            try:
-                points = _to_points(message, record.topic)
-                write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+            if _process_record(consumer, write_api, record, STRICT_VALIDATION):
                 stats["written"] += 1
-                MESSAGES_WRITTEN.inc()
-            except (KeyError, ValueError, TypeError) as exc:
+            else:
                 stats["dropped"] += 1
-                MESSAGES_DROPPED.inc()
-                if STRICT_VALIDATION:
-                    print(f"Dropped malformed message {message!r}: {exc}")
-                else:
-                    print(f"Skipping malformed message {message!r}: {exc}")
             if LOG_EVERY_N_MESSAGES and stats["seen"] % LOG_EVERY_N_MESSAGES == 0:
                 print(
                     "telemetry-writer stats: "

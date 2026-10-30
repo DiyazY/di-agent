@@ -34,6 +34,5 @@ def status() -> dict:
 
 @app.get("/modbus")
 def modbus_status() -> dict:
-    """Read-only view of genset/battery status polled over Modbus TCP,
-    alongside (not instead of) the Kafka-derived /status view."""
+    """View the Modbus supply inputs used by the switchboard's allocation."""
     return controller.get_modbus_status()

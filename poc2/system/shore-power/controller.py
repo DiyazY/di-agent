@@ -73,6 +73,7 @@ class ShorePowerController:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._errors: list[str] = []
+        self._battery_forward_error: str | None = None
 
     def start(self) -> None:
         self._producer = _make_producer()
@@ -111,15 +112,24 @@ class ShorePowerController:
         thread_status = {"telemetry": self._thread is not None and self._thread.is_alive()}
         with self._lock:
             errors = list(self._errors)
-        healthy = all(thread_status.values()) and not errors
-        return {"status": "ok" if healthy else "error", "threads": thread_status, "errors": errors}
+            battery_forward_error = self._battery_forward_error
+        healthy = all(thread_status.values()) and not errors and battery_forward_error is None
+        return {
+            "status": "ok" if healthy else "error",
+            "threads": thread_status,
+            "errors": errors,
+            "battery_forward_error": battery_forward_error,
+        }
 
     def _record_error(self, message: str) -> None:
         with self._lock:
             self._errors.append(message)
 
     def _send(self, topic: str, *, key: str, value: dict) -> None:
-        self._producer.send(topic, key=key, value=value).get(timeout=5)
+        try:
+            self._producer.send(topic, key=key, value=value).get(timeout=5)
+        except KafkaTimeoutError as error:
+            logger.warning("Kafka send to %s timed out; telemetry loop will continue: %s", topic, error)
 
     def _charge_battery(self, power_kw: float) -> None:
         try:
@@ -128,8 +138,12 @@ class ShorePowerController:
                 json={"power_kw": power_kw},
                 timeout=BATTERY_REQUEST_TIMEOUT_S,
             ).raise_for_status()
+            with self._lock:
+                self._battery_forward_error = None
         except requests.RequestException as error:
             logger.warning("Failed to forward charge request to battery: %s", error)
+            with self._lock:
+                self._battery_forward_error = str(error)
 
     def _run(self) -> None:
         try:

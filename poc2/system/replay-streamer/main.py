@@ -11,11 +11,12 @@ import random
 import threading
 import time
 from dataclasses import asdict, dataclass
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Response
 from kafka import KafkaProducer
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -103,6 +104,63 @@ def _metadata(connection, run_id: str) -> dict[str, str | None]:
     return {str(key): None if value is None else str(value) for key, value in rows}
 
 
+def _collector_metadata(
+    profiles: list[SignalProfile], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    declared = metadata.get("signals", metadata)
+    if isinstance(declared, str):
+        declared = json.loads(declared)
+    if not isinstance(declared, dict):
+        raise ValueError("run metadata signals must be an object")
+
+    observed: dict[str, tuple[float, float]] = {}
+    for profile in profiles:
+        if (
+            not math.isfinite(profile.minimum)
+            or not math.isfinite(profile.maximum)
+            or profile.minimum > profile.maximum
+        ):
+            raise ValueError(f"invalid observed range for {profile.signal!r}")
+        lower, upper = observed.get(profile.signal, (profile.minimum, profile.maximum))
+        observed[profile.signal] = (min(lower, profile.minimum), max(upper, profile.maximum))
+
+    signals = {}
+    for signal, (lower, upper) in observed.items():
+        details = declared.get(signal, {})
+        if isinstance(details, str):
+            details = json.loads(details)
+        if not isinstance(details, dict):
+            raise ValueError(f"metadata for signal {signal!r} must be an object")
+        details = dict(details)
+        unit = details.get("unit", metadata.get(f"{signal}.unit", metadata.get(f"{signal}_unit")))
+        bounds = details.get("range", metadata.get(f"{signal}.range", metadata.get(f"{signal}_range")))
+        if bounds is None and "minimum" in details and "maximum" in details:
+            bounds = [details["minimum"], details["maximum"]]
+        if unit is None:
+            unit = "dataset-native"
+            details["unit_source"] = "dataset-native"
+            logger.warning("Signal %s has no physical unit; preserving dataset-native values", signal)
+        if not isinstance(unit, str) or not unit.strip():
+            raise ValueError(f"invalid unit metadata for {signal!r}")
+        if bounds is None:
+            # A constant signal still needs a nonzero normalization span.
+            if lower == upper:
+                padding = max(abs(lower) * 0.01, 1.0)
+                lower, upper = lower - padding, upper + padding
+            bounds = [lower, upper]
+            details["range_source"] = "observed"
+            logger.warning("Signal %s has no declared range; using observed bounds %s", signal, bounds)
+        if isinstance(bounds, str):
+            bounds = json.loads(bounds)
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            raise ValueError(f"range metadata for {signal!r} must contain [min, max]")
+        lower, upper = (float(value) for value in bounds)
+        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise ValueError(f"range metadata for {signal!r} must be finite and increasing")
+        signals[signal] = {**details, "unit": unit.strip(), "range": [lower, upper]}
+    return {**metadata, "signals": signals}
+
+
 def _series_rows(cursor, run_id: str, source: str, signal: str) -> Iterator[tuple]:
     cursor.execute(
         """
@@ -126,26 +184,17 @@ def real_records(config: StreamConfig) -> Iterator[dict]:
     """
     while True:
         with psycopg.connect(**PG_CONFIG) as connection:
-            metadata = _metadata(connection, config.run_id)
-            series = connection.execute(
-                """
-                SELECT DISTINCT source, signal FROM timeseries
-                WHERE run_id = %s AND value IS NOT NULL
-                ORDER BY source, signal
-                """,
-                (config.run_id,),
-            ).fetchall()
-            if not series:
-                raise ValueError(f"no usable samples found for run_id={config.run_id!r}")
+            profiles = _profiles(connection, config.run_id)
+            metadata = _collector_metadata(profiles, _metadata(connection, config.run_id))
             with contextlib.ExitStack() as stack:
                 streams = [
                     _series_rows(
                         stack.enter_context(connection.cursor(name=f"replay_{index}")),
                         config.run_id,
-                        source,
-                        signal,
+                        profile.source,
+                        profile.signal,
                     )
-                    for index, (source, signal) in enumerate(series)
+                    for index, profile in enumerate(profiles)
                 ]
                 for source, signal, t_source, value in heapq.merge(
                     *streams, key=lambda row: (row[2], row[0], row[1])
@@ -170,23 +219,30 @@ def time_steps(records: Iterator[dict]) -> Iterator[list[dict]]:
         yield list(group)
 
 
-def load_profiles(config: StreamConfig) -> tuple[list[SignalProfile], dict[str, str | None]]:
-    with psycopg.connect(**PG_CONFIG) as connection:
-        rows = connection.execute(
-            """
-            SELECT source, signal, min(value), max(value), avg(value),
-                   coalesce(stddev_samp(value), 0), count(*), min(t), max(t)
-            FROM timeseries
-            WHERE run_id = %s AND value IS NOT NULL
-            GROUP BY source, signal
-            ORDER BY source, signal
-            """,
-            (config.run_id,),
-        ).fetchall()
-        metadata_rows = connection.execute(
-            "SELECT parameter, value FROM run_metadata WHERE run_id = %s ORDER BY parameter",
-            (config.run_id,),
-        ).fetchall()
+def _wait_for_send_futures(futures, timeout_s: float = 5) -> None:
+    first_error = None
+    for future in futures:
+        try:
+            future.get(timeout=timeout_s)
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
+
+
+def _profiles(connection, run_id: str) -> list[SignalProfile]:
+    rows = connection.execute(
+        """
+        SELECT source, signal, min(value), max(value), avg(value),
+               coalesce(stddev_samp(value), 0), count(*), min(t), max(t)
+        FROM timeseries
+        WHERE run_id = %s AND value IS NOT NULL
+        GROUP BY source, signal
+        ORDER BY source, signal
+        """,
+        (run_id,),
+    ).fetchall()
     profiles = [
         SignalProfile(
             source=source,
@@ -202,11 +258,15 @@ def load_profiles(config: StreamConfig) -> tuple[list[SignalProfile], dict[str, 
         for source, signal, minimum, maximum, mean, stddev, count, first_t, last_t in rows
     ]
     if not profiles:
-        raise ValueError(f"no usable samples found for run_id={config.run_id!r}")
-    return profiles, {
-        str(key): None if value is None else str(value)
-        for key, value in metadata_rows
-    }
+        raise ValueError(f"no usable samples found for run_id={run_id!r}")
+    return profiles
+
+
+def load_profiles(config: StreamConfig) -> tuple[list[SignalProfile], dict[str, Any]]:
+    with psycopg.connect(**PG_CONFIG) as connection:
+        profiles = _profiles(connection, config.run_id)
+        metadata = _collector_metadata(profiles, _metadata(connection, config.run_id))
+    return profiles, metadata
 
 
 def synthetic_records(config: StreamConfig) -> Iterator[dict]:
@@ -328,17 +388,21 @@ class ReplayService:
                         break
                     assert self._producer is not None
                     emitted_at = time.time()
+                    futures = []
                     for sample_index, record in enumerate(batch):
                         message = {
                             **record,
                             "timestamp": emitted_at,
                             "timestamp_ns": int(emitted_at * 1_000_000_000) + sample_index,
                         }
-                        self._producer.send(
-                            KAFKA_TOPIC,
-                            key=f"{config.run_id}:{record['source']}:{record['signal']}",
-                            value=message,
+                        futures.append(
+                            self._producer.send(
+                                KAFKA_TOPIC,
+                                key=f"{config.run_id}:{record['source']}:{record['signal']}",
+                                value=message,
+                            )
                         )
+                    _wait_for_send_futures(futures)
                     self._producer.flush(timeout=max(config.interval_ms / 1000, 1))
                     self._set_status(
                         state="running",
@@ -369,6 +433,7 @@ class ReplayService:
 
 service = ReplayService()
 app = FastAPI(title="PostgreSQL telemetry replay")
+Instrumentator().instrument(app).expose(app)
 
 
 @app.on_event("startup")
