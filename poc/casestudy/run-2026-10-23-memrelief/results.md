@@ -1,5 +1,7 @@
 # Memory relief on di-node, 2026-10-23
 
+> **Rerun 2026-10-30** with the refault-gated io stall: see `../run-2026-10-30-memrelief/results.md`.
+
 `memrelief.sh` on the k0s VM (Ubuntu 24.04 arm64, kernel 6.8.0-147, MGLRU on, no swap, cgroup v2,
 cgroupfs driver, MemoryQoS off), agent `ef9db5f` (branch `feat/actuators`) on `agent-relief.yaml`
 with both levers at their defaults of that commit — the memory lever's `step` was 0.10 then (raised to 0.25 afterwards, Ruling R19) — and the ledger at `<run>/actions.json`. Times are EEST.
