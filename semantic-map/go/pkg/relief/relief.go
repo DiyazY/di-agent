@@ -176,17 +176,14 @@ type Loop struct {
 	since        time.Time // when the current phase began
 	paused       bool
 	inFlight     *Action
-	kept         []*Action            // oldest first; release reverts from the end
-	history      []*Action            // oldest first, at most historySize
-	released     map[string]time.Time // when each workload was last released
-	cycles       map[string]int       // throttle/release cycles within backoffWindow
-	lastRelease  time.Time            // the last release revert, for one per Settle
-	noted        string               // the last refusal journalled this episode
-	noPlanAt     time.Time            // when attribution last found no plan
-	noPlanKey    string               // the eligible workloads it found none among
-	unread       map[string]*Unread   // by subject: ledger entries whose setting could not be read at the latest reconcile
-	reconcileErr string               // why the latest reconcile failed, "" when it succeeded
-	awaiting     map[string]bool      // subjects whose pending change may yet land; read again every pass. Touched only under pass
+	kept         []*Action          // oldest first; release reverts from the end
+	history      []*Action          // oldest first, at most historySize
+	noted        string             // the last refusal journalled this episode
+	noPlanAt     time.Time          // when attribution last found no plan
+	noPlanKey    string             // the eligible workloads it found none among
+	unread       map[string]*Unread // by subject: ledger entries whose setting could not be read at the latest reconcile
+	reconcileErr string             // why the latest reconcile failed, "" when it succeeded
+	awaiting     map[string]bool    // subjects whose pending change may yet land; read again every pass. Touched only under pass
 	nActs        int
 	nKept        int
 	nReverted    int
@@ -228,7 +225,7 @@ func New(c Config) (*Loop, error) {
 		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act, epoch: now.Unix(),
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
-		released: map[string]time.Time{}, cycles: map[string]int{}, unread: map[string]*Unread{}, spent: map[string]spend{},
+		unread: map[string]*Unread{}, spent: map[string]spend{},
 	}, nil
 }
 
@@ -367,11 +364,8 @@ func (l *Loop) Tick(ctx context.Context) {
 	l.phase = l.trigger.Observe(seen, pressure, fresh)
 	if l.phase != prev {
 		l.since = now
-		switch l.phase {
-		case Relieving:
+		if l.phase == Relieving {
 			l.noted, l.noPlanAt = "", time.Time{}
-		case Releasing:
-			l.lastRelease = time.Time{}
 		}
 	}
 	if a := l.inFlight; a != nil && a.needBaseline && fresh {
@@ -394,7 +388,7 @@ func (l *Loop) Tick(ctx context.Context) {
 		}
 		return
 	}
-	l.release(ctx, now, pressure, phase, workloads)
+	l.release(now, phase)
 }
 
 // Reconcile takes up the changes the ledger says this node made with this
@@ -1004,11 +998,6 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		}
 		a = &Action{ID: id, Subject: plan.Subject, DecisionID: id, Plan: plan, Entry: entry,
 			ContentionAtAct: pressure, ActedAt: now, cooldown: eff.Settings.Cooldown, origin: &origin, SharesAtAct: shares}
-		if last, ok := l.released[plan.Subject]; ok && now.Sub(last) < backoffWindow {
-			l.cycles[plan.Subject]++
-		} else {
-			l.cycles[plan.Subject] = 0
-		}
 		l.history = appendHistory(l.history, a)
 	}
 	l.inFlight = a

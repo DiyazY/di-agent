@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/actuators"
@@ -16,7 +15,7 @@ import (
 const (
 	OutcomeKept       = "kept"        // it helped; the cap stays until release or expiry
 	OutcomeReverted   = "reverted"    // it did not help and was undone
-	OutcomeReleased   = "released"    // pressure ended and the cap was given back
+	OutcomeReleased   = "released"    // the workload left and its cap was given back
 	OutcomeExpired    = "expired"     // it outlived its expiry and was given back
 	OutcomeGone       = "gone"        // the workload left; there was nothing to give back
 	OutcomeManual     = "manual"      // an operator undid it
@@ -31,11 +30,6 @@ const (
 	// help: the map was wrong about it, and acting on it again soon would
 	// repeat the mistake.
 	failedCooldown = 4
-	// backoffWindow is how soon after its release a workload must be capped
-	// again for the capping to count as a repeated cycle.
-	backoffWindow = time.Hour
-	// backoffCap bounds a repeatedly capped workload's cooldown.
-	backoffCap = 4 * time.Hour
 	// historySize is how many actions Actions keeps.
 	historySize = 200
 )
@@ -389,81 +383,14 @@ func (l *Loop) reverted(now time.Time, a *Action, entry actuators.Entry, verifyI
 	l.end(now, a, OutcomeReverted, cooldown)
 }
 
-// release gives back the most recent kept change, one per Settle, whenever the
-// node is not relieving: after pressure has eased, and after a restart that
-// found caps on a calm node. One the actuator will not give back does not hold up
-// the rest: the next most recent is tried in the same tick, and the refused one
-// is tried again at the next release, a Settle later. A pass that cannot list
-// the workloads gives back nothing and tries again next tick. In Releasing, with
-// nothing left, it ends the phase. An action in flight is judged first, so it is
-// either kept and released in turn or reverted.
-func (l *Loop) release(ctx context.Context, now time.Time, pressure float64, phase Phase, workloads lister) {
-	l.mu.Lock()
-	if l.inFlight != nil {
-		l.mu.Unlock()
-		return
-	}
-	if len(l.kept) == 0 {
-		if phase == Releasing {
-			l.trigger.Released()
-			l.phase, l.since = l.trigger.Phase(), now
-		}
-		l.mu.Unlock()
-		return
-	}
-	if !l.lastRelease.IsZero() && now.Sub(l.lastRelease) < l.c.Settle {
-		l.mu.Unlock()
-		return
-	}
-	kept := make([]*Action, len(l.kept))
-	cooldowns := make([]time.Duration, len(l.kept))
-	for i, a := range l.kept {
-		kept[len(kept)-1-i] = a // newest first
-		cooldowns[len(kept)-1-i] = backoff(a.cooldown, l.cycles[a.Subject])
-	}
-	l.mu.Unlock()
-
-	var skipped []string
-	for i, a := range kept {
-		gone, why, err := l.undo(ctx, a, workloads)
-		switch {
-		case errors.Is(err, errNoListing):
-			return
-		case gone:
-			l.gone(now, a, why)
-			return
-		case err != nil:
-			l.undoFailed(a, "releasing", err)
-			skipped = append(skipped, a.ID)
-			continue
-		}
-		l.recordRelease(now, a, pressure, phase, cooldowns[i], skipped)
-		return
-	}
-}
-
-// recordRelease journals and records the release of a, whose revert went
-// through. skipped lists the newer actions the actuator would not give back first.
-func (l *Loop) recordRelease(now time.Time, a *Action, pressure float64, phase Phase, cooldown time.Duration, skipped []string) {
-	b := l.cfg.Map.Decide(l.id("release"), l.giveBackAsk(a.Subject, l.d.Relieves+" has eased"))
-	b.Property(l.d.Relieves)
-	b.Input("act", a.DecisionID)
-	b.Input("entry", a.Entry)
-	b.Input("pressure", pressure)
-	b.Input("phase", string(phase))
-	b.Note("released most recent first; cooling %s down for %s", a.Subject, cooldown)
-	if len(skipped) > 0 {
-		b.Input("skipped", skipped)
-		b.Note("newer changes the actuator would not give back were passed over, to be retried: %s", strings.Join(skipped, ", "))
-	}
-	b.Commit(map[string]any{"released": a.Subject, "cooldown": cooldown.String()})
-	l.end(now, a, OutcomeReleased, cooldown)
-
+// release ends Releasing once no change is left. It gives nothing back: pressure
+// under exit is low because of the caps in force, and giving one back brought the
+// pressure straight back (run 2026-10-30c). A cap comes off when it expires, when
+// an operator reverts it, or when its workload leaves.
+func (l *Loop) release(now time.Time, phase Phase) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lastRelease = now
-	l.released[a.Subject] = now
-	if len(l.kept) == 0 && l.inFlight == nil && l.trigger.Phase() == Releasing {
+	if phase == Releasing && l.inFlight == nil && len(l.kept) == 0 {
 		l.trigger.Released()
 		l.phase, l.since = l.trigger.Phase(), now
 	}
@@ -523,16 +450,6 @@ func (l *Loop) end(now time.Time, a *Action, outcome string, cooldown time.Durat
 	if cooldown > 0 {
 		l.budget.Cool(a.Subject, now.Add(cooldown))
 	}
-}
-
-// backoff is a workload's cooldown after its k-th cap/release cycle within
-// backoffWindow: doubled each cycle, capped at backoffCap.
-func backoff(base time.Duration, k int) time.Duration {
-	d := base
-	for i := 0; i < k && d < backoffCap; i++ {
-		d *= 2
-	}
-	return min(d, backoffCap)
 }
 
 func hasSubject(ws []runtime.Workload, subject string) bool {

@@ -390,50 +390,6 @@ func TestAnActionThatDidNotHelpIsReverted(t *testing.T) {
 	}
 }
 
-func TestReleaseRevertsLastFirstAndStopsOnReturn(t *testing.T) {
-	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}})
-	h.act("pod:a")
-	h.run(2*time.Minute, 0.44)
-	h.until(time.Minute, 0.44, "an action on pod:b", func() bool { _, ok := h.applied()["pod:b"]; return ok })
-	h.run(2*time.Minute, 0.38)
-	if a, b := h.action("pod:a"), h.action("pod:b"); a.Outcome != "kept" || b.Outcome != "kept" {
-		t.Fatalf("outcomes %q, %q; want both kept", a.Outcome, b.Outcome)
-	}
-	h.until(4*time.Minute, 0.05, "a release", func() bool { return len(h.ledger.All()) < 2 })
-	if h.l.Status().Phase != Releasing {
-		t.Fatalf("phase %s", h.l.Status().Phase)
-	}
-	if _, ok := h.applied()["pod:a"]; !ok || h.action("pod:b").Outcome != "released" {
-		t.Fatalf("applied %v, pod:b %+v; want the newest (pod:b) released first", h.applied(), h.action("pod:b"))
-	}
-	if n := len(h.decisions("release")); n != 1 {
-		t.Fatalf("%d release decisions", n)
-	}
-	h.run(time.Minute+tick, 0.4)
-	if h.l.Status().Phase != Relieving {
-		t.Fatalf("phase %s; want relieving again", h.l.Status().Phase)
-	}
-	h.run(5*time.Minute, 0.4)
-	if _, ok := h.applied()["pod:a"]; !ok {
-		t.Fatalf("pod:a was released after pressure returned")
-	}
-}
-
-func TestRepeatedThrottlingBacksOff(t *testing.T) {
-	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
-	for i, want := range []time.Duration{10 * time.Minute, 20 * time.Minute, 40 * time.Minute} {
-		h.act("pod:a")
-		h.run(2*time.Minute, 0.44)
-		h.until(5*time.Minute, 0.05, "a release", func() bool { return len(h.ledger.All()) == 0 })
-		if got := h.l.Status().Cooling["pod:a"].Sub(h.now); got != want {
-			t.Fatalf("cycle %d: cooldown %s; want %s", i+1, got, want)
-		}
-	}
-	if got := backoff(10*time.Minute, 5); got != 4*time.Hour {
-		t.Errorf("backoff after five cycles %s; want capped at 4h", got)
-	}
-}
-
 func TestAnExpiredChangeIsRevertedInAnyPhase(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 	h.act("pod:a")
@@ -820,7 +776,7 @@ func TestAResumedChangeWaitsForAFreshBaseline(t *testing.T) {
 	}
 }
 
-func TestADominantWorkloadIsSteppedAgainAndReleasedOnce(t *testing.T) {
+func TestADominantWorkloadIsSteppedAgainAndGivenBackOnce(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 	h.act("pod:a")
 	h.run(2*time.Minute, 0.44)
@@ -843,12 +799,12 @@ func TestADominantWorkloadIsSteppedAgainAndReleasedOnce(t *testing.T) {
 	if a := h.action("pod:a"); a.Outcome != "kept" {
 		t.Fatalf("pod:a %+v; want the second step kept", a)
 	}
-	h.until(5*time.Minute, 0.05, "a release", func() bool { return len(h.ledger.All()) == 0 })
+	h.until(time.Hour, 0.05, "the cap expiring", func() bool { return len(h.ledger.All()) == 0 })
 	if l := h.limit("pod:a"); l != nil {
 		t.Fatalf("limit %v; want the pre-agent no limit back in one revert", *l)
 	}
-	if n := len(h.decisions("release")); n != 1 {
-		t.Fatalf("%d release decisions; want one", n)
+	if n := len(h.decisions("expired")); n != 1 {
+		t.Fatalf("%d expiry decisions; want one", n)
 	}
 }
 
@@ -872,6 +828,33 @@ func TestNoFurtherStepBelowEnter(t *testing.T) {
 	}
 }
 
+// Pressure under exit does not give a cap back: the cap is why pressure is low,
+// and giving it back brought contention straight back (run 2026-10-30c). A cap
+// stays until it expires, and the phase ends when none is left.
+func TestCapsAreKeptUntilExpiry(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.act("pod:a")
+	h.run(2*time.Minute, 0.05)
+	if a := h.action("pod:a"); a.Outcome != "kept" {
+		t.Fatalf("pod:a %+v; want the step kept", a)
+	}
+	h.run(20*time.Minute, 0.05)
+	if l := h.limit("pod:a"); l == nil || !near(*l, 1.2) {
+		t.Fatalf("limit %v; want the cap kept at 1.2 under exit", l)
+	}
+	if p := h.l.Status().Phase; p != Releasing {
+		t.Fatalf("phase %s; want releasing while the cap waits out its expiry", p)
+	}
+	h.until(time.Hour, 0.05, "the cap expiring", func() bool { return len(h.ledger.All()) == 0 })
+	if a := h.action("pod:a"); a.Outcome != "expired" {
+		t.Fatalf("pod:a %+v; want it given back by expiry", a)
+	}
+	h.step(0.05)
+	if p := h.l.Status().Phase; p != Calm {
+		t.Fatalf("phase %s; want calm with no cap left", p)
+	}
+}
+
 func TestAFailedSecondStepReturnsToTheFirst(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 	h.act("pod:a")
@@ -889,30 +872,6 @@ func TestAFailedSecondStepReturnsToTheFirst(t *testing.T) {
 	}
 	if until := h.l.Status().Cooling["pod:a"]; !until.Equal(h.now.Add(40 * time.Minute)) {
 		t.Fatalf("cooling until %v; want 40m", until)
-	}
-}
-
-func TestKeptChangesAreReleasedOutsideRelieving(t *testing.T) {
-	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}})
-	record(t, h.m, contention, "", 0.05, h.now)
-	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
-		Applied: 1.2, Expires: h.now.Add(20 * time.Minute), DecisionID: "relief-act-1-1"})
-	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:b", Action: cpu.Action,
-		Applied: 0.9, Expires: h.now.Add(30 * time.Minute), DecisionID: "relief-act-1-2"})
-	if err := h.l.Reconcile(h.ctx); err != nil {
-		t.Fatal(err)
-	}
-	h.until(5*time.Minute, 0.05, "a first release", func() bool { return len(h.ledger.All()) < 2 })
-	if _, ok := h.applied()["pod:a"]; !ok {
-		t.Fatalf("applied %v; want the newest (pod:b) released first", h.applied())
-	}
-	first := h.now
-	h.until(5*time.Minute, 0.05, "a second release", func() bool { return len(h.ledger.All()) == 0 })
-	if gap := h.now.Sub(first); gap != 2*time.Minute {
-		t.Fatalf("second release %s after the first; want one settle", gap)
-	}
-	if h.l.Status().Phase != Calm {
-		t.Errorf("phase %s", h.l.Status().Phase)
 	}
 }
 
@@ -1231,10 +1190,10 @@ func TestARetriedRevertCitesItsVerdict(t *testing.T) {
 	}
 }
 
-// TestAStuckReleaseDoesNotBlockTheOthers: the newest kept change, whose undo the
-// runtime keeps refusing, does not hold back the release of the others. Its
-// failures are counted on the action and in Status, and journalled once.
-func TestAStuckReleaseDoesNotBlockTheOthers(t *testing.T) {
+// TestAStuckExpiryDoesNotBlockTheOthers: a kept change whose undo the runtime
+// keeps refusing at expiry does not hold back the others' expiry. Its failures
+// are counted on the action and in Status, and journalled once.
+func TestAStuckExpiryDoesNotBlockTheOthers(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}, flaky: true})
 	h.act("pod:a")
 	h.run(2*time.Minute, 0.44)
@@ -1243,12 +1202,11 @@ func TestAStuckReleaseDoesNotBlockTheOthers(t *testing.T) {
 	if a, b := h.action("pod:a"), h.action("pod:b"); a.Outcome != OutcomeKept || b.Outcome != OutcomeKept {
 		t.Fatalf("outcomes %q, %q; want both kept", a.Outcome, b.Outcome)
 	}
-	h.fl.set(func(f *flaky) { f.stuck["pod:b"] = true })
-	h.until(10*time.Minute, 0.05, "pod:a released", func() bool { return h.action("pod:a").Outcome == OutcomeReleased })
-	h.run(2*time.Minute, 0.05)
-	b := h.action("pod:b")
-	if b.Outcome != OutcomeKept || b.RevertAttempts < 2 || !strings.Contains(b.LastError, "webhook") {
-		t.Fatalf("pod:b %+v; want still kept, with its failed undos counted and the last error", b)
+	h.fl.set(func(f *flaky) { f.stuck["pod:a"] = true })
+	h.until(time.Hour, 0.05, "pod:b expired", func() bool { return h.action("pod:b").Outcome == OutcomeExpired })
+	a := h.action("pod:a")
+	if a.Outcome != OutcomeKept || a.RevertAttempts < 2 || !strings.Contains(a.LastError, "webhook") {
+		t.Fatalf("pod:a %+v; want still kept, with its failed undos counted and the last error", a)
 	}
 	if st := h.l.Status(); st.Stuck != 1 {
 		t.Fatalf("status %+v; want one stuck change", st)
@@ -1256,13 +1214,13 @@ func TestAStuckReleaseDoesNotBlockTheOthers(t *testing.T) {
 	if n := len(h.decisions("stuck")); n != 1 {
 		t.Fatalf("%d stuck decisions; want the first failure journalled once", n)
 	}
-	h.fl.set(func(f *flaky) { f.stuck["pod:b"] = false })
-	h.until(2*time.Minute, 0.05, "pod:b released", func() bool { return h.action("pod:b").Outcome == OutcomeReleased })
+	h.fl.set(func(f *flaky) { f.stuck["pod:a"] = false })
+	h.until(2*time.Minute, 0.05, "pod:a expired", func() bool { return h.action("pod:a").Outcome == OutcomeExpired })
 	if st := h.l.Status(); st.Stuck != 0 {
 		t.Fatalf("status %+v; want nothing stuck once it went through", st)
 	}
-	if b := h.action("pod:b"); b.RevertAttempts != 0 || b.LastError != "" {
-		t.Fatalf("pod:b %+v; want a released change to show no failing undo", b)
+	if a := h.action("pod:a"); a.RevertAttempts != 0 || a.LastError != "" {
+		t.Fatalf("pod:a %+v; want an expired change to show no failing undo", a)
 	}
 }
 

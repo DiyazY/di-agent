@@ -210,16 +210,6 @@ func outcomeOf(l *Loop, id string) string {
 	return ""
 }
 
-func TestMemoryHighIsGivenBackOnRelease(t *testing.T) {
-	h := newMemHarness(t)
-	a := h.act()
-	h.until(30*time.Minute, 0, "a release", func() bool {
-		o := outcomeOf(h.l, a.ID)
-		return o != "" && o != OutcomeKept
-	})
-	h.givenBack(a.ID, OutcomeReleased)
-}
-
 func TestMemoryHighIsGivenBackOnExpiry(t *testing.T) {
 	h := newMemHarness(t)
 	a := h.act()
