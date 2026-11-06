@@ -56,10 +56,6 @@ spec:
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
             - name: DATASET_KAFKA_TOPIC
               value: {{ .Values.streamer.kafkaTopic | quote }}
-            # Not mirrored by telemetry-cloud-sync today; point at a topic
-            # that won't exist so the writer simply never sees navigation data.
-            - name: NAVIGATION_KAFKA_TOPIC
-              value: "navigation.telemetry.unmirrored"
             - name: KAFKA_GROUP_ID
               value: {{ .Values.telemetryWriterCloud.kafkaGroupId | quote }}
             - name: LOG_EVERY_N_MESSAGES

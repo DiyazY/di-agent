@@ -20,6 +20,11 @@ DATASET_COLLECTOR_URL=${DATASET_COLLECTOR_URL:-}
 if [ "${DATASET_NODE_NAME+x}" = x ] && [ "${DATASET_NODE_NAME}" != "${NODE_ID}" ]; then
     DATASET_COLLECTOR_URL=""
 fi
+SIMULATION_COLLECTOR_URL=${SIMULATION_COLLECTOR_URL:-}
+SIMULATION_INCLUDE=${SIMULATION_INCLUDE:-}
+if [ "${SIMULATION_NODE_NAME+x}" = x ] && [ "${SIMULATION_NODE_NAME}" != "${NODE_ID}" ]; then
+    SIMULATION_COLLECTOR_URL=""
+fi
 CGROUP_ROOT=${CGROUP_ROOT:-"/sys/fs/cgroup"}
 # true serves the web console at /ui/; the agent is headless by default. Only
 # true or false: the value is written into the spec as a YAML bool.
@@ -40,6 +45,7 @@ echo "  PROPOSER=${PROPOSER}"
 echo "  NETDATA_URL=${NETDATA_URL}"
 echo "  DOMAIN_SPEC=${DOMAIN_SPEC}"
 echo "  DATASET_COLLECTOR_URL=${DATASET_COLLECTOR_URL}"
+echo "  SIMULATION_COLLECTOR_URL=${SIMULATION_COLLECTOR_URL}"
 echo "  CGROUP_ROOT=${CGROUP_ROOT}"
 echo "  UI=${UI}"
 
@@ -82,6 +88,24 @@ cat >> "${SPEC_FILE}" <<SPEC
       http:
         url: "${DATASET_COLLECTOR_URL}"
 SPEC
+fi
+if [ -n "${SIMULATION_COLLECTOR_URL}" ]; then
+cat >> "${SPEC_FILE}" <<SPEC
+    - name: simulation
+      http:
+        url: "${SIMULATION_COLLECTOR_URL}"
+SPEC
+    if [ -n "${SIMULATION_INCLUDE}" ]; then
+        printf '      config:\n        include:\n' >> "${SPEC_FILE}"
+        IFS=',' read -r -a patterns <<< "${SIMULATION_INCLUDE}"
+        for pattern in "${patterns[@]}"; do
+            if [[ ! "${pattern}" =~ ^[A-Za-z0-9._*?-]+$ ]]; then
+                echo "Invalid SIMULATION_INCLUDE pattern: ${pattern}" >&2
+                exit 1
+            fi
+            printf '          - "%s"\n' "${pattern}" >> "${SPEC_FILE}"
+        done
+    fi
 fi
 cat >> "${SPEC_FILE}" <<SPEC
 map:

@@ -26,6 +26,8 @@ kafka:
   clusterId: ZGlhZ2VudC1rYWZrYS0
   logRetentionHours: "168"
   logRetentionBytes: "1073741824"
+  # Optional JVM heap cap for small lab workers, e.g. "-Xms128m -Xmx384m".
+  heapOpts: ""
   persistence:
     enabled: true
     size: 10Gi
@@ -41,6 +43,19 @@ datasetCollector:
   kafkaTopic: dataset.telemetry
   groupId: dataset-collector
   maxActiveSeries: 2000
+  nodeSelector: {}
+  resources: {}
+
+simulationCollector:
+  enabled: false
+  image:
+    repository: simulation-collector
+    tag: ""
+  groupId: simulation-collector
+  maxActiveSeries: 2000
+  maxAgeSeconds: 15
+  # Empty uses the collector's curated defaults; ["*"] selects all known fields.
+  include: []
   nodeSelector: {}
   resources: {}
 
@@ -68,6 +83,8 @@ agent:
     hostPath: /var/lib/di-agent
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
+  # Only this worker polls the shared legacy simulation collector.
+  simulationNodeName: ""
   nodeSelector: {}
   resources: {}
 
@@ -152,21 +169,6 @@ auxload:
   requestKafkaTopic: switchboard.requests
   allocationKafkaTopic: switchboard.telemetry
   initialLoadRatio: "0.5"
-  nodeSelector: {}
-  resources: {}
-
-navigation:
-  enabled: false
-  image:
-    repository: navigation
-    tag: ""
-  kafkaTopic: navigation.telemetry
-  # Custom TCP CAN-frame debug gateway port.
-  n2kGatewayPort: 2597
-  vesselName: vessel-1
-  initialSpeedKnots: "8"
-  # Time acceleration: 60 -> one simulated minute per wall second.
-  timeScale: "60"
   nodeSelector: {}
   resources: {}
 

@@ -55,7 +55,7 @@ The deployment consists of two separate layers:
    - one cluster for the VM fleet
 
 2. Application and demo layer
-   - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector; legacy simulators and the playground are disabled by default
+   - Helm chart in `helm/di-agent-system` deploys Kafka, PostgreSQL, InfluxDB, Grafana, replay-streamer, telemetry-writer, and dataset-collector; legacy simulators, simulation-collector, and the playground are disabled by default
    - the Helm chart deploys the Go `di-agent` as a DaemonSet, one pod per worker node
    - `scripts/04-peers.sh` discovers the Helm agent pods through kubectl, registers peers and sets trust values
    - `scripts/coordinator.sh` runs the trust-drain/routing experiment
@@ -184,6 +184,82 @@ API changes are in memory only: a pod restart or a new `make helm-install` retur
 `streamer.runId` selects the dataset (default `1000rpm_150kW_0001`). All of the run's sources (`short` and every `long_*` file) are streamed together: they share the same time grid (`t` steps of 7200 from 0), so each tick emits the next `pointsPerInterval` time steps for every signal, and shorter sources simply end before the longer ones (the run then loops if `loop=true`).
 
 At ingest, each multi-signal CSV is split into one file per signal next to it in `data/` (`<run>_timeseries_<source>_<signal>.csv`, containing only `Data1_<signal>` and `Data1_time_<signal>`); the split files are what is loaded into PostgreSQL. Files that are already split can be placed in `data/` (or the `DATA_URL` share) as-is and are loaded directly. Run `DATA_DIR=poc2/data python3 poc2/data-ingest/ingest.py --split-only` to produce them locally without a database. To disable streaming entirely, set `streamer.enabled=false`. The legacy genset/battery/propulsion/etc. simulators and playground can be enabled individually with their respective `*.enabled=true` values; they all default to false.
+
+### Optional: legacy simulation collection
+
+The six legacy components (genset, battery, propulsion, auxiliary load, shore
+power, switchboard) already publish Kafka telemetry. Enable `simulationCollector`
+to make those observations available to di-agent without changing the
+InfluxDB/Grafana path. The navigation component and its CAN gateway have been
+removed.
+
+Run these commands from `poc2/`. Choose an eligible worker from `kubectl get nodes`:
+
+```bash
+make images REGISTRY=ghcr.io/chuducanh242002 TAG=simulation-v1 \
+  IMAGES="simulation-collector di-agent telemetry-writer genset battery propulsion auxload shore-power switchboard"
+make agent REGISTRY=ghcr.io/chuducanh242002 TAG=simulation-v1 \
+  SIMULATION_COLLECTOR=true SIMULATION_NODE_NAME=ubuntu-vm2 \
+  HELM_ARGS="--set genset.enabled=true --set battery.enabled=true --set propulsion.enabled=true --set auxload.enabled=true --set shorePower.enabled=true --set switchboard.enabled=true --wait"
+make peers
+```
+
+The registry override is optional; defaults remain unchanged. Build images for
+any other enabled custom services under the same registry/tag, or override their
+individual images. For a legacy-only deployment, also pass
+`--set postgres.enabled=false --set streamer.enabled=false --set datasetCollector.enabled=false`.
+This does not delete existing database PVCs.
+`make images IMAGE_FLAGS=--build-only` builds without registry access;
+`IMAGE_FLAGS=--push-only` publishes those images later. If GHCR rejects a push,
+authenticate Docker to GHCR with package-write permission before retrying;
+do not put registry tokens in chart values or source files.
+On small workers, set per-service `resources.requests` and distribute the
+simulators rather than pinning the entire stack to one node. Kafka's default
+JVM heap can exhaust a 2 GiB worker; `kafka.heapOpts="-Xms128m -Xmx384m"` allows
+a smaller lab heap alongside an appropriate `kafka.resources` memory limit.
+
+Only `agent.simulationNodeName` polls the shared collector; the chart requires a
+nonempty selection when both agents and the collector are enabled. Its agent
+waits for Kafka-backed collector readiness before the initial handshake. A
+different agent's handshake is refused to prevent accidentally splitting the
+pending snapshots. Dataset worker selection is independent, so both collectors
+can run on the same worker or different workers. `make peers` validates both.
+
+Each poll returns the latest new snapshot per device, with its original Unix
+seconds timestamp, not a window average. A stopped producer becomes silent,
+allowing di-agent's normal stale/retired lifecycle to work. Older/out-of-order
+events and same-second updates already emitted are ignored. The default
+freshness limit is 15 seconds (`simulationCollector.maxAgeSeconds`); keep the
+agent interval below it. `maxActiveSeries` defaults to 2000 and bounds stored
+measurements and device timestamp watermarks. Collector restarts can lose
+unpolled snapshots; use InfluxDB for durable history.
+
+Metrics use source namespaces and subjects, e.g. `genset.power_kw` on
+`genset:genset-1` and `battery.soc` on `battery:battery-1`. Switchboard totals
+appear once per board; each allocation has its own
+`allocation:<board-id>:<consumer-id>` subject. Power remains in kW (including
+negative battery power while charging); state of charge uses fraction `[0,1]`;
+shore connection is boolean `0/1`. Other physical units are declared explicitly,
+without deriving changing ranges from observed samples. Properties are admitted
+without altering the existing host-resource cost/routing model.
+IDs that are not safe subject segments (such as standalone defaults containing
+spaces) are encoded with a reserved `hex-` prefix; original IDs remain in the
+`source_id` label. Encoding also prevents ambiguous allocation identities.
+
+The default include list selects core power/load, fuel, charge, switchboard, and
+allocation measurements. Set `--set 'simulationCollector.include[0]=*'` to
+include every supported field, including RPM, cylinder sensors, electrical
+sensors and optional predictions, or specify patterns such as `genset.*` and
+`battery.soc`. Pattern selection happens in the collector, not the map.
+
+Inspect `GET /ready` on `simulation-collector:8000` for connection, pending
+series, received/dropped messages, invalid fields, superseded events and expired
+snapshots. `GET /health` distinguishes a live retrying consumer from a dead
+worker. Malformed fields are logged and counted while valid fields survive.
+On the designated agent, `GET /collectors` should show `simulation` with no
+violations, and `GET /state?subject=genset:genset-1` should show its measurements.
+Certify a separately fed collector with `mapctl collector check --http URL`;
+do not run certification against the collector already owned by a live agent.
 
 ### Optional: cloud eventual-consistency sync
 

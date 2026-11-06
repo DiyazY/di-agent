@@ -44,6 +44,8 @@ STREAMER_POINTS ?=
 STREAMER_LOOP ?=
 # Optional worker hostname that alone ingests engine signals.
 DATASET_NODE_NAME ?=
+SIMULATION_NODE_NAME ?=
+SIMULATION_COLLECTOR ?=
 AGENT_COLLECT_INTERVAL ?= 5s
 # Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
 HELM_ARGS ?=
@@ -54,7 +56,9 @@ HELM_STREAMER_SETS = \
 	$(if $(STREAMER_POINTS),--set streamer.pointsPerInterval=$(STREAMER_POINTS)) \
 	$(if $(STREAMER_LOOP),--set streamer.loop=$(STREAMER_LOOP)) \
 	--set agent.collectInterval=$(AGENT_COLLECT_INTERVAL) \
-	$(if $(DATASET_NODE_NAME),--set-string agent.datasetNodeName=$(DATASET_NODE_NAME))
+	$(if $(DATASET_NODE_NAME),--set-string agent.datasetNodeName=$(DATASET_NODE_NAME)) \
+	$(if $(SIMULATION_NODE_NAME),--set-string agent.simulationNodeName=$(SIMULATION_NODE_NAME)) \
+	$(if $(SIMULATION_COLLECTOR),--set simulationCollector.enabled=$(SIMULATION_COLLECTOR))
 
 # Display detected VMs
 $(info Detected $(VM_COUNT) VM(s): $(VMS))
@@ -76,8 +80,9 @@ k8s:
 # Override IMAGES to build/push only a subset, e.g.:
 #   make images IMAGES="genset propulsion"
 IMAGES ?=
+IMAGE_FLAGS ?=
 images:
-	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/build-push-images.sh $(IMAGES)
+	@REGISTRY=$(REGISTRY) TAG=$(TAG) bash $(SCRIPTS)/build-push-images.sh $(IMAGE_FLAGS) $(IMAGES)
 
 helm-lint:
 	@helm lint $(HELM_CHART)
@@ -189,9 +194,10 @@ get-ip-%:
 help:
 	@echo "Available targets:"
 	@echo "  all          - Full stack: provision → k8s → images → Helm agents → peers"
-	@echo "  images       - Build+push all service images (including navigation and"
+	@echo "  images       - Build+push all service images (including simulation-collector and"
 	@echo "                 telemetry-cloud-sync) to REGISTRY (default $(REGISTRY))"
 	@echo "                 Override with IMAGES to build/push only a subset, e.g. IMAGES=\"genset propulsion\""
+	@echo "                 IMAGE_FLAGS=--build-only or --push-only separates building and publishing"
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
@@ -205,6 +211,7 @@ help:
 	@echo "  helm-template - Render the chart's manifests locally (no cluster needed)"
 	@echo "  agent        - Install/upgrade Helm and wait for one agent per worker"
 	@echo "                 Optional dataset worker: DATASET_NODE_NAME; poll interval: AGENT_COLLECT_INTERVAL"
+	@echo "                 Legacy collector: SIMULATION_COLLECTOR=true SIMULATION_NODE_NAME=<worker>"
 	@echo "  peers        - Register the ready Helm worker agents using kubectl"
 	@echo "  demo         - Run coordinator for 8 rounds (10s interval)"
 	@echo "  status       - Check /cost endpoint on all VMs"

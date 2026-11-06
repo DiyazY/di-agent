@@ -83,11 +83,6 @@ def test_to_points_all_components(writer_modules):
     pts = to_points(msg_swb)
     assert len(pts) == 2
 
-    # 7. Navigation
-    msg_nav = {"gnss_id": "gnss-1", "latitude_deg": 1.25, "longitude_deg": 103.8, "timestamp": ts}
-    pts = to_points(msg_nav)
-    assert len(pts) == 1
-
 
 def test_to_points_invalid(writer_modules):
     to_points = writer_modules["writer"]._to_points

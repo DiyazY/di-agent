@@ -31,8 +31,9 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and .Values.datasetCollector.enabled .Values.agent.datasetNodeName }}
+      {{- if or (and .Values.datasetCollector.enabled .Values.agent.datasetNodeName) (and .Values.simulationCollector.enabled .Values.agent.simulationNodeName) }}
       initContainers:
+        {{- if and .Values.datasetCollector.enabled .Values.agent.datasetNodeName }}
         - name: wait-for-dataset-collector
           image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.agent.image) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
@@ -54,6 +55,30 @@ spec:
                   fieldPath: spec.nodeName
             - name: DATASET_NODE_NAME
               value: {{ .Values.agent.datasetNodeName | quote }}
+        {{- end }}
+        {{- if and .Values.simulationCollector.enabled .Values.agent.simulationNodeName }}
+        - name: wait-for-simulation-collector
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.agent.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              if [ "${NODE_ID}" != "${SIMULATION_NODE_NAME}" ]; then
+                exit 0
+              fi
+              until curl --fail --silent --show-error --connect-timeout 2 --max-time 3 \
+                http://simulation-collector:8000/ready; do
+                echo "Waiting for simulation-collector readiness before starting di-agent"
+                sleep 2
+              done
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SIMULATION_NODE_NAME
+              value: {{ .Values.agent.simulationNodeName | quote }}
+        {{- end }}
       {{- end }}
       containers:
         - name: di-agent
@@ -95,6 +120,14 @@ spec:
               value: {{ .Values.agent.datasetNodeName | quote }}
             - name: DATASET_COLLECTOR_URL
               value: "http://dataset-collector:8000/collect"
+            {{- end }}
+            {{- if .Values.simulationCollector.enabled }}
+            - name: SIMULATION_NODE_NAME
+              value: {{ .Values.agent.simulationNodeName | quote }}
+            - name: SIMULATION_COLLECTOR_URL
+              value: "http://simulation-collector:8000/collect"
+            - name: SIMULATION_INCLUDE
+              value: {{ join "," .Values.simulationCollector.include | quote }}
             {{- end }}
           ports:
             - name: http

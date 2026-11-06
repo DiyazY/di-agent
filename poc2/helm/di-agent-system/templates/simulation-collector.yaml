@@ -1,0 +1,89 @@
+{{- if .Values.simulationCollector.enabled }}
+{{- if and .Values.agent.enabled (not .Values.agent.simulationNodeName) }}
+{{- fail "agent.simulationNodeName must name one eligible worker when simulationCollector is enabled with agents" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulation-collector
+  labels:
+    app: simulation-collector
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: simulation-collector
+  template:
+    metadata:
+      labels:
+        app: simulation-collector
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.simulationCollector.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: simulation-collector
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.simulationCollector.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.simulationCollector.groupId | quote }}
+            - name: MAX_ACTIVE_SERIES
+              value: {{ .Values.simulationCollector.maxActiveSeries | quote }}
+            - name: MAX_AGE_SECONDS
+              value: {{ .Values.simulationCollector.maxAgeSeconds | quote }}
+            - name: GENSET_KAFKA_TOPIC
+              value: {{ .Values.genset.kafkaTopic | quote }}
+            - name: BATTERY_KAFKA_TOPIC
+              value: {{ .Values.battery.kafkaTopic | quote }}
+            - name: PROPULSION_KAFKA_TOPIC
+              value: {{ .Values.propulsion.kafkaTopic | quote }}
+            - name: AUXLOAD_KAFKA_TOPIC
+              value: {{ .Values.auxload.kafkaTopic | quote }}
+            - name: SHORE_POWER_KAFKA_TOPIC
+              value: {{ .Values.shorePower.kafkaTopic | quote }}
+            - name: SWITCHBOARD_KAFKA_TOPIC
+              value: {{ .Values.switchboard.kafkaTopic | quote }}
+          ports:
+            - name: http
+              containerPort: 8000
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.simulationCollector.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simulation-collector
+  labels:
+    app: simulation-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: simulation-collector
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}

@@ -28,6 +28,7 @@ with open(sys.argv[1]) as stream:
     pods = json.load(stream)["items"]
 agents = {}
 dataset_nodes = set()
+simulation_nodes = set()
 for pod in pods:
     if pod["metadata"].get("deletionTimestamp"):
         continue
@@ -41,6 +42,8 @@ for pod in pods:
     container = next(c for c in pod["spec"]["containers"] if c["name"] == "di-agent")
     dataset_nodes.update(e["value"] for e in container.get("env", [])
                          if e["name"] == "DATASET_NODE_NAME" and e.get("value"))
+    simulation_nodes.update(e["value"] for e in container.get("env", [])
+                            if e["name"] == "SIMULATION_NODE_NAME" and e.get("value"))
     port = next(p["containerPort"] for p in container["ports"] if p["name"] == "http")
     host = pod["status"]["hostIP"]
     if ":" in host:
@@ -50,6 +53,8 @@ if not agents:
     sys.exit("[peers] No Helm-managed worker agents found.")
 if len(dataset_nodes) > 1 or not dataset_nodes.issubset(agents):
     sys.exit(f"[peers] Dataset node must name one ready worker: {dataset_nodes}")
+if len(simulation_nodes) > 1 or not simulation_nodes.issubset(agents):
+    sys.exit(f"[peers] Simulation node must name one ready worker: {simulation_nodes}")
 for node, (pod, port, url) in sorted(agents.items()):
     print(node, pod, port, url, sep="\t")
 PY
