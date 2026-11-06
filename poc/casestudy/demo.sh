@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# demo.sh — a 44-minute compressed run to watch the map evolve: fresh map, planted
+# demo.sh — a 48-minute compressed run to watch the map evolve: fresh map, planted
 # workloads arrive and the review loop (level full, decision model on the node's Ollama)
-# settles what discovery proposes; the planted pods leave, relief acts twice on a hog,
-# everything leaves and retires.
+# settles what discovery proposes; the planted pods leave, a hog runs beside a victim
+# (the kernel gives each its CPU share, so CPU relief has nothing to do), everything
+# leaves and retires.
 set -uo pipefail
 cd "$(dirname "$0")"
 OUT="$(realpath -m "${1:?usage: $0 <out-dir>}")"; mkdir -p "$OUT"
@@ -24,7 +25,5 @@ echo $! >"$OUT/capture.pid"
 at 2;  for p in cycler mem-wave mem-squeeze io-wave twin-a twin-b noise; do apply $p; sleep 30; done
 at 12; "${K[@]}" delete pod cycler mem-wave mem-squeeze io-wave twin-a twin-b noise --wait=true >/dev/null; mark "deleted the planted pods"
 at 14; apply hog; apply victim
-at 22; "${K[@]}" delete pod victim --wait=true >/dev/null; mark "deleted victim"
-at 26; apply victim
 at 36; "${K[@]}" delete pod hog victim --ignore-not-found --wait=true >/dev/null; mark "deleted hog and victim"
 at 48; mark "demo ends"; kill "$(cat "$OUT/capture.pid")"; echo done

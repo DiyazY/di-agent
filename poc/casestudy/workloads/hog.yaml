@@ -1,6 +1,7 @@
-# A steady CPU load for the relief phase: six busy loops under a 4.5-core limit, so with
-# the victim beside it the node's six CPUs are oversubscribed (1.5x, as on the 4-CPU node) and any limit the agent
-# sets below its usage binds. Burstable, one container, with a
+# A steady CPU load for P4: six busy loops under a 4.5-core limit, so with the victim
+# beside it the node's six pod CPUs are oversubscribed (1.5x, as on the 4-CPU node). The
+# kernel's cpu.weight still gives the victim its share, so the hog's wait is its own and
+# CPU relief leaves it alone. Burstable, one container, with a
 # CPU limit: the kind of pod the kubernetes runtime will resize in place.
 apiVersion: v1
 kind: Pod

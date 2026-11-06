@@ -191,10 +191,13 @@ phase_P3() {
     mark P3 "agent restarted, relief on" --argjson revision "$after" --argjson from_snapshot "$snapshot"
 }
 
-# Two relief episodes, because a relationship needs two agreeing outcomes and the
-# policy cools a workload down for ten minutes after it is touched. The victim leaving
-# ends the first (its cap is released); it comes back after its properties have gone
-# stale, so its earlier self is not counted as a workload that left mid-outcome.
+# A hog of six threads beside a victim of three, both requesting 100m: the kernel's
+# cpu.weight gives each its weighted share of the pods' CPUs, so the victim gets the
+# three cores it runs on and the hog waits on its own threads past its share. Nothing
+# is owed to anyone, cpu_contention_ratio stays near zero, and the cpu.limit lever
+# must not act: capping the hog would only make its own wait worse. Runs 2026-11-05
+# showed this with the victim at 100m and again at a 3-core request (results in
+# run-2026-11-05-victim-req3). Checked five minutes in and again at steady state.
 phase_P4() {
     at 72
     apply hog
@@ -202,22 +205,30 @@ phase_P4() {
     apply victim
     mark P4 "applied victim" --arg subject "pod:$(uid_of victim)"
     at 77
-    relief_active "first episode"
-    at 88
-    remove victim
-    mark P4 "deleted victim"
-    at 95
-    apply victim
-    mark P4 "applied victim" --arg subject "pod:$(uid_of victim)"
+    cpu_relief_calm "five minutes in"
     at 100
-    relief_active "second episode"
+    cpu_relief_calm "at steady state"
 }
 
-relief_active() {
-    if [ "$(curl -sf "$API/relief" | jq -r '.phase')" != relieving ]; then
-        mark P4 "relief not active five minutes into the $1"
-        echo "relief not active ($1)" >&2
+# cpu_relief_calm marks the cpu.limit lever's phase and action count with the node's
+# contention and pressure, the verdict in the event: "calm" only when the lever is calm,
+# has not acted, and the node's contention is under OWED_TOLERANCE — so the check holds
+# P4's premise that nothing is owed, not just that relief did nothing (no reading is not
+# calm: a lever with no signal is calm by default). A read that fails is recorded as
+# null, as revision() does, rather than let set -e end the timetable before P5 removes
+# the pods.
+OWED_TOLERANCE=0.05 # the measure's own waitingFloor: below it a pod is not waiting
+cpu_relief_calm() {
+    local lever contention pressure verdict=calm
+    lever=$(curl -sf "$API/relief" | jq -c '[.levers[] | select(.action == "cpu.limit") | {phase, actions}][0]' 2>/dev/null || echo null)
+    contention=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_contention_ratio") | .value][0]' 2>/dev/null || echo null)
+    pressure=$(curl -sf "$API/state" | jq '[.properties[] | select(.id == "cpu_pressure_ratio") | .value][0]' 2>/dev/null || echo null)
+    if [ "$(jq -r '"\(.phase) \(.actions)"' <<<"${lever:-null}")" != "calm 0" ] ||
+        ! jq -en --argjson c "${contention:-null}" --argjson t "$OWED_TOLERANCE" '$c != null and $c < $t' >/dev/null 2>&1; then
+        verdict="not calm"
+        echo "cpu.limit not calm $1: lever ${lever:-null}, contention ${contention:-null}" >&2
     fi
+    mark P4 "cpu.limit $verdict $1" --argjson lever "${lever:-null}" --argjson contention "${contention:-null}" --argjson pressure "${pressure:-null}"
 }
 
 phase_P5() {

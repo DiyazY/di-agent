@@ -37,7 +37,7 @@ The agent runs as `di-agent.service` (`systemd-run`), and the configs model the 
 `unit:` subjects: the agent itself, its decision model (`ollama.service`), k0s, containerd and Netdata. CPUs
 6–9 are the decision model's alone: pods, k0s, containerd, Netdata and the agent are held to 0–5. Ollama on the host keeps listening on 127.0.0.1 only.
 
-`demo.sh <out-dir>` (on the node) is a 48-minute compressed run (`agent-demo.yaml`): planted pods arrive and leave, then two relief episodes on the hog.
+`demo.sh <out-dir>` (on the node) is a 48-minute compressed run (`agent-demo.yaml`): planted pods arrive and leave, then `hog` and `victim` side by side, where CPU relief has nothing to do.
 
 ## The workloads and what each should produce
 
@@ -56,8 +56,8 @@ node memory `without=group:memory`.
 | `io-wave` | direct-I/O writes | 97 s | its I/O → node I/O pressure |
 | `twin-a`, `twin-b` | CPU on one wall clock, throttled at 200m | 113 s | twin-a CPU ↔ twin-b CPU |
 | `noise` | CPU in random bursts | none | nothing |
-| `hog` | CPU, steady, six busy loops, limit 4.5 cores | none | relief phase only: its CPU → node CPU contention, learned by intervention |
-| `victim` | CPU, three busy loops, limit 6 cores, never throttled, frozen by policy | none | relief phase only: what relief protects; the workload whose waiting is the contention |
+| `hog` | CPU, steady, six busy loops, limit 4.5 cores | none | P4 only: waits on its own threads past its share; not relieved |
+| `victim` | CPU, three busy loops, limit 6 cores, never throttled, frozen by policy | none | P4 only: gets its CPU share from the kernel beside `hog`, so nothing is owed |
 | `mem-victim` | page cache: a 1 GiB file in an emptyDir re-read every second, within its 1280Mi request | none | memory relief only: the protected pod whose memory stall is `memory_contention_ratio` |
 | `page-hog` | 6 GiB anonymous held, then a file set growing 256 MiB/min, re-read whole, no memory limit; holds once a pass refaults a tenth of the set | none | memory relief only: the candidate for `memory.high` |
 
@@ -75,14 +75,19 @@ pressure) were missed in earlier runs: no single pair reaches the threshold.
 | P2 counterfactual + departure | 50 | the agent is asked for node memory without `mem-wave`, and the decision id kept; then `mem-wave` is deleted |
 | P2 observe | 50–65 | `mem-wave`'s properties go stale (2 min) and retire (10 min) |
 | P3 quiesce + restart | 65–72 | the other planted pods are deleted; the agent restarts from its snapshot on `agent-relief.yaml` |
-| P4 relief | 72–117 | `hog` and `victim` applied; relief caps hog and verifies (first episode); `victim` deleted at 88, so contention ends and the cap is released; `victim` back at 95 (second episode) |
+| P4 CPU, no relief | 72–117 | `hog` and `victim` applied; `cpu.limit` checked at 77 and 100: calm, no action, and `cpu_contention_ratio` under 0.05 (the measure's own waiting floor), or the mark says `not calm` |
 | P5 release | 117–127 | `hog` and `victim` deleted |
 
-Relief runs on its own pair because a result counts as evidence only when no other workload moved
-during its window, and the planted pods move continuously. Its signal is node CPU contention, the
-share of time some workload waited for a CPU another was using, so it needs a victim: `hog` alone
-at its limit is throttled, not contended. A relationship needs two agreeing results and the policy
-cools a workload down for 10 minutes after it is touched, hence two episodes.
+P4 is the case where CPU relief must *not* act. Relief's CPU signal is the worst waiting of a pod
+owed CPU it does not get, owed meaning its `cpu.weight` share of the pods' CPUs, and the kernel's
+scheduler already enforces that share between pods. `hog` (six threads) and `victim` (three), both
+requesting 100m, each get about three of the six pod CPUs: `victim` all it runs on, `hog` waiting on
+its own threads past its share. Nothing is owed, so nothing is relieved; capping `hog` would make its
+own wait worse. What `hog` needs is more CPU than this node promised it, which is admission's
+question, not relief's. `run-2026-11-05-victim-req3/results.md` has the readings, with `victim` at
+100m and at a 3-core request, and `run-2026-11-06-pr64/results.md` this timetable's P4 passing.
+Memory relief (`memrelief.sh`) is where relief acts: the kernel protects no pod's page cache from a
+neighbour unless `memory.low` or `memory.min` is set, and Kubernetes sets neither with MemoryQoS off.
 
 Everything runs on the node, as root, from this directory, next to an `agent` binary:
 
@@ -100,7 +105,7 @@ memory against node memory and that relationship has at least one observation (a
 moment ago has no strength, and the estimate would leave it out), and the estimate returned 200 with a
 decision id and `mem-wave` in `excluded`. The mark records which reviewer confirmed it.
 `repeat-p2.sh <out-dir>` runs that episode on its own against the running agent, and exits non-zero when it refuses.
-`verify.sh <out-dir>` reruns P3–P5 on a fresh map: the verification run of the measured `Intervened` strength.
+`verify.sh <out-dir>` reruns P3–P5 on a fresh map: P4 checks that `cpu.limit` stays calm beside `hog` and `victim`.
 
 Both write JSON lines stamped with the VM's clock: `capture.jsonl` (`t`, `endpoint`, `status`,
 `body`; a failed poll has `status: 0` and `body: null`) and `phases.jsonl` (`t`, `phase`, `event`, and

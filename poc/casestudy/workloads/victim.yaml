@@ -1,6 +1,7 @@
-# The relief phase's victim: three busy loops with room to spare under a 6-core limit, so it
-# is never throttled — any CPU it waits for, another workload is using. Frozen by the
-# default policy rule, so the agent may relieve it but never cap it.
+# P4's victim: three busy loops with room to spare under a 6-core limit, so it is never
+# throttled — any CPU it waits for, another workload is using. Beside hog, the kernel's
+# cpu.weight gives it its share and it hardly waits, so CPU relief has nothing to do.
+# Frozen by the default policy rule, so the agent may never cap it.
 apiVersion: v1
 kind: Pod
 metadata: { name: victim, labels: { check: casestudy, di-agent/group: relief, di-agent/freeze: "true" } }

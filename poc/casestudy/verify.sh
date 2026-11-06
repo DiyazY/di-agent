@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# verify.sh — relief on a fresh map: P3 to P5 of the timetable, nothing before. The
-# 2026-10-19 verification of an Intervened relationship's measured strength ran this,
-# with agent.new the build under test. Runs on the node, as root, from this directory.
+# verify.sh — P3 to P5 of the timetable on a fresh map, nothing before: hog beside
+# victim, where cpu.limit must stay calm (README, P4). agent.new is the build under
+# test. Runs on the node, as root, from this directory.
 #
 # Usage: sudo ./verify.sh <out-dir>
 set -uo pipefail
