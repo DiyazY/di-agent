@@ -44,6 +44,19 @@ datasetCollector:
   nodeSelector: {}
   resources: {}
 
+simulationCollector:
+  enabled: false
+  image:
+    repository: simulation-collector
+    tag: ""
+  groupId: simulation-collector
+  maxActiveSeries: 2000
+  maxAgeSeconds: 15
+  # Empty uses the collector's curated defaults; ["*"] selects all known fields.
+  include: []
+  nodeSelector: {}
+  resources: {}
+
 agent:
   # One agent on each eligible worker; control-plane/master nodes are excluded.
   enabled: true
@@ -68,6 +81,8 @@ agent:
     hostPath: /var/lib/di-agent
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
+  # Only this worker polls the shared legacy simulation collector.
+  simulationNodeName: ""
   nodeSelector: {}
   resources: {}
 

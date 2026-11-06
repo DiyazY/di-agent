@@ -73,7 +73,7 @@ class AgentDeploymentTests(unittest.TestCase):
             "MOCK_DIR": str(self.directory),
         }
 
-    def pods(self, count=3, dataset_node="worker-1"):
+    def pods(self, count=3, dataset_node="worker-1", simulation_node=""):
         items = []
         for i in range(1, count + 1):
             items.append({
@@ -83,7 +83,10 @@ class AgentDeploymentTests(unittest.TestCase):
                     "containers": [{
                         "name": "di-agent",
                         "ports": [{"name": "http", "containerPort": 9191}],
-                        "env": [{"name": "DATASET_NODE_NAME", "value": dataset_node}],
+                        "env": [
+                            {"name": "DATASET_NODE_NAME", "value": dataset_node},
+                            {"name": "SIMULATION_NODE_NAME", "value": simulation_node},
+                        ],
                     }],
                 },
                 "status": {
@@ -125,6 +128,72 @@ class AgentDeploymentTests(unittest.TestCase):
         result = self.run_peers()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("No Helm-managed", result.stderr)
+
+    def test_missing_simulation_worker_fails_before_registration(self):
+        self.pods(simulation_node="missing-worker")
+        result = self.run_peers()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Simulation node", result.stderr)
+        self.assertFalse((self.directory / "state.json").exists())
+
+    def test_independent_simulation_and_dataset_workers(self):
+        self.pods(simulation_node="worker-2")
+        self.assertEqual(self.run_peers().returncode, 0)
+
+    def test_collector_combinations_and_simulation_include(self):
+        script = ENTRYPOINT.read_text().replace(
+            'exec /usr/local/bin/di-agent -config "${SPEC_FILE}" "$@"', "exit 0",
+        )
+        for dataset, simulation in [(False, False), (True, False), (False, True), (True, True)]:
+            for node in ("worker-1", "worker-2"):
+                with self.subTest(dataset=dataset, simulation=simulation, node=node):
+                    spec = self.directory / "agent.yaml"
+                    result = subprocess.run(
+                        ["bash", "-c", script], capture_output=True, text=True,
+                        env={
+                            **self.env, "NODE_ID": node, "NETDATA_URL": "", "SPEC_FILE": str(spec),
+                            "DATASET_NODE_NAME": "worker-1",
+                            "SIMULATION_NODE_NAME": "worker-1",
+                            "DATASET_COLLECTOR_URL": "http://dataset:8000/collect" if dataset else "",
+                            "SIMULATION_COLLECTOR_URL": "http://simulation:8000/collect" if simulation else "",
+                            "SIMULATION_INCLUDE": "genset.*,battery.soc",
+                        },
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    content = spec.read_text()
+                    self.assertEqual("name: dataset" in content, dataset and node == "worker-1")
+                    self.assertEqual("name: simulation" in content, simulation and node == "worker-1")
+                    if simulation and node == "worker-1":
+                        self.assertIn('- "genset.*"', content)
+                        self.assertIn('- "battery.soc"', content)
+
+    def test_chart_collector_combinations_and_simulation_configuration(self):
+        for dataset, simulation in [(False, False), (True, False), (False, True), (True, True)]:
+            result = subprocess.run(
+                [
+                    "helm", "template", "test", str(CHART),
+                    "--set", f"datasetCollector.enabled={str(dataset).lower()}",
+                    "--set", f"simulationCollector.enabled={str(simulation).lower()}",
+                    "--set", "agent.datasetNodeName=worker-1",
+                    "--set", "agent.simulationNodeName=worker-2",
+                    "--set", "simulationCollector.include[0]=*",
+                ],
+                capture_output=True, text=True, check=True,
+            )
+            rendered = result.stdout
+            self.assertEqual("name: wait-for-dataset-collector" in rendered, dataset)
+            self.assertEqual("name: wait-for-simulation-collector" in rendered, simulation)
+            self.assertEqual("name: SIMULATION_COLLECTOR_URL" in rendered, simulation)
+            self.assertNotIn("NAVIGATION_KAFKA_TOPIC", rendered)
+            if simulation:
+                self.assertIn("type: Recreate", rendered)
+                self.assertIn('name: SIMULATION_INCLUDE\n              value: "*"', rendered)
+        invalid = subprocess.run(
+            ["helm", "template", "test", str(CHART), "--set", "simulationCollector.enabled=true"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("agent.simulationNodeName", invalid.stderr)
 
     def test_unready_agent_is_an_error(self):
         items = self.pods()
