@@ -26,6 +26,8 @@ kafka:
   clusterId: ZGlhZ2VudC1rYWZrYS0
   logRetentionHours: "168"
   logRetentionBytes: "1073741824"
+  # Optional JVM heap cap for small lab workers, e.g. "-Xms128m -Xmx384m".
+  heapOpts: ""
   persistence:
     enabled: true
     size: 10Gi

@@ -71,6 +71,10 @@ spec:
               value: {{ .Values.kafka.logRetentionHours | quote }}
             - name: KAFKA_LOG_RETENTION_BYTES
               value: {{ .Values.kafka.logRetentionBytes | quote }}
+            {{- if .Values.kafka.heapOpts }}
+            - name: KAFKA_HEAP_OPTS
+              value: {{ .Values.kafka.heapOpts | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.kafka.resources | nindent 12 }}
           volumeMounts:
