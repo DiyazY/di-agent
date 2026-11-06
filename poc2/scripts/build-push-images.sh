@@ -42,7 +42,7 @@ SEMANTIC_MAP_DIR="$(dirname "$POC_DIR")/semantic-map"
 REGISTRY="${REGISTRY:-ghcr.io/diyazy}"
 TAG="${TAG:-latest}"
 
-ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload telemetry-writer telemetry-cloud-sync playground data-ingest replay-streamer dataset-collector di-agent)
+ALL_SERVICES=(genset switchboard propulsion battery shore-power auxload telemetry-writer telemetry-cloud-sync playground data-ingest replay-streamer dataset-collector simulation-collector di-agent)
 
 usage() {
     sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -62,6 +62,7 @@ service_dir() {
         data-ingest) printf '%s\n' "$POC_DIR/data-ingest" ;;
         replay-streamer) printf '%s\n' "$SYSTEM_DIR/replay-streamer" ;;
         dataset-collector) printf '%s\n' "$SYSTEM_DIR/dataset-collector" ;;
+        simulation-collector) printf '%s\n' "$SYSTEM_DIR/simulation-collector" ;;
         di-agent) printf '%s\n' "$SEMANTIC_MAP_DIR" ;;
         *) return 1 ;;
     esac
