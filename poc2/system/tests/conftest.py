@@ -20,8 +20,6 @@ COMMON_MODULE_NAMES = [
     "shore_power",
     "aux_load",
     "switchboard",
-    "vessel",
-    "nmea2000",
 ]
 
 

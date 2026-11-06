@@ -312,8 +312,6 @@ jobs:
             context: poc2/system/dataset-collector
           - service: telemetry-cloud-sync
             context: poc2/system/telemetry-cloud-sync
-          - service: navigation
-            context: poc2/system/navigation
           - service: di-agent
             context: semantic-map
 

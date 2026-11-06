@@ -155,21 +155,6 @@ auxload:
   nodeSelector: {}
   resources: {}
 
-navigation:
-  enabled: false
-  image:
-    repository: navigation
-    tag: ""
-  kafkaTopic: navigation.telemetry
-  # Custom TCP CAN-frame debug gateway port.
-  n2kGatewayPort: 2597
-  vesselName: vessel-1
-  initialSpeedKnots: "8"
-  # Time acceleration: 60 -> one simulated minute per wall second.
-  timeScale: "60"
-  nodeSelector: {}
-  resources: {}
-
 influxdb:
   image:
     repository: influxdb
