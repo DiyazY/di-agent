@@ -20,6 +20,7 @@ COMMON_MODULE_NAMES = [
     "shore_power",
     "aux_load",
     "switchboard",
+    "schema",
 ]
 
 
