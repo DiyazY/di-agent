@@ -488,3 +488,14 @@ func TestRegistry_ListCopiesLastPenalised(t *testing.T) {
 		t.Errorf("List must carry LastPenalised: %+v", list)
 	}
 }
+
+func TestRegistry_SetTrustClearsLastPenalised(t *testing.T) {
+	r := NewRegistry()
+	d, _ := r.Add("http://node_1:8080", "")
+	_ = r.Penalise(d.ID, time.Now())
+	_ = r.SetTrust(d.ID, 0.15)
+	got, _ := r.Get(d.ID)
+	if !got.LastPenalised.IsZero() {
+		t.Errorf("an operator-set trust must clear LastPenalised, got %v", got.LastPenalised)
+	}
+}

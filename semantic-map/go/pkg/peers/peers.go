@@ -229,6 +229,7 @@ func (r *Registry) Reward(id string) error {
 
 // SetTrust overrides the peer's trust score directly (clamped to [0, 1]).
 // Intended for operator console adjustments and deterministic test setups.
+// It clears LastPenalised: a trust set by an operator is never re-probed.
 // NObserved is incremented so /peers responses reflect that the operator
 // touched this peer.
 func (r *Registry) SetTrust(id string, value float64) error {
@@ -239,6 +240,7 @@ func (r *Registry) SetTrust(id string, value float64) error {
 		return ErrUnknownPeer
 	}
 	d.Trust = clamp01(value)
+	d.LastPenalised = time.Time{} // an operator's trust is a floor that stays, not a penalty that expires
 	d.NObserved++
 	return nil
 }

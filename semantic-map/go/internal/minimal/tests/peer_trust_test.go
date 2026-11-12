@@ -131,3 +131,19 @@ func TestARewardStopsAtOne(t *testing.T) {
 		t.Fatalf("trust %v, want 1.0", d.Trust)
 	}
 }
+
+func TestAnOperatorFloorOverAnAgentPenaltyIsNotReprobed(t *testing.T) {
+	f := newTrustFixture(t)
+	f.fail.Store(true)
+	_ = f.ask()
+	_ = f.reg.SetTrust(f.d.ID, 0.15)
+	f.fail.Store(false)
+	*f.now = f.now.Add(time.Hour)
+	err := f.ask()
+	if f.hits.Load() != 1 {
+		t.Fatalf("hits %d, want 1", f.hits.Load())
+	}
+	if err == nil || !strings.Contains(err.Error(), "1 peers below trust floor") {
+		t.Fatalf("err = %v", err)
+	}
+}
