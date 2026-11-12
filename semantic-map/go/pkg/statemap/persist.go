@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -47,8 +48,9 @@ import (
 // Version 4 added the intervention counters. Version 5 distinguishes associations
 // from directional relationships. Version 6 persists per-source intervention slopes.
 // Version 7 adds the journal's incarnation and sequence. Version 8 adds the
-// calibration record of the map's own predictions.
-const SnapshotVersion = 8
+// calibration record of the map's own predictions. Version 9 adds `retired_at` and
+// the tombstones of forgotten properties.
+const SnapshotVersion = 9
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -75,6 +77,9 @@ type Snapshot struct {
 	// Interventions are the counters by pair "from->to", saved apart from the
 	// relationships because they exist before any relationship does.
 	Interventions map[string]Interventions `json:"interventions,omitempty"`
+
+	// Forgotten is the tombstones: id to the time the property was retired.
+	Forgotten map[string]time.Time `json:"forgotten,omitempty"`
 
 	// Calibration is how the map's own predictions have fared, by kind and basis.
 	Calibration []CalibrationEntry `json:"calibration"`
@@ -117,6 +122,9 @@ func (m *Map) Snapshot() Snapshot {
 			s.Interventions = map[string]Interventions{}
 		}
 		s.Interventions[k] = *iv
+	}
+	if len(m.forgotten) > 0 {
+		s.Forgotten = maps.Clone(m.forgotten)
 	}
 	s.Calibration = m.calibrationListLocked()
 	s.Events = m.journal.Events(0, 0)
@@ -386,6 +394,7 @@ func (m *Map) restoreLocked(snap Snapshot, from, currentError string) error {
 		iv := iv
 		m.interventions[k] = &iv
 	}
+	maps.Copy(m.forgotten, snap.Forgotten)
 	for _, e := range snap.Calibration {
 		m.calibration[CalibrationKey{e.Kind, e.Basis}] = e.Calibration
 	}

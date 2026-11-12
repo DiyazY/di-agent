@@ -840,7 +840,13 @@ from the return, not from before the outage. An HTTP producer is stamped `http`,
 cannot name itself after a member.
 Retiring a property cascades to the relationships referencing it, since an edge to
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
-stay reconstructible.
+stay reconstructible. It is soft for a day: an observed property retired for 24 hours
+(`forgetAfter`) is forgotten by the sweep, which deletes it, its retired relationships
+and the per-pair state keyed by them, and leaves a tombstone (id and `RetiredAt`) for
+another day, so a decision that read it still resolves to "retired" (`GET
+/state/properties/{id}` answers 410) while the map and snapshot stop growing with pod
+churn. Derived properties are never forgotten; a re-observation after forgetting is a
+new admission.
 
 `Record` refuses a reading older than the property's last reading, judged on the agent's monotonic clock (the anchor silence runs on, so a wall-clock step cannot make every correct reading look old; a property restored from a snapshot and not yet seen by this process accepts), or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record; `RecordAccepted` reports the refusal so ingestion keeps the reading from the proposer too. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup. So "older" means by a whole second, which also absorbs the two clocks being read one after the other; such a reading does not move the silence anchor back.
 
@@ -870,6 +876,9 @@ A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
 A collector member entering or leaving backoff or stuck records `collector.down` or
 `collector.up`, once per transition, with the member as target.
+The sweep deleting a property retired for 24 hours records `property.forgotten` (target
+the id; detail `retired_at`, the `relationships` removed, and `kept` for any live edge
+left in place).
 Save keeps one previous generation (`<persist.file>.prev`) and Load falls back to it
 when the current file is absent or unreadable; when neither is usable the map starts
 cold and its first event is `restore.failed` (target the path, detail `error` and

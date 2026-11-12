@@ -742,3 +742,42 @@ func TestStateRouteAcceptsStatusUnobservable(t *testing.T) {
 		t.Errorf("status %d for ?status=bogus; want 400", code)
 	}
 }
+
+func TestForgottenPropertyAnswers410(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	mono := time.Second
+	sm.SetClock(func() time.Time { return now })
+	sm.SetMonotonic(func() time.Duration { return mono })
+	if err := sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.5, At: now, Subject: "pod:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.RetireProperty("cpu@pod:a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	now, mono = now.Add(25*time.Hour), mono+25*time.Hour
+	sm.Sweep()
+
+	resp, err := http.Get(srv.URL + "/state/properties/cpu@pod:a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status %d, want 410", resp.StatusCode)
+	}
+	var body struct {
+		ID        string    `json:"id"`
+		RetiredAt time.Time `json:"retired_at"`
+		Forgotten bool      `json:"forgotten"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ID != "cpu@pod:a" || !body.Forgotten || body.RetiredAt.IsZero() {
+		t.Errorf("body %+v", body)
+	}
+	if code := getState(t, srv.URL+"/state/properties/never-seen", nil); code != http.StatusNotFound {
+		t.Errorf("unknown id answered %d, want 404", code)
+	}
+}

@@ -741,7 +741,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
 | GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` (`active`, `stale`, `unobservable`, `retired`) repeat or take a comma list; an unknown value is `400`. Counts carry `properties_unobservable`, the properties whose collector is down. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
-| GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
+| GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood; `410` with `{id, retired_at, forgotten: true}` for a property forgotten after 24 h retired | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
 | GET  | `/state/relationships`              | `?from=&to=` — each relationship carries `regime` and `regime_since` when its recent layer differs from its established one | State model |
@@ -998,7 +998,10 @@ produced is not a typo to discard, and the journal records the admission. Silenc
 marks a property stale (`map.stale_after`) and optionally retires it (`map.retire_after`);
 a property whose collector is in backoff or stuck is `unobservable` instead, not stale,
 and is never retired while the collector is down; it becomes active on its next
-observation. `map.admit: false` closes the model for a deployment that wants that.
+observation. A property retired for 24 hours is forgotten: removed from the map and the
+snapshot, with a tombstone kept a day more, so an old decision id still resolves to
+"retired" and the snapshot stops growing with pod churn. `map.admit: false` closes the
+model for a deployment that wants that.
 
 ### One agent per machine
 

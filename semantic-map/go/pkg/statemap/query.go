@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Query selects part of the map. A zero Query returns the active state, which is
@@ -194,6 +195,15 @@ func (m *Map) Property(id string) (Property, bool) {
 		return Property{}, false
 	}
 	return p.clone(), true
+}
+
+// Forgotten reports whether id is a tombstone: a property retired and then deleted
+// by the sweep, with the time it was retired.
+func (m *Map) Forgotten(id string) (retiredAt time.Time, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	retiredAt, ok = m.forgotten[id]
+	return retiredAt, ok
 }
 
 // Relationship returns one relationship.

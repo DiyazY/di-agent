@@ -20,7 +20,12 @@ const (
 	EventPropertyStale      EventKind = "property.stale"
 	EventPropertyRetired    EventKind = "property.retired"
 	EventPropertyConflict   EventKind = "property.conflict"
-	EventHookFailed         EventKind = "hook.failed"
+
+	// EventPropertyForgotten: the sweep deleted an observed property retired for
+	// forgetAfter (Target = id; Detail retired_at, relationships removed, and kept
+	// for any live edge left in place).
+	EventPropertyForgotten EventKind = "property.forgotten"
+	EventHookFailed        EventKind = "hook.failed"
 
 	EventRelationshipDeclared EventKind = "relationship.declared"
 	EventRelationshipAsserted EventKind = "relationship.asserted"
