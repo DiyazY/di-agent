@@ -257,6 +257,11 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 			// recorded as an input.
 			reporters := m.ActiveWithPrefix(contentionReporters[c.id])
 			b.Input(c.id+"_reporters", reporters)
+			if p.Status == Unobservable {
+				// The pods' own readings come from the same down source, so no
+				// reporter is also no evidence of calm.
+				return answer(false, fmt.Sprintf("the map's reading of %s is unobservable, so the node's contention is unknown", c.id))
+			}
 			if len(reporters) > 0 {
 				return answer(false, fmt.Sprintf("the map's reading of %s is %s while %s still reports it, so the node's contention is unknown",
 					c.id, p.Status, reporters[0]))

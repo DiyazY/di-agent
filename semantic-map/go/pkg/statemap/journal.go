@@ -562,6 +562,9 @@ func (b *DecisionBuilder) read(id string, retiredValueUsed bool) (Property, bool
 	case Stale:
 		b.caveats = append(b.caveats,
 			fmt.Sprintf("property %s is stale: last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
+	case Unobservable:
+		b.caveats = append(b.caveats,
+			fmt.Sprintf("property %s is unobservable: its collector is down, last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
 	}
 	if copied.NObservations == 0 {
 		b.caveats = append(b.caveats,

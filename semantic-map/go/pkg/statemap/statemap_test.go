@@ -3151,3 +3151,24 @@ func TestDecisionCaveatsAnUnobservableEndpoint(t *testing.T) {
 		t.Errorf("caveats %v; want %q", d.Caveats, want)
 	}
 }
+
+func TestDecisionCaveatsAnUnobservableProperty(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu", .5, c.now(), "netdata")
+	m.SetSourceDown("netdata", true)
+	m.Sweep()
+	b := m.Decide("d1", "estimate", "test")
+	if _, ok := b.Property("cpu"); !ok {
+		t.Fatal("property missing")
+	}
+	d := b.Commit(nil)
+	var found bool
+	for _, cv := range d.Caveats {
+		if strings.HasPrefix(cv, "property cpu is unobservable: its collector is down, last observed ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("caveats %v; want one naming the unobservable property", d.Caveats)
+	}
+}
