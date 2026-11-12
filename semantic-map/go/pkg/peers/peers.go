@@ -47,7 +47,9 @@ import (
 // when ranking candidates.
 //
 // LastSeen is updated by the reasoner whenever a successful HTTP probe lands;
-// it remains zero until first contact.
+// it remains zero until first contact. LastPenalised is stamped when the agent
+// itself penalised the peer (Penalise); it stays zero for a trust an operator set,
+// which is how the reasoner tells a penalty that may expire from a floor that stays.
 type Descriptor struct {
 	ID        string    `json:"id"`
 	URL       string    `json:"url"`
@@ -55,7 +57,13 @@ type Descriptor struct {
 	NObserved int       `json:"n_observed"`
 	LastSeen  time.Time `json:"last_seen"`
 	Note      string    `json:"note,omitempty"`
+
+	LastPenalised time.Time `json:"last_penalised,omitzero"`
 }
+
+// TrustStep is how far one failed cost query lowers a peer's trust and one
+// successful query raises it.
+const TrustStep = 0.05
 
 // clone returns a defensive deep copy so callers can mutate the result
 // without affecting registry state.
@@ -186,6 +194,35 @@ func (r *Registry) UpdateTrust(id string, delta float64) error {
 		return ErrUnknownPeer
 	}
 	d.Trust = clamp01(d.Trust + delta)
+	d.NObserved++
+	return nil
+}
+
+// Penalise lowers the peer's trust by TrustStep (clamped to 0), counts the
+// observation and records when it happened.
+func (r *Registry) Penalise(id string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.byID[id]
+	if !ok {
+		return ErrUnknownPeer
+	}
+	d.Trust = clamp01(d.Trust - TrustStep)
+	d.NObserved++
+	d.LastPenalised = at
+	return nil
+}
+
+// Reward raises the peer's trust by TrustStep (capped at 1) and counts the
+// observation.
+func (r *Registry) Reward(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.byID[id]
+	if !ok {
+		return ErrUnknownPeer
+	}
+	d.Trust = clamp01(d.Trust + TrustStep)
 	d.NObserved++
 	return nil
 }

@@ -429,3 +429,62 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// ── Trust forces ─────────────────────────────────────────────────────────────
+
+func trustNear(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
+func TestRegistry_PenaliseRecordsWhen(t *testing.T) {
+	r := NewRegistry()
+	d, _ := r.Add("http://node_1:8080", "")
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := r.Penalise(d.ID, t0); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.Get(d.ID)
+	if !trustNear(got.Trust, 0.45) {
+		t.Errorf("trust after Penalise: got %v, want 0.45", got.Trust)
+	}
+	if !got.LastPenalised.Equal(t0) {
+		t.Errorf("LastPenalised: got %v, want %v", got.LastPenalised, t0)
+	}
+	if got.NObserved != 1 {
+		t.Errorf("NObserved: got %d, want 1", got.NObserved)
+	}
+	if err := r.Penalise("nope", t0); !errors.Is(err, ErrUnknownPeer) {
+		t.Errorf("Penalise unknown: got %v", err)
+	}
+}
+
+func TestRegistry_RewardIsSymmetricAndCapped(t *testing.T) {
+	r := NewRegistry()
+	d, _ := r.Add("http://node_1:8080", "")
+	_ = r.Penalise(d.ID, time.Now())
+	if err := r.Reward(d.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := r.Get(d.ID)
+	if !trustNear(got.Trust, 0.50) || got.NObserved != 2 {
+		t.Errorf("after reward: trust %v n %d, want 0.50 and 2", got.Trust, got.NObserved)
+	}
+	_ = r.SetTrust(d.ID, 0.98)
+	_ = r.Reward(d.ID)
+	got, _ = r.Get(d.ID)
+	if got.Trust != 1.0 {
+		t.Errorf("reward must cap at 1.0, got %v", got.Trust)
+	}
+	if err := r.Reward("nope"); !errors.Is(err, ErrUnknownPeer) {
+		t.Errorf("Reward unknown: got %v", err)
+	}
+}
+
+func TestRegistry_ListCopiesLastPenalised(t *testing.T) {
+	r := NewRegistry()
+	d, _ := r.Add("http://node_1:8080", "")
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_ = r.Penalise(d.ID, t0)
+	list, _ := r.List()
+	if len(list) != 1 || !list[0].LastPenalised.Equal(t0) {
+		t.Errorf("List must carry LastPenalised: %+v", list)
+	}
+}

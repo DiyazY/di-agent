@@ -195,6 +195,8 @@ type PeerDTO struct {
 	NObserved int       `json:"n_observed"`
 	LastSeen  time.Time `json:"last_seen"`
 	Note      string    `json:"note,omitempty"`
+
+	LastPenalised time.Time `json:"last_penalised,omitzero"`
 }
 
 // AddPeerRequest is the body of POST /peers.

@@ -1502,7 +1502,7 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 
 | Verb | Path | Body / Params | Response |
 | --- | --- | --- | --- |
-| `GET` | `/peers` | — | `[]PeerDTO{id,url,trust,n_observed,last_seen,note}` |
+| `GET` | `/peers` | — | `[]PeerDTO{id,url,trust,n_observed,last_seen,last_penalised,note}` |
 | `POST` | `/peers` | `{url,note?}` | `200 PeerDTO` (idempotent on URL) |
 | `DELETE` | `/peers/{id}` | — | `204` |
 | `POST` | `/peers/{id}/trust` | `{value}` | `204` (manual operator override) |
@@ -1535,12 +1535,12 @@ go run ./cmd/mapctl peers remove a1b2c3d4e5f6
 For every call, the reasoner:
 
 1. Lists peers from the registry. Empty → `ErrInsufficientTrust` ("no peers registered").
-2. Skips any peer below `--min-trust` (default `0.5`).
-3. For each survivor: `GET /cost` on the peer URL; on success `MarkSeen` + record `savings = my ResourceCost − peer ResourceCost`; on failure log + nudge trust down by `0.05` (clamped at 0).
+2. Skips any peer below `--min-trust` (default `0.5`), unless the agent itself penalised it under the floor 10 or more minutes ago; a peer an operator set under the floor is not queried again.
+3. For each survivor: `GET /cost` on the peer URL; on success `Reward` (+0.05, capped 1.0) and `MarkSeen`, and record `savings = my ResourceCost − peer ResourceCost`; on failure log and `Penalise` (−0.05, clamped at 0), stamped with the time.
 4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
 5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
 
-Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
 
 ### Demo scenario
 

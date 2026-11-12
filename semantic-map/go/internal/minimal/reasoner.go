@@ -59,15 +59,27 @@ type RuleEngineReasoner struct {
 	// peerc is the HTTP client used to talk to remote peers. nil is permitted
 	// alongside an empty registry — RecommendPeer never reaches it in that
 	// case. When set, transport errors are logged and treated as a soft trust
-	// penalty (peerPenalty below); they never abort the recommendation run.
+	// penalty (Registry.Penalise); they never abort the recommendation run.
 	peerc *peers.Client
+
+	// now is the clock trust is stamped and aged on; time.Now unless a test sets one.
+	now func() time.Time
 }
 
-// peerPenalty is the trust delta applied to a peer that fails a Cost query.
-// Small enough that a single transient blip barely registers; large enough
-// that a peer that is persistently down drains out of the eligible set after
-// ~20 attempts.
-const peerPenalty = -0.05
+// SetClock replaces the clock RecommendPeer stamps and ages trust penalties with.
+func (r *RuleEngineReasoner) SetClock(f func() time.Time) { r.now = f }
+
+func (r *RuleEngineReasoner) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// trustRetryAfter is how long a peer the agent itself penalised below the trust
+// floor is left alone before it is queried again. A peer whose trust an operator
+// set under the floor is not re-probed: only the agent's own penalty expires.
+const trustRetryAfter = 10 * time.Minute
 
 // peerCostQueryTimeout caps a single RecommendPeer pass when the caller does
 // not supply a context. Generous (3s) — peers are LAN-local in v1, but the
@@ -171,12 +183,14 @@ func (r *RuleEngineReasoner) costConstructs() (resource, pressure string, err er
 //  1. List the peer registry. Empty → ErrInsufficientTrust with rationale
 //     "no peers registered".
 //  2. Compute the local CostOfAction once.
-//  3. For each peer with Trust ≥ minTrustScore, GET /cost on the peer URL.
-//     a. Success → MarkSeen on the registry; compute savings as
+//  3. For each eligible peer, GET /cost on the peer URL. A peer is eligible when
+//     Trust ≥ minTrustScore, or when the agent itself penalised it under the floor
+//     at least trustRetryAfter ago (an operator-set floor is never re-probed).
+//     a. Success → Reward and MarkSeen on the registry; compute savings as
 //     (myEnergy − peerEnergy); compute trust-weighted savings as
 //     savings × peer.Trust.
-//     b. Failure → log via log.Printf and apply peerPenalty to the peer's
-//     trust score. Skip this peer; do not abort the run. The reasoner
+//     b. Failure → log via log.Printf and Penalise the peer (trust − 0.05,
+//     stamped with the time). Skip this peer; do not abort the run. The reasoner
 //     must remain useful when one peer is down.
 //  4. Pick the peer with the highest trust-weighted savings. If no peer
 //     beats local cost (savings ≤ 0 everywhere) → ErrInsufficientTrust.
@@ -220,8 +234,9 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 	bestSet := false
 	var skippedBelowTrust, skippedHTTPError, skippedNoSavings int
 
+	now := r.clock()
 	for _, p := range list {
-		if p.Trust < r.minTrustScore {
+		if p.Trust < r.minTrustScore && (p.LastPenalised.IsZero() || now.Sub(p.LastPenalised) < trustRetryAfter) {
 			skippedBelowTrust++
 			continue
 		}
@@ -237,14 +252,17 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 			log.Printf("reasoner.RecommendPeer: peer %s (%s) cost query failed: %v", p.ID, p.URL, err)
 			// Soft trust penalty so persistently-down peers drain out of the
 			// eligible set without hard-banning them on first failure.
-			if perr := r.peers.UpdateTrust(p.ID, peerPenalty); perr != nil {
+			if perr := r.peers.Penalise(p.ID, now); perr != nil {
 				log.Printf("reasoner.RecommendPeer: penalty update failed: %v", perr)
 			}
 			skippedHTTPError++
 			continue
 		}
 		// Successful query — record contact.
-		if perr := r.peers.MarkSeen(p.ID, time.Now()); perr != nil {
+		if perr := r.peers.Reward(p.ID); perr != nil {
+			log.Printf("reasoner.RecommendPeer: reward failed: %v", perr)
+		}
+		if perr := r.peers.MarkSeen(p.ID, now); perr != nil {
 			log.Printf("reasoner.RecommendPeer: MarkSeen failed: %v", perr)
 		}
 		savings := myCost.ResourceCost - peerCost.ResourceCost

@@ -796,6 +796,8 @@ func peerToDTO(d *peers.Descriptor) PeerDTO {
 		NObserved: d.NObserved,
 		LastSeen:  d.LastSeen,
 		Note:      d.Note,
+
+		LastPenalised: d.LastPenalised,
 	}
 }
 

@@ -1646,11 +1646,14 @@ The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. T
 
 ### Trust mechanics
 
-`Descriptor.Trust` is a float in `[0, 1]`. Three forces move it:
+`Descriptor.Trust` is a float in `[0, 1]`. Four forces move it:
 
 1. **Default at registration** = `0.5`. We neither blanket-trust nor pre-distrust an operator-supplied URL.
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
-3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
+3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `Registry.Penalise` takes `−0.05` per failed `/cost` query, clamped at 0, and stamps `LastPenalised`.
+4. **Reward** on a successful `/cost` query — `Registry.Reward` adds `+0.05`, capped at 1. Without it trust could only fall, and a peer that had a bad minute would never recover.
+
+The trust floor expires for the agent's own penalty only. A peer under `min_trust` with a `LastPenalised` stamp is queried again after `trustRetryAfter` (10 minutes), so a recovered peer climbs back by rewards; a peer whose trust an operator set under the floor has no stamp and stays excluded until the operator says otherwise (the PoC's `trust 0.15` exclusion relies on this).
 
 Outcome-driven trust updates (boost on an accepted offer, penalty on a declined one) are designed but not wired. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after an accepted offer, but `peers.Client.Offer` never touches trust and neither does an admission outcome: an answer moves trust only when its caller applies `UpdateTrust`. Admission does not read trust either; a submission walks peers in registry-id order.
 
