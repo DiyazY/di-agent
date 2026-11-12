@@ -68,7 +68,7 @@ func TestNodeUIReachesTheConsole(t *testing.T) {
 func TestSaveIfChangedSkipsAnUnchangedMap(t *testing.T) {
 	state := newTestState(t)
 	path := filepath.Join(t.TempDir(), "state.json")
-	var last uint64
+	var last saveMark
 
 	if saved, err := saveIfChanged(state, path, &last); !saved || err != nil {
 		t.Fatalf("first call = (%v, %v); want (true, nil)", saved, err)
@@ -95,12 +95,34 @@ func TestSaveIfChangedSkipsAnUnchangedMap(t *testing.T) {
 	}
 }
 
+// TestSaveIfChangedSavesADecisionOnlyChange: a decision is journalled without moving
+// the map's revision, and it is what a restart must be able to reproduce.
+func TestSaveIfChangedSavesADecisionOnlyChange(t *testing.T) {
+	state := newTestState(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	var last saveMark
+	if saved, err := saveIfChanged(state, path, &last); !saved || err != nil {
+		t.Fatalf("first call = (%v, %v); want (true, nil)", saved, err)
+	}
+	rev := state.Revision()
+	state.Decide("dec-1", "anything?").Commit(map[string]any{"answer": "no"})
+	if state.Revision() != rev {
+		t.Fatalf("precondition: a decision moved the revision")
+	}
+	if saved, err := saveIfChanged(state, path, &last); !saved || err != nil {
+		t.Fatalf("after a decision = (%v, %v); want (true, nil)", saved, err)
+	}
+	if saved, _ := saveIfChanged(state, path, &last); saved {
+		t.Error("a quiet tick after the decision saved again")
+	}
+}
+
 // TestShutdownSaveIsUnconditional: the shutdown save is state.Save, not the skipping
 // helper, so it writes even when the revision has not moved.
 func TestShutdownSaveIsUnconditional(t *testing.T) {
 	state := newTestState(t)
 	path := filepath.Join(t.TempDir(), "state.json")
-	var last uint64
+	var last saveMark
 	if _, err := saveIfChanged(state, path, &last); err != nil {
 		t.Fatal(err)
 	}

@@ -782,19 +782,28 @@ func newServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
-// saveIfChanged saves the map unless its revision is the one last saved. *lastSaved
-// holds that revision plus one, so its zero value means "nothing saved yet" even for a
-// map still at revision 0, and the first call always writes. The revision is read
-// before the save, so a change landing mid-save leaves the next tick to save it.
-func saveIfChanged(state *statemap.Map, path string, lastSaved *uint64) (saved bool, err error) {
-	rev := state.Revision()
-	if rev+1 == *lastSaved {
+// saveMark is what the last successful save covered: the map's revision and the
+// journal's total entries ever appended. A decision is journalled without moving the
+// revision, so the revision alone would skip it.
+type saveMark struct {
+	rev, entries uint64
+	done         bool
+}
+
+// saveIfChanged saves the map unless neither its revision nor its journal moved since
+// the last successful save. A zero mark has saved nothing, so the first tick saves once.
+// The mark is read before the save, so a change landing mid-save leaves the next tick
+// to save it.
+func saveIfChanged(state *statemap.Map, path string, last *saveMark) (saved bool, err error) {
+	held, dropped, _ := state.Journal().Stats()
+	now := saveMark{rev: state.Revision(), entries: uint64(held) + dropped, done: true}
+	if now == *last {
 		return false, nil
 	}
 	if err := state.Save(path); err != nil {
 		return false, err
 	}
-	*lastSaved = rev + 1
+	*last = now
 	return true, nil
 }
 
@@ -817,7 +826,7 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
-		var lastSaved uint64 // revision+1; 0, so the first tick saves once
+		var lastSaved saveMark
 		for {
 			select {
 			case <-ctx.Done():
@@ -831,7 +840,7 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 					continue
 				}
 				if saved {
-					log.Printf("state model: saved at revision %d (periodic)", lastSaved-1)
+					log.Printf("state model: saved at revision %d (periodic)", lastSaved.rev)
 				}
 			}
 		}
