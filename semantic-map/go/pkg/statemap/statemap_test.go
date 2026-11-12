@@ -2113,3 +2113,41 @@ func TestStaleAfterIsTheConfiguredSilence(t *testing.T) {
 		t.Errorf("configured %s; want 30s", got)
 	}
 }
+
+func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: time.Minute})
+	_ = c
+	if err := m.RecordFacts("test", []Fact{NumberFact("cpu_cores", 4, "cores")}); err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]any{"nested": map[string]any{"k": 1.0}, "list": []any{1.0}}
+	b := m.Decide("dec-copy", "q")
+	b.Input("evidence", in)
+	b.Facts()
+	b.Commit(map[string]any{"ok": true})
+
+	in["nested"].(map[string]any)["k"] = 2.0
+	in["list"].([]any)[0] = 9.0
+
+	d, ok := m.Journal().Decision("dec-copy")
+	if !ok {
+		t.Fatal("decision not found")
+	}
+	ev := d.Inputs["evidence"].(map[string]any)
+	if ev["nested"].(map[string]any)["k"] != 1.0 || ev["list"].([]any)[0] != 1.0 {
+		t.Fatalf("caller's later write reached the journal: %v", ev)
+	}
+	if len(d.FactsRead) == 0 || d.FactsRead[0].Number == nil {
+		t.Fatalf("facts not read: %+v", d.FactsRead)
+	}
+	*d.FactsRead[0].Number = 99
+	ev["nested"].(map[string]any)["k"] = 3.0
+
+	again, _ := m.Journal().Decision("dec-copy")
+	if *again.FactsRead[0].Number != 4 {
+		t.Fatalf("returned fact aliased: %v", *again.FactsRead[0].Number)
+	}
+	if again.Inputs["evidence"].(map[string]any)["nested"].(map[string]any)["k"] != 1.0 {
+		t.Fatal("returned input aliased")
+	}
+}

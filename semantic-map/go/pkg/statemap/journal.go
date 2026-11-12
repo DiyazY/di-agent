@@ -252,6 +252,22 @@ func (d *Decision) clone() *Decision {
 			c.RelationshipsRead[i] = r
 		}
 	}
+	if d.Inputs != nil {
+		c.Inputs = make(map[string]any, len(d.Inputs))
+		for k, v := range d.Inputs {
+			c.Inputs[k] = copyAny(v)
+		}
+	}
+	if d.FactsRead != nil {
+		c.FactsRead = make([]Fact, len(d.FactsRead))
+		for i, f := range d.FactsRead {
+			if f.Number != nil {
+				n := *f.Number
+				f.Number = &n
+			}
+			c.FactsRead[i] = f
+		}
+	}
 	if d.Answer != nil {
 		c.Answer = make(map[string]any, len(d.Answer))
 		for k, v := range d.Answer {
@@ -440,7 +456,26 @@ func (b *DecisionBuilder) Input(name string, v any) {
 	if b.inputs == nil {
 		b.inputs = map[string]any{}
 	}
-	b.inputs[name] = v
+	b.inputs[name] = copyAny(v)
+}
+
+// copyAny copies the maps and slices nested in v; every other value is assigned.
+func copyAny(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		c := make(map[string]any, len(x))
+		for k, e := range x {
+			c[k] = copyAny(e)
+		}
+		return c
+	case []any:
+		c := make([]any, len(x))
+		for i, e := range x {
+			c[i] = copyAny(e)
+		}
+		return c
+	}
+	return v
 }
 
 // Commit records the decision in the journal and returns it.
