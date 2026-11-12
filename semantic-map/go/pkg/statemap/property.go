@@ -1609,6 +1609,24 @@ func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at
 	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
 }
 
+// ReasonSignContradicted is the retired_reason the agent writes when the machine
+// contradicts a relationship's declared sign past SignSuspect's bar.
+const ReasonSignContradicted = "sign-contradicted"
+
+// retireSignContradictedLocked retires a relationship the machine keeps contradicting.
+// The pair's intervention counters are untouched: what the agent did and saw on this
+// pair is a fact about the pair, not about the claim. Caller holds the write lock.
+func (m *Map) retireSignContradictedLocked(r *Relationship, at time.Time) {
+	r.Status = Retired
+	r.RetiredReason = ReasonSignContradicted
+	m.bump(EventRelationshipRetired, r.ID, "agent", map[string]any{
+		"reason":     ReasonSignContradicted,
+		"agreements": r.SignAgreements,
+		"conflicts":  r.SignConflicts,
+		"provenance": string(r.Provenance),
+	}, at)
+}
+
 // admitEventLocked reports whether an event identity is new, recording it if so.
 // Caller holds the write lock.
 //

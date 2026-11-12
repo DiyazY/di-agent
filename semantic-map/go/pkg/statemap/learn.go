@@ -150,7 +150,14 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 		r.SignConflicts++
 		strength = 0
 	}
+	was := r.SignSuspectFlag
 	r.SignSuspectFlag = r.SignSuspect()
+	if !was && r.SignSuspectFlag && r.Provenance != Asserted {
+		// On the transition only: a relationship an operator re-declares keeps its
+		// counters and its flag, and is not retired again. An asserted one is the
+		// operator's claim to overrule; it stays flagged.
+		m.retireSignContradictedLocked(r, at)
+	}
 
 	if r.NObservations == 0 {
 		r.Recent = strength

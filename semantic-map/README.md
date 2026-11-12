@@ -1090,7 +1090,9 @@ Two consequences worth knowing before reading a number off `/edges`:
   each one rejected at the gate, and holds a strength of zero — which is also what a
   relationship on a quiet system holds. Every relationship therefore carries
   `sign_agreements` and `sign_conflicts`, exposes a conflict share, and is flagged
-  `sign_suspect` past 30 pairs at 60% conflict; the census of every view reports how many
+  `sign_suspect` past 30 pairs at 60% conflict, and on that transition the agent retires it
+  (`retired_reason` `sign-contradicted`) unless an operator asserted it, in which case it
+  stays active and flagged; the census of every view reports how many
   relationships the machine persistently refutes. This is not hypothetical: two of the
   four propositions an earlier specification carried sat in that state on every cluster,
   and nothing in the aggregate metrics showed it.

@@ -769,7 +769,14 @@ This is not tidiness. Two failures were live without it, both silent:
   relationship on a quiet system. `Relationship.SignConflicts` and `SignSuspect()` are
   what make the difference visible, and `relationships_sign_suspect` carries it into
   the census so an aggregate reader cannot miss it. Polarity is what gives that check
-  a fixed reference to test against.
+  a fixed reference to test against. The flag is acted on, not only shown: when it
+  turns on, a seeded, learned, discovered or intervened relationship is retired with
+  `retired_reason: "sign-contradicted"` (journalled by the agent with the agreement and
+  conflict counts and the provenance it had), while an `asserted` one is only flagged,
+  since an operator's claim is theirs to overrule. Retirement happens on that
+  transition only: re-declaring the relationship revives it with its counters, flag
+  still set, and does not retire it again until `ResetRelationship` clears the
+  counters and gives it a fresh trial. The pair's intervention counters are untouched.
 
 **How many observations a relationship gets.** A relationship advances on a *pair*, so
 its `n_obs` counts the times both its endpoints were observed close enough together —
@@ -880,6 +887,9 @@ verify and outcome decisions carry the updated records as a `calibration` input.
 persisted in its own snapshot field and `GET /state` carries it as `calibration`.
 Admission reads it back: when both its predictions exist and each basis has at least
 `calibrationMinN` (5) outcomes, the one with the lower mean absolute error decides.
+It also judges the map's own relationships: one whose declared sign the machine keeps
+contradicting retires itself (`relationship.retired`, actor `agent`, reason
+`sign-contradicted`) rather than waiting for an operator to read the flag.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept

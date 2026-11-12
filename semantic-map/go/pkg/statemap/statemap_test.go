@@ -2527,3 +2527,163 @@ func TestARepeatedStampAcrossClockReadJitterIsAccepted(t *testing.T) {
 		t.Errorf("n=%d; a repeated stamp was refused as out of order", p.NObservations)
 	}
 }
+
+// signStreamMap builds the sign-suspect setup: two relationships over resource ->
+// pressure, "backwards" declared with the wrong sign for a stream that rises together.
+func signStreamMap(t *testing.T, rels ...Relationship) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 20,
+		Alpha:                   0.5,
+		Learn:                   true,
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 40},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rels == nil {
+		rels = []Relationship{
+			{From: "resource", To: "pressure", Label: "backwards", Sign: -1},
+			{From: "resource", To: "pressure", Label: "correct", Sign: 1},
+		}
+	}
+	for _, r := range rels {
+		if err := m.DeclareRelationship(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return m, c
+}
+
+// feedSignPairs feeds n pairs; pressure rises with resource, or falls with it if inverse.
+func feedSignPairs(t *testing.T, m *Map, c *clock, from, n int, inverse bool) {
+	t.Helper()
+	for i := from; i < from+n; i++ {
+		c.advance(5 * time.Second)
+		x := float64(i%10) / 10.0
+		if err := m.ObserveEvent("resource", x, c.now(), "r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(2 * time.Second)
+		y := 0.9*x + 0.02
+		if inverse {
+			y = 0.9 * (1 - x)
+		}
+		if err := m.ObserveEvent("pressure", y, c.now(), "p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func retiredEventsFor(m *Map, id string) []Event {
+	var out []Event
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventRelationshipRetired && e.Target == id {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestSignContradictedSeededRelationshipIsRetired(t *testing.T) {
+	m, c := signStreamMap(t)
+	feedSignPairs(t, m, c, 0, 40, false)
+	id := RelationshipID("resource", "pressure", "backwards")
+	backwards, _ := m.Relationship(id)
+	correct, _ := m.Relationship(RelationshipID("resource", "pressure", "correct"))
+	if backwards.Status != Retired || backwards.RetiredReason != ReasonSignContradicted || !backwards.SignSuspectFlag {
+		t.Fatalf("backwards = %v %q flag=%v", backwards.Status, backwards.RetiredReason, backwards.SignSuspectFlag)
+	}
+	if correct.Status != Active {
+		t.Errorf("correct status = %v", correct.Status)
+	}
+	evs := retiredEventsFor(m, id)
+	if len(evs) != 1 {
+		t.Fatalf("retired events = %d, want 1", len(evs))
+	}
+	e := evs[0]
+	if e.Actor != "agent" || e.Detail["reason"] != "sign-contradicted" ||
+		e.Detail["conflicts"].(int) < 30 || e.Detail["agreements"] != 0 || e.Detail["provenance"] != "learned" {
+		t.Errorf("event = %+v", e)
+	}
+	if got := m.Census().RelationshipsLive; got != 1 {
+		t.Errorf("live = %d, want 1", got)
+	}
+}
+
+func TestSignContradictedAssertedRelationshipIsOnlyFlagged(t *testing.T) {
+	m, c := signStreamMap(t)
+	id := RelationshipID("resource", "pressure", "backwards")
+	if err := m.AssertRelationshipStrength(id, 0.5, "op", "test"); err != nil {
+		t.Fatal(err)
+	}
+	feedSignPairs(t, m, c, 0, 40, false)
+	backwards, _ := m.Relationship(id)
+	if backwards.Status != Active || !backwards.SignSuspectFlag {
+		t.Fatalf("asserted: status=%v flag=%v, want active and flagged", backwards.Status, backwards.SignSuspectFlag)
+	}
+	if n := len(retiredEventsFor(m, id)); n != 0 {
+		t.Errorf("%d retired events for an asserted relationship", n)
+	}
+}
+
+func TestSignContradictedIntervenedIsRetiredAndKeepsInterventions(t *testing.T) {
+	m, c := signStreamMap(t, Relationship{From: "resource", To: "pressure", Label: "backwards", Sign: 1})
+	id := RelationshipID("resource", "pressure", "backwards")
+	for i := 0; i < 2; i++ {
+		if _, _, err := m.RecordIntervention(InterventionOutcome{
+			From: "resource", To: "pressure", Agreed: true, HasEffect: true, Effect: 0.6,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r, _ := m.Relationship(id); r.Provenance != Intervened {
+		t.Fatalf("precondition: provenance = %v", r.Provenance)
+	}
+	feedSignPairs(t, m, c, 0, 40, true)
+	r, _ := m.Relationship(id)
+	if r.Status != Retired || r.RetiredReason != ReasonSignContradicted {
+		t.Fatalf("status=%v reason=%q", r.Status, r.RetiredReason)
+	}
+	evs := retiredEventsFor(m, id)
+	if len(evs) != 1 || evs[0].Detail["provenance"] != "intervened" {
+		t.Fatalf("events = %+v", evs)
+	}
+	if r.Interventions == nil || r.Interventions.EffectN != 2 {
+		t.Errorf("interventions = %+v, want EffectN 2", r.Interventions)
+	}
+}
+
+func TestSignRetiredRelationshipRedeclaredStaysActive(t *testing.T) {
+	m, c := signStreamMap(t)
+	feedSignPairs(t, m, c, 0, 40, false)
+	id := RelationshipID("resource", "pressure", "backwards")
+	before, _ := m.Relationship(id)
+	if before.Status != Retired {
+		t.Fatalf("precondition: status = %v", before.Status)
+	}
+	if err := m.DeclareRelationship(Relationship{From: "resource", To: "pressure", Label: "backwards", Sign: -1}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := m.Relationship(id)
+	if r.Status != Active || r.SignConflicts != before.SignConflicts || !r.SignSuspectFlag {
+		t.Fatalf("redeclared: status=%v conflicts=%d (was %d) flag=%v",
+			r.Status, r.SignConflicts, before.SignConflicts, r.SignSuspectFlag)
+	}
+	feedSignPairs(t, m, c, 40, 10, false)
+	if r, _ = m.Relationship(id); r.Status != Active {
+		t.Fatalf("re-retired on a repeat: status = %v", r.Status)
+	}
+	if err := m.ResetRelationship(id, "op", "fresh trial"); err != nil {
+		t.Fatal(err)
+	}
+	feedSignPairs(t, m, c, 50, 40, false)
+	if r, _ = m.Relationship(id); r.Status != Retired {
+		t.Fatalf("after reset and a fresh trial: status = %v, want retired", r.Status)
+	}
+	if n := len(retiredEventsFor(m, id)); n != 2 {
+		t.Errorf("retired events = %d, want 2", n)
+	}
+}

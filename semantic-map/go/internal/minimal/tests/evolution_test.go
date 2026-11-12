@@ -618,8 +618,18 @@ func TestEvolution_DeprecationFromContradiction(t *testing.T) {
 		t.Errorf("%s learned strength %.3f from evidence of the opposite sign; evidence "+
 			"against a claim is not a weaker version of it", target, contradicted.EMA)
 	}
-	if advisoryAt < 0 {
-		t.Error("expected at least one advisory line to fire before deprecation")
+	// The advisory used to be the only signal that a claim wanted review. The agent now
+	// retires a seeded claim the machine keeps contradicting, which supersedes it: the
+	// scenario passes if either the advisory fired or the agent already retired the
+	// relationship, naming the reason.
+	retiredByAgent := false
+	for _, r := range a.state.Relationships("", "") {
+		if r.Label == target && r.Status == statemap.Retired && r.RetiredReason == statemap.ReasonSignContradicted {
+			retiredByAgent = true
+		}
+	}
+	if advisoryAt < 0 && !retiredByAgent {
+		t.Error("expected an advisory or an agent retirement before the operator deprecates")
 	}
 
 	// Operator action: deprecate through the FACADE, not the ontology. The facade
