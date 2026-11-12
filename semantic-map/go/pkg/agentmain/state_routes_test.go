@@ -800,7 +800,9 @@ func TestStateCarriesThePace(t *testing.T) {
 	if code := getState(t, srv.URL+"/state", &view); code != 200 || view.Pace != "slow" {
 		t.Fatalf("GET /state after SetPace: code=%d pace=%q, want slow", code, view.Pace)
 	}
-	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	if err := sm.Observe("cpu_pressure_ratio", 0.3, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	var res statemap.EstimateResult
 	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio", &res); code != 200 || res.DecisionID == "" {
 		t.Fatalf("estimate: code=%d decision_id=%q", code, res.DecisionID)

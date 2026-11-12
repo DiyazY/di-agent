@@ -1027,7 +1027,7 @@ The map changes at four rates, and each is a setting rather than an accident.
 | **Property** | one observation, at confidence 0 | stale after `map.stale_after` (2 m) → retired after `map.retire_after` (10 m), cascading to incident relationships |
 | **Magnitude** | `profile.alpha` (0.2) for the recent layer, `profile.alpha_slow` (0.001) for the established layer | — |
 | **Structure** | `map.proposer.min_pairs` (30) co-observations inside `map.pair_window` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
-| **Attention** | `base` from start and on any event (lever leaving calm, offer, operator mutation, admitted property) | `slow` after `paceCalmFor` (10 m) of calm: paced loops at ×4; journalled `pace.changed`; every decision carries `inputs.pace` |
+| **Attention** | `base` from start and on any event (lever leaving calm, offer, operator mutation other than a pushed sample, admitted property) | `slow` after `paceCalmFor` (10 m) of calm: paced loops at ×4; journalled `pace.changed`; every decision carries `inputs.pace` |
 
 The sweep is not paced, so "stale" keeps one meaning at both attention levels.
 

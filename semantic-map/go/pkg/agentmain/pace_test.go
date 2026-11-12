@@ -418,6 +418,9 @@ func TestWakefulWakesOnMutationsOnly(t *testing.T) {
 	f.wantPace(paceSlow)
 	do(http.MethodGet, "/state")
 	f.wantPace(paceSlow)
+	// A pushed sample is telemetry, not attention: a node fed by samples can still slow.
+	do(http.MethodPost, "/ingest-sample")
+	f.wantPace(paceSlow)
 	do(http.MethodPost, "/tasks")
 	f.wantPace(paceBase)
 	if r := f.lastChange().Detail["reason"]; r != "request:POST /tasks" {

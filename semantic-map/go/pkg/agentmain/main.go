@@ -401,8 +401,9 @@ func Main() {
 		LastAdmitted: state.LastAdmitted,
 	}, time.Now, log.Printf)
 	// Before Run: Pin does not move a pace that is already slow back to base.
-	if ok, why := paceAllowed(cfg.Sources.Interval, state.StaleAfter()); !ok {
-		pace.Pin(why)
+	paceOK, paceWhy := paceAllowed(cfg.Sources.Interval, state.StaleAfter())
+	if !paceOK {
+		pace.Pin(paceWhy)
 	}
 
 	srv := newServer(cfg.Node.Addr, pace.Wakeful(mux))
@@ -447,8 +448,10 @@ func Main() {
 		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
-	log.Printf("pace: base; slow after %s of calm (×%d on collection, review, persist, peer poll, groups)",
-		paceCalmFor, paceSlowFactor)
+	if paceOK {
+		log.Printf("pace: base; slow after %s of calm (×%d on collection, review, persist, peer poll, groups)",
+			paceCalmFor, paceSlowFactor)
+	}
 	go pace.Run(ctx)
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval, pace)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll, pace)

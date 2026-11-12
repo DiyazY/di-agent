@@ -197,12 +197,17 @@ func (p *Pace) wait(ctx context.Context, base time.Duration) bool {
 	}
 }
 
+// paceTelemetryPath is the pushed-sample route: telemetry, not an attention event. A
+// sample that admits a new property still wakes the pace through the admit hook.
+const paceTelemetryPath = "/ingest-sample"
+
 // Wakeful wakes the pace on every request that may change something: any method
-// other than GET, HEAD and OPTIONS.
+// other than GET, HEAD and OPTIONS, except a pushed sample.
 func (p *Pace) Wakeful(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		switch {
+		case r.Method == http.MethodGet, r.Method == http.MethodHead, r.Method == http.MethodOptions:
+		case r.URL.Path == paceTelemetryPath:
 		default:
 			p.Wake("request:" + r.Method + " " + r.URL.Path)
 		}
