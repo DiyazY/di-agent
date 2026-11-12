@@ -2828,7 +2828,9 @@ func TestRegimeEndsAfterThreeFoldsInsideTheBand(t *testing.T) {
 	stepRegime(t, m, c, id, same, "back")
 }
 
-func TestRegimeNeedsAnEstablishedLayer(t *testing.T) {
+// TestResetClearsTheRegime: a reset discards the evidence a regime rests on, so it
+// clears Regime and RegimeSince, and no regime starts on the pairs right after it.
+func TestResetClearsTheRegime(t *testing.T) {
 	m, c, id := newLearningPairWindow(t, 0.001, 10)
 	feedPairs(t, m, c, 300, 1.0, "strong")
 	driveRegime(t, m, c, id, 100)
@@ -2841,7 +2843,7 @@ func TestRegimeNeedsAnEstablishedLayer(t *testing.T) {
 	since := m.Journal().Seq()
 	feedPairs(t, m, c, 20, 0.0, "after")
 	if r, _ := m.Relationship(id); r.Regime {
-		t.Fatal("regime set with no established layer of its own")
+		t.Fatal("regime set on the pairs right after the reset")
 	}
 	for _, e := range m.Journal().Events(0, 0) {
 		if e.Seq > since && e.Kind == EventRelationshipRegime {

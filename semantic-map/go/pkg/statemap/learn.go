@@ -192,7 +192,7 @@ func regimeBand(nWindow int) float64 {
 // outside the established one's band, in Fisher's z, for regimeFolds folds running.
 // Caller holds the write lock.
 func (m *Map) updateRegimeLocked(r *Relationship, nWindow int, at time.Time) {
-	if r.Established == nil {
+	if r.Established == nil { // a fold always seeds Established first; this guards direct callers only
 		r.regimeRun = 0
 		return
 	}
