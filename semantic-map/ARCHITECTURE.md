@@ -922,7 +922,8 @@ silently dropped everything since the last periodic save.
 
 The snapshot also holds `loops`, what the acting loops learned: each relief lever's
 effect EMAs and its tally (acts, kept, reverted, refused), the admission outcomes, and
-the trust extended to each peer. It is stamped with the node id and restored, before
+the trust extended to each peer with the time the agent last penalised it (without
+it, a peer under the floor would read as operator-set and never be re-probed). It is stamped with the node id and restored, before
 any loop starts, only on the same `node.id`; another node's is logged and ignored. An
 accept still awaiting its outcome is not resumed — its arrival and settle clocks ran in
 the process that is gone — but closed with a journalled `admission.outcome`,
@@ -1668,7 +1669,7 @@ This section covers the registry and the trust mechanics that decide *where work
 
 In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
-- SQLite-backed registry for the edge-standard / cloud-full profile, keeping full trust history (today each peer's trust value survives a restart in the snapshot's `loops`, §5 Persistence, and its observation count starts again);
+- SQLite-backed registry for the edge-standard / cloud-full profile, keeping full trust history (today each peer's trust and penalty time survive a restart in the snapshot's `loops`, §5 Persistence, and its observation count starts again);
 - gossip-based discovery (mDNS / dat-style) so peers find each other without a static `peers.urls` list.
 
 The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.

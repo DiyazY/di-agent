@@ -12,10 +12,10 @@ import (
 // says whose it is: what relief learned about this node's workloads, and the
 // trust this node extended, mean nothing on another node.
 type loopsBlob struct {
-	NodeID    string                   `json:"node_id"`
-	Relief    map[string]relief.Memory `json:"relief"` // by action
-	Admission admission.Memory         `json:"admission"`
-	Peers     map[string]float64       `json:"peers"` // trust by peer id
+	NodeID    string                      `json:"node_id"`
+	Relief    map[string]relief.Memory    `json:"relief"` // by action
+	Admission admission.Memory            `json:"admission"`
+	Peers     map[string]peers.TrustState `json:"peers"` // by peer id
 }
 
 // captureLoops is the snapshot's capture of the loops' learned state.

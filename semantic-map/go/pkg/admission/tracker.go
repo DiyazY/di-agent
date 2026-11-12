@@ -193,6 +193,11 @@ type PendingAccept struct {
 func (t *Tracker) PendingList() []PendingAccept {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.pendingLocked()
+}
+
+// pendingLocked is PendingList; the caller holds mu.
+func (t *Tracker) pendingLocked() []PendingAccept {
 	out := make([]PendingAccept, len(t.pending))
 	for i, e := range t.pending {
 		out[i] = PendingAccept{Name: e.name, AcceptID: e.acceptID, AcceptedAt: e.at, Arrived: e.snap != nil, Subject: e.subject}
@@ -217,11 +222,12 @@ type Memory struct {
 }
 
 // Memory is the tracker's state, for the snapshot.
+// Both are read under one lock, so an accept judged meanwhile is in one or the
+// other, never both.
 func (t *Tracker) Memory() Memory {
-	pending := t.PendingList()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return Memory{Outcomes: slices.Clone(t.outcomes), Pending: pending}
+	return Memory{Outcomes: slices.Clone(t.outcomes), Pending: t.pendingLocked()}
 }
 
 // Restore replaces the outcomes with mem's and closes each accept that was

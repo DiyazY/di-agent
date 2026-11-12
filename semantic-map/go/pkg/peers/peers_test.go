@@ -510,11 +510,15 @@ func TestTrustRoundTrip(t *testing.T) {
 	if err := r.SetTrust(a.ID, 0.9); err != nil {
 		t.Fatal(err)
 	}
+	at := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	if err := r.Penalise(b.ID, at); err != nil {
+		t.Fatal(err)
+	}
 	saved := r.Trusts()
-	if saved[a.ID] != 0.9 || saved[b.ID] != 0.5 {
+	if saved[a.ID].Trust != 0.9 || saved[b.ID].Trust != 0.45 || !saved[b.ID].LastPenalised.Equal(at) {
 		t.Fatalf("trusts %v", saved)
 	}
-	saved["gone"] = 0.1
+	saved["gone"] = TrustState{Trust: 0.1}
 
 	r2 := NewRegistry()
 	r2.Add("http://node_1:8080", "") //nolint:errcheck
@@ -526,6 +530,9 @@ func TestTrustRoundTrip(t *testing.T) {
 	}
 	if got.Trust != 0.9 || got.NObserved != 0 {
 		t.Fatalf("restored %+v; want trust 0.9, nothing observed", got)
+	}
+	if got, _ := r2.Get(b.ID); got.Trust != 0.45 || !got.LastPenalised.Equal(at) {
+		t.Fatalf("restored %+v; want trust 0.45 penalised at %v", got, at)
 	}
 	if ps, _ := r2.List(); len(ps) != 2 {
 		t.Fatalf("peers %+v; the restore added an unknown one", ps)

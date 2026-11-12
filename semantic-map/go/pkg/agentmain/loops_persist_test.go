@@ -63,7 +63,7 @@ func (r *loopsRig) capture() func() (json.RawMessage, error) {
 }
 
 // learned gives the rig state worth keeping: an effect and a tally on the first
-// lever, an outcome, and trust 0.7 in its peer.
+// lever, an outcome, and its peer set to 0.7 then penalised once, to 0.65.
 func (r *loopsRig) learned(t *testing.T) {
 	t.Helper()
 	r.loops[0].Restore(relief.Memory{Effects: map[string]map[string]float64{"pod:a": {relief.BasisUsage: 0.6}},
@@ -71,6 +71,9 @@ func (r *loopsRig) learned(t *testing.T) {
 	r.tr.Restore(admission.Memory{Outcomes: []admission.Outcome{{Name: "web", AcceptID: "admit-1.1",
 		OutcomeID: "admit-1.2", Subject: "pod:web", Result: admission.Held, At: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}}})
 	if err := r.reg.SetTrust(r.peer, 0.7); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reg.Penalise(r.peer, time.Date(2026, 11, 5, 12, 5, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -95,8 +98,8 @@ func TestCaptureAndRestoreLoops(t *testing.T) {
 	if got, want := b.tr.Outcomes(), a.tr.Outcomes(); !reflect.DeepEqual(got, want) {
 		t.Errorf("outcomes %+v; want %+v", got, want)
 	}
-	if d, _ := b.reg.Get(b.peer); d.Trust != 0.7 {
-		t.Errorf("peer trust %v; want 0.7", d.Trust)
+	if got, want := b.reg.Trusts(), a.reg.Trusts(); !reflect.DeepEqual(got, want) {
+		t.Errorf("peer trust %+v; want %+v, penalty time included", got, want)
 	}
 	if err := restoreLoops(nil, "n1", b.loops, b.tr, b.reg, t.Logf); err != nil {
 		t.Errorf("a cold start: %v", err)
