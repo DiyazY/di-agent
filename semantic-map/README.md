@@ -1277,7 +1277,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `explain.sessions`        | `true`                           | Enable multi-turn session memory and the session-scoped tool-result cache. |
 | `explain.api_key`         | `""`                             | Bearer token for the backend. Write `${EXPLAIN_API_KEY}` to read it from the environment; the agent no longer reads that variable on its own. |
 
-**Autonomous review** (off by default). Full walkthrough in [§9](#9-autonomous-candidate-review--autonomy).
+**Autonomous review** (rules alone by default: both model backends are `none`; `decision.backend` turns tier 1 on, `reasoning.backend` tier 2). Full walkthrough in [§9](#9-autonomous-candidate-review--autonomy).
 
 | Setting                       | Default               | Meaning |
 | --------------------------- | --------------------- | ------- |
@@ -1287,14 +1287,14 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `loops.review.rules`           | `composition, persistent-correlation` | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
+| `loops.review.rules`           | `composition, persistent-correlation` | Tier 0 rules, a list, first match decides; `[composition]` drops the correlation rule; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
 | `loops.review.decision.backend` | `none`               | Tier 1 (off by default): `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
 | `loops.review.decision.model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
 | `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
 | `loops.review.decision.reasoning_effort` | `none`      | `reasoning_effort` sent by `openai-logprobs`, so a thinking model answers directly; empty omits it, and a server that refuses it (vLLM accepts only `low`/`medium`/`high`) gets it dropped. |
-| `loops.review.reasoning.backend` | `openai-tools`      | Tier 2: `openai-tools` (any OpenAI-compatible server with tool calling) or `none`. Unreachable, it skips only what needs it, each cycle. |
+| `loops.review.reasoning.backend` | `none`              | Tier 2 (off by default): `openai-tools` (any OpenAI-compatible server with tool calling) turns it on, or `none`. Unreachable, it skips only what needs it, each cycle. |
 | `loops.review.decision.timeout`  | `5m`                | How long one tier-1 call may take. A decision model on the node's own CPUs scoring a candidate with tier 2's analysis takes minutes; a call past this fails and the candidate waits for the next cycle. |
 | `loops.review.reasoning.timeout` | `10m`               | How long one tier-2 analysis may take, tool calls included. |
 | `loops.review.reasoning.url`   | `http://localhost:11434/v1` | Tier 2 `/v1` base; it may be another machine. |
@@ -1747,18 +1747,19 @@ A missing planner or critic prompt disables that stage with a log line rather th
 
 ## 9. Autonomous Candidate Review (`loops.review.level`)
 
-The agent reviews the proposer's candidates itself: `loops.review.level` defaults to `full`, with a
-decision model and a reasoning model, and every review is a decision record. `suggest` and `off` are
-the manual modes, for an operator who wants to decide.
+The agent reviews the proposer's candidates itself: `loops.review.level` defaults to `full`, and every
+review is a decision record. By default it runs on rules alone: both model backends are `none`, and
+`decision.backend` (tier 1) and `reasoning.backend` (tier 2) turn the model tiers on. `suggest` and
+`off` are the manual modes, for an operator who wants to decide.
 
 ```bash
 # A node (8 GB): a decision model only; what it is unsure of waits for its evidence to move.
-# agent.yaml: loops.review: {reasoning: {backend: none}}
+# agent.yaml: loops.review: {decision: {backend: systemone}}
 ollama pull tev1:4b
 ./agent -config agent.yaml
 
 # A machine with memory to spare: a stronger decision model and a reasoning tier.
-# agent.yaml: loops.review: {decision: {model: "nimble-v3:9b-nvfp4"}}  (the reasoning tier is on by default)
+# agent.yaml: loops.review: {decision: {backend: systemone, model: "nimble-v3:9b-nvfp4"}, reasoning: {backend: openai-tools}}
 ollama pull nimble-v3:9b-nvfp4 && ollama pull qwen3.8:27b-nvfp4
 ./agent -config agent.yaml
 
@@ -1857,7 +1858,7 @@ of progress. This checkpoint is separate from the state estimator's raw windows,
 still restart cold. Snapshot format 6 is current. Older versions, including format 5,
 are rejected; older binaries cannot load format 6.
 
-This is an opt-in statistical acceptance policy, **not proof of causation**. Directed
+This is a statistical acceptance policy, on by default, **not proof of causation**. Directed
 confirmations still participate in estimates; associations do not. This feature does
 not add probation or automatic retirement of accepted edges. `level: suggest`
 records proposed approvals without applying them. `level: rules` alone does not disable
