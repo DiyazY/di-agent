@@ -83,15 +83,12 @@ func (g *grouper) topology() groups.Topology {
 	return g.top
 }
 
-func (g *grouper) run(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
+// run refreshes the topology, then waits every at the pace, until ctx ends.
+func (g *grouper) run(ctx context.Context, every time.Duration, p *Pace) {
 	for {
 		g.tick(ctx)
-		select {
-		case <-ctx.Done():
+		if !p.wait(ctx, every) {
 			return
-		case <-t.C:
 		}
 	}
 }

@@ -751,7 +751,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq` | State model |
 | GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
-| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` when the journal has dropped it | State model |
+| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` when the journal has dropped it. `inputs.pace` is the pace the decision was taken at | State model |
 | POST | `/state/sweep`                      | —                                                        | State model |
 | GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
 | GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
@@ -1002,6 +1002,8 @@ observation. A property retired for 24 hours is forgotten: removed from the map 
 snapshot, with a tombstone kept a day more, so an old decision id still resolves to
 "retired" and the snapshot stops growing with pod churn. `map.admit: false` closes the
 model for a deployment that wants that.
+
+**The pace.** The agent has two attention levels and no setting for them. After ten minutes in which every relief lever is calm, no accept awaits its outcome, no candidate is due for review and no property was admitted, it goes `slow`: collection, review, persist, peer polling and group refresh run at a quarter of their cadence. The first lever leaving calm, offer (`POST /tasks`, `/offers`), operator mutation (any non-GET request) or newly admitted property returns it to `base` at once; the change is journalled as `pace.changed` with its reason, and every decision records the pace it was taken at. The sweep keeps wall-clock time, so staleness means the same at both paces; relief and admission tracking keep their own cadence. If `sources.interval × 4` would reach `map.stale_after`, the agent logs once at start and never slows. A restart starts at `base`. An unclean exit under `slow` can lose up to four `persist.interval`s; a clean shutdown saves as before.
 
 ### One agent per machine
 

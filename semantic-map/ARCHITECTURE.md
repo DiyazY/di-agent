@@ -1018,15 +1018,18 @@ observations as this one's history at full confidence. A relationship serialises
 recent layer as `recent` and adds the derived `effective` and `basis`, so a reader is
 handed the answer rather than three layers and a precedence rule.
 
-#### The three paces
+#### The four paces
 
-The map changes at three rates, and each is a setting rather than an accident.
+The map changes at four rates, and each is a setting rather than an accident.
 
 | Pace | Appears | Disappears |
 |---|---|---|
 | **Property** | one observation, at confidence 0 | stale after `map.stale_after` (2 m) → retired after `map.retire_after` (10 m), cascading to incident relationships |
 | **Magnitude** | `profile.alpha` (0.2) for the recent layer, `profile.alpha_slow` (0.001) for the established layer | — |
 | **Structure** | `map.proposer.min_pairs` (30) co-observations inside `map.pair_window` before a candidate can exist; an operator confirms | cascade on endpoint retirement |
+| **Attention** | `base` from start and on any event (lever leaving calm, offer, operator mutation, admitted property) | `slow` after `paceCalmFor` (10 m) of calm: paced loops at ×4; journalled `pace.changed`; every decision carries `inputs.pace` |
+
+The sweep is not paced, so "stale" keeps one meaning at both attention levels.
 
 Admission is immediate and *trust* grows with observations: a property's confidence is its observation count against the convergence threshold, so confidence is the pace signal and there is no probation gate. The sweep never retires a derived property — it is declared structure — but it goes stale when no member is active and returns with them; an operator can retire it.
 

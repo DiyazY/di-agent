@@ -68,9 +68,9 @@ func autonomyStatus(r *autonomy.Reviewer) func() *autonomy.Status {
 	}
 }
 
-// startReviewLoop reviews candidates in the background: a cycle, then a wait of every,
-// until ctx ends. A nil reviewer (level off) starts nothing.
-func startReviewLoop(ctx context.Context, r *autonomy.Reviewer, every time.Duration) {
+// startReviewLoop reviews candidates in the background: a cycle, then a wait of every
+// at the pace, until ctx ends. A nil reviewer (level off) starts nothing.
+func startReviewLoop(ctx context.Context, r *autonomy.Reviewer, every time.Duration, p *Pace) {
 	if r == nil {
 		return
 	}
@@ -81,10 +81,8 @@ func startReviewLoop(ctx context.Context, r *autonomy.Reviewer, every time.Durat
 	go func() {
 		for {
 			r.Cycle(ctx)
-			select {
-			case <-ctx.Done():
+			if !p.wait(ctx, every) {
 				return
-			case <-time.After(every):
 			}
 		}
 	}()

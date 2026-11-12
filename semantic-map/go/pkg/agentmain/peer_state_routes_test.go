@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -272,5 +273,39 @@ func TestPeerTransitionsAreJournalledOnce(t *testing.T) {
 	f.fetchAll(ctx)
 	if n := count(statemap.EventPeerRecovered); n != 1 {
 		t.Fatalf("%d recovered events; want one", n)
+	}
+}
+
+// TestPeerPollFollowsThePace: after the immediate pass, peers are polled at the
+// pace's interval.
+func TestPeerPollFollowsThePace(t *testing.T) {
+	remote := statemap.New(statemap.Config{Owner: "node-2"}, statemap.NewJournal(0))
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, remote, nil, nil)
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/state" {
+			hits.Add(1)
+		}
+		mux.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	registry := peers.NewRegistry()
+	if _, err := registry.Add(srv.URL, "node-2"); err != nil {
+		t.Fatal(err)
+	}
+	f := &peerStateFetcher{registry: registry, client: peers.NewClient(time.Second),
+		store: statemap.NewPeerStore("node-1", time.Minute)}
+
+	slow := newPaceFixture(t)
+	slow.minutes(10)
+	slow.wantPace(paceSlow)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startPeerStateLoop(ctx, f, 20*time.Millisecond, slow.p)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	if n := hits.Load(); n < 1 || n > 4 {
+		t.Errorf("%d polls in 200ms under slow (80ms); want the immediate pass plus ≤ 3", n)
 	}
 }

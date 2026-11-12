@@ -102,7 +102,7 @@ func (f *peerStateFetcher) fetchAll(ctx context.Context) (ok, failed int) {
 // A zero interval disables polling, which leaves the cluster view holding only what a
 // manual refresh collected. That is a legitimate configuration for a node that should
 // not generate periodic traffic, and the flag documentation says what it costs.
-func startPeerStateLoop(ctx context.Context, f *peerStateFetcher, every time.Duration) {
+func startPeerStateLoop(ctx context.Context, f *peerStateFetcher, every time.Duration, p *Pace) {
 	if f == nil || every <= 0 {
 		return
 	}
@@ -112,15 +112,8 @@ func startPeerStateLoop(ctx context.Context, f *peerStateFetcher, every time.Dur
 		if ok, failed := f.fetchAll(ctx); ok+failed > 0 {
 			log.Printf("peer state: %d peers answered, %d did not", ok, failed)
 		}
-		t := time.NewTicker(every)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				f.fetchAll(ctx)
-			}
+		for p.wait(ctx, every) {
+			f.fetchAll(ctx)
 		}
 	}()
 }
