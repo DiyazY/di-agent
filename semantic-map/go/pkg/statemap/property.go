@@ -150,6 +150,11 @@ type Property struct {
 	LastObserved  time.Time `json:"last_observed,omitzero"`
 	RetiredReason string    `json:"retired_reason,omitempty"`
 
+	// lastSeen is the process-monotonic time of the last accepted observation, the
+	// clock silence is measured on so a wall-clock step cannot read as silence. Not
+	// serialised; zero means not observed in this process (just restored).
+	lastSeen time.Duration
+
 	// OutOfRange counts readings outside Range. Non-zero means the collector and
 	// the declared range disagree, which is a configuration fault worth surfacing
 	// rather than absorbing.
@@ -540,6 +545,14 @@ type Map struct {
 	// now is injectable so lifecycle transitions can be tested without sleeping.
 	now func() time.Time
 
+	// mono is the process's monotonic reading, which silence is measured on. epoch
+	// anchors it; the sweep compares wall and monotonic deltas between sweeps to
+	// notice a wall-clock step (prevSweepMono zero means no previous sweep).
+	epoch         time.Time
+	mono          func() time.Duration
+	prevSweepWall time.Time
+	prevSweepMono time.Duration
+
 	// onRetire is called, outside the lock, with the id of every property that
 	// retires — by an operator or by silence. See SetRetireHook.
 	onRetire func(propertyID string)
@@ -551,7 +564,7 @@ func New(cfg Config, journal *Journal) *Map {
 	if journal == nil {
 		journal = NewJournal(0)
 	}
-	return &Map{
+	m := &Map{
 		cfg:           c,
 		owner:         c.Owner,
 		properties:    make(map[string]*Property),
@@ -563,7 +576,26 @@ func New(cfg Config, journal *Journal) *Map {
 		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
 		now:           time.Now,
+		epoch:         time.Now(),
 	}
+	m.mono = func() time.Duration { return time.Since(m.epoch) }
+	return m
+}
+
+// baselineSweepLocked records the wall and monotonic readings the first sweep
+// compares against, so a step before the first sweep is noticed too. Caller holds
+// the write lock.
+func (m *Map) baselineSweepLocked() {
+	if m.prevSweepMono == 0 {
+		m.prevSweepWall, m.prevSweepMono = m.now().Round(0), m.mono()
+	}
+}
+
+// SetMonotonic overrides the monotonic reading silence is measured on. For tests.
+func (m *Map) SetMonotonic(f func() time.Duration) {
+	m.mu.Lock()
+	m.mono = f
+	m.mu.Unlock()
 }
 
 // SetClock overrides the map's clock. For tests.
@@ -834,6 +866,8 @@ func (m *Map) Record(o Observation) error {
 	}
 	p.NObservations++
 	p.LastObserved = at
+	p.lastSeen = m.mono()
+	m.baselineSweepLocked()
 	p.Confidence = clamp01(float64(p.NObservations) / float64(m.cfg.ConvergenceObservations))
 	if p.Status == Retired {
 		// The system is exhibiting it again, which is exactly the event retirement
@@ -1114,11 +1148,29 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 	defer m.mu.Unlock()
 
 	now := m.now()
+	mono := m.mono()
+	if m.prevSweepMono > 0 {
+		wallDelta := now.Round(0).Sub(m.prevSweepWall)
+		monoDelta := mono - m.prevSweepMono
+		tol := time.Duration(m.learn.PairWindowSeconds) * time.Second
+		if d := wallDelta - monoDelta; d > tol || -d > tol {
+			m.bump(EventClockStepped, "", "sweep", map[string]any{
+				"wall_delta_seconds":      wallDelta.Seconds(),
+				"monotonic_delta_seconds": monoDelta.Seconds(),
+			}, now)
+		}
+	}
+	m.prevSweepWall, m.prevSweepMono = now.Round(0), mono
 	for _, p := range m.properties {
 		if p.Kind == Derived || p.Status == Retired || p.NObservations == 0 {
 			continue
 		}
+		// Silence is process time where this process has seen the property; right
+		// after a restore it is the snapshot's wall gap, which the grace covers.
 		silence := now.Sub(p.LastObserved)
+		if p.lastSeen > 0 {
+			silence = mono - p.lastSeen
+		}
 		switch {
 		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter:
 			m.retireLocked(p, fmt.Sprintf("no observation for %s", silence.Round(time.Second)), "sweep", now)

@@ -272,6 +272,7 @@ func TestRiseFromAcceptBaseline(t *testing.T) {
 func TestStaleReadingConfounds(t *testing.T) {
 	r := arrived(t)
 	r.m.SetClock(func() time.Time { return t0.Add(2 * r.m.StaleAfter()) })
+	r.m.SetMonotonic(func() time.Duration { return time.Second + 2*r.m.StaleAfter() })
 	r.m.Sweep()
 	r.tick(time.Minute)
 	o := r.result("confounded")

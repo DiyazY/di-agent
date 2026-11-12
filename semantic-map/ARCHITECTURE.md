@@ -820,6 +820,8 @@ stay reconstructible.
 
 `Record` refuses a reading older than the property's last, or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup.
 
+Silence is measured on the process's monotonic clock, not the sample's wall time, so an NTP step after boot does not read as a week of silence; a step larger than the pair window is journalled as `clock.stepped`.
+
 The ordering in `IngestSample` matters: the state model records a sample BEFORE the
 routing table is consulted. The table says what the agent knows how to summarise, not
 what the system is allowed to exhibit.
@@ -838,6 +840,8 @@ system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
 evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
+A sweep that finds the wall clock stepped against the monotonic one records
+`clock.stepped` with both deltas, so a timestamp that jumped is explained.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept

@@ -13,10 +13,18 @@ import (
 
 // clock is a controllable time source: lifecycle transitions depend on elapsed
 // time, and a test that slept for them would be slow and flaky.
-type clock struct{ t time.Time }
+//
+// t is the wall clock and m the process's monotonic reading. advance moves both, as
+// time passing does; stepWall moves only the wall clock, as an NTP step does.
+type clock struct {
+	t time.Time
+	m time.Duration
+}
 
-func (c *clock) now() time.Time          { return c.t }
-func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *clock) now() time.Time           { return c.t }
+func (c *clock) mono() time.Duration      { return c.m }
+func (c *clock) advance(d time.Duration)  { c.t = c.t.Add(d); c.m += d }
+func (c *clock) stepWall(d time.Duration) { c.t = c.t.Add(d) }
 
 // near compares floats that arrive via EMA arithmetic, where an exact literal is
 // not reachable: 0.2*0.8 + 0.8*0.8 is 0.8000000000000001.
@@ -27,9 +35,10 @@ func near(got, want float64) bool {
 
 func newTestMap(t *testing.T, cfg Config) (*Map, *clock) {
 	t.Helper()
-	c := &clock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
+	c := &clock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), m: time.Second}
 	m := New(cfg, NewJournal(0))
 	m.SetClock(c.now)
+	m.SetMonotonic(c.mono)
 	return m, c
 }
 
@@ -1601,6 +1610,7 @@ func TestSweepReleasesTheLockWhenItPanics(t *testing.T) {
 		}
 		return at
 	})
+	m.SetMonotonic(func() time.Duration { return c.m + time.Minute })
 
 	m.Sweep() // first call: x falls silent past RetireAfter, so this runs retireLocked
 	if p, ok := m.Property("x"); !ok || p.Status != Retired {
@@ -2235,5 +2245,108 @@ func TestARefusedReadingDoesNotConsumeItsEventID(t *testing.T) {
 	p, _ := m.Property("cpu")
 	if p.NObservations != 2 {
 		t.Errorf("n = %d; want 2: the refused reading consumed event id e2", p.NObservations)
+	}
+}
+
+// ── Silence runs on the process's monotonic clock ─────────────────────────────
+
+func clockSteps(m *Map) []Event {
+	var out []Event
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventClockStepped {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func observedDiskIO(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	if err := m.DeclareProperty(Property{ID: "disk_io"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("disk_io", 0.1, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	return m, c
+}
+
+func TestAWallClockStepForwardRetiresNothing(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(5 * time.Second)
+	c.stepWall(2 * time.Hour)
+
+	stale, retired := m.Sweep()
+	if len(stale) != 0 || len(retired) != 0 {
+		t.Fatalf("a 2h wall step made stale=%v retired=%v; 5s of real silence is neither", stale, retired)
+	}
+	if p, _ := m.Property("disk_io"); p.Status != Active {
+		t.Errorf("status %s after a wall step, want active", p.Status)
+	}
+	steps := clockSteps(m)
+	if len(steps) != 1 {
+		t.Fatalf("%d clock.stepped events, want 1", len(steps))
+	}
+	if w, _ := steps[0].Detail["wall_delta_seconds"].(float64); math.Abs(w-7205) > 1 {
+		t.Errorf("wall_delta_seconds %v, want about 7205", steps[0].Detail["wall_delta_seconds"])
+	}
+
+	c.advance(time.Second)
+	m.Sweep()
+	if n := len(clockSteps(m)); n != 1 {
+		t.Errorf("%d clock.stepped events after a quiet sweep, want still 1: one event per step", n)
+	}
+}
+
+func TestAWallClockStepBackwardRetiresNothing(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(5 * time.Second)
+	c.stepWall(-time.Hour)
+
+	stale, retired := m.Sweep()
+	if len(stale) != 0 || len(retired) != 0 {
+		t.Fatalf("a backward wall step made stale=%v retired=%v", stale, retired)
+	}
+	steps := clockSteps(m)
+	if len(steps) != 1 {
+		t.Fatalf("%d clock.stepped events, want 1", len(steps))
+	}
+	if w, _ := steps[0].Detail["wall_delta_seconds"].(float64); w >= 0 {
+		t.Errorf("wall_delta_seconds %v, want negative", w)
+	}
+}
+
+func TestOrdinarySilenceStillRetires(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(3 * time.Minute)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "disk_io" {
+		t.Fatalf("retired=%v after 3m of silence, want disk_io", retired)
+	}
+	if n := len(clockSteps(m)); n != 0 {
+		t.Errorf("%d clock.stepped events with both clocks agreeing, want 0", n)
+	}
+}
+
+func TestRelationshipsSurviveAClockStep(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	for _, id := range []string{"a", "b"} {
+		if err := m.DeclareProperty(Property{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Observe(id, 0.5, c.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(5 * time.Second)
+	c.stepWall(48 * time.Hour)
+	m.Sweep()
+	r, _ := m.Relationship(RelationshipID("a", "b", ""))
+	if r.Status == Retired {
+		t.Errorf("relationship retired by a wall-clock step: %s", r.RetiredReason)
 	}
 }

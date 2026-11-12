@@ -36,6 +36,12 @@ const (
 	// adjustment from two unrelated ones that happened to be adjacent in the log.
 	EventOperatorIntent EventKind = "operator.intent"
 
+	// EventClockStepped records a sweep that found the wall clock and the process's
+	// monotonic clock disagreeing by more than the pair window: the wall clock was
+	// stepped, by NTP or an operator. Silence is measured on the monotonic clock, so
+	// nothing is retired by it; the record says why a timestamp jumped.
+	EventClockStepped EventKind = "clock.stepped"
+
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
 )

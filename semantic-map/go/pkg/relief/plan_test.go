@@ -68,6 +68,9 @@ func newMap(t *testing.T, now func() time.Time) *statemap.Map {
 	t.Helper()
 	m := statemap.New(statemap.Config{AdmitUnknown: true, Alpha: 1}, statemap.NewJournal(0))
 	m.SetClock(now)
+	// Silence is measured on the monotonic clock; drive it from the same fake clock.
+	base := now()
+	m.SetMonotonic(func() time.Duration { return now().Sub(base) + time.Second })
 	return m
 }
 
