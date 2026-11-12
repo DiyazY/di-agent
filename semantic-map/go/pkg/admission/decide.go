@@ -128,7 +128,9 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	nonPredictionFailure := false
 	for i, d := range domains {
 		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity], cal)
-		chosenBy[d.Relieves] = lines[i].ChosenBy
+		if lines[i].ChosenBy != "" { // a line that failed before prediction chose no basis
+			chosenBy[d.Relieves] = lines[i].ChosenBy
+		}
 		for _, basis := range []string{"map", "usage"} {
 			k := statemap.CalibrationKey{Kind: "admission." + d.Relieves, Basis: basis}
 			if c := cal[k]; c.N > 0 {

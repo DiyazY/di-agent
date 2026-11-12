@@ -265,8 +265,8 @@ type Relationship struct {
 	// the JSON does not have to re-derive the predicate to see the verdict.
 	SignSuspectFlag bool `json:"sign_suspect"`
 
-	// Regime says the recent layer has sat outside the established one's band for
-	// regimeFolds consecutive folds: the present differs from what this machine has
+	// Regime says the recent layer has sat outside the established one's band for a
+	// window of consecutive folds: the present differs from what this machine has
 	// shown. It changes no strength — Effective is unchanged — and a decision that
 	// reads the relationship carries a caveat saying so.
 	Regime      bool      `json:"regime"`

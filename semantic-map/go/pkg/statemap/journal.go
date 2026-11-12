@@ -27,7 +27,7 @@ const (
 	EventRelationshipRetired  EventKind = "relationship.retired"
 
 	// EventRelationshipRegime records a relationship entering or leaving a regime:
-	// its recent layer outside the established one's band for regimeFolds folds.
+	// its recent layer outside the established one's band for a window of folds.
 	// Detail: recent, established, band, started.
 	EventRelationshipRegime EventKind = "relationship.regime"
 

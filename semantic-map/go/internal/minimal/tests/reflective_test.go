@@ -22,7 +22,7 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 		mono = time.Second
 		unit = [2]float64{0, 1}
 		cfg  = statemap.Config{Owner: "n1", ConvergenceObservations: 500, Alpha: 0.2, AdmitUnknown: true, Learn: true,
-			LearnConfig: statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 10}}
+			LearnConfig: statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 40}}
 	)
 	step := func(d time.Duration) { wall, mono = wall.Add(d), mono+d }
 	m := statemap.New(cfg, statemap.NewJournal(0))
@@ -66,7 +66,7 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 120; i++ {
 		pair("resource", "pressure", "a", i, func(x float64) float64 { return 0.9*x + 0.02 })
 	}
 	backId := statemap.RelationshipID("resource", "pressure", "backwards")
@@ -81,7 +81,7 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 	if census.RelationshipsLive != 1 || census.RelationshipsTotal != 2 {
 		t.Fatalf("census %+v; want 1 live of 2", census)
 	}
-	t.Logf("(a) 40 pairs of rising resource and rising pressure against a relationship declared sign -1:")
+	t.Logf("(a) 120 pairs of rising resource and rising pressure against a relationship declared sign -1:")
 	t.Logf("    %s actor=%s %v", retired[0].Kind, retired[0].Actor, retired[0].Detail)
 	t.Logf("    census: %d relationships live, %d retired; the correctly signed one is %v",
 		census.RelationshipsLive, census.RelationshipsTotal-census.RelationshipsLive, good.Status)
@@ -97,7 +97,7 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 	if r, _ := m.Relationship(relID); r.Regime {
 		t.Fatal("regime set while the relationship held")
 	}
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 200; i++ {
 		pair("queue", "latency", "c", i, func(x float64) float64 { return 1 - x })
 		if r, _ := m.Relationship(relID); r.Regime {
 			break
@@ -198,6 +198,9 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 	if ok, err := restored.Load(path); err != nil || !ok {
 		t.Fatalf("load: %v %v", ok, err)
 	}
+	if r, _ := restored.Relationship(backId); r.Status != statemap.Retired || r.RetiredReason != statemap.ReasonSignContradicted {
+		t.Fatalf("restored %s: %v %q; want retired, sign-contradicted", backId, r.Status, r.RetiredReason)
+	}
 	after, _ := restored.Relationship(relID)
 	if !after.Regime || !after.RegimeSince.Equal(rel.RegimeSince) {
 		t.Fatalf("restored regime %v since %v; had since %v", after.Regime, after.RegimeSince, rel.RegimeSince)
@@ -211,8 +214,8 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 			t.Fatalf("restored calibration %+v; want %+v", got[i], want[i])
 		}
 	}
-	t.Logf("(d) after Save and Load: %s is in regime since %s; calibration returned with %d records, %s/%s at n=%d",
-		relID, after.RegimeSince.Format(time.RFC3339), len(got), got[0].Kind, got[0].Basis, got[0].N)
+	t.Logf("(d) after Save and Load: %s is still retired (sign-contradicted); %s is in regime since %s; calibration returned with %d records, %s/%s at n=%d",
+		backId, relID, after.RegimeSince.Format(time.RFC3339), len(got), got[0].Kind, got[0].Basis, got[0].N)
 }
 
 func lineOf(d admission.Decision, domain string) admission.Line {

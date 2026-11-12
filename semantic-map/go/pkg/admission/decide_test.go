@@ -678,3 +678,24 @@ func TestAcceptCaveatsARegimeRelationship(t *testing.T) {
 		t.Fatalf("relationships read %+v; want %s", rec.RelationshipsRead, id)
 	}
 }
+
+// TestBasisChosenByOmitsALineThatChoseNoBasis: a domain whose line fails before any
+// prediction chose no basis, and the record does not say it did.
+func TestBasisChosenByOmitsALineThatChoseNoBasis(t *testing.T) {
+	m, j := node(t, 0.4, 0.02)
+	// The 64 MiB offer is 0.0078 of memory: above this headroom, so the memory line
+	// fails before it predicts.
+	record(t, m, "memory_admission_headroom_ratio", "", 0.001)
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
+	if l := line(t, d, "memory_contention_ratio"); l.Basis != "memory-headroom" || l.ChosenBy != "" {
+		t.Fatalf("precondition: memory line %s by %q; want memory-headroom, no choice", l.Basis, l.ChosenBy)
+	}
+	rec, _ := j.Decision(d.ID)
+	chosen := rec.Inputs["basis_chosen_by"].(map[string]string)
+	if by, ok := chosen["memory_contention_ratio"]; ok {
+		t.Fatalf("basis_chosen_by records %q for a line that chose no basis: %v", by, chosen)
+	}
+	if chosen["cpu_contention_ratio"] != "default" {
+		t.Fatalf("basis_chosen_by %v; want cpu by default", chosen)
+	}
+}

@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -2629,7 +2630,7 @@ func retiredEventsFor(m *Map, id string) []Event {
 
 func TestSignContradictedSeededRelationshipIsRetired(t *testing.T) {
 	m, c := signStreamMap(t)
-	feedSignPairs(t, m, c, 0, 40, false)
+	feedSignPairs(t, m, c, 0, 120, false)
 	id := RelationshipID("resource", "pressure", "backwards")
 	backwards, _ := m.Relationship(id)
 	correct, _ := m.Relationship(RelationshipID("resource", "pressure", "correct"))
@@ -2659,7 +2660,7 @@ func TestSignContradictedAssertedRelationshipIsOnlyFlagged(t *testing.T) {
 	if err := m.AssertRelationshipStrength(id, 0.5, "op", "test"); err != nil {
 		t.Fatal(err)
 	}
-	feedSignPairs(t, m, c, 0, 40, false)
+	feedSignPairs(t, m, c, 0, 120, false)
 	backwards, _ := m.Relationship(id)
 	if backwards.Status != Active || !backwards.SignSuspectFlag {
 		t.Fatalf("asserted: status=%v flag=%v, want active and flagged", backwards.Status, backwards.SignSuspectFlag)
@@ -2682,7 +2683,7 @@ func TestSignContradictedIntervenedIsRetiredAndKeepsInterventions(t *testing.T) 
 	if r, _ := m.Relationship(id); r.Provenance != Intervened {
 		t.Fatalf("precondition: provenance = %v", r.Provenance)
 	}
-	feedSignPairs(t, m, c, 0, 40, true)
+	feedSignPairs(t, m, c, 0, 120, true)
 	r, _ := m.Relationship(id)
 	if r.Status != Retired || r.RetiredReason != ReasonSignContradicted {
 		t.Fatalf("status=%v reason=%q", r.Status, r.RetiredReason)
@@ -2698,7 +2699,7 @@ func TestSignContradictedIntervenedIsRetiredAndKeepsInterventions(t *testing.T) 
 
 func TestSignRetiredRelationshipRedeclaredStaysActive(t *testing.T) {
 	m, c := signStreamMap(t)
-	feedSignPairs(t, m, c, 0, 40, false)
+	feedSignPairs(t, m, c, 0, 120, false)
 	id := RelationshipID("resource", "pressure", "backwards")
 	before, _ := m.Relationship(id)
 	if before.Status != Retired {
@@ -2712,14 +2713,14 @@ func TestSignRetiredRelationshipRedeclaredStaysActive(t *testing.T) {
 		t.Fatalf("redeclared: status=%v conflicts=%d (was %d) flag=%v",
 			r.Status, r.SignConflicts, before.SignConflicts, r.SignSuspectFlag)
 	}
-	feedSignPairs(t, m, c, 40, 10, false)
+	feedSignPairs(t, m, c, 120, 10, false)
 	if r, _ = m.Relationship(id); r.Status != Active {
 		t.Fatalf("re-retired on a repeat: status = %v", r.Status)
 	}
 	if err := m.ResetRelationship(id, "op", "fresh trial"); err != nil {
 		t.Fatal(err)
 	}
-	feedSignPairs(t, m, c, 50, 40, false)
+	feedSignPairs(t, m, c, 130, 120, false)
 	if r, _ = m.Relationship(id); r.Status != Retired {
 		t.Fatalf("after reset and a fresh trial: status = %v, want retired", r.Status)
 	}
@@ -2730,16 +2731,22 @@ func TestSignRetiredRelationshipRedeclaredStaysActive(t *testing.T) {
 
 // ── A relationship says when the present differs from what is established ─────
 
+// effectiveBand is two standard errors of Fisher's z at the effective window of n
+// pairs smoothed with EMA weight alpha: n_eff = n·(1 − φ²)/(1 + φ²), φ = 1 − alpha.
+func effectiveBand(n int, alpha float64) float64 {
+	phi := 1 - alpha
+	nEff := float64(n) * (1 - phi*phi) / (1 + phi*phi)
+	return 2 / math.Sqrt(math.Max(nEff-3, 1))
+}
+
 // regimeOutside is the regime rule recomputed from a relationship as a reader sees
-// it: the recent layer more than two standard errors of Fisher's z at the window
-// size away from the established one.
+// it: the recent layer more than effectiveBand away from the established one.
 func regimeOutside(m *Map, r Relationship) bool {
 	if r.Established == nil {
 		return false
 	}
 	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
-	n := m.PairSupport(r.ID)
-	return math.Abs(z(r.Recent)-z(*r.Established)) > 2/math.Sqrt(math.Max(float64(n-3), 1))
+	return math.Abs(z(r.Recent)-z(*r.Established)) > effectiveBand(m.PairSupport(r.ID), m.cfg.Alpha)
 }
 
 // driveRegime feeds opposed pairs one at a time until the relationship's Regime
@@ -2765,8 +2772,8 @@ func lastEvent(m *Map) Event {
 }
 
 // stepRegime makes observations one at a time — each folds one pair — and checks the
-// three-fold rule stepwise: Regime flips exactly on the third consecutive fold on
-// the new side.
+// run rule stepwise: Regime flips exactly on the fold that completes a full window of
+// consecutive folds on the new side.
 func stepRegime(t *testing.T, m *Map, c *clock, id string, y func(float64) float64, tag string) {
 	t.Helper()
 	r0, _ := m.Relationship(id)
@@ -2780,9 +2787,10 @@ func stepRegime(t *testing.T, m *Map, c *clock, id string, y func(float64) float
 		} else {
 			run = 0
 		}
-		if run < regimeFolds {
+		window := m.PairSupport(id)
+		if run < window {
 			if r.Regime != r0.Regime {
-				t.Fatalf("observation %d: regime flipped after %d folds on the new side; want %d", i, run, regimeFolds)
+				t.Fatalf("observation %d: regime flipped after %d folds on the new side; want %d", i, run, window)
 			}
 			continue
 		}
@@ -2804,16 +2812,17 @@ func stepRegime(t *testing.T, m *Map, c *clock, id string, y func(float64) float
 				t.Fatalf("regime event lacks %s: %v", k, e.Detail)
 			}
 		}
-		if b, _ := e.Detail["band"].(float64); math.Abs(b-2/math.Sqrt(7)) > 1e-12 {
-			t.Fatalf("band %v; want 2/sqrt(7) at window 10", e.Detail["band"])
+		// Window 40 at alpha 0.2: n_eff = 40·0.36/1.64 ≈ 8.78, band 2/sqrt(n_eff − 3).
+		if b, _ := e.Detail["band"].(float64); math.Abs(b-2/math.Sqrt(40*0.36/1.64-3)) > 1e-9 {
+			t.Fatalf("band %v; want 2/sqrt(n_eff − 3) at window 40, alpha 0.2", e.Detail["band"])
 		}
 		return
 	}
 	t.Fatalf("regime never flipped to %v", want)
 }
 
-func TestRegimeStartsAfterThreeFoldsOutsideTheBand(t *testing.T) {
-	m, c, id := newLearningPairWindow(t, 0.001, 10)
+func TestRegimeStartsAfterAWindowOfFoldsOutsideTheBand(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
 	feedPairs(t, m, c, 300, 1.0, "strong")
 	if r, _ := m.Relationship(id); r.Regime {
 		t.Fatal("regime set during the stretch that established the layer")
@@ -2821,8 +2830,8 @@ func TestRegimeStartsAfterThreeFoldsOutsideTheBand(t *testing.T) {
 	stepRegime(t, m, c, id, opposed, "opposed")
 }
 
-func TestRegimeEndsAfterThreeFoldsInsideTheBand(t *testing.T) {
-	m, c, id := newLearningPairWindow(t, 0.001, 10)
+func TestRegimeEndsAfterAWindowOfFoldsInsideTheBand(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
 	feedPairs(t, m, c, 300, 1.0, "strong")
 	stepRegime(t, m, c, id, opposed, "opposed")
 	stepRegime(t, m, c, id, same, "back")
@@ -2831,9 +2840,9 @@ func TestRegimeEndsAfterThreeFoldsInsideTheBand(t *testing.T) {
 // TestResetClearsTheRegime: a reset discards the evidence a regime rests on, so it
 // clears Regime and RegimeSince, and no regime starts on the pairs right after it.
 func TestResetClearsTheRegime(t *testing.T) {
-	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
 	feedPairs(t, m, c, 300, 1.0, "strong")
-	driveRegime(t, m, c, id, 100)
+	driveRegime(t, m, c, id, 200)
 	if err := m.ResetRelationship(id, "op", "t"); err != nil {
 		t.Fatal(err)
 	}
@@ -2853,9 +2862,9 @@ func TestResetClearsTheRegime(t *testing.T) {
 }
 
 func TestRegimeSurvivesRestart(t *testing.T) {
-	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	m, c, id := newLearningPairWindow(t, 0.001, 40)
 	feedPairs(t, m, c, 300, 1.0, "strong")
-	driveRegime(t, m, c, id, 100)
+	driveRegime(t, m, c, id, 200)
 	before, _ := m.Relationship(id)
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := m.Save(path); err != nil {
@@ -2868,5 +2877,95 @@ func TestRegimeSurvivesRestart(t *testing.T) {
 	after, _ := restored.Relationship(id)
 	if !after.Regime || !after.RegimeSince.Equal(before.RegimeSince) {
 		t.Fatalf("restored regime %v since %v; had %v since %v", after.Regime, after.RegimeSince, before.Regime, before.RegimeSince)
+	}
+}
+
+// ── Default-config regressions: noise is not evidence ──────────────────────────
+
+// noisyMap is a default-config learning map with one relationship resource ->
+// pressure declared sign +1. Every learning and smoothing parameter takes its default,
+// which is what these regressions are about.
+func noisyMap(t *testing.T) (*Map, *clock, string) {
+	t.Helper()
+	m, c := newTestMap(t, Config{Learn: true})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: "resource", To: "pressure", Label: "noisy", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	return m, c, RelationshipID("resource", "pressure", "noisy")
+}
+
+// feedNoisy feeds n pairs of x uniform on [0,1) and y = coef·x + Gaussian noise, from
+// a seeded source so the stream is the same on every run.
+func feedNoisy(t *testing.T, m *Map, c *clock, rng *rand.Rand, n int, coef float64) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		x := rng.Float64()
+		y := coef*x + 0.3*rng.NormFloat64()
+		c.advance(time.Second)
+		if err := m.ObserveEvent("resource", x, c.now(), "r"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+		c.advance(time.Second)
+		if err := m.ObserveEvent("pressure", y, c.now(), "p"+itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestSignRetirementIgnoresNoiseOnACorrectSign: a correctly signed but noisy
+// relationship is never retired at the defaults. The first folds share all but one
+// pair of a still-filling window of smoothed values, so a conflict share over them
+// rests on one or two effective draws; retirement must wait for independent evidence.
+func TestSignRetirementIgnoresNoiseOnACorrectSign(t *testing.T) {
+	for seed := int64(1); seed <= 10; seed++ {
+		m, c, id := noisyMap(t)
+		feedNoisy(t, m, c, rand.New(rand.NewSource(seed)), 2000, 0.5)
+		if r, _ := m.Relationship(id); r.Status != Active {
+			t.Errorf("seed %d: a correctly signed noisy relationship is %v (%q) after %d agreements, %d conflicts",
+				seed, r.Status, r.RetiredReason, r.SignAgreements, r.SignConflicts)
+		}
+	}
+}
+
+// TestRegimeIgnoresAStationaryNoisyStream: a stream whose association never changes
+// produces no regime event at the defaults. Consecutive folds share all but one pair of
+// EMA-smoothed values, so the band must be the effective window's, and a run must last
+// a window.
+func TestRegimeIgnoresAStationaryNoisyStream(t *testing.T) {
+	m, c, id := noisyMap(t)
+	feedNoisy(t, m, c, rand.New(rand.NewSource(7)), 6000, 0.5)
+	n := 0
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventRelationshipRegime && e.Target == id {
+			n++
+		}
+	}
+	if r, _ := m.Relationship(id); n != 0 || r.Status != Active {
+		t.Fatalf("stationary stream: %d regime events, status %v (%q); want none, active", n, r.Status, r.RetiredReason)
+	}
+}
+
+// TestRegimeIsNotUpdatedOnARetiredRelationship: a relationship retired on a fold has
+// no present to differ from, so the same fold does not journal a regime for it.
+func TestRegimeIsNotUpdatedOnARetiredRelationship(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	r := m.relationships[id]
+	// z(0.999) ≈ 3.8 against recent 0: outside the band (2 at window 10, alpha 0.2).
+	est := 0.999
+	r.Status, r.Established, r.Recent, r.regimeRun = Retired, &est, 0, 9 // one fold short of a run
+	since := m.Journal().Seq()
+	m.updateRegimeLocked(r, 10, c.now())
+	if r.Regime {
+		t.Fatal("a retired relationship entered a regime")
+	}
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Seq > since && e.Kind == EventRelationshipRegime {
+			t.Fatalf("regime event for a retired relationship: %+v", e)
+		}
 	}
 }

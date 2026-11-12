@@ -769,14 +769,21 @@ This is not tidiness. Two failures were live without it, both silent:
   relationship on a quiet system. `Relationship.SignConflicts` and `SignSuspect()` are
   what make the difference visible, and `relationships_sign_suspect` carries it into
   the census so an aggregate reader cannot miss it. Polarity is what gives that check
-  a fixed reference to test against. The flag is acted on, not only shown: when it
-  turns on, a seeded, learned, discovered or intervened relationship is retired with
-  `retired_reason: "sign-contradicted"` (journalled by the agent with the agreement and
-  conflict counts and the provenance it had), while an `asserted` one is only flagged,
-  since an operator's claim is theirs to overrule. Retirement happens on that
-  transition only: re-declaring the relationship revives it with its counters, flag
-  still set, and does not retire it again until `ResetRelationship` clears the
-  counters and gives it a fresh trial. The pair's intervention counters are untouched.
+  a fixed reference to test against. The flag is acted on, not only shown: once it
+  holds over `signRetireWindows` (3) windows of pairs, a seeded, learned, discovered or
+  intervened relationship is retired with `retired_reason: "sign-contradicted"`
+  (journalled by the agent with the agreement and conflict counts and the provenance it
+  had), while an `asserted` one is only flagged, since an operator's claim is theirs to
+  overrule. The three windows are the substance: folds share all but one pair of a
+  window of smoothed values, so the 30 folds the flag needs can rest on one or two
+  effective draws, and at the defaults a correctly signed but noisy relationship
+  (y = 0.5x + noise) was retired on the first eligible fold in 7 of 10 seeded runs. Retirement
+  happens on the transition of that combined predicate only: re-declaring the
+  relationship revives it with its counters, flag still set, and does not retire it
+  again while the predicate holds; if the conflict share then drops below the bar and
+  rises past it again, the revived relationship is retired again, and
+  `ResetRelationship` clears the counters and gives it a fresh trial. The pair's
+  intervention counters are untouched.
 
 **How many observations a relationship gets.** A relationship advances on a *pair*, so
 its `n_obs` counts the times both its endpoints were observed close enough together —
@@ -894,15 +901,22 @@ Admission reads it back: when both its predictions exist and each basis has at l
 `calibrationMinN` (5) outcomes, the one with the lower mean absolute error decides.
 It also judges the map's own relationships: one whose declared sign the machine keeps
 contradicting retires itself (`relationship.retired`, actor `agent`, reason
-`sign-contradicted`) rather than waiting for an operator to read the flag.
+`sign-contradicted`) once the sign-suspect flag holds over three windows of pairs,
+rather than waiting for an operator to read the flag.
 And it says when the present differs from what it has established: a relationship is
-in `regime` once its recent layer has sat outside the established layer's band for
-`regimeFolds` (3) consecutive folds, and leaves it after three inside. The band is the
-bar `CandidateReview.Outdated` uses, two standard errors of Fisher's z at the pair
-window's size, `2 / sqrt(max(n − 3, 1))`; three folds keep one noisy pair from
-flipping it. Entering and leaving are journalled as `relationship.regime`, and
-`regime_since` dates the entry. `Effective()` is unchanged — the established layer still
-answers — so what a reader sees is the caveat: any decision that reads the
+in `regime` once its recent layer has sat outside the established layer's band for a
+full window of consecutive folds (as many as the pair window holds), and leaves it
+after a window inside. The band is two standard errors of Fisher's z, as
+`CandidateReview.Outdated` uses, but at the window's effective size rather than its
+count: the paired values are EMA-smoothed at `Alpha`, an AR(1) with φ = 1 − α, so n
+pairs carry n_eff = n·(1 − φ²)/(1 + φ²) independent ones and the band is
+`2 / sqrt(max(n_eff − 3, 1))` (at α = 1, n_eff = n). Consecutive folds share all but
+one pair, so a run shorter than a window is one draw seen several times; with the
+independent-pair band and a three-fold run a stationary stream at the defaults went in
+and out of regime 314 times in 6000 pairs. A relationship retired on a fold
+does not enter or leave a regime on it. Entering and leaving are journalled as
+`relationship.regime`, and `regime_since` dates the entry. The precedence in
+`Effective()` is unchanged, so what a reader sees is the caveat: any decision that reads the
 relationship (an estimate, or an admission through the measured effects behind `k`)
 carries `relationship <id>: present differs from established (recent …, established …)`.
 
@@ -1048,7 +1062,10 @@ Two properties follow:
   sibling at 0.995 and the negative one at 0.000.
 - **The learned sign can contradict the backbone.** A proposition asserts a direction;
   when the system shows the opposite sign, that is evidence against *that* proposition
-  rather than evidence of a weaker relation.
+  rather than evidence of a weaker relation. Each fold counts as a sign agreement or a
+  conflict; `SignSuspect()` flags 60% conflict over at least 30 folds, and the agent
+  retires a non-asserted relationship only once that holds over three windows of pairs,
+  because early folds share a still-filling window and are not independent evidence.
 
 **What it replaced.** The other reading was endpoint EMA: every sample updated every edge
 incident to its construct, and the edge's weight tracked that construct's magnitude. It was
