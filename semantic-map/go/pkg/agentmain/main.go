@@ -352,6 +352,12 @@ func Main() {
 	}
 	registerActingRoutes(mux, rt, acting, pol, reliefLoops)
 	admit := buildAdmission(cfg, state, rt, reliefLoops, sm.Peers())
+	// Before any loop starts: what they learned is handed back, and the save loop
+	// captures it from here on.
+	if err := restoreLoops(state.LoopsPersistence(captureLoops(cfg.Node.ID, reliefLoops, admit.tracker, sm.Peers())),
+		cfg.Node.ID, reliefLoops, admit.tracker, sm.Peers(), log.Printf); err != nil {
+		log.Printf("loops: restoring: %v; starting the loops fresh", err)
+	}
 	registerAdmissionRoutes(mux, admit)
 	reviewer, err := buildReviewer(sm, cfg.Loops.Review)
 	if err != nil {

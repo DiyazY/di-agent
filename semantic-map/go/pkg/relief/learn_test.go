@@ -3,6 +3,7 @@ package relief
 import (
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -748,5 +749,30 @@ func TestMovedReportsArrivalAndExcludes(t *testing.T) {
 	got := Moved(m, nodeUsage, map[string]float64{"pod:a": 0.4}, "pod:c", 0.25, t0)
 	if len(got) != 1 || got[0] != "pod:b" {
 		t.Fatalf("moved %v; want [pod:b]", got)
+	}
+}
+
+// TestMemoryRoundTripsEffectsAndCounters: what a loop has learned about a
+// workload, and its tally, are handed to the loop a restarted agent builds.
+func TestMemoryRoundTripsEffectsAndCounters(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, noRelate: true, evidence: true})
+	h.judged("pod:a", 0.44)
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept {
+		t.Fatalf("action %+v; want kept", a)
+	}
+	mem := h.l.Memory()
+	if v, ok := mem.Effects["pod:a"][BasisUsage]; !ok || v == 1 {
+		t.Fatalf("effects %v; want pod:a's usage effect learned", mem.Effects)
+	}
+	if mem.Kept != 1 || mem.Acts != 1 {
+		t.Fatalf("memory %+v; want one act, kept", mem)
+	}
+	l2 := h.newLoop(h.l.Lever())
+	l2.Restore(mem)
+	if st := l2.Status(); st.Kept != 1 || st.Actions != 1 {
+		t.Fatalf("restored status %+v; want one act, kept", st)
+	}
+	if got := l2.Memory(); !reflect.DeepEqual(got, mem) {
+		t.Fatalf("restored memory %+v; want %+v", got, mem)
 	}
 }

@@ -464,3 +464,37 @@ func TestArrivalIsJournalled(t *testing.T) {
 		t.Errorf("%d arrival events after another tick; want still one", n)
 	}
 }
+
+// TestRestoreKeepsOutcomesAndClosesPendingAccepts: a restarted agent keeps the
+// outcomes, and closes each accept still awaiting one as confounded — its
+// arrival and settle clocks did not survive the restart — citing the accept.
+func TestRestoreKeepsOutcomesAndClosesPendingAccepts(t *testing.T) {
+	r := newRig(t)
+	r.accept("gone")
+	r.tick(ArrivalWindow + time.Second)
+	d := r.accept("web")
+	r.arrive("web")
+	r.tick(10 * time.Second)
+	mem := r.tr.Memory()
+	if len(mem.Outcomes) != 1 || len(mem.Pending) != 1 || mem.Pending[0].AcceptID != d.ID {
+		t.Fatalf("memory %+v; want one outcome and web pending", mem)
+	}
+
+	r2 := newRig(t)
+	r2.tr.Restore(mem)
+	out := r2.tr.Outcomes()
+	if len(out) != 2 || out[1].Name != "gone" {
+		t.Fatalf("outcomes %+v; want web's newest, then gone", out)
+	}
+	o := out[0]
+	if o.Name != "web" || o.Result != Confounded || o.Reason != "agent restarted" || o.Subject != "pod:web" {
+		t.Fatalf("restart outcome %+v; want web confounded by the restart", o)
+	}
+	rec, ok := r2.j.Decision(o.OutcomeID)
+	if !ok || rec.Kind != "admission.outcome" || len(rec.Cites) != 1 || rec.Cites[0] != d.ID {
+		t.Fatalf("decision %+v (found %v); want admission.outcome citing %s", rec, ok, d.ID)
+	}
+	if p := r2.tr.PendingList(); len(p) != 0 {
+		t.Fatalf("pending %+v; nothing resumes after a restart", p)
+	}
+}

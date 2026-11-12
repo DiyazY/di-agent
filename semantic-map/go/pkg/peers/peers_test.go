@@ -499,3 +499,35 @@ func TestRegistry_SetTrustClearsLastPenalised(t *testing.T) {
 		t.Errorf("an operator-set trust must clear LastPenalised, got %v", got.LastPenalised)
 	}
 }
+
+// TestTrustRoundTrip: a restarted agent's registry, built from the same peer
+// URLs, takes back the trust it had; the observation count starts afresh, and
+// trust for a peer it no longer holds is ignored.
+func TestTrustRoundTrip(t *testing.T) {
+	r := NewRegistry()
+	a, _ := r.Add("http://node_1:8080", "")
+	b, _ := r.Add("http://node_2:8080", "")
+	if err := r.SetTrust(a.ID, 0.9); err != nil {
+		t.Fatal(err)
+	}
+	saved := r.Trusts()
+	if saved[a.ID] != 0.9 || saved[b.ID] != 0.5 {
+		t.Fatalf("trusts %v", saved)
+	}
+	saved["gone"] = 0.1
+
+	r2 := NewRegistry()
+	r2.Add("http://node_1:8080", "") //nolint:errcheck
+	r2.Add("http://node_2:8080", "") //nolint:errcheck
+	r2.RestoreTrust(saved)
+	got, err := r2.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Trust != 0.9 || got.NObserved != 0 {
+		t.Fatalf("restored %+v; want trust 0.9, nothing observed", got)
+	}
+	if ps, _ := r2.List(); len(ps) != 2 {
+		t.Fatalf("peers %+v; the restore added an unknown one", ps)
+	}
+}

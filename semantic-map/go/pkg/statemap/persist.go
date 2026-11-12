@@ -48,7 +48,12 @@ type Snapshot struct {
 	// Discovery is the proposer's bounded raw evidence, validated separately on
 	// restore against its policy and freshness. The state estimator remains cold.
 	Discovery json.RawMessage `json:"discovery,omitempty"`
-	Version   int             `json:"version"`
+
+	// Loops is the acting loops' learned state — relief effects and counters,
+	// admission outcomes, peer trust — opaque to the map and decoded by the agent
+	// that installed the capture.
+	Loops   json.RawMessage `json:"loops,omitempty"`
+	Version int             `json:"version"`
 
 	// Owner is the system the snapshot describes, so a snapshot moved between hosts
 	// can be recognised as foreign instead of adopted as local history.
@@ -89,6 +94,7 @@ func (m *Map) Snapshot() Snapshot {
 		SavedAt:   m.now(),
 		Revision:  m.revision,
 		Discovery: append(json.RawMessage(nil), m.savedDiscovery...),
+		Loops:     append(json.RawMessage(nil), m.savedLoops...),
 	}
 	for _, p := range m.properties {
 		s.Properties = append(s.Properties, p.clone()) // Save encodes it after the lock is released
@@ -137,6 +143,16 @@ func (m *Map) Save(path string) error {
 			return fmt.Errorf("capturing discovery evidence: %w", err)
 		}
 		snap.Discovery = raw
+	}
+	m.mu.RLock()
+	captureLoops := m.loopsCheckpoint
+	m.mu.RUnlock()
+	if captureLoops != nil {
+		raw, err := captureLoops()
+		if err != nil {
+			return fmt.Errorf("capturing the loops' state: %w", err)
+		}
+		snap.Loops = raw
 	}
 	blob, err := json.Marshal(snap)
 	if err != nil {
@@ -302,6 +318,7 @@ func (m *Map) loadLocked(snap Snapshot, path string) error {
 	}
 	m.baselineSweepLocked() // a restore is a first reading of both clocks, so a step before the first sweep is seen
 	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)
+	m.savedLoops = append(json.RawMessage(nil), snap.Loops...)
 	inc := snap.Incarnation + 1
 	m.journal.restore(snap.Events, snap.JournalDropped, snap.Seq, inc)
 
@@ -331,6 +348,16 @@ func (m *Map) DiscoveryPersistence(capture func() (json.RawMessage, error)) json
 	defer m.mu.Unlock()
 	m.discoveryCheckpoint = capture
 	return append(json.RawMessage(nil), m.savedDiscovery...)
+}
+
+// LoopsPersistence installs the loops' capture callback, run by Save outside the
+// state lock as the discovery capture is, and returns the blob Load restored — nil
+// on a cold start.
+func (m *Map) LoopsPersistence(capture func() (json.RawMessage, error)) json.RawMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.loopsCheckpoint = capture
+	return append(json.RawMessage(nil), m.savedLoops...)
 }
 
 // DiscardDiscoveryCheckpoint forgets a checkpoint that failed validation while

@@ -503,6 +503,8 @@ type Map struct {
 	saveMu              sync.Mutex
 	discoveryCheckpoint func() (json.RawMessage, error)
 	savedDiscovery      json.RawMessage
+	loopsCheckpoint     func() (json.RawMessage, error)
+	savedLoops          json.RawMessage
 
 	// owner is the system this map models. Fixed at construction: a map that could be
 	// reassigned to another system would carry the first one's history into the second.

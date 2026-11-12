@@ -209,6 +209,38 @@ func (t *Tracker) Outcomes() []Outcome {
 	return out
 }
 
+// Memory is the tracker's state for the snapshot: outcomes oldest first, and
+// the accepts still awaiting one.
+type Memory struct {
+	Outcomes []Outcome       `json:"outcomes"`
+	Pending  []PendingAccept `json:"pending"`
+}
+
+// Memory is the tracker's state, for the snapshot.
+func (t *Tracker) Memory() Memory {
+	pending := t.PendingList()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return Memory{Outcomes: slices.Clone(t.outcomes), Pending: pending}
+}
+
+// Restore replaces the outcomes with mem's and closes each accept that was
+// pending as confounded: its arrival and settle clocks ran in a process that is
+// gone, so nothing re-enters pending on this one's clock. Called before the
+// tracker ticks.
+func (t *Tracker) Restore(mem Memory) {
+	now := t.c.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.outcomes = slices.Clone(mem.Outcomes)
+	t.pending = nil
+	for _, p := range mem.Pending {
+		e := &entry{name: p.Name, acceptID: p.AcceptID, at: p.AcceptedAt, subject: p.Subject}
+		t.outcomes = append(t.outcomes, t.record(e, Confounded, "agent restarted", nil, nil, now))
+	}
+	t.trimOutcomes()
+}
+
 // PredictionSummary describes prediction errors over the outcomes currently
 // retained by the tracker. Confounded and otherwise unscored outcomes are omitted.
 func (t *Tracker) PredictionSummary() PredictionSummary {

@@ -857,7 +857,9 @@ Every event carries `(incarnation, seq)`; a decision id is `<prefix>-<incarnatio
 with `n` drawn from the same counter, so no crash and no restart can reissue an id,
 and order is total across restarts. The incarnation advances on every restore and is
 written back at once. A commit under an id already recorded is not recorded; it is
-journalled as `decision.refused`.
+journalled as `decision.refused`. The loops' learned state survives a restart with the
+map (§ Persistence), and an accept left pending by the restart is closed by an
+`admission.outcome` citing it, so its chain is never left open.
 A decision carries a `kind` (`estimate`, `admit`, `relief.act`, `relief.verify`,
 `admission`, `review`, `cost`, …) and `cites`, the earlier decisions it rests on: a
 verdict cites its act, a revert its act and verdict, an admission outcome its accept,
@@ -917,6 +919,14 @@ without this the audit trail is an artefact of one process lifetime rather than 
 agent. The shutdown save is synchronous in `main` rather than in the save goroutine:
 cancelling the context and returning let the process exit mid-write, so a clean restart
 silently dropped everything since the last periodic save.
+
+The snapshot also holds `loops`, what the acting loops learned: each relief lever's
+effect EMAs and its tally (acts, kept, reverted, refused), the admission outcomes, and
+the trust extended to each peer. It is stamped with the node id and restored, before
+any loop starts, only on the same `node.id`; another node's is logged and ignored. An
+accept still awaiting its outcome is not resumed — its arrival and settle clocks ran in
+the process that is gone — but closed with a journalled `admission.outcome`,
+`confounded: agent restarted`, citing the accept.
 
 What is deliberately not persisted: the estimator's pair windows. Restoring them would
 restore a claim of simultaneity between observations taken before a restart and after
@@ -1658,7 +1668,7 @@ This section covers the registry and the trust mechanics that decide *where work
 
 In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
-- SQLite-backed registry for the edge-standard / cloud-full profile so trust history survives restarts;
+- SQLite-backed registry for the edge-standard / cloud-full profile, keeping full trust history (today each peer's trust value survives a restart in the snapshot's `loops`, §5 Persistence, and its observation count starts again);
 - gossip-based discovery (mDNS / dat-style) so peers find each other without a static `peers.urls` list.
 
 The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.
@@ -2569,11 +2579,11 @@ A verified action is the one kind of evidence correlation cannot give: the agent
 
 **Strength from what was measured.** Each unconfounded outcome also measures the relationship: the drop in node contention per unit drop in the workload's share of node CPU, both fractions of the node (`measuredEffect`; none when the share fell by no more than 0.02). Pair-level relationship strength clamps this measurement to [0, 1]. The admission domain effect retains the slope above 1 because it projects a node response per unit workload share, not a relationship strength. The pair's mean measured effect is the relationship's `measured` layer, which outranks `established` and `recent` and yields only to an assertion. Co-variation is the wrong measure once the agent acts on the source: a capped workload stops moving with the contention it caused, because the cap holds it still, so the learned layers settle near zero exactly when the relationship is strongest. In the 2026-10-19 case study that left the relationship at 0.047, predicted a drop of 0.0009 under `min_effect`, and relief refused four times while contention was back at 0.59. That run measured CPU contention as any stall, which counted `hog`'s waiting on its own threads; under owed contention the same pair owes nothing (above), and no CPU intervention has been shown on the VM since. The verify decision records the outcome's `effect`.
 
-**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It is held in memory and lost on restart, when every workload starts again from 1. An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
+**Effects.** Per workload and prediction basis, the loop keeps an EMA (alpha 0.3, from 1, clamped to [0.1, 2]) of observed over predicted drop, from unconfounded outcomes only, and scales every later prediction for that workload on the same basis by it. A usage-share prediction and a map prediction err differently, so the factor learned for one never scales the other. The plan records the factor (`effect`), and the ratio is taken against the prediction before scaling, so the effect converges on the workload's real response rather than back to 1. It is the map's first learned slope. It survives a restart in the snapshot's `loops` (§5, Persistence). An outcome that measures an effect resets the workload's map-basis factor to 1: the relationship's strength now carries what the interventions saw, and a factor learned against the old strength would correct the map's prediction twice.
 
 **Settling candidates.** When interventions create or promote the relationship, a pending discovery candidate on the same pair — directed from the workload's usage to pressure, or undirected in either order, and not negative — is confirmed with `from` = the workload's usage and a review `{by: intervention, tier: 0, action: confirm}` citing the verify decision. This is how undecided candidates settle without an operator, slowly under contention (below). The facade declares no second relationship for a pair that is already covered. A confirmation that fails is a caveat on the verify decision, never an error in the loop.
 
-**What is not here yet.** The thresholds are uncalibrated defaults, not measured, and the learned effects do not survive a restart. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. Undecided candidates therefore settle slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
+**What is not here yet.** The thresholds are uncalibrated defaults, not measured. Learning is slowest where relief matters most: capping a workload frees CPU that the others absorb, so under real contention the other workloads move and many outcomes are confounded and teach nothing. Undecided candidates therefore settle slowly in exactly the situation relief exists for, and fastest on a node with one dominant workload.
 
 ### The Kubernetes runtime (`pkg/runtime/kubernetes`)
 

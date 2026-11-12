@@ -40,8 +40,7 @@ const (
 // against what was predicted: an EMA of observed/predicted drop in node pressure,
 // starting from 1, clamped to [0.1, 2]. Later predictions for the workload on the
 // same basis are scaled by it; a usage-share prediction and a map prediction err
-// differently, so one's factor never scales the other. It is held in memory only
-// and is lost on restart, when every workload starts again from 1.
+// differently, so one's factor never scales the other.
 type effects struct {
 	mu sync.Mutex
 	m  map[effectKey]float64
@@ -74,6 +73,35 @@ func (e *effects) Forget(subject, basis string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.m, effectKey{subject, basis})
+}
+
+// snapshot is every learned effect, by subject then basis.
+func (e *effects) snapshot() map[string]map[string]float64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := map[string]map[string]float64{}
+	for k, v := range e.m {
+		if out[k.subject] == nil {
+			out[k.subject] = map[string]float64{}
+		}
+		out[k.subject][k.basis] = v
+	}
+	return out
+}
+
+// restore replaces every learned effect with saved, clamped as Observe clamps.
+func (e *effects) restore(saved map[string]map[string]float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.m = map[effectKey]float64{}
+	for subject, bases := range saved {
+		for basis, v := range bases {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				continue
+			}
+			e.m[effectKey{subject, basis}] = math.Min(effectMax, math.Max(effectMin, v))
+		}
+	}
 }
 
 // Of is subject's learned effect for predictions of basis, 1 when nothing has

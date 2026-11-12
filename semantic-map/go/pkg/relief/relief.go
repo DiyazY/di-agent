@@ -323,6 +323,33 @@ func (l *Loop) Status() Status {
 	return st
 }
 
+// Memory is what the loop has learned and would lose on restart: each
+// workload's effect, by subject then prediction basis, and the loop's tally.
+type Memory struct {
+	Effects  map[string]map[string]float64 `json:"effects"`
+	Acts     int                           `json:"acts"`
+	Kept     int                           `json:"kept"`
+	Reverted int                           `json:"reverted"`
+	Refused  int                           `json:"refused"`
+}
+
+// Memory is the loop's learned state, for the snapshot.
+func (l *Loop) Memory() Memory {
+	mem := Memory{Effects: l.effects.snapshot()}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	mem.Acts, mem.Kept, mem.Reverted, mem.Refused = l.nActs, l.nKept, l.nReverted, l.nRefused
+	return mem
+}
+
+// Restore replaces the loop's effects and tally with mem. Called before Start.
+func (l *Loop) Restore(mem Memory) {
+	l.effects.restore(mem.Effects)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.nActs, l.nKept, l.nReverted, l.nRefused = mem.Acts, mem.Kept, mem.Reverted, mem.Refused
+}
+
 // Actions lists the actions, newest first, at most 200.
 func (l *Loop) Actions() []Action {
 	l.mu.Lock()

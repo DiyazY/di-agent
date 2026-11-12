@@ -245,6 +245,30 @@ func (r *Registry) SetTrust(id string, value float64) error {
 	return nil
 }
 
+// Trusts is every peer's trust, by peer id, for the snapshot.
+func (r *Registry) Trusts() map[string]float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]float64, len(r.byID))
+	for id, d := range r.byID {
+		out[id] = d.Trust
+	}
+	return out
+}
+
+// RestoreTrust sets the trust of each peer the registry holds to the saved
+// value, clamped. NObserved is untouched: it counts this process's
+// interactions. A saved id the registry does not hold is ignored.
+func (r *Registry) RestoreTrust(t map[string]float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, v := range t {
+		if d, ok := r.byID[id]; ok {
+			d.Trust = clamp01(v)
+		}
+	}
+}
+
 // MarkSeen records that a successful interaction with the peer happened at
 // the given timestamp. Use it after any 2xx response from the peer.
 func (r *Registry) MarkSeen(id string, when time.Time) error {
