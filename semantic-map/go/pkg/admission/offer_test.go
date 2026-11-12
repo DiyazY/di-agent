@@ -1,12 +1,12 @@
 package admission
 
 import (
-	"fmt"
 	"math"
 	"strings"
 	"sync"
 	"testing"
-	"time"
+
+	"github.com/DiyazY/di-agent/pkg/statemap"
 )
 
 func TestValidate(t *testing.T) {
@@ -32,8 +32,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestIDsDistinctUnderConcurrency(t *testing.T) {
-	start := time.Unix(1700000000, 0)
-	g := NewIDs(start)
+	m := statemap.New(statemap.Config{}, nil)
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	var wg sync.WaitGroup
@@ -41,7 +40,7 @@ func TestIDsDistinctUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			id := g.Next()
+			id := m.NewDecisionID("admit")
 			mu.Lock()
 			seen[id] = true
 			mu.Unlock()
@@ -51,14 +50,10 @@ func TestIDsDistinctUnderConcurrency(t *testing.T) {
 	if len(seen) != 100 {
 		t.Fatalf("got %d distinct ids, want 100", len(seen))
 	}
-	prefix := fmt.Sprintf("admit-%d-", start.Unix())
 	for id := range seen {
-		if !strings.HasPrefix(id, prefix) {
-			t.Errorf("id %q lacks prefix %q", id, prefix)
+		if !strings.HasPrefix(id, "admit-1.") {
+			t.Errorf("id %q lacks prefix admit-1.", id)
 		}
-	}
-	if !seen[prefix+"1"] {
-		t.Errorf("sequence does not start at 1")
 	}
 }
 

@@ -62,7 +62,6 @@ func newRig(t *testing.T) *rig {
 		Acted: func(action string, _ time.Time) (float64, bool) {
 			return r.peak, action != "" && action == r.actedOn
 		},
-		IDs: NewIDs(t0),
 		Now: func() time.Time { return r.now },
 		Logf: func(f string, a ...any) {
 			r.mu.Lock()
@@ -374,7 +373,7 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	r := arrived(t)
 	r.tick(time.Minute)
 	o := r.result("held")
-	if o.AcceptID != "admit-1-web" || !strings.HasPrefix(o.OutcomeID, fmt.Sprintf("admit-%d-", t0.Unix())) {
+	if o.AcceptID != "admit-1-web" || o.OutcomeID == "" {
 		t.Fatalf("ids %q %q", o.AcceptID, o.OutcomeID)
 	}
 	rec, ok := r.j.Decision(o.OutcomeID)
@@ -383,6 +382,27 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	}
 	if rec.Inputs["accept"] != o.AcceptID || rec.Answer["outcome"] != "held" {
 		t.Fatalf("record inputs %v answer %v", rec.Inputs, rec.Answer)
+	}
+}
+
+func TestOutcomeCitesTheAccept(t *testing.T) {
+	r := arrived(t)
+	r.tick(time.Minute)
+	o := r.result("held")
+	rec, ok := r.j.Decision(o.OutcomeID)
+	if !ok {
+		t.Fatal("outcome decision not recorded")
+	}
+	if rec.Kind != "admission.outcome" || len(rec.Cites) != 1 || rec.Cites[0] != o.AcceptID {
+		t.Fatalf("outcome kind %q cites %v; want admission.outcome citing %s", rec.Kind, rec.Cites, o.AcceptID)
+	}
+}
+
+func TestOutcomeIdsComeFromTheMap(t *testing.T) {
+	r := arrived(t)
+	r.tick(time.Minute)
+	if o := r.result("held"); !strings.HasPrefix(o.OutcomeID, "admit-1.") {
+		t.Fatalf("outcome id %q; want prefix admit-1.", o.OutcomeID)
 	}
 }
 
@@ -413,5 +433,68 @@ func TestOutcomesNewestFirst(t *testing.T) {
 	out := r.tr.Outcomes()
 	if len(out) != 2 || out[0].Name != "a2" || out[1].Name != "a1" {
 		t.Fatalf("outcomes %+v", out)
+	}
+}
+
+func TestArrivalIsJournalled(t *testing.T) {
+	r := newRig(t)
+	r.accept("web")
+	r.arrive("web")
+	r.tick(time.Second)
+	var got []statemap.Event
+	for _, e := range r.j.Events(0, 0) {
+		if e.Kind == statemap.EventAdmissionArrived {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("arrival events %v; want one", got)
+	}
+	if e := got[0]; e.Target != "web" || e.Detail["subject"] != "pod:web" || e.Detail["accept"] != "admit-1-web" {
+		t.Errorf("event %+v", e)
+	}
+	r.tick(time.Second)
+	n := 0
+	for _, e := range r.j.Events(0, 0) {
+		if e.Kind == statemap.EventAdmissionArrived {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d arrival events after another tick; want still one", n)
+	}
+}
+
+// TestRestoreKeepsOutcomesAndClosesPendingAccepts: a restarted agent keeps the
+// outcomes, and closes each accept still awaiting one as confounded — its
+// arrival and settle clocks did not survive the restart — citing the accept.
+func TestRestoreKeepsOutcomesAndClosesPendingAccepts(t *testing.T) {
+	r := newRig(t)
+	r.accept("gone")
+	r.tick(ArrivalWindow + time.Second)
+	d := r.accept("web")
+	r.arrive("web")
+	r.tick(10 * time.Second)
+	mem := r.tr.Memory()
+	if len(mem.Outcomes) != 1 || len(mem.Pending) != 1 || mem.Pending[0].AcceptID != d.ID {
+		t.Fatalf("memory %+v; want one outcome and web pending", mem)
+	}
+
+	r2 := newRig(t)
+	r2.tr.Restore(mem)
+	out := r2.tr.Outcomes()
+	if len(out) != 2 || out[1].Name != "gone" {
+		t.Fatalf("outcomes %+v; want web's newest, then gone", out)
+	}
+	o := out[0]
+	if o.Name != "web" || o.Result != Confounded || o.Reason != "agent restarted" || o.Subject != "pod:web" {
+		t.Fatalf("restart outcome %+v; want web confounded by the restart", o)
+	}
+	rec, ok := r2.j.Decision(o.OutcomeID)
+	if !ok || rec.Kind != "admission.outcome" || len(rec.Cites) != 1 || rec.Cites[0] != d.ID {
+		t.Fatalf("decision %+v (found %v); want admission.outcome citing %s", rec, ok, d.ID)
+	}
+	if p := r2.tr.PendingList(); len(p) != 0 {
+		t.Fatalf("pending %+v; nothing resumes after a restart", p)
 	}
 }

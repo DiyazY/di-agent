@@ -240,6 +240,25 @@ func TestAnUnsureModelGoesUpATierAndThenWaitsForEvidence(t *testing.T) {
 	}
 }
 
+func TestReviewCitesThePriorReview(t *testing.T) {
+	const id = "cpu_utilization@pod:a->cpu_pressure"
+	c := directed(id, "")
+	c.Review = &types.CandidateReview{DecisionID: "verify-1"}
+	m := newFakeMap(t, c)
+	run(t, m, autonomy.Config{Level: autonomy.Full, Decider: &fixed{actions: confident(types.ReviewConfirm)}})
+	got := m.cands[id].Review
+	if got == nil || got.DecisionID == "verify-1" {
+		t.Fatalf("review %+v; want a new review", got)
+	}
+	dec, ok := m.st.Journal().Decision(got.DecisionID)
+	if !ok {
+		t.Fatalf("decision %s is not in the journal", got.DecisionID)
+	}
+	if dec.Kind != "review" || len(dec.Cites) != 1 || dec.Cites[0] != "verify-1" {
+		t.Errorf("review kind %q cites %v; want review citing verify-1", dec.Kind, dec.Cites)
+	}
+}
+
 func TestAnUndirectedConfirmationNeedsADriver(t *testing.T) {
 	const id = "cpu_pressure<->io_pressure"
 	und := func() *types.CandidateEdge {
@@ -403,7 +422,7 @@ func TestTier0LeavesAClosedCandidateAlone(t *testing.T) {
 	if s := r.Status(); s.Reviewed != 0 || s.Errors != 0 {
 		t.Errorf("reviewed %d, errors %d; want neither", s.Reviewed, s.Errors)
 	}
-	if ds := m.st.Journal().Decisions(0); len(ds) != 0 {
+	if ds := m.st.Journal().Decisions(0, ""); len(ds) != 0 {
 		t.Errorf("%d decisions journaled for closed candidates", len(ds))
 	}
 }

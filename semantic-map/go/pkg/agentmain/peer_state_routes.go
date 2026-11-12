@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/peers"
@@ -32,6 +33,30 @@ type peerStateFetcher struct {
 	registry *peers.Registry
 	client   *peers.Client
 	store    *statemap.PeerStore
+	// state journals a peer going quiet and coming back, once each.
+	state *statemap.Map
+	mu    sync.Mutex
+	down  map[string]bool // by URL: a failure yields only the URL
+}
+
+// note journals a change of reachability, never a repeat.
+func (f *peerStateFetcher) note(d *peers.Descriptor, err error) {
+	f.mu.Lock()
+	was := f.down[d.URL]
+	if f.down == nil {
+		f.down = map[string]bool{}
+	}
+	f.down[d.URL] = err != nil
+	f.mu.Unlock()
+	if f.state == nil || was == (err != nil) {
+		return
+	}
+	if err != nil {
+		f.state.RecordEvent(statemap.EventPeerUnreachable, d.ID, "agent",
+			map[string]any{"peer": d.ID, "url": d.URL, "error": err.Error()})
+		return
+	}
+	f.state.RecordEvent(statemap.EventPeerRecovered, d.ID, "agent", map[string]any{"peer": d.ID, "url": d.URL})
 }
 
 // fetchAll asks every registered peer for its state, sequentially.
@@ -52,6 +77,7 @@ func (f *peerStateFetcher) fetchAll(ctx context.Context) (ok, failed int) {
 		st, err := f.client.State(ctx, d.URL)
 		if err != nil {
 			f.store.RecordFailure(d.URL, err)
+			f.note(d, err)
 			failed++
 			continue
 		}
@@ -60,9 +86,11 @@ func (f *peerStateFetcher) fetchAll(ctx context.Context) (ok, failed int) {
 			// could not be attributed. Recording it as unreachable would hide a
 			// configuration problem behind a network-shaped symptom.
 			log.Printf("peer state: refusing state from %s: %v", d.URL, err)
+			f.note(d, err)
 			failed++
 			continue
 		}
+		f.note(d, nil)
 		_ = f.registry.MarkSeen(d.ID, time.Now())
 		ok++
 	}

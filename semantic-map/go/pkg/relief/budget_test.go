@@ -326,7 +326,7 @@ func TestDecisionsAreWordedFromTheDescriptor(t *testing.T) {
 	}
 	h.both(l2, 3*time.Minute, 0.5) // neither helped: both are reverted
 	byAction, acts := map[string]int{}, map[string]int{}
-	for _, d := range h.m.Journal().Decisions(0) {
+	for _, d := range h.m.Journal().Decisions(0, "") {
 		if !strings.HasPrefix(d.ID, "relief-") {
 			continue
 		}

@@ -259,8 +259,10 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		held, dropped, oldest := sm.Journal().Stats()
 		writeJSON(w, map[string]any{
-			"events":   sm.Journal().Events(since, limit),
-			"revision": sm.Revision(),
+			"events":      sm.Journal().Events(since, limit),
+			"revision":    sm.Revision(),
+			"incarnation": sm.Journal().Incarnation(),
+			"seq":         sm.Journal().Seq(),
 			// Reporting the window explicitly stops a caller from reading an absence
 			// as evidence that nothing happened.
 			"held":            held,
@@ -269,20 +271,26 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 		})
 	})
 
-	// GET /state/decisions?limit=N and GET /state/decisions/{id} — the trace.
+	// GET /state/decisions?kind=&limit=N and GET /state/decisions/{id}[?chain=1] — the trace.
 	mux.HandleFunc("GET /state/decisions", func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if limit <= 0 {
 			limit = 20
 		}
 		writeJSON(w, map[string]any{
-			"decisions": sm.Journal().Decisions(limit),
+			"decisions": sm.Journal().Decisions(limit, r.URL.Query().Get("kind")),
 			"revision":  sm.Revision(),
 		})
 	})
 
 	mux.HandleFunc("GET /state/decisions/{id}", func(w http.ResponseWriter, r *http.Request) {
-		d, ok := sm.Journal().Decision(r.PathValue("id"))
+		var body any
+		var ok bool
+		if r.URL.Query().Get("chain") == "1" {
+			body, ok = sm.Journal().Chain(r.PathValue("id"))
+		} else {
+			body, ok = sm.Journal().Decision(r.PathValue("id"))
+		}
 		if !ok {
 			// 410 rather than 404: the decision may well have happened and been
 			// evicted by the journal bound, and a caller has to be able to tell that
@@ -298,7 +306,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 			writeError(w, http.StatusNotFound, "no decision "+r.PathValue("id"))
 			return
 		}
-		writeJSON(w, d)
+		writeJSON(w, body)
 	})
 
 	// GET /state/estimate?target=<property>[&id=…][&assume=<property>=<value>]*[&without=<subject|property>]*

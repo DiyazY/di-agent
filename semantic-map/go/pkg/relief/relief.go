@@ -160,13 +160,11 @@ type Loop struct {
 	d      actuators.Descriptor
 	budget *Budget
 	act    actuators.Actuator // the descriptor's, from Acting
-	epoch  int64
 
 	effects effects       // what acting on each workload has done; safe on its own
 	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
 	pass       sync.Mutex       // serialises the passes that change the system
-	seq        int              // decision counter; touched only under pass
 	reconciled bool             // the ledger has been reconciled; until then nothing is applied. Touched only under pass
 	spent      map[string]spend // by decision: steps that took an hourly slot and are not yet settled (left pending, or adopted after a failed Set), so reconcile neither spends again nor keeps the spend of a step that never took. Touched only under pass
 
@@ -190,8 +188,7 @@ type Loop struct {
 	nRefused     int
 }
 
-// New builds a loop in Calm. Its decision ids carry the time it was built, so a
-// restarted loop cannot reuse an id the journal already holds.
+// New builds a loop in Calm.
 func New(c Config) (*Loop, error) {
 	switch {
 	case c.Runtime == nil:
@@ -222,7 +219,7 @@ func New(c Config) (*Loop, error) {
 	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act, epoch: now.Unix(),
+		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act,
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
 		unread: map[string]*Unread{}, spent: map[string]spend{},
@@ -266,10 +263,27 @@ func (l *Loop) Descriptor() actuators.Descriptor { return l.d }
 
 // Pause stops the loop making changes and releasing them. It still observes,
 // runs the trigger, verifies what is in flight, and gives back what expires.
-func (l *Loop) Pause() { l.mu.Lock(); l.paused = true; l.mu.Unlock() }
+func (l *Loop) Pause() { l.setPaused(true) }
+
+// setPaused journals a change of state, after releasing l.mu, and nothing when the
+// state did not change.
+func (l *Loop) setPaused(v bool) {
+	l.mu.Lock()
+	changed := l.paused != v
+	l.paused = v
+	l.mu.Unlock()
+	if !changed {
+		return
+	}
+	kind := statemap.EventReliefResumed
+	if v {
+		kind = statemap.EventReliefPaused
+	}
+	l.cfg.Map.RecordEvent(kind, l.d.Action, "operator", map[string]any{"actor": "operator"})
+}
 
 // Resume undoes Pause.
-func (l *Loop) Resume() { l.mu.Lock(); l.paused = false; l.mu.Unlock() }
+func (l *Loop) Resume() { l.setPaused(false) }
 
 // Lever is the lever the loop acts by, as the spec gave it.
 func (l *Loop) Lever() spec.Lever { return l.c }
@@ -307,6 +321,33 @@ func (l *Loop) Status() Status {
 		st.Cooling = c
 	}
 	return st
+}
+
+// Memory is what the loop has learned and would lose on restart: each
+// workload's effect, by subject then prediction basis, and the loop's tally.
+type Memory struct {
+	Effects  map[string]map[string]float64 `json:"effects"`
+	Acts     int                           `json:"acts"`
+	Kept     int                           `json:"kept"`
+	Reverted int                           `json:"reverted"`
+	Refused  int                           `json:"refused"`
+}
+
+// Memory is the loop's learned state, for the snapshot.
+func (l *Loop) Memory() Memory {
+	mem := Memory{Effects: l.effects.snapshot()}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	mem.Acts, mem.Kept, mem.Reverted, mem.Refused = l.nActs, l.nKept, l.nReverted, l.nRefused
+	return mem
+}
+
+// Restore replaces the loop's effects and tally with mem. Called before Start.
+func (l *Loop) Restore(mem Memory) {
+	l.effects.restore(mem.Effects)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.nActs, l.nKept, l.nReverted, l.nRefused = mem.Acts, mem.Kept, mem.Reverted, mem.Refused
 }
 
 // Actions lists the actions, newest first, at most 200.
@@ -377,6 +418,10 @@ func (l *Loop) Tick(ctx context.Context) {
 	}
 	phase, paused := l.phase, l.paused
 	l.mu.Unlock()
+	if phase != prev {
+		l.cfg.Map.RecordEvent(statemap.EventReliefPhase, l.d.Action, "agent",
+			map[string]any{"lever": l.d.Action, "from": string(prev), "to": string(phase)})
+	}
 
 	workloads := l.lister(ctx)
 	l.expire(ctx, now, workloads)
@@ -619,8 +664,9 @@ func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Worklo
 	if spent && !restore {
 		l.budget.refund(sp.at)
 	}
-	b := l.cfg.Map.Decide(l.id(OutcomeNotApplied), fmt.Sprintf("did the change to %s's %s through %s take?", e.Subject, l.d.Resource, l.d.Action))
+	b := l.decide(OutcomeNotApplied, fmt.Sprintf("did the change to %s's %s through %s take?", e.Subject, l.d.Resource, l.d.Action))
 	b.Input("entry", e)
+	b.Cite(e.DecisionID)
 	if restored.Action != "" {
 		b.Input("restored", restored)
 	}
@@ -926,7 +972,11 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	}
 
 	id := l.id("act")
-	b := l.cfg.Map.Decide(id, l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+	b := l.cfg.Map.Decide(id, "relief.act", l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+	b.Cite(plan.EstimateID)
+	if k != nil {
+		b.Cite(k.DecisionID)
+	}
 	b.Property(l.d.Relieves)
 	b.Property(l.d.Usage + "@" + plan.Subject)
 	b.Facts()
@@ -942,7 +992,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		} else {
 			l.budget.refund(now)
 		}
-		r := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+		r := l.decide("refused", l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+		r.Cite(plan.EstimateID)
 		r.Input("plan", plan)
 		r.Input("policy", eff)
 		r.Input("rule", eff.Rule)
@@ -1031,7 +1082,7 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	l.noted = why
 	l.nRefused++
 	l.mu.Unlock()
-	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("relieve %s through %s?", l.d.Relieves, l.d.Action))
+	b := l.decide("refused", fmt.Sprintf("relieve %s through %s?", l.d.Relieves, l.d.Action))
 	b.Property(l.d.Relieves)
 	for k, v := range inputs {
 		b.Input(k, v)
@@ -1040,12 +1091,14 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	b.Commit(map[string]any{"refused": why})
 }
 
-// id names the next decision: relief-<kind>-<action>-<loop start>-<n>. The
-// action keeps two levers' loops, started in the same second, from naming two
-// decisions alike.
+// id names the next decision from the map: relief-<kind>-<action>-<incarnation>.<n>.
 func (l *Loop) id(kind string) string {
-	l.seq++
-	return fmt.Sprintf("relief-%s-%s-%d-%d", kind, l.d.Action, l.epoch, l.seq)
+	return l.cfg.Map.NewDecisionID("relief-" + kind + "-" + l.d.Action)
+}
+
+// decide starts a decision of kind relief.<kind> under the next id for kind.
+func (l *Loop) decide(kind, question string) *statemap.DecisionBuilder {
+	return l.cfg.Map.Decide(l.id(kind), "relief."+kind, question)
 }
 
 // liveLocked is every action still in force. Caller holds mu.
@@ -1096,9 +1149,10 @@ func (l *Loop) refuseUnanchored(a *Action) {
 		return
 	}
 	why := fmt.Sprintf("origin of %s's change is unknown: no original setting was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
-	b := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s further through %s to relieve %s?", a.Subject))
+	b := l.decide("refused", l.ask("cap %s's %s further through %s to relieve %s?", a.Subject))
 	b.Input("action", a.ID)
 	b.Input("entry", a.Entry)
+	b.Cite(a.DecisionID)
 	b.Caveat("%s", why)
 	b.Commit(map[string]any{"refused": why})
 }

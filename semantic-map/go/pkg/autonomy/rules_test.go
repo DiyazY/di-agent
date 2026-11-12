@@ -297,7 +297,7 @@ func TestTheRuleSettlesACompositionTheProposerWithdrewBeforeAReview(t *testing.T
 	if h, _ := m.CandidateHistory(); h[0].Status != types.Deferred || h[0].Reason != "weakened" || h[0].Review != nil {
 		t.Fatalf("at suggest the withdrawn candidate was touched: %v/%q review %+v", h[0].Status, h[0].Reason, h[0].Review)
 	}
-	if ds := state.Journal().Decisions(0); len(ds) != 0 {
+	if ds := state.Journal().Decisions(0, ""); len(ds) != 0 {
 		t.Fatalf("at suggest %d decisions were journaled for a withdrawn candidate", len(ds))
 	}
 	cfg.Level = autonomy.Full
@@ -393,12 +393,12 @@ func TestARefusedWithdrawnCandidateIsReviewedOnce(t *testing.T) {
 		t.Fatalf("after the refusal the candidate is %v/%q review %+v; want deferred as weakened, its undecided review kept",
 			h[0].Status, h[0].Reason, h[0].Review)
 	}
-	decisions, errs := len(state.Journal().Decisions(0)), r.Status().Errors
+	decisions, errs := len(state.Journal().Decisions(0, "")), r.Status().Errors
 	if decisions == 0 {
 		t.Fatal("the refused confirmation journaled no decision")
 	}
 	r.Cycle(context.Background())
-	if n := len(state.Journal().Decisions(0)); n != decisions {
+	if n := len(state.Journal().Decisions(0, "")); n != decisions {
 		t.Errorf("the second cycle journaled %d more decisions for a candidate whose evidence did not move", n-decisions)
 	}
 	if e := r.Status().Errors; e != errs {

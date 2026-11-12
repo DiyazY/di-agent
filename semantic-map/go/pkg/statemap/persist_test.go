@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -126,5 +127,47 @@ func TestSnapshotIsCompact(t *testing.T) {
 	}
 	if !json.Valid(blob) {
 		t.Error("snapshot is not valid JSON")
+	}
+}
+
+// TestLoopsBlobRoundTrips: the loops' learned state is saved with the map and
+// handed back, unread, to whoever installs the callback after a load.
+func TestLoopsBlobRoundTrips(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	if got := m.LoopsPersistence(func() (json.RawMessage, error) { return json.RawMessage(`{"a":1}`), nil }); got != nil {
+		t.Fatalf("cold start returned %s", got)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{})
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.LoopsPersistence(nil); string(got) != `{"a":1}` {
+		t.Fatalf("restored %s, want {\"a\":1}", got)
+	}
+}
+
+// TestLoopsCaptureRunsOutsideTheLock: the capture may read the map, as the
+// loops do, without deadlocking the save that called it.
+func TestLoopsCaptureRunsOutsideTheLock(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	m.LoopsPersistence(func() (json.RawMessage, error) {
+		_ = m.Census()
+		return json.RawMessage(`{}`), nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.Save(filepath.Join(t.TempDir(), "state.json")) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Save deadlocked on a capture that reads the map")
 	}
 }

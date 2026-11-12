@@ -231,7 +231,6 @@ type Reviewer struct {
 	down   struct{ decider, reasoner bool }
 	mu     sync.Mutex
 	status Status
-	seq    uint64
 }
 
 // New builds a reviewer.
@@ -398,8 +397,13 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 		r.failed(fmt.Errorf("the map has no state model to record decisions in"))
 		return false, nil
 	}
-	id := r.decisionID(c)
-	b := st.Decide(id, "review candidate "+c.CandidateID)
+	// The candidate's hash lets a reader group a candidate's reviews.
+	h := sha256.Sum256([]byte(c.CandidateID))
+	id := st.NewDecisionID("review", hex.EncodeToString(h[:])[:8])
+	b := st.Decide(id, "review", "review candidate "+c.CandidateID)
+	if c.Review != nil {
+		b.Cite(c.Review.DecisionID)
+	}
 	from, _ := b.Property(c.FromID)
 	to, _ := b.Property(c.ToID)
 	ev := Evidence{Candidate: *c, From: from, To: to, Neighbours: neighbours(c, pending), Facts: b.Facts()}
@@ -579,17 +583,6 @@ func (r *Reviewer) apply(c *types.CandidateEdge, o outcome, id string) (bool, er
 func (r *Reviewer) reviewOf(o outcome, id string) types.CandidateReview {
 	return types.CandidateReview{By: o.by, Model: o.model, Tier: o.tier, Action: o.action,
 		DecisionID: id, At: r.cfg.Now(), Association: o.association}
-}
-
-// decisionID names a review's decision record: the candidate's hash, so a reader can
-// group a candidate's reviews, and a sequence number, so two never share an id.
-func (r *Reviewer) decisionID(c *types.CandidateEdge) string {
-	r.mu.Lock()
-	r.seq++
-	n := r.seq
-	r.mu.Unlock()
-	h := sha256.Sum256([]byte(c.CandidateID))
-	return fmt.Sprintf("review-%s-%d-%d", hex.EncodeToString(h[:4]), r.cfg.Now().Unix(), n)
 }
 
 func (r *Reviewer) failed(err error) {

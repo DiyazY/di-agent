@@ -103,3 +103,30 @@ func TestWithoutAGroupTakesEveryMemberAway(t *testing.T) {
 }
 
 func groupNearly(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+
+// TestRedeclaringMembersRecordsThePreviousList: a membership change journals the list
+// it replaced, so the change can be read without diffing two snapshots.
+func TestRedeclaringMembersRecordsThePreviousList(t *testing.T) {
+	m := groupMap(t)
+	if err := m.DeclareGroup("group:storage", []string{"pod:pg", "pod:redis"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeclareGroup("group:storage", []string{"pod:pg"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range m.Journal().Events(0, 0) {
+		before, ok := e.Detail["members_before"].([]string)
+		if e.Kind != EventPropertyRedeclared || !ok {
+			continue
+		}
+		found = true
+		after, _ := e.Detail["members"].([]string)
+		if len(before) != 2 || len(after) != 1 || !slices.Contains(before, after[0]) {
+			t.Fatalf("detail %v; want two members before and the first one after", e.Detail)
+		}
+	}
+	if !found {
+		t.Fatal("no property.redeclared event carries members_before")
+	}
+}

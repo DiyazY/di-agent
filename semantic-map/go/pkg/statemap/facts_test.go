@@ -37,7 +37,7 @@ func TestFactsJournalChangesOnly(t *testing.T) {
 func TestDecisionKeepsTheFactsItRead(t *testing.T) {
 	m := New(Config{}, nil)
 	_ = m.RecordFacts("host", []Fact{NumberFact("cpu_cores", 4, "cores")})
-	b := m.Decide("d1", "q")
+	b := m.Decide("d1", "estimate", "q")
 	b.Facts()
 	d := b.Commit(nil)
 	_ = m.RecordFacts("host", []Fact{NumberFact("cpu_cores", 8, "cores")})

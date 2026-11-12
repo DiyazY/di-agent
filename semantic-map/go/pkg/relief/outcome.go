@@ -186,8 +186,9 @@ func (l *Loop) expireUnread(ctx context.Context, now time.Time, workloads lister
 // expiredFromRecord journals and closes a change given back at its expiry from
 // the ledger's record, its setting having been unreadable.
 func (l *Loop) expiredFromRecord(now time.Time, a *Action, u Unread) {
-	b := l.cfg.Map.Decide(l.id("expired"), l.giveBackAsk(a.Subject, "the change expired"))
+	b := l.decide("expired", l.giveBackAsk(a.Subject, "the change expired"))
 	b.Input("act", a.DecisionID)
+	b.Cite(a.DecisionID)
 	b.Input("entry", u.Entry)
 	b.Input("unread", u.Error)
 	b.Caveat("its setting could not be read; it was given back from the ledger's record of what it replaced")
@@ -270,8 +271,9 @@ func (l *Loop) undoFailed(a *Action, what string, err error) {
 	if n != 1 {
 		return
 	}
-	b := l.cfg.Map.Decide(l.id("stuck"), fmt.Sprintf("give back the change to %s?", a.Subject))
+	b := l.decide("stuck", fmt.Sprintf("give back the change to %s?", a.Subject))
 	b.Input("act", a.DecisionID)
+	b.Cite(a.DecisionID)
 	b.Input("entry", a.Entry)
 	b.Input("while", what)
 	b.Input("error", err.Error())
@@ -328,9 +330,10 @@ func (l *Loop) verify(ctx context.Context, now time.Time, pressure float64, at t
 		verdict = "keep"
 	}
 	id := l.id("verify")
-	b := l.cfg.Map.Decide(id, fmt.Sprintf("did capping %s's %s through %s relieve %s?", a.Subject, l.d.Resource, l.d.Action, l.d.Relieves))
+	b := l.cfg.Map.Decide(id, "relief.verify", fmt.Sprintf("did capping %s's %s through %s relieve %s?", a.Subject, l.d.Resource, l.d.Action, l.d.Relieves))
 	b.Property(l.d.Relieves)
 	b.Input("act", a.DecisionID)
+	b.Cite(a.DecisionID)
 	b.Input("predicted", a.Plan.Predicted)
 	b.Input("observed", observed)
 	b.Input("contention_at_act", a.ContentionAtAct)
@@ -406,11 +409,13 @@ func (l *Loop) reverted(now time.Time, a *Action, entry actuators.Entry, verifyI
 	if a.prev != nil {
 		question = fmt.Sprintf("put %s back at its earlier %s: the further step did not help", a.Subject, l.d.Action)
 	}
-	b := l.cfg.Map.Decide(l.id("revert"), question)
+	b := l.decide("revert", question)
 	b.Input("act", a.DecisionID)
+	b.Cite(a.DecisionID)
 	if verifyID != "" {
 		b.Input("verify", verifyID)
 	}
+	b.Cite(verifyID)
 	b.Input("entry", a.Entry)
 	if a.prev != nil {
 		b.Input("restored", map[string]any{"act": a.prev.DecisionID, "to": a.prev.Entry.Applied, "unit": l.d.Unit})
@@ -465,8 +470,9 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 		l.gone(now, a, why)
 		return nil
 	}
-	b := l.cfg.Map.Decide(l.id(kind), l.giveBackAsk(a.Subject, reason))
+	b := l.decide(kind, l.giveBackAsk(a.Subject, reason))
 	b.Input("act", a.DecisionID)
+	b.Cite(a.DecisionID)
 	b.Input("entry", a.Entry)
 	b.Note("cooling %s down for %s", a.Subject, cooldown)
 	b.Commit(map[string]any{outcome: a.Subject})
@@ -478,8 +484,9 @@ func (l *Loop) giveBack(ctx context.Context, now time.Time, a *Action, outcome, 
 // nothing to give back and nothing to retry: the workload, if it returns, is a
 // new one.
 func (l *Loop) gone(now time.Time, a *Action, why string) {
-	b := l.cfg.Map.Decide(l.id("gone"), fmt.Sprintf("what became of the change to %s?", a.Subject))
+	b := l.decide("gone", fmt.Sprintf("what became of the change to %s?", a.Subject))
 	b.Input("act", a.DecisionID)
+	b.Cite(a.DecisionID)
 	b.Input("entry", a.Entry)
 	b.Note("%s; the change is dropped", why)
 	b.Commit(map[string]any{"gone": a.Subject})

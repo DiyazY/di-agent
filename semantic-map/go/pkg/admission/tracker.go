@@ -92,7 +92,6 @@ type TrackerConfig struct {
 	// Acted says whether relief acted in the action's domain since the time given,
 	// and the highest contention it acted at.
 	Acted func(action string, since time.Time) (peak float64, acted bool)
-	IDs   *IDs
 	Now   func() time.Time
 	Logf  func(string, ...any)
 }
@@ -194,6 +193,11 @@ type PendingAccept struct {
 func (t *Tracker) PendingList() []PendingAccept {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.pendingLocked()
+}
+
+// pendingLocked is PendingList; the caller holds mu.
+func (t *Tracker) pendingLocked() []PendingAccept {
 	out := make([]PendingAccept, len(t.pending))
 	for i, e := range t.pending {
 		out[i] = PendingAccept{Name: e.name, AcceptID: e.acceptID, AcceptedAt: e.at, Arrived: e.snap != nil, Subject: e.subject}
@@ -208,6 +212,39 @@ func (t *Tracker) Outcomes() []Outcome {
 	out := slices.Clone(t.outcomes)
 	slices.Reverse(out)
 	return out
+}
+
+// Memory is the tracker's state for the snapshot: outcomes oldest first, and
+// the accepts still awaiting one.
+type Memory struct {
+	Outcomes []Outcome       `json:"outcomes"`
+	Pending  []PendingAccept `json:"pending"`
+}
+
+// Memory is the tracker's state, for the snapshot.
+// Both are read under one lock, so an accept judged meanwhile is in one or the
+// other, never both.
+func (t *Tracker) Memory() Memory {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return Memory{Outcomes: slices.Clone(t.outcomes), Pending: t.pendingLocked()}
+}
+
+// Restore replaces the outcomes with mem's and closes each accept that was
+// pending as confounded: its arrival and settle clocks ran in a process that is
+// gone, so nothing re-enters pending on this one's clock. Called before the
+// tracker ticks.
+func (t *Tracker) Restore(mem Memory) {
+	now := t.c.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.outcomes = slices.Clone(mem.Outcomes)
+	t.pending = nil
+	for _, p := range mem.Pending {
+		e := &entry{name: p.Name, acceptID: p.AcceptID, at: p.AcceptedAt, subject: p.Subject}
+		t.outcomes = append(t.outcomes, t.record(e, Confounded, "agent restarted", nil, nil, now))
+	}
+	t.trimOutcomes()
 }
 
 // PredictionSummary describes prediction errors over the outcomes currently
@@ -269,6 +306,8 @@ func (t *Tracker) Tick(ctx context.Context) {
 				t.mu.Lock()
 				e.subject, e.snap = s, snap
 				t.mu.Unlock()
+				t.c.Map.RecordEvent(statemap.EventAdmissionArrived, e.name, "agent",
+					map[string]any{"name": e.name, "subject": s, "accept": e.acceptID})
 			} else if now.Sub(e.at) > ArrivalWindow {
 				done = append(done, t.record(e, NotArrived, "", nil, nil, now))
 				finished = append(finished, e)
@@ -402,10 +441,11 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 
 // record commits the outcome decision, linked to the accept.
 func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
-	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.IDs.Next(), Subject: e.subject,
+	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.Map.NewDecisionID("admit"), Subject: e.subject,
 		Result: result, Reason: reason, Lines: lines, At: now}
-	b := t.c.Map.Decide(o.OutcomeID, "outcome of "+e.name+"?")
+	b := t.c.Map.Decide(o.OutcomeID, "admission.outcome", "outcome of "+e.name+"?")
 	b.Input("accept", e.acceptID)
+	b.Cite(e.acceptID)
 	b.Input("subject", e.subject)
 	b.Input("lines", slices.Clone(lines))
 	for k, v := range inputs {

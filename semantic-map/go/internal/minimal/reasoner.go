@@ -377,10 +377,8 @@ func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressur
 	if who == "" {
 		who = "self"
 	}
-	// The decision id has to be unique per answer and derivable by the caller, so a
-	// client can fetch the trace without the daemon inventing an opaque handle.
-	id := fmt.Sprintf("cost-%d-%s-%s", r.state.Revision(), taskType, who)
-	b := r.state.Decide(id, fmt.Sprintf("cost of %s on %s", taskType, who))
+	id := r.state.NewDecisionID("cost", taskType, who)
+	b := r.state.Decide(id, "cost", fmt.Sprintf("cost of %s on %s", taskType, who))
 
 	level := func(propertyID string) (float64, float64) {
 		p, ok := b.Property(propertyID)
@@ -445,6 +443,9 @@ func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressur
 		"pressure_sensitivity": pressureSens,
 		"confidence":           confidence,
 	})
+	if d == nil {
+		return nil, fmt.Errorf("decision %s was not recorded: duplicate id", id)
+	}
 
 	path := make([]string, 0, len(d.RelationshipsRead))
 	for i := range d.RelationshipsRead {

@@ -183,3 +183,27 @@ func TestAReprobedPeerStillBelowTheFloorIsNotRecommended(t *testing.T) {
 		t.Fatalf("a peer at 0.35 under a 0.5 floor was recommended or misreported: err = %v", err)
 	}
 }
+
+// TestARestoredPenalisedPeerIsReprobed: a peer the agent penalised under the
+// floor keeps its penalty time across a restart, so the restarted agent
+// re-probes it after the retry window instead of reading it as operator-set.
+func TestARestoredPenalisedPeerIsReprobed(t *testing.T) {
+	a := newTrustFixture(t)
+	a.fail.Store(true)
+	_ = a.ask()
+	saved := a.reg.Trusts()[a.d.ID]
+
+	b := newTrustFixture(t) // the restarted agent, its peer at another test URL
+	b.reg.RestoreTrust(map[string]peers.TrustState{b.d.ID: saved})
+	if d := b.peer(t); !near(d.Trust, 0.45) || !d.LastPenalised.Equal(*a.now) {
+		t.Fatalf("restored %+v; want trust 0.45 penalised at %v", d, *a.now)
+	}
+	_ = b.ask()
+	if b.hits.Load() != 0 {
+		t.Fatalf("hits %d inside the retry window, want 0", b.hits.Load())
+	}
+	*b.now = b.now.Add(10 * time.Minute)
+	if err := b.ask(); err != nil || b.hits.Load() != 1 {
+		t.Fatalf("hits %d err %v; want the restored peer re-probed after ten minutes", b.hits.Load(), err)
+	}
+}

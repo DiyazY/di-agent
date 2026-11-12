@@ -503,6 +503,8 @@ type Map struct {
 	saveMu              sync.Mutex
 	discoveryCheckpoint func() (json.RawMessage, error)
 	savedDiscovery      json.RawMessage
+	loopsCheckpoint     func() (json.RawMessage, error)
+	savedLoops          json.RawMessage
 
 	// owner is the system this map models. Fixed at construction: a map that could be
 	// reassigned to another system would carry the first one's history into the second.
@@ -628,6 +630,17 @@ func (m *Map) StaleAfter() time.Duration { return m.cfg.StaleAfter }
 // Journal exposes the change and decision record.
 func (m *Map) Journal() *Journal { return m.journal }
 
+// Incarnation counts this map's lives: 1 when new, one more on each restore.
+func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
+
+// NewDecisionID issues a decision id no other in this map's history has had:
+// "<prefix>-<incarnation>.<n>", followed by "-"-joined suffix parts when given, n a
+// ticket from the journal's event counter. Tickets are never reissued, so the id
+// needs no reservation; explicit operator ids are reserved instead.
+func (m *Map) NewDecisionID(prefix string, suffix ...string) string {
+	return m.journal.newID(prefix, suffix)
+}
+
 // ── Property lifecycle ────────────────────────────────────────────────────────
 
 // DeclareProperty creates or updates a property's definition — not its value.
@@ -732,6 +745,7 @@ func (m *Map) DeclareProperty(p Property) error {
 	}
 	if len(p.Members) > 0 && !sameStrings(existing.Members, p.Members) {
 		changed["members"] = p.Members
+		changed["members_before"] = append([]string(nil), existing.Members...)
 		existing.Members = append([]string(nil), p.Members...)
 	}
 	if existing.Status == Retired {
@@ -1634,6 +1648,15 @@ func (m *Map) bump(kind EventKind, target, actor string, detail map[string]any, 
 		Actor:    actor,
 		Detail:   detail,
 	})
+}
+
+// RecordEvent journals a structural event a loop outside this package observed, such as
+// a relief phase change or a peer going quiet. Callers must not hold a lock the map
+// could call back into.
+func (m *Map) RecordEvent(kind EventKind, target, actor string, detail map[string]any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bump(kind, target, actor, detail, m.now())
 }
 
 func clamp01(v float64) float64 {

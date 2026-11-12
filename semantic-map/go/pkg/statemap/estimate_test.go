@@ -3,7 +3,6 @@ package statemap
 import (
 	"encoding/json"
 	"math"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -235,8 +234,8 @@ func TestEstimateDefaultIdDistinguishesCounterfactuals(t *testing.T) {
 		}
 		seen[id] = name
 	}
-	if want := "est-" + strconv.FormatUint(rev, 10) + "-pressure"; plain.DecisionID != want {
-		t.Errorf("plain estimate id %q; want the unchanged shape %q", plain.DecisionID, want)
+	if !strings.HasPrefix(plain.DecisionID, "est-1.") || !strings.HasSuffix(plain.DecisionID, "-pressure") {
+		t.Errorf("plain estimate id %q; want est-1.<n>-pressure", plain.DecisionID)
 	}
 
 	// Each id must replay as its own answer, not as whichever was recorded last.

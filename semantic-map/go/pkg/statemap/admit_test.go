@@ -357,13 +357,13 @@ func TestAdmitRefusesAReusedID(t *testing.T) {
 
 func TestAdmitRefusesABadDemand(t *testing.T) {
 	m, _ := admitFixture(t)
-	before := len(m.Journal().Decisions(0))
+	before := len(m.Journal().Decisions(0, ""))
 	for _, req := range []AdmitRequest{admitReq(-1, 0), admitReq(math.NaN(), 0), admitReq(0, math.Inf(1))} {
 		if res := m.Admit(req); res.Err == "" || res.DecisionID != "" {
 			t.Errorf("%+v; want the demand refused before a decision", res)
 		}
 	}
-	if after := len(m.Journal().Decisions(0)); after != before {
+	if after := len(m.Journal().Decisions(0, "")); after != before {
 		t.Errorf("journal holds %d decisions, was %d; a refused request must record nothing", after, before)
 	}
 }
@@ -377,31 +377,30 @@ func TestAdmitAReusedExplicitIDRecordsNothing(t *testing.T) {
 	if res := m.Admit(req); res.Err != "" || res.DecisionID != "est-1-gate" {
 		t.Fatalf("%+v; want the explicit id kept", res)
 	}
-	before := len(m.Journal().Decisions(0))
+	before := len(m.Journal().Decisions(0, ""))
 	if res := m.Admit(req); !strings.Contains(res.Err, "already used") {
 		t.Errorf("%+v; want the reused id refused", res)
 	}
-	if after := len(m.Journal().Decisions(0)); after != before {
+	if after := len(m.Journal().Decisions(0, "")); after != before {
 		t.Errorf("journal holds %d decisions, was %d", after, before)
 	}
 }
 
 // TestAdmitIDsAreUnambiguousAndNeverOverwrite: two requests whose fields would join
-// to the same text get different ids, and an identical retry at the same revision
-// gets a suffixed one, so both records stay.
+// to the same text get different digests, and an identical retry gets a different
+// id, so both records stay.
 func TestAdmitIDsAreUnambiguousAndNeverOverwrite(t *testing.T) {
 	m, _ := admitFixture(t)
 	a := m.Admit(AdmitRequest{From: "n|pod:a", Workload: "b", CPUCores: 1, CPUEnter: 0.25, MemoryEnter: 0.08})
 	b := m.Admit(AdmitRequest{From: "n", Workload: "pod:a|b", CPUCores: 1, CPUEnter: 0.25, MemoryEnter: 0.08})
-	if a.DecisionID == b.DecisionID || strings.TrimSuffix(b.DecisionID, "-2") == a.DecisionID {
+	digest := func(id string) string { return id[strings.LastIndex(id, "-")+1:] }
+	if digest(a.DecisionID) == digest(b.DecisionID) {
 		t.Errorf("ids %s and %s; want two different digests", a.DecisionID, b.DecisionID)
 	}
 	first, retry := m.Admit(admitReq(1, 0)), m.Admit(admitReq(1, 0))
-	if first.Revision != retry.Revision || retry.DecisionID != first.DecisionID+"-2" {
-		t.Fatalf("ids %s and %s at revisions %d/%d; want the retry suffixed -2", first.DecisionID, retry.DecisionID, first.Revision, retry.Revision)
-	}
-	if third := m.Admit(admitReq(1, 0)); third.DecisionID != first.DecisionID+"-3" {
-		t.Errorf("third id %s; want -3", third.DecisionID)
+	if first.Revision != retry.Revision || retry.DecisionID == first.DecisionID ||
+		digest(retry.DecisionID) != digest(first.DecisionID) {
+		t.Fatalf("ids %s and %s at revisions %d/%d; want two ids over one digest", first.DecisionID, retry.DecisionID, first.Revision, retry.Revision)
 	}
 	for _, id := range []string{first.DecisionID, retry.DecisionID} {
 		if _, ok := m.Journal().Decision(id); !ok {
@@ -658,7 +657,7 @@ func TestAdmitAnUnseenPodIsPricedOnItsDeclaredDemand(t *testing.T) {
 func TestAdmitIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
 	m, _ := admitFixture(t)
 	const n = 16
-	before := len(m.Journal().Decisions(0))
+	before := len(m.Journal().Decisions(0, ""))
 	results := make([]AdmitResult, n)
 	var wg sync.WaitGroup
 	for i := range n {
@@ -677,7 +676,7 @@ func TestAdmitIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
 			t.Errorf("decision %s: record %+v does not match what the caller got", r.DecisionID, d)
 		}
 	}
-	if after := len(m.Journal().Decisions(0)); after != before+n {
+	if after := len(m.Journal().Decisions(0, "")); after != before+n {
 		t.Errorf("journal holds %d decisions, was %d; want %d new records", after, before, n)
 	}
 
