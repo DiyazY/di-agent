@@ -2350,3 +2350,101 @@ func TestRelationshipsSurviveAClockStep(t *testing.T) {
 		t.Errorf("relationship retired by a wall-clock step: %s", r.RetiredReason)
 	}
 }
+
+// ── A restored map gets retire_after of grace ─────────────────────────────────
+
+// restoredMap saves a map holding two observed properties and a relationship, and
+// loads it into a second map whose clock is three days later.
+func restoredMap(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	cfg := Config{Owner: "n", StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute}
+	a, cA := newTestMap(t, cfg)
+	for _, id := range []string{"cpu", "mem"} {
+		if err := a.DeclareProperty(Property{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Observe(id, 0.5, cA.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.DeclareRelationship(Relationship{From: "cpu", To: "mem", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/state.json"
+	if err := a.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	b, cB := newTestMap(t, cfg)
+	cB.t = cA.t.Add(72 * time.Hour)
+	cB.m = time.Second
+	if ok, err := b.Load(path); err != nil || !ok {
+		t.Fatalf("load: %v %v", ok, err)
+	}
+	return b, cB
+}
+
+func TestRestoreGraceMarksStaleButDoesNotRetire(t *testing.T) {
+	m, _ := restoredMap(t)
+	stale, retired := m.Sweep()
+	if len(stale) != 2 || stale[0] != "cpu" || stale[1] != "mem" || len(retired) != 0 {
+		t.Fatalf("stale=%v retired=%v; want both stale, none retired during grace", stale, retired)
+	}
+	r, _ := m.Relationship(RelationshipID("cpu", "mem", ""))
+	if r.Status == Retired {
+		t.Errorf("relationship retired during grace: %s", r.RetiredReason)
+	}
+	if n := m.State(Query{}).Counts.RelationshipsLive; n != 1 {
+		t.Errorf("RelationshipsLive %d, want 1", n)
+	}
+}
+
+func TestRestoreGraceEndsAfterRetireAfter(t *testing.T) {
+	m, c := restoredMap(t)
+	m.Sweep()
+	c.advance(2*time.Minute + time.Second)
+	_, retired := m.Sweep()
+	if len(retired) != 2 || retired[0] != "cpu" || retired[1] != "mem" {
+		t.Fatalf("retired=%v after grace, want cpu and mem", retired)
+	}
+	if r, _ := m.Relationship(RelationshipID("cpu", "mem", "")); r.Status != Retired {
+		t.Errorf("relationship %s after grace, want retired", r.Status)
+	}
+}
+
+func TestAnObservationDuringGraceRevivesNormally(t *testing.T) {
+	m, c := restoredMap(t)
+	m.Sweep()
+	c.advance(10 * time.Second)
+	if err := m.Observe("cpu", 0.6, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.Status != Active {
+		t.Fatalf("cpu %s after an observation, want active", p.Status)
+	}
+	c.advance(2 * time.Minute)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "mem" {
+		t.Fatalf("retired=%v, want mem only", retired)
+	}
+	if p, _ := m.Property("cpu"); p.Status != Stale {
+		t.Errorf("cpu %s, want stale", p.Status)
+	}
+}
+
+func TestAClockStepDuringGraceRetiresNothing(t *testing.T) {
+	m, c := restoredMap(t)
+	c.advance(5 * time.Second)
+	c.stepWall(6 * time.Hour)
+	_, retired := m.Sweep()
+	if len(retired) != 0 {
+		t.Fatalf("retired=%v after a wall step during grace", retired)
+	}
+	if n := len(clockSteps(m)); n != 1 {
+		t.Errorf("%d clock.stepped events, want 1", n)
+	}
+	c.advance(2 * time.Minute)
+	if _, retired = m.Sweep(); len(retired) != 2 {
+		t.Errorf("retired=%v once grace elapsed, want both", retired)
+	}
+}

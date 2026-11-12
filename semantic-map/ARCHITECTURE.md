@@ -822,6 +822,8 @@ stay reconstructible.
 
 Silence is measured on the process's monotonic clock, not the sample's wall time, so an NTP step after boot does not read as a week of silence; a step larger than the pair window is journalled as `clock.stepped`.
 
+After a restore nothing retires until `retire_after` of this process's time has passed: a snapshot's last observations are hours old by definition, and retiring on that would cascade every relationship away on the first sweep.
+
 The ordering in `IngestSample` matters: the state model records a sample BEFORE the
 routing table is consulted. The table says what the agent knows how to summarise, not
 what the system is allowed to exhibit.

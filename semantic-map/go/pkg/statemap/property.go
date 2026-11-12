@@ -553,6 +553,10 @@ type Map struct {
 	prevSweepWall time.Time
 	prevSweepMono time.Duration
 
+	// graceUntil is the monotonic time before which nothing retires, set by Load:
+	// a snapshot's last observations are hours old by definition. Zero means no grace.
+	graceUntil time.Duration
+
 	// onRetire is called, outside the lock, with the id of every property that
 	// retires — by an operator or by silence. See SetRetireHook.
 	onRetire func(propertyID string)
@@ -1172,7 +1176,8 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 			silence = mono - p.lastSeen
 		}
 		switch {
-		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter:
+		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter &&
+			(m.graceUntil == 0 || mono >= m.graceUntil):
 			m.retireLocked(p, fmt.Sprintf("no observation for %s", silence.Round(time.Second)), "sweep", now)
 			retired = append(retired, p.ID)
 		case silence > m.cfg.StaleAfter && p.Status != Stale:
