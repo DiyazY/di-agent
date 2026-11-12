@@ -779,16 +779,24 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 // refused, because two producers describing one id differently is a fault worth
 // seeing rather than a value worth averaging.
 func (m *Map) Record(o Observation) error {
+	_, err := m.RecordAccepted(o)
+	return err
+}
+
+// RecordAccepted is Record that also says whether the reading was folded in: false
+// with no error for one refused as from the future, out of order or a duplicate
+// event, so a caller can keep it from anything else that learns from readings.
+func (m *Map) RecordAccepted(o Observation) (bool, error) {
 	id, value, at, eventID := o.ID, o.Value, o.At, o.EventID
 	if id == "" {
-		return fmt.Errorf("observation needs a property id")
+		return false, fmt.Errorf("observation needs a property id")
 	}
 	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return fmt.Errorf("property %q observed with non-finite value", id)
+		return false, fmt.Errorf("property %q observed with non-finite value", id)
 	}
 	if o.Range != nil {
 		if err := validRange(*o.Range); err != nil {
-			return fmt.Errorf("property %q: %w", id, err)
+			return false, fmt.Errorf("property %q: %w", id, err)
 		}
 	}
 	if at.IsZero() {
@@ -808,7 +816,7 @@ func (m *Map) Record(o Observation) error {
 	// delivery of it will carry.
 	if at.After(m.now().Add(time.Duration(m.learn.PairWindowSeconds) * time.Second)) {
 		m.readingsFuture++
-		return nil
+		return false, nil
 	}
 	// Zero means unseen, so nudge off it. Older means by a whole stamp: stamps are
 	// Unix seconds, and the wall and monotonic clocks are read one after the other,
@@ -819,23 +827,23 @@ func (m *Map) Record(o Observation) error {
 	}
 	if p, ok := m.properties[id]; ok && p.lastSeen != 0 && p.lastSeen-anchor >= time.Second {
 		m.readingsOutOfOrder++
-		return nil
+		return false, nil
 	}
 
 	// Keyed by property as well as event, because an event identity is only unique
 	// within the reading it names: one collector tick can carry several metrics, and
 	// some collectors number them from a shared counter.
 	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
-		return nil
+		return false, nil
 	}
 
 	p, ok := m.properties[id]
 	if !ok {
 		if !m.cfg.AdmitUnknown {
-			return fmt.Errorf("property %q is not declared and admission is disabled", id)
+			return false, fmt.Errorf("property %q is not declared and admission is disabled", id)
 		}
 		if err := validScope(id, o.Subject); err != nil {
-			return err
+			return false, err
 		}
 		p = &Property{
 			ID: id, Kind: Observed, Status: Active,
@@ -863,11 +871,11 @@ func (m *Map) Record(o Observation) error {
 		// reconciling first would journal a conflict and advance the revision for an
 		// observation that is about to be refused anyway.
 		if p.Kind == Derived {
-			return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
+			return false, fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
 				id, p.Members)
 		}
 		if err := m.reconcileDeclarationLocked(p, o, at); err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -923,7 +931,7 @@ func (m *Map) Record(o Observation) error {
 		m.latest[d.ID] = dobs
 		m.learnFromObservationLocked(d.ID, dobs)
 	}
-	return nil
+	return true, nil
 }
 
 // reconcileDeclarationLocked merges what a later observation says about a property
