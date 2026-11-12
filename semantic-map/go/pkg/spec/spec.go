@@ -585,18 +585,18 @@ func Default() Spec {
 		Loops: Loops{
 			Review: Review{
 				Level: "full", Interval: time.Minute, PerCycle: 10,
-				Rules: []string{"composition"}, Renderer: "text",
+				Rules: []string{"composition", "persistent-correlation"}, Renderer: "text",
 				Thresholds: ReviewThreshold{
 					Confirm: autonomy.DefaultThresholds.Confirm,
 					Reject:  autonomy.DefaultThresholds.Reject,
 					Defer:   autonomy.DefaultThresholds.Defer,
 				},
 				Decision: Decision{
-					Backend: "systemone", URL: "http://localhost:11434",
+					Backend: "none", URL: "http://localhost:11434",
 					Model: "tev1:4b", ReasoningEffort: "none", Timeout: 5 * time.Minute,
 				},
 				Reasoning: Reasoning{
-					Backend: "openai-tools", URL: "http://localhost:11434/v1",
+					Backend: "none", URL: "http://localhost:11434/v1",
 					Model: "qwen3.8:27b-nvfp4", KeepAlive: "10m", Timeout: 10 * time.Minute,
 					Tools: slices.Clone(autonomy.DefaultTools),
 				},

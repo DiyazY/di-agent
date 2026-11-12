@@ -314,16 +314,19 @@ func TestTheExampleIsTheDefaults(t *testing.T) {
 	}
 }
 
-// TestTheAgentReviewsOnItsOwnByDefault: discovery's candidates are settled by the
-// agent — rules, a decision model, and a reasoning model when that is not sure — at
-// full autonomy. A person reviewing is a mode an operator turns on, not the default:
-// nobody checks thousands of machines one candidate at a time.
-func TestTheAgentReviewsOnItsOwnByDefault(t *testing.T) {
+// TestTheAgentReviewsByRulesAloneByDefault: discovery's candidates are settled by the
+// agent at full autonomy, not by a person: nobody checks thousands of machines one
+// candidate at a time. A model is something an operator adds; a default that names a
+// model nobody runs is a permanent silent outage.
+func TestTheAgentReviewsByRulesAloneByDefault(t *testing.T) {
 	r := Default().Loops.Review
 	if r.Level != "full" {
 		t.Errorf("review level %q by default; want full", r.Level)
 	}
-	if r.Decision.Backend == "none" || r.Reasoning.Backend != "openai-tools" {
-		t.Errorf("decision %q, reasoning %q by default; want both model tiers on", r.Decision.Backend, r.Reasoning.Backend)
+	if r.Decision.Backend != "none" || r.Reasoning.Backend != "none" {
+		t.Errorf("decision %q, reasoning %q by default; want both none", r.Decision.Backend, r.Reasoning.Backend)
+	}
+	if want := []string{"composition", "persistent-correlation"}; !reflect.DeepEqual(r.Rules, want) {
+		t.Errorf("rules %v by default; want %v", r.Rules, want)
 	}
 }

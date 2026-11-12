@@ -805,7 +805,7 @@ The file overlays the defaults, so it names only what it changes. A key the agen
 `agent -print-config` prints every setting with its default, and [`agent.example.yaml`](agent.example.yaml) is that output. Copy it and delete what you do not change. A running agent shows the spec it runs on, secrets redacted, at `GET /config`.
 
 ```yaml
-# agent.yaml: a k0s node polling its local Netdata, with the review loop on
+# agent.yaml: a k0s node polling its local Netdata
 node:
   id: node_1
 profile:
@@ -1284,9 +1284,9 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `loops.review.level`                 | `full`                | `full` (3): the agent decides. The manual modes are `bounded` (2), `rules` (1), `suggest` (0), and `off`. |
 | `loops.review.interval`        | `1m`                  | How often the reviewer looks at the queue. |
 | `loops.review.per_cycle`       | `10`                  | Candidates reviewed per cycle, strongest first. |
-| `loops.review.rules`           | `composition`         | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
+| `loops.review.rules`           | `composition, persistent-correlation` | Tier 0 rules, a list, first match decides; optional `persistent-correlation`; `[]` for none. |
 | `loops.review.renderer`        | `text`                | How a candidate's evidence is written for the models. |
-| `loops.review.decision.backend` | `systemone`          | Tier 1: `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
+| `loops.review.decision.backend` | `none`               | Tier 1 (off by default): `systemone` (Ollama decision models, `/v1/systemone`), `openai-logprobs` (any OpenAI-compatible server returning token log-probabilities: llama.cpp, vLLM, Ollama `/v1`), or `none` — then what rules cannot settle is undecided. |
 | `loops.review.decision.url`    | `http://localhost:11434` | Ollama's root for `systemone`; the `/v1` base for `openai-logprobs`. |
 | `loops.review.decision.model`  | `tev1:4b`             | Tier 1 model. `nimble-v3:9b-nvfp4` on an Apple-silicon machine with memory to spare. |
 | `loops.review.decision.keep_alive` | `""`              | Ollama `keep_alive` for an `openai-logprobs` tier 1 model. |
@@ -1772,7 +1772,7 @@ A candidate goes up the tiers only as far as it has to:
 
 | Tier | Decider | What it does |
 | ---- | ------- | ------------ |
-| 0 | rules | `composition` confirms a directed part against its whole. Optional `persistent-correlation` accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
+| 0 | rules | `composition` confirms a directed part against its whole. `persistent-correlation` (on by default) accepts candidates as associations after three full qualifying windows of fresh paired observations; it never creates a causal edge. |
 | 1 | decision model | One forward pass: a probability for confirm, reject and defer, and for an undirected candidate which end drives the other. The top action is taken when it reaches its threshold. `systemone` asks an Ollama decision model's typed-question endpoint; `openai-logprobs` asks a general model for one lettered answer and reads the distribution off the letters' log-probabilities, undecided when less than half the model's probability fell on any letter. |
 | 2 | reasoning model | Reads the map with read-only tools (`get_property`, `get_state`, `get_candidates`) and writes an analysis. The decision model scores the candidate again with the analysis, and that probability is the one compared with the threshold. |
 | — | undecided | What no tier was sure of stays in `GET /candidates` with `Review.Action: "undecided"`, and is reviewed again when its evidence moves. A reasoning or decision model that cannot be reached skips only what needs it, for that cycle. |
@@ -1786,22 +1786,30 @@ The level decides who may act:
 | `bounded` (2) | yes | confirm and defer; a model's rejection is left undecided |
 | `full` (3), the default | yes | yes |
 
-### Rules-only persistent correlation
+### The default review: rules only
 
-Merge this into the agent configuration to approve unfamiliar metric pairs without
-an allowlist or model calls. The default rule list remains `composition` only.
+`decision.backend` and `reasoning.backend` are `none` by default, and the rule list is
+`composition, persistent-correlation`, so the review loop runs on rules alone: a candidate
+no rule settles is recorded `undecided` and reviewed again when its evidence moves. A model
+is something an operator adds. Turn a tier on by setting its backend; its URL, model,
+timeout and tools already carry values:
 
 ```yaml
 loops:
   review:
-    level: rules
+    decision:
+      backend: systemone          # tier 1
+    reasoning:
+      backend: openai-tools       # tier 2
+```
+
+To run without the correlation rule, list only `composition`:
+
+```yaml
+loops:
+  review:
     rules:
       - composition
-      - persistent-correlation
-    decision:
-      backend: none
-    reasoning:
-      backend: none
 ```
 
 `persistent-correlation` requires `PersistentWindows >= 3` and no evidence caveats.
@@ -1850,7 +1858,7 @@ This is an opt-in statistical acceptance policy, **not proof of causation**. Dir
 confirmations still participate in estimates; associations do not. This feature does
 not add probation or automatic retirement of accepted edges. `level: suggest`
 records proposed approvals without applying them. `level: rules` alone does not disable
-model calls: set both model backends to `none` as above for rules-only operation.
+model calls: both model backends are `none` by default, which is rules-only operation.
 
 An agent's rejection or deferral is not final: the pair is still tested, and the candidate
 returns to pending, to be reviewed again, once its evidence moves materially or crosses

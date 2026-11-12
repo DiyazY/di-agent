@@ -2358,11 +2358,11 @@ Candidate review is the one place the map waits on a person, and the first decis
 agent takes on its own authority. How much authority is an operator setting
 (`loops.review.level`); what the agent does with it is always a decision record.
 
-**Tiers, cheapest first.** A candidate goes up only as far as it has to.
+**Tiers, cheapest first.** A candidate goes up only as far as it has to. Tiers 1 and 2 are off by default (`backend: none`); a model is something an operator adds, and a default naming a model the node does not run would retry every cycle with no record.
 
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
-| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
+| 0 | rules in the daemon | `composition` confirms a directed part against its whole. `persistent-correlation` (on by default) approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
 | 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
 | — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
@@ -2385,7 +2385,7 @@ reviewed again, which is what keeps the models from being asked the same questio
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
-**Persistent correlation (opt-in).** The proposer tracks fresh paired observations,
+**Persistent correlation (default).** The proposer tracks fresh paired observations,
 checkpointing only after a full buffer has been replaced. Every intervening update
 must meet its correlation threshold, evidence-count and variation gates, have no
 missing-range caveats, and pass both a Fisher p-value limit of 0.05 and the configured
@@ -2416,7 +2416,7 @@ starting. Pending reviews survive restart, and restore reconciles a candidate ag
 an association already present in the map because the two are captured under separate
 locks. The state estimator's own raw windows remain cold after restart. There is no new
 probation or retirement policy. See the
-[rules-only configuration](README.md#rules-only-persistent-correlation).
+[default review](README.md#the-default-review-rules-only).
 
 **Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule
 costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits
