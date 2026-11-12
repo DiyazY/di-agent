@@ -49,6 +49,9 @@ type StateView struct {
 	Properties    []Property     `json:"properties"`
 	Relationships []Relationship `json:"relationships"`
 
+	// Calibration is how the map's own predictions have fared, by kind and basis.
+	Calibration []CalibrationEntry `json:"calibration"`
+
 	// Facts are the machine the properties belong to: its OS, CPU, memory, disk. Every
 	// view carries them, whatever the filter, since they are the frame its values are
 	// read in.
@@ -135,7 +138,7 @@ func (m *Map) State(q Query) StateView {
 	// serialise as [] rather than null, which a client has to special-case.
 	view := StateView{
 		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(), Facts: m.factsLocked(),
-		Properties: []Property{}, Relationships: []Relationship{},
+		Calibration: m.calibrationListLocked(), Properties: []Property{}, Relationships: []Relationship{},
 	}
 	selected := map[string]bool{}
 	for _, p := range m.properties {

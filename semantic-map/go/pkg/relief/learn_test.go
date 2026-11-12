@@ -776,3 +776,52 @@ func TestMemoryRoundTripsEffectsAndCounters(t *testing.T) {
 		t.Fatalf("restored memory %+v; want %+v", got, mem)
 	}
 }
+
+func TestAKeptOutcomeFeedsTheCalibration(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	h.judged("pod:a", 0.44) // predicted 0.1, observed 0.06, kept
+	got := h.m.Calibration()[statemap.CalibrationKey{Kind: "relief.cpu.limit", Basis: BasisMap}]
+	if got.N != 1 || !near(got.MeanErr, 0.04) || !near(got.MeanAbsErr, 0.04) || got.HitRate != 1 {
+		t.Fatalf("calibration %+v", got)
+	}
+	in, _ := h.lastVerify().Inputs["calibration"].(map[string]statemap.Calibration)
+	if in["relief.cpu.limit/map"].N != 1 {
+		t.Fatalf("calibration input %v", h.lastVerify().Inputs["calibration"])
+	}
+}
+
+func TestARevertedOutcomeFeedsAMiss(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: true})
+	h.judged("pod:a", 0.49) // observed 0.01: reverted
+	got := h.m.Calibration()[statemap.CalibrationKey{Kind: "relief.cpu.limit", Basis: BasisMap}]
+	if got.N != 1 || got.HitRate != 0 || !near(got.MeanErr, 0.09) {
+		t.Fatalf("calibration %+v", got)
+	}
+}
+
+func TestAConfoundedOutcomeFeedsNoCalibration(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.1}, noRelate: true, evidence: true})
+	h.act("pod:a")
+	record(t, h.m, usage("pod:b"), "pod:b", 0.2, h.now)
+	h.run(2*time.Minute, 0.44)
+	h.secondStep("pod:a", 0.3, 0.44)
+	record(t, h.m, usage("pod:b"), "pod:b", 0.3, h.now)
+	h.run(2*time.Minute, 0.40)
+	if a := h.action("pod:a"); a.Outcome != OutcomeKept {
+		t.Fatalf("second step %+v; want kept", a)
+	}
+	if n := len(h.m.Calibration()); n != 0 {
+		t.Fatalf("calibration %v; a confounded outcome feeds nothing", h.m.Calibration())
+	}
+	if h.lastVerify().Inputs["calibration"] != nil {
+		t.Fatalf("confounded verify carries calibration %v", h.lastVerify().Inputs["calibration"])
+	}
+}
+
+func TestDryRunFeedsNoCalibration(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, evidence: false})
+	h.judged("pod:a", 0.44)
+	if n := len(h.m.Calibration()); n != 0 {
+		t.Fatalf("calibration %v; a dry run feeds nothing", h.m.Calibration())
+	}
+}

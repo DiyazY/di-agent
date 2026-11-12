@@ -327,6 +327,10 @@ func (l *Loop) learn(b *statemap.DecisionBuilder, verifyID string, a *Action, ag
 		// so the effect converges on the workload's real response rather than on 1.
 		ratio := observed * effect / a.Plan.Predicted
 		l.effects.Observe(a.Subject, a.Plan.Basis, ratio)
+		kind := "relief." + l.d.Action
+		l.cfg.Map.RecordPrediction(kind, a.Plan.Basis, a.Plan.Predicted, observed, agreed)
+		key := statemap.CalibrationKey{Kind: kind, Basis: a.Plan.Basis}
+		b.Input("calibration", map[string]statemap.Calibration{kind + "/" + a.Plan.Basis: l.cfg.Map.Calibration()[key]})
 		if o.HasEffect && err == nil {
 			// The relationship's strength is now what the interventions measured, so a
 			// map prediction carries it; a factor learned against the old strength

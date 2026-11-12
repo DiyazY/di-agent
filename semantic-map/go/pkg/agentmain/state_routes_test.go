@@ -601,3 +601,25 @@ func TestOnlyTheMapMayClaimIntervened(t *testing.T) {
 		}
 	}
 }
+
+func TestStateCarriesCalibration(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.RecordPrediction("admission.cpu_contention_ratio", "map", 0.09, 0.07, true)
+	var body map[string]any
+	if code := getState(t, srv.URL+"/state", &body); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	list, _ := body["calibration"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("calibration %v; want one entry", body["calibration"])
+	}
+	e, _ := list[0].(map[string]any)
+	for _, k := range []string{"kind", "basis", "n", "mean_err", "mean_abs_err", "hit_rate"} {
+		if _, ok := e[k]; !ok {
+			t.Errorf("entry %v lacks %q", e, k)
+		}
+	}
+	if e["n"] != float64(1) {
+		t.Errorf("n %v", e["n"])
+	}
+}

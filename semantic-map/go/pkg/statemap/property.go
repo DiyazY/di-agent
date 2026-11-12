@@ -516,6 +516,9 @@ type Map struct {
 	// interventions holds the counters by pair "from->to"; see Interventions.
 	interventions map[string]*Interventions
 
+	// calibration is how the map's own predictions have fared; see Calibration.
+	calibration map[CalibrationKey]Calibration
+
 	// facts are what the machine is, read rather than observed; see Fact.
 	facts map[string]Fact
 
@@ -576,6 +579,7 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		interventions: make(map[string]*Interventions),
+		calibration:   make(map[CalibrationKey]Calibration),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,

@@ -422,6 +422,7 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 	result := Held
 	settled := make([]float64, len(e.domains))
 	baseline := make([]float64, len(e.domains))
+	fed := map[string]statemap.Calibration{}
 	for i, d := range e.domains {
 		l, a := &lines[i], e.lines[i]
 		v := value(t.c.Map, d.Relieves)
@@ -434,6 +435,20 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 		}
 		l.MapRise, l.MapErr = rise(a.MapPred, a.Pressure, observed)
 		l.UsageRise, l.UsageErr = rise(a.UsagePred, a.Pressure, observed)
+
+		// Each basis is judged on whether its predicted level fell on the same side of
+		// the exit as the settled one.
+		kind := "admission." + d.Relieves
+		for basis, pred := range map[string]*float64{"map": a.MapPred, "usage": a.UsagePred} {
+			if pred == nil {
+				continue
+			}
+			t.c.Map.RecordPrediction(kind, basis, *pred, v, (*pred <= d.Exit) == (v <= d.Exit))
+			fed[kind+"/"+basis] = t.c.Map.Calibration()[statemap.CalibrationKey{Kind: kind, Basis: basis}]
+		}
+	}
+	if len(fed) > 0 {
+		inputs["calibration"] = fed
 	}
 	inputs["relieves_at_accept"], inputs["relieves_now"] = baseline, settled
 	return t.record(e, result, "", lines, inputs, now)

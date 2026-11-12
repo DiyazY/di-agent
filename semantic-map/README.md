@@ -921,6 +921,10 @@ curl -s localhost:8080/state | jq -r '.facts[] | "\(.key)\t\(.value) \(.unit // 
 # how many property pairs discovery is testing, of how many it could
 curl -s localhost:8080/state | jq '.discovery'
 
+# how the map's own predictions have fared, per kind and basis: n outcomes, mean
+# signed error (predicted - observed), mean absolute error, share of verdicts right
+curl -s localhost:8080/state | jq '.calibration'
+
 # one property, readable in a terminal
 curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 

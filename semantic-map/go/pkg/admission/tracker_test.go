@@ -498,3 +498,64 @@ func TestRestoreKeepsOutcomesAndClosesPendingAccepts(t *testing.T) {
 		t.Fatalf("pending %+v; nothing resumes after a restart", p)
 	}
 }
+
+func TestHeldFeedsBothBases(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	o := r.result("held")
+	cal := r.m.Calibration()
+	key := func(k, b string) statemap.CalibrationKey { return statemap.CalibrationKey{Kind: k, Basis: b} }
+	cm := cal[key("admission.cpu_contention_ratio", "map")]
+	cu := cal[key("admission.cpu_contention_ratio", "usage")]
+	mu := cal[key("admission.memory_contention_ratio", "usage")]
+	if cm.N != 1 || !near(cm.MeanErr, 0.025) || !near(cm.MeanAbsErr, 0.025) || cm.HitRate != 1 {
+		t.Errorf("cpu map %+v", cm)
+	}
+	if cu.N != 1 || !near(cu.MeanErr, -0.02) || !near(cu.MeanAbsErr, 0.02) || cu.HitRate != 1 {
+		t.Errorf("cpu usage %+v", cu)
+	}
+	if mu.N != 1 || !near(mu.MeanErr, 0.01) || mu.HitRate != 1 {
+		t.Errorf("memory usage %+v", mu)
+	}
+	if len(cal) != 3 {
+		t.Errorf("calibration %v; want three keys", cal)
+	}
+	rec, _ := r.j.Decision(o.OutcomeID)
+	in, _ := rec.Inputs["calibration"].(map[string]statemap.Calibration)
+	if len(in) != 3 || in["admission.cpu_contention_ratio/map"].N != 1 ||
+		in["admission.cpu_contention_ratio/usage"].N != 1 || in["admission.memory_contention_ratio/usage"].N != 1 {
+		t.Errorf("calibration input %v", rec.Inputs["calibration"])
+	}
+}
+
+func TestBreachedOnAReadingFeedsAMiss(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_contention_ratio", "", 0.26)
+	r.tick(time.Minute)
+	r.result("breached")
+	c := r.m.Calibration()[statemap.CalibrationKey{Kind: "admission.cpu_contention_ratio", Basis: "map"}]
+	if c.N != 1 || c.HitRate != 0 {
+		t.Fatalf("cpu map %+v; predicted under the exit, observed over it", c)
+	}
+}
+
+func TestConfoundedAndReliefActedFeedNothing(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_utilization@pod:a", "pod:a", 0.4)
+	record(t, r.m, "cpu_contention_ratio", "", 0.26)
+	r.tick(time.Minute)
+	r.result("confounded")
+	if len(r.m.Calibration()) != 0 {
+		t.Fatalf("confounded outcome fed %v", r.m.Calibration())
+	}
+
+	r = arrived(t)
+	r.actedOn, r.peak = cpuDom.Action, 0.31
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	r.result("breached")
+	if len(r.m.Calibration()) != 0 {
+		t.Fatalf("relief-acted outcome fed %v", r.m.Calibration())
+	}
+}

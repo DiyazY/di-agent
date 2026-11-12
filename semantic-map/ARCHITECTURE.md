@@ -868,6 +868,17 @@ chain act → verify → revert → intervention is walkable from any link, back
 its ancestry and forward to what cites it (`?chain=1`). An ancestor the bound has
 evicted is reported as `{id, evicted}` rather than left out.
 
+**Reflective.** The map keeps a record of how its own predictions have fared: a
+`Calibration` per `(kind, basis)` holding the outcome count, the mean signed error
+(predicted − observed), the mean absolute error and the hit rate, folded as a running
+mean so no history is kept. Relief feeds it from `relief.<action>` verdicts on the
+prediction basis the plan used (hit when the verdict agreed), and admission from each
+settled outcome as `admission.<relieves>` on the `map` and `usage` bases (hit when the
+predicted level fell on the same side of the exit as the settled one). A dry run, an
+unbound cap, a confounded outcome or an accept relief acted on feeds nothing. The
+verify and outcome decisions carry the updated records as a `calibration` input. It is
+persisted in its own snapshot field and `GET /state` carries it as `calibration`.
+
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
 as a fallback, because a fallback meant an untraceable answer could be produced by
