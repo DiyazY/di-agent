@@ -818,6 +818,8 @@ Retiring a property cascades to the relationships referencing it, since an edge 
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
 stay reconstructible.
 
+`Record` refuses a reading older than the property's last, or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup.
+
 The ordering in `IngestSample` matters: the state model records a sample BEFORE the
 routing table is consulted. The table says what the agent knows how to summarise, not
 what the system is allowed to exhibit.

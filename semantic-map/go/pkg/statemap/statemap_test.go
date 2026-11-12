@@ -2151,3 +2151,89 @@ func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
 		t.Fatal("returned input aliased")
 	}
 }
+
+// ── A reading must be newer than the last, and not from the future ─────────────
+
+func TestAReadingOlderThanTheLastIsRefusedAndCounted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	counter := func() int { return m.State(Query{}).Counts.ReadingsOutOfOrder }
+
+	if err := m.Observe("cpu", 0.1, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	rev := m.Revision()
+	// Unix-second stamps: a sub-second producer legitimately repeats an instant.
+	if err := m.Observe("cpu", 0.9, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("cpu")
+	if p.NObservations != 2 || counter() != 0 || m.Revision() == rev {
+		t.Errorf("equal-instant reading: n=%d counter=%d; want 2 and 0, revision advanced", p.NObservations, counter())
+	}
+
+	rev = m.Revision()
+	if err := m.Observe("cpu", 0.5, c.now().Add(-time.Second)); err != nil {
+		t.Fatalf("a refused reading is not an error: %v", err)
+	}
+	q, _ := m.Property("cpu")
+	if q.NObservations != 2 || q.Value != p.Value || !q.LastObserved.Equal(c.now()) || counter() != 1 {
+		t.Errorf("older reading changed the property or was not counted: %+v counter=%d", q, counter())
+	}
+	if m.Revision() != rev {
+		t.Error("a refused reading advanced the revision")
+	}
+
+	c.advance(time.Second)
+	if err := m.Observe("cpu", 0.9, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	q, _ = m.Property("cpu")
+	if q.NObservations != 3 || counter() != 1 || m.Revision() == rev {
+		t.Errorf("newer reading: n=%d counter=%d; want 3 and 1", q.NObservations, counter())
+	}
+}
+
+func TestAFutureReadingIsRefusedAndCounted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+
+	if err := m.Observe("gpu", 0.5, c.now().Add(16*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Property("gpu"); ok {
+		t.Error("a future-stamped reading admitted a property")
+	}
+	if got := m.State(Query{}).Counts.ReadingsFuture; got != 1 {
+		t.Errorf("ReadingsFuture = %d; want 1", got)
+	}
+
+	if err := m.Observe("gpu", 0.5, c.now().Add(15*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := m.Property("gpu")
+	if !ok || p.NObservations != 1 {
+		t.Errorf("a reading at the tolerance edge was not admitted: %+v ok=%v", p, ok)
+	}
+	if got := m.State(Query{}).Counts.ReadingsFuture; got != 1 {
+		t.Errorf("ReadingsFuture = %d; want still 1", got)
+	}
+}
+
+func TestARefusedReadingDoesNotConsumeItsEventID(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	t0 := c.now()
+
+	if err := m.ObserveEvent("cpu", 0.1, t0, "e1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ObserveEvent("cpu", 0.5, t0.Add(-time.Second), "e2"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	if err := m.ObserveEvent("cpu", 0.5, c.now(), "e2"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("cpu")
+	if p.NObservations != 2 {
+		t.Errorf("n = %d; want 2: the refused reading consumed event id e2", p.NObservations)
+	}
+}

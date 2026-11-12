@@ -527,6 +527,10 @@ type Map struct {
 	seenEvents map[string]struct{}
 	seenOrder  []string
 
+	// readingsOutOfOrder and readingsFuture count readings Record refused. They are
+	// not persisted: they describe this process's ingest, not the system's state.
+	readingsOutOfOrder, readingsFuture int
+
 	// revision advances on every mutation. A decision records the revision it read
 	// so its inputs can be identified later even though the map has moved on.
 	revision uint64
@@ -756,6 +760,19 @@ func (m *Map) Record(o Observation) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// A reading is refused, not folded in, when it is from the future or not newer
+	// than the property's last: it would enter the EMA as the newest value and make
+	// silence negative. Both checks run before the event id is recorded, so a refused
+	// reading does not consume the identity a correct delivery of it will carry.
+	if at.After(m.now().Add(time.Duration(m.learn.PairWindowSeconds) * time.Second)) {
+		m.readingsFuture++
+		return nil
+	}
+	if p, ok := m.properties[id]; ok && at.Before(p.LastObserved) {
+		m.readingsOutOfOrder++
+		return nil
+	}
 
 	// Keyed by property as well as event, because an event identity is only unique
 	// within the reading it names: one collector tick can carry several metrics, and

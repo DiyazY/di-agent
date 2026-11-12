@@ -1110,3 +1110,38 @@ func TestIngestSample_WithoutTimestampIsRecordedNow(t *testing.T) {
 		t.Errorf("LastObserved = %v, want about now", p.LastObserved)
 	}
 }
+
+func TestIngestSample_OldReadingIsCountedNotRecorded(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	for i, ts := range []int64{time.Now().Unix(), 1700000000} {
+		v := []float64{0.7, 0.1}[i]
+		resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
+			NodeID: "master", MetricType: "cpu_utilization", Value: v,
+			TimestampUnix: ts, EventID: fmt.Sprintf("old-reading-%d", i),
+		})
+		if resp.StatusCode != 204 {
+			t.Fatalf("POST %d: %s", i, body(resp))
+		}
+		resp.Body.Close()
+	}
+
+	p, ok := sm.State().Property("cpu_utilization")
+	if !ok || p.Value != 0.7 || p.NObservations != 1 {
+		t.Errorf("cpu_utilization = %+v; want 0.7 from 1 observation", p)
+	}
+	// The test agent mounts the ingest routes only; /state is read through the
+	// state routes over the same map.
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm.State(), nil, nil)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	var view statemap.StateView
+	if code := getState(t, srv.URL+"/state", &view); code != 200 {
+		t.Fatalf("GET /state returned %d", code)
+	}
+	if got := view.Counts.ReadingsOutOfOrder; got != 1 {
+		t.Errorf("counts.readings_out_of_order = %d; want 1", got)
+	}
+}

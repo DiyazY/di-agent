@@ -978,6 +978,8 @@ declaration. Investigate a flagged relationship as a defect in the specification
 usually a direction inherited from a framework that phrased its outcome in the opposite
 polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarity).
 
+`counts.readings_out_of_order` and `counts.readings_future` count readings the map refused: one older than the property's last, and one more than `map.pair_window` ahead of the agent's clock. A refused reading changes nothing and is not an error to the producer.
+
 A metric the specification never declared still becomes a property: `/ingest-sample`
 answers 202 with `routed:false` rather than rejecting it, because a reading the system
 produced is not a typo to discard, and the journal records the admission. Silence
