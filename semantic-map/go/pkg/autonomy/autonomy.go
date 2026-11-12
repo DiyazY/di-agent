@@ -210,12 +210,15 @@ type Status struct {
 	// Cumulative counts of reviews by outcome. Applied and Suggested are actions a
 	// tier was sure of, taken or reserved by the level; Undecided is what no tier
 	// was sure of. Waiting is the last cycle's count of due candidates passed over
-	// because an end is not active, so the evidence is not moving.
+	// because an end is not active, so the evidence is not moving. Due is the last
+	// cycle's count of due candidates whose ends are active (due less Waiting): work a
+	// cycle could act on, which is what the review pace follows.
 	Reviewed  int    `json:"reviewed"`
 	Applied   int    `json:"applied"`
 	Suggested int    `json:"suggested"`
 	Undecided int    `json:"undecided"`
 	Waiting   int    `json:"waiting"`
+	Due       int    `json:"due"`
 	Errors    int    `json:"errors"`
 	LastError string `json:"last_error,omitempty"`
 }
@@ -276,21 +279,6 @@ func (r *Reviewer) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.status
-}
-
-// Run reviews every Interval until ctx ends.
-func (r *Reviewer) Run(ctx context.Context) {
-	r.cfg.Logf("autonomy: reviewing candidates every %s at level %s", r.cfg.Interval, r.cfg.Level)
-	t := time.NewTicker(r.cfg.Interval)
-	defer t.Stop()
-	for {
-		r.Cycle(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
 }
 
 // Cycle reviews the candidates that are due: never reviewed, or with evidence that
@@ -371,6 +359,7 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	}
 	r.mu.Lock()
 	r.status.Waiting = waiting
+	r.status.Due = len(due) - waiting
 	r.status.Cycles++
 	r.status.LastCycle = r.cfg.Now()
 	r.mu.Unlock()

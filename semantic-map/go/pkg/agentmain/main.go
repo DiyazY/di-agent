@@ -440,9 +440,7 @@ func Main() {
 		status = sup.Status
 	}
 	startCollectionLoop(ctx, sm, collector, status, state, cfg.Sources.Interval, headroomMu)
-	if reviewer != nil {
-		go reviewer.Run(ctx)
-	}
+	startReviewLoop(ctx, reviewer, cfg.Loops.Review.Interval)
 	if cfg.Groups.Interval > 0 {
 		go grp.run(ctx, cfg.Groups.Interval)
 	}

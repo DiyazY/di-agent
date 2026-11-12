@@ -192,7 +192,7 @@ semantic-map/
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
     │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
-    │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
+    │   │   ├── autonomy.go     Levels, thresholds, the review cycle, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
     │   │   ├── rules.go        Tier 0: Rule, composition and persistent-correlation
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
@@ -730,7 +730,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/relief/pause`                     | JSON content type — every lever stops making changes; verifying, reverting a failed action and expiry go on; journalled as `relief.paused` (and `/relief/resume` as `relief.resumed`) with actor `operator`; answers as `GET /relief` | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause, on every lever            | relief   |
 | GET  | `/groups`                           | —                                                        | groups | The node's topology: `groups` (`id`, `name`, `source`, `members`, `consumers` — whether the map holds the group's sums as `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`) and `parents` (a container's or a `veth`'s pod) |
-| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
+| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts (`waiting`: due candidates passed over for an inactive end; `due`: those with active ends, the work a cycle can act on); `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
@@ -1890,7 +1890,7 @@ An agent's rejection or deferral is not final: the pair is still tested, and the
 returns to pending, to be reviewed again, once its evidence moves materially or crosses
 the persistent-correlation approval threshold. A reviewed candidate is not reviewed again
 until then, so the models are not asked the same question every cycle.
-A candidate whose end is stale waits. The decision record holds the candidate, both
+A candidate whose end is stale waits, and is counted in the status's `waiting`, not in `due`. The decision record holds the candidate, both
 properties as read, the text each model was given, each model's answer, the tool calls,
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
 a reader of the map can see the level it was shaped under.

@@ -1,7 +1,10 @@
 package agentmain
 
 import (
+	"context"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/DiyazY/di-agent/pkg/autonomy"
 	"github.com/DiyazY/di-agent/pkg/semmap"
@@ -63,4 +66,26 @@ func autonomyStatus(r *autonomy.Reviewer) func() *autonomy.Status {
 		s := r.Status()
 		return &s
 	}
+}
+
+// startReviewLoop reviews candidates in the background: a cycle, then a wait of every,
+// until ctx ends. A nil reviewer (level off) starts nothing.
+func startReviewLoop(ctx context.Context, r *autonomy.Reviewer, every time.Duration) {
+	if r == nil {
+		return
+	}
+	if every <= 0 {
+		every = time.Minute // as autonomy.New defaults it
+	}
+	log.Printf("autonomy: reviewing candidates every %s at level %s", every, r.Status().Level)
+	go func() {
+		for {
+			r.Cycle(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(every):
+			}
+		}
+	}()
 }
