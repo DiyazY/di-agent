@@ -216,6 +216,13 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	// k is the strongest response slope measured on a live relationship from this
 	// usage metric to relieves. Unlike relationship strength, it may exceed 1.
 	// Its estimate is shrunk toward zero until repeated outcomes build support.
+	// The relationships k is drawn from are read through the builder, so the record
+	// lists them and carries their caveats (a stale endpoint, a regime).
+	for _, e := range m.MeasuredEffects(d.Relieves) {
+		if strings.HasPrefix(e.From, d.Usage+"@") {
+			b.Relationship(e.Relationship)
+		}
+	}
 	if e, ok := m.MeasuredDomainEffect(d.Usage, d.Relieves); ok {
 		k := e.Estimate()
 		l.K, l.KObservations = &k, e.N

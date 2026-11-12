@@ -1082,29 +1082,69 @@ func TestSignSuspectIgnoresARegimeDependentSign(t *testing.T) {
 func feedPairs(t *testing.T, m *Map, c *clock, n int, assoc float64, tag string) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		c.advance(time.Second)
-		x := float64(i%10) / 10.0
-		// Alternating perturbation breaks the correlation when assoc < 1 without
-		// changing either series' range, so the two cases differ in association only.
-		y := assoc*x + (1-assoc)*float64((i*7)%10)/10.0
-		if err := m.ObserveEvent("resource", x, c.now(), tag+"r"+itoa(i)); err != nil {
-			t.Fatal(err)
-		}
-		c.advance(time.Second)
-		if err := m.ObserveEvent("pressure", y, c.now(), tag+"p"+itoa(i)); err != nil {
-			t.Fatal(err)
-		}
+		feedPair(t, m, c, i, assoc, tag)
 	}
 }
 
+// feedPair feeds the i-th pair of feedPairs' sequence.
+func feedPair(t *testing.T, m *Map, c *clock, i int, assoc float64, tag string) {
+	t.Helper()
+	c.advance(time.Second)
+	x := float64(i%10) / 10.0
+	// Alternating perturbation breaks the correlation when assoc < 1 without
+	// changing either series' range, so the two cases differ in association only.
+	y := assoc*x + (1-assoc)*float64((i*7)%10)/10.0
+	if err := m.ObserveEvent("resource", x, c.now(), tag+"r"+itoa(i)); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	if err := m.ObserveEvent("pressure", y, c.now(), tag+"p"+itoa(i)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// observeHalf makes the k-th observation of a pair sequence: resource on even k,
+// pressure (y of resource's x) on odd k. Each one folds a pair once the window is
+// full, so a test can check what each fold did.
+func observeHalf(t *testing.T, m *Map, c *clock, k int, y func(x float64) float64, tag string) {
+	t.Helper()
+	j := k / 2
+	x := float64(j%10) / 10.0
+	c.advance(time.Second)
+	id, v, ev := "resource", x, tag+"r"+itoa(j)
+	if k%2 == 1 {
+		id, v, ev = "pressure", y(x), tag+"p"+itoa(j)
+	}
+	if err := m.ObserveEvent(id, v, c.now(), ev); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func opposed(x float64) float64 { return 1 - x }
+func same(x float64) float64    { return x }
+
+// feedOpposed feeds the i-th pair with pressure moving against resource: the declared
+// sign contradicted, so the strength that folds is zero. Over a window of 10 an
+// assoc-0 stretch still shows |r| near 0.5, inside the band; this one is outside it.
+func feedOpposed(t *testing.T, m *Map, c *clock, i int, tag string) {
+	t.Helper()
+	observeHalf(t, m, c, 2*i, opposed, tag)
+	observeHalf(t, m, c, 2*i+1, opposed, tag)
+}
+
 func newLearningPair(t *testing.T, alphaSlow float64) (*Map, *clock, string) {
+	t.Helper()
+	return newLearningPairWindow(t, alphaSlow, 60)
+}
+
+func newLearningPairWindow(t *testing.T, alphaSlow float64, window int) (*Map, *clock, string) {
 	t.Helper()
 	m, c := newTestMap(t, Config{
 		ConvergenceObservations: 500,
 		Alpha:                   0.2,
 		AlphaSlow:               alphaSlow,
 		Learn:                   true,
-		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 60},
+		LearnConfig:             LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: window},
 	})
 	for _, id := range []string{"resource", "pressure"} {
 		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
@@ -2685,5 +2725,146 @@ func TestSignRetiredRelationshipRedeclaredStaysActive(t *testing.T) {
 	}
 	if n := len(retiredEventsFor(m, id)); n != 2 {
 		t.Errorf("retired events = %d, want 2", n)
+	}
+}
+
+// ── A relationship says when the present differs from what is established ─────
+
+// regimeOutside is the regime rule recomputed from a relationship as a reader sees
+// it: the recent layer more than two standard errors of Fisher's z at the window
+// size away from the established one.
+func regimeOutside(m *Map, r Relationship) bool {
+	if r.Established == nil {
+		return false
+	}
+	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
+	n := m.PairSupport(r.ID)
+	return math.Abs(z(r.Recent)-z(*r.Established)) > 2/math.Sqrt(math.Max(float64(n-3), 1))
+}
+
+// driveRegime feeds opposed pairs one at a time until the relationship's Regime
+// flips, and returns how many it took.
+func driveRegime(t *testing.T, m *Map, c *clock, id string, limit int) int {
+	t.Helper()
+	r, _ := m.Relationship(id)
+	start := r.Regime
+	tag := "drive" + itoa(int(c.now().Unix())) + "-" // unique per call: the clock only advances
+	for i := 0; i < limit; i++ {
+		feedOpposed(t, m, c, i, tag)
+		if r, _ := m.Relationship(id); r.Regime != start {
+			return i + 1
+		}
+	}
+	t.Fatalf("regime still %v after %d pairs", start, limit)
+	return 0
+}
+
+func lastEvent(m *Map) Event {
+	ev := m.Journal().Events(0, 0)
+	return ev[len(ev)-1]
+}
+
+// stepRegime makes observations one at a time — each folds one pair — and checks the
+// three-fold rule stepwise: Regime flips exactly on the third consecutive fold on
+// the new side.
+func stepRegime(t *testing.T, m *Map, c *clock, id string, y func(float64) float64, tag string) {
+	t.Helper()
+	r0, _ := m.Relationship(id)
+	want := !r0.Regime
+	run := 0
+	for i := 0; i < 400; i++ {
+		observeHalf(t, m, c, i, y, tag)
+		r, _ := m.Relationship(id)
+		if regimeOutside(m, r) == want {
+			run++
+		} else {
+			run = 0
+		}
+		if run < regimeFolds {
+			if r.Regime != r0.Regime {
+				t.Fatalf("observation %d: regime flipped after %d folds on the new side; want %d", i, run, regimeFolds)
+			}
+			continue
+		}
+		if r.Regime != want {
+			t.Fatalf("observation %d: %d folds on the new side and regime is still %v", i, run, r.Regime)
+		}
+		if want && !r.RegimeSince.Equal(c.now()) {
+			t.Fatalf("regime since %v; want the fold that started it, %v", r.RegimeSince, c.now())
+		}
+		if !want && !r.RegimeSince.IsZero() {
+			t.Fatalf("regime ended but since is %v", r.RegimeSince)
+		}
+		e := lastEvent(m)
+		if e.Kind != EventRelationshipRegime || e.Target != id || e.Detail["started"] != want {
+			t.Fatalf("last event %+v; want relationship.regime started=%v", e, want)
+		}
+		for _, k := range []string{"recent", "established", "band"} {
+			if _, ok := e.Detail[k]; !ok {
+				t.Fatalf("regime event lacks %s: %v", k, e.Detail)
+			}
+		}
+		if b, _ := e.Detail["band"].(float64); math.Abs(b-2/math.Sqrt(7)) > 1e-12 {
+			t.Fatalf("band %v; want 2/sqrt(7) at window 10", e.Detail["band"])
+		}
+		return
+	}
+	t.Fatalf("regime never flipped to %v", want)
+}
+
+func TestRegimeStartsAfterThreeFoldsOutsideTheBand(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	if r, _ := m.Relationship(id); r.Regime {
+		t.Fatal("regime set during the stretch that established the layer")
+	}
+	stepRegime(t, m, c, id, opposed, "opposed")
+}
+
+func TestRegimeEndsAfterThreeFoldsInsideTheBand(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	stepRegime(t, m, c, id, opposed, "opposed")
+	stepRegime(t, m, c, id, same, "back")
+}
+
+func TestRegimeNeedsAnEstablishedLayer(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	driveRegime(t, m, c, id, 100)
+	if err := m.ResetRelationship(id, "op", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := m.Relationship(id); r.Regime || !r.RegimeSince.IsZero() {
+		t.Fatalf("a reset relationship keeps its regime: %v since %v", r.Regime, r.RegimeSince)
+	}
+	since := m.Journal().Seq()
+	feedPairs(t, m, c, 20, 0.0, "after")
+	if r, _ := m.Relationship(id); r.Regime {
+		t.Fatal("regime set with no established layer of its own")
+	}
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Seq > since && e.Kind == EventRelationshipRegime {
+			t.Fatalf("regime event after the reset: %+v", e)
+		}
+	}
+}
+
+func TestRegimeSurvivesRestart(t *testing.T) {
+	m, c, id := newLearningPairWindow(t, 0.001, 10)
+	feedPairs(t, m, c, 300, 1.0, "strong")
+	driveRegime(t, m, c, id, 100)
+	before, _ := m.Relationship(id)
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, _ := newTestMap(t, Config{Learn: true})
+	if ok, err := restored.Load(path); err != nil || !ok {
+		t.Fatalf("load: %v %v", ok, err)
+	}
+	after, _ := restored.Relationship(id)
+	if !after.Regime || !after.RegimeSince.Equal(before.RegimeSince) {
+		t.Fatalf("restored regime %v since %v; had %v since %v", after.Regime, after.RegimeSince, before.Regime, before.RegimeSince)
 	}
 }

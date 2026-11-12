@@ -2,6 +2,7 @@ package admission
 
 import (
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -599,5 +600,81 @@ func TestBasisChoiceNeedsBothPredictions(t *testing.T) {
 	l := line(t, Decide(m, offer(1), both, self, m.NewDecisionID("admit")), "cpu_contention_ratio")
 	if l.Basis != "usage" || l.ChosenBy != "default" {
 		t.Fatalf("basis %s by %s; want usage by default", l.Basis, l.ChosenBy)
+	}
+}
+
+// regimeNode is node(0.4, 0.02) on a learning map whose clock the caller advances.
+func regimeNode(t *testing.T) (*statemap.Map, *statemap.Journal, *time.Time) {
+	t.Helper()
+	j := statemap.NewJournal(0)
+	m := statemap.New(statemap.Config{AdmitUnknown: true, Alpha: 1, Learn: true,
+		LearnConfig: statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 10}}, j)
+	now := t0
+	m.SetClock(func() time.Time { return now })
+	m.SetMonotonic(func() time.Duration { return now.Sub(t0) + time.Second })
+	cores(t, m, 4)
+	memTotal(t, m, 8<<30)
+	return m, j, &now
+}
+
+// driveRegime feeds correlated, then opposed pairs on cpu_utilization@<subject>
+// -> cpu_contention_ratio until the relationship is in regime, then records the node
+// readings node(0.4, 0.02) holds, so Decide sees the same state.
+func driveRegime(t *testing.T, m *statemap.Map, now *time.Time, subject, id string, limit int) {
+	t.Helper()
+	from := "cpu_utilization@" + subject
+	obs := func(prop, sub string, v float64, ev string) {
+		*now = now.Add(time.Second)
+		if err := m.Record(statemap.Observation{ID: prop, Value: v, At: *now, Subject: sub, Range: &unit, EventID: ev}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; ; i++ {
+		if i == limit {
+			t.Fatalf("no regime after %d pairs", limit)
+		}
+		x := float64(i%10) / 10
+		y := x
+		if i >= 60 {
+			y = 1 - x // against the declared sign: strength folds as zero
+		}
+		obs(from, subject, x, "x"+strconv.Itoa(i))
+		obs("cpu_contention_ratio", "", y, "y"+strconv.Itoa(i))
+		if r, _ := m.Relationship(id); r.Regime {
+			break
+		}
+	}
+	for _, r := range []struct {
+		id, subject string
+		v           float64
+	}{{"cpu_utilization", "", 0.4}, {"memory_utilization", "", 0.2}, {"memory_contention_ratio", "", 0},
+		{"cpu_contention_ratio", "", 0.02}, {from, subject, 0.1}} {
+		obs(r.id, r.subject, r.v, "")
+	}
+}
+
+func TestAcceptCaveatsARegimeRelationship(t *testing.T) {
+	m, j, now := regimeNode(t)
+	record(t, m, "cpu_contention_ratio", "", 0.02)
+	effect(t, m, "pod:a", 0.2)
+	id := statemap.RelationshipID("cpu_utilization@pod:a", "cpu_contention_ratio", "drives")
+	driveRegime(t, m, now, "pod:a", id, 400)
+
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
+	want(t, d, Accept, "")
+	rec, _ := j.Decision(d.ID)
+	caveat := false
+	for _, c := range rec.Caveats {
+		caveat = caveat || strings.HasPrefix(c, "relationship "+id+": present differs from established")
+	}
+	if !caveat {
+		t.Fatalf("caveats %q; want the regime caveat on %s", rec.Caveats, id)
+	}
+	read := false
+	for _, r := range rec.RelationshipsRead {
+		read = read || r.ID == id
+	}
+	if !read {
+		t.Fatalf("relationships read %+v; want %s", rec.RelationshipsRead, id)
 	}
 }

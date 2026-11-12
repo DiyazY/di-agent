@@ -1067,6 +1067,10 @@ bias-corrected). `Effective()` picks between them by authority rather than by ar
 — an operator assertion first, else what the agent's interventions measured, else the
 established baseline, else the recent estimate, else `unknown` — and `basis` on every
 edge names which one answered.
+When the recent estimate sits outside the established one's band (two standard errors
+of Fisher's z at the pair window) for three folds running, the edge reports
+`regime: true` and `regime_since`, and every decision that reads it carries a
+"present differs from established" caveat; three folds back inside clear it.
 
 ```bash
 # agent.yaml

@@ -265,6 +265,16 @@ type Relationship struct {
 	// the JSON does not have to re-derive the predicate to see the verdict.
 	SignSuspectFlag bool `json:"sign_suspect"`
 
+	// Regime says the recent layer has sat outside the established one's band for
+	// regimeFolds consecutive folds: the present differs from what this machine has
+	// shown. It changes no strength — Effective is unchanged — and a decision that
+	// reads the relationship carries a caveat saying so.
+	Regime      bool      `json:"regime"`
+	RegimeSince time.Time `json:"regime_since,omitzero"`
+	// regimeRun counts consecutive folds on the other side of the band from Regime.
+	// Not serialised: it restarts at 0 after a restore, like the pair window.
+	regimeRun int
+
 	Status        Status    `json:"status"`
 	FirstObserved time.Time `json:"first_observed,omitzero"`
 	LastObserved  time.Time `json:"last_observed,omitzero"`
@@ -1559,6 +1569,7 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 	r.SignAgreements = 0
 	r.SignConflicts = 0
 	r.SignSuspectFlag = false
+	r.Regime, r.RegimeSince, r.regimeRun = false, time.Time{}, 0
 	if r.Provenance == Learned {
 		// Back to seeded: the strength in force is the prior again, and provenance has to
 		// say so or the next reader will treat an unobserved edge as a measured one.

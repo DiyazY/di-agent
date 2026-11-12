@@ -26,6 +26,11 @@ const (
 	EventRelationshipAsserted EventKind = "relationship.asserted"
 	EventRelationshipRetired  EventKind = "relationship.retired"
 
+	// EventRelationshipRegime records a relationship entering or leaving a regime:
+	// its recent layer outside the established one's band for regimeFolds folds.
+	// Detail: recent, established, band, started.
+	EventRelationshipRegime EventKind = "relationship.regime"
+
 	// EventIntervention records what an action the agent took did to a relationship's
 	// evidence, whether or not it changed the structure.
 	EventIntervention EventKind = "relationship.intervention"
@@ -592,11 +597,52 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 			b.seenRel[r.ID] = true
 			b.rels = append(b.rels, r)
 		}
-		for _, end := range staleEnds[r.ID] {
-			b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
-		}
+		b.relationshipCaveats(r, staleEnds[r.ID])
 	}
 	return out
+}
+
+// Relationship reads one relationship by id and records it as an input, with the
+// same caveats RelationshipsInto gives (stale endpoint, regime).
+func (b *DecisionBuilder) Relationship(id string) (Relationship, bool) {
+	b.m.mu.RLock()
+	r, ok := b.m.relationships[id]
+	var out Relationship
+	var staleEnds []string
+	if ok {
+		out = b.m.relationshipViewLocked(r)
+		for _, end := range []string{r.From, r.To} {
+			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
+				staleEnds = append(staleEnds, end)
+			}
+		}
+	}
+	b.m.mu.RUnlock()
+	if !ok {
+		b.caveats = append(b.caveats, fmt.Sprintf("relationship %s is not in the map", id))
+		return Relationship{}, false
+	}
+	if !b.seenRel[id] {
+		b.seenRel[id] = true
+		b.rels = append(b.rels, out)
+	}
+	b.relationshipCaveats(out, staleEnds)
+	return out, true
+}
+
+func (b *DecisionBuilder) relationshipCaveats(r Relationship, staleEnds []string) {
+	for _, end := range staleEnds {
+		b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
+	}
+	if r.Regime {
+		established := 0.0
+		if r.Established != nil {
+			established = *r.Established
+		}
+		b.caveats = append(b.caveats, fmt.Sprintf(
+			"relationship %s: present differs from established (recent %.3f, established %.3f)",
+			r.ID, r.Recent, established))
+	}
 }
 
 // Cite records an earlier decision this one rests on. An empty id or one already

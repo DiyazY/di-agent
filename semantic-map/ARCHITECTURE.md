@@ -853,6 +853,11 @@ evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
+The map's own changes are `property.*` and `relationship.*` events:
+`relationship.declared`, `relationship.asserted`, `relationship.intervention`,
+`relationship.retired` (with a `reason`, `sign-contradicted` when the agent retires
+one the machine keeps refuting) and `relationship.regime` (a relationship entering or
+leaving a regime, with `recent`, `established`, `band` and `started`).
 Loops outside the map journal what would otherwise be silent, through `Map.RecordEvent`:
 `relief.phase` (a lever's phase change, with `from` and `to`), `relief.paused` and
 `relief.resumed` (the operator's pause, only when the state changed),
@@ -890,6 +895,16 @@ Admission reads it back: when both its predictions exist and each basis has at l
 It also judges the map's own relationships: one whose declared sign the machine keeps
 contradicting retires itself (`relationship.retired`, actor `agent`, reason
 `sign-contradicted`) rather than waiting for an operator to read the flag.
+And it says when the present differs from what it has established: a relationship is
+in `regime` once its recent layer has sat outside the established layer's band for
+`regimeFolds` (3) consecutive folds, and leaves it after three inside. The band is the
+bar `CandidateReview.Outdated` uses, two standard errors of Fisher's z at the pair
+window's size, `2 / sqrt(max(n − 3, 1))`; three folds keep one noisy pair from
+flipping it. Entering and leaving are journalled as `relationship.regime`, and
+`regime_since` dates the entry. `Effective()` is unchanged — the established layer still
+answers — so what a reader sees is the caveat: any decision that reads the
+relationship (an estimate, or an admission through the measured effects behind `k`)
+carries `relationship <id>: present differs from established (recent …, established …)`.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept

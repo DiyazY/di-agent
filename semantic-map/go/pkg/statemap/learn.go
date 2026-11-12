@@ -174,7 +174,48 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 	if r.Provenance == Seeded {
 		r.Provenance = Learned
 	}
+	m.updateRegimeLocked(r, w.Len(), at)
 	m.revision++
+}
+
+// regimeFolds is how many consecutive folds the recent layer must sit on one side of
+// the established layer's band before the relationship's regime changes.
+const regimeFolds = 3
+
+// regimeBand is two standard errors of Fisher's z at the window size, the bar
+// Outdated uses: 2 / sqrt(max(n − 3, 1)).
+func regimeBand(nWindow int) float64 {
+	return 2 / math.Sqrt(math.Max(float64(nWindow-3), 1))
+}
+
+// updateRegimeLocked moves a relationship into or out of a regime: the recent layer
+// outside the established one's band, in Fisher's z, for regimeFolds folds running.
+// Caller holds the write lock.
+func (m *Map) updateRegimeLocked(r *Relationship, nWindow int, at time.Time) {
+	if r.Established == nil {
+		r.regimeRun = 0
+		return
+	}
+	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
+	band := regimeBand(nWindow)
+	outside := math.Abs(z(r.Recent)-z(*r.Established)) > band
+	if outside == r.Regime {
+		r.regimeRun = 0
+		return
+	}
+	r.regimeRun++
+	if r.regimeRun < regimeFolds {
+		return
+	}
+	r.regimeRun = 0
+	r.Regime = outside
+	r.RegimeSince = time.Time{}
+	if outside {
+		r.RegimeSince = at
+	}
+	m.bump(EventRelationshipRegime, r.ID, "agent", map[string]any{
+		"recent": r.Recent, "established": *r.Established, "band": band, "started": outside,
+	}, at)
 }
 
 // pairIdentity names a paired observation from its two contributing event IDs, in a
