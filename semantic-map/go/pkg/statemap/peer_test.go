@@ -235,5 +235,5 @@ func TestSnapshotFromAnotherSystemIsRefused(t *testing.T) {
 // replaceOwner strips the owner field from a snapshot, standing in for a file written
 // by an older build.
 func replaceOwner(s string) string {
-	return strings.Replace(s, `"owner": "node-2",`, "", 1)
+	return strings.Replace(s, `"owner":"node-2",`, "", 1)
 }

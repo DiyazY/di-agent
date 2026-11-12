@@ -130,7 +130,7 @@ func (m *Map) Save(path string) error {
 		}
 		snap.Discovery = raw
 	}
-	blob, err := json.MarshalIndent(snap, "", "  ")
+	blob, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("encoding snapshot: %w", err)
 	}

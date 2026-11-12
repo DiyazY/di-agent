@@ -771,7 +771,23 @@ func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duratio
 	}()
 }
 
-// startSaveLoop snapshots the map on a ticker and once more when the context ends.
+// saveIfChanged saves the map unless its revision is the one last saved. *lastSaved
+// holds that revision plus one, so its zero value means "nothing saved yet" even for a
+// map still at revision 0, and the first call always writes. The revision is read
+// before the save, so a change landing mid-save leaves the next tick to save it.
+func saveIfChanged(state *statemap.Map, path string, lastSaved *uint64) (saved bool, err error) {
+	rev := state.Revision()
+	if rev+1 == *lastSaved {
+		return false, nil
+	}
+	if err := state.Save(path); err != nil {
+		return false, err
+	}
+	*lastSaved = rev + 1
+	return true, nil
+}
+
+// startSaveLoop snapshots the map on a ticker when its revision moved, and once more when the context ends.
 //
 // This loop only does the periodic saves, which bound what an UNCLEAN exit costs. The
 // save that makes a clean restart lossless is done synchronously by main after the
@@ -790,6 +806,7 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
+		var lastSaved uint64 // revision+1; 0, so the first tick saves once
 		for {
 			select {
 			case <-ctx.Done():
@@ -797,11 +814,14 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 				// cannot exit before it lands.
 				return
 			case <-t.C:
-				if err := state.Save(path); err != nil {
+				saved, err := saveIfChanged(state, path, &lastSaved)
+				if err != nil {
 					log.Printf("state model: periodic save failed: %v", err)
 					continue
 				}
-				log.Printf("state model: saved at revision %d (periodic)", state.Revision())
+				if saved {
+					log.Printf("state model: saved at revision %d (periodic)", lastSaved-1)
+				}
 			}
 		}
 	}()
