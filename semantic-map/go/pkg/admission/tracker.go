@@ -268,6 +268,8 @@ func (t *Tracker) Tick(ctx context.Context) {
 				t.mu.Lock()
 				e.subject, e.snap = s, snap
 				t.mu.Unlock()
+				t.c.Map.RecordEvent(statemap.EventAdmissionArrived, e.name, "agent",
+					map[string]any{"name": e.name, "subject": s, "accept": e.acceptID})
 			} else if now.Sub(e.at) > ArrivalWindow {
 				done = append(done, t.record(e, NotArrived, "", nil, nil, now))
 				finished = append(finished, e)

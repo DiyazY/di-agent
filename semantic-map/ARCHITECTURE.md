@@ -846,6 +846,13 @@ evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
+Loops outside the map journal what would otherwise be silent, through `Map.RecordEvent`:
+`relief.phase` (a lever's phase change, with `from` and `to`), `relief.paused` and
+`relief.resumed` (the operator's pause, only when the state changed),
+`admission.arrived` (an accepted workload appeared, with its subject and accept id),
+`peer.unreachable` and `peer.recovered` (a peer's first failure and its first success
+after, never a repeat). A redeclared group's `property.redeclared` carries
+`members_before` beside `members`.
 Every event carries `(incarnation, seq)`; a decision id is `<prefix>-<incarnation>.<n>`
 with `n` drawn from the same counter, so no crash and no restart can reissue an id,
 and order is total across restarts. The incarnation advances on every restore and is

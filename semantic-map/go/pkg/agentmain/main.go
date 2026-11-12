@@ -318,6 +318,7 @@ func Main() {
 		registry: sm.Peers(),
 		client:   peers.NewClient(5 * time.Second),
 		store:    peerState,
+		state:    state,
 	}
 
 	mux := http.NewServeMux()

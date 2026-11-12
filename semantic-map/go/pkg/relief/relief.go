@@ -263,10 +263,27 @@ func (l *Loop) Descriptor() actuators.Descriptor { return l.d }
 
 // Pause stops the loop making changes and releasing them. It still observes,
 // runs the trigger, verifies what is in flight, and gives back what expires.
-func (l *Loop) Pause() { l.mu.Lock(); l.paused = true; l.mu.Unlock() }
+func (l *Loop) Pause() { l.setPaused(true) }
+
+// setPaused journals a change of state, after releasing l.mu, and nothing when the
+// state did not change.
+func (l *Loop) setPaused(v bool) {
+	l.mu.Lock()
+	changed := l.paused != v
+	l.paused = v
+	l.mu.Unlock()
+	if !changed {
+		return
+	}
+	kind := statemap.EventReliefResumed
+	if v {
+		kind = statemap.EventReliefPaused
+	}
+	l.cfg.Map.RecordEvent(kind, l.d.Action, "operator", map[string]any{"actor": "operator"})
+}
 
 // Resume undoes Pause.
-func (l *Loop) Resume() { l.mu.Lock(); l.paused = false; l.mu.Unlock() }
+func (l *Loop) Resume() { l.setPaused(false) }
 
 // Lever is the lever the loop acts by, as the spec gave it.
 func (l *Loop) Lever() spec.Lever { return l.c }
@@ -374,6 +391,10 @@ func (l *Loop) Tick(ctx context.Context) {
 	}
 	phase, paused := l.phase, l.paused
 	l.mu.Unlock()
+	if phase != prev {
+		l.cfg.Map.RecordEvent(statemap.EventReliefPhase, l.d.Action, "agent",
+			map[string]any{"lever": l.d.Action, "from": string(prev), "to": string(phase)})
+	}
 
 	workloads := l.lister(ctx)
 	l.expire(ctx, now, workloads)

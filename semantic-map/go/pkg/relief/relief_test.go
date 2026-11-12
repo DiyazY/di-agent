@@ -2694,3 +2694,47 @@ func TestACommitWhoseRollbackFailedKeepsItsSpend(t *testing.T) {
 		t.Fatalf("hourly count %d, ledger %+v; want the step pending with its spend kept", n, h.ledger.All())
 	}
 }
+
+func (h *harness) events(kind statemap.EventKind) []statemap.Event {
+	var out []statemap.Event
+	for _, e := range h.m.Journal().Events(0, 0) {
+		if e.Kind == kind {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestPhaseTransitionsAreJournalled(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3}})
+	h.run(time.Minute, 0)
+	if n := len(h.events(statemap.EventReliefPhase)); n != 0 {
+		t.Fatalf("%d phase events while calm", n)
+	}
+	h.until(10*time.Minute, 0.5, "relieving", func() bool { return h.l.Status().Phase == Relieving })
+	h.until(30*time.Minute, 0, "relief to end", func() bool { return h.l.Status().Phase != Relieving })
+	ev := h.events(statemap.EventReliefPhase)
+	if len(ev) < 2 {
+		t.Fatalf("phase events %v; want calm->relieving and out of it", ev)
+	}
+	if e := ev[0]; e.Target != "cpu.limit" || e.Detail["from"] != "calm" || e.Detail["to"] != "relieving" {
+		t.Errorf("first phase event %+v; want cpu.limit calm -> relieving", e)
+	}
+	if e := ev[len(ev)-1]; e.Detail["from"] != "relieving" || e.Detail["to"] == "relieving" {
+		t.Errorf("last phase event %+v; want relieving left", e)
+	}
+}
+
+func TestPauseAndResumeAreJournalled(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.l.Pause()
+	h.l.Pause()
+	h.l.Resume()
+	p, r := h.events(statemap.EventReliefPaused), h.events(statemap.EventReliefResumed)
+	if len(p) != 1 || len(r) != 1 {
+		t.Fatalf("paused %d resumed %d; want one each", len(p), len(r))
+	}
+	if p[0].Actor != "operator" || r[0].Actor != "operator" || p[0].Target != "cpu.limit" {
+		t.Errorf("events %+v %+v; want actor operator on cpu.limit", p[0], r[0])
+	}
+}

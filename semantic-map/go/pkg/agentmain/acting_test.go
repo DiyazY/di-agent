@@ -31,6 +31,13 @@ func f64(v float64) *float64 { return &v }
 // no CPU limit; pod:b has a limit of 1 core.
 func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *runtime.DryRun, *actuators.Acting) {
 	t.Helper()
+	mux, loop, dr, acting, _ := actingMuxWithMap(t, withLoop)
+	return mux, loop, dr, acting
+}
+
+// actingMuxWithMap is actingMuxWith that also returns the map the loops journal to.
+func actingMuxWithMap(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *runtime.DryRun, *actuators.Acting, *statemap.Map) {
+	t.Helper()
 	s := spec.Default()
 	rt, err := runtime.Build("dry-run", runtime.Env{NodeID: "n1", Spec: s.Runtime})
 	if err != nil {
@@ -53,8 +60,9 @@ func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *
 	}
 	var loop *relief.Loop
 	var loops []*relief.Loop
+	sm := statemap.New(statemap.Config{Owner: "n1"}, nil)
 	if withLoop {
-		loops, err = buildRelief(s, rt, acting, pol, statemap.New(statemap.Config{Owner: "n1"}, nil), false, nil, t.Logf)
+		loops, err = buildRelief(s, rt, acting, pol, sm, false, nil, t.Logf)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +70,7 @@ func actingMuxWith(t *testing.T, withLoop bool) (*http.ServeMux, *relief.Loop, *
 	}
 	mux := http.NewServeMux()
 	registerActingRoutes(mux, rt, acting, pol, loops)
-	return mux, loop, dr, acting
+	return mux, loop, dr, acting, sm
 }
 
 func post(mux *http.ServeMux, url string, json bool) *httptest.ResponseRecorder {
@@ -190,7 +198,7 @@ func TestReliefRoutesNeedTheLoop(t *testing.T) {
 }
 
 func TestPauseAndResume(t *testing.T) {
-	mux, _, _, _ := actingMuxWith(t, true)
+	mux, _, _, _, sm := actingMuxWithMap(t, true)
 	paused := func() bool {
 		var st struct {
 			Levers []struct {
@@ -217,6 +225,13 @@ func TestPauseAndResume(t *testing.T) {
 	}
 	if rec := post(mux, "/relief/resume", true); rec.Code != http.StatusOK || paused() {
 		t.Fatalf("resume: %d, paused=%v", rec.Code, paused())
+	}
+	count := map[statemap.EventKind]int{}
+	for _, e := range sm.Journal().Events(0, 0) {
+		count[e.Kind]++
+	}
+	if count[statemap.EventReliefPaused] != 2 || count[statemap.EventReliefResumed] != 2 {
+		t.Errorf("journal holds %d paused and %d resumed; want one per lever of each", count[statemap.EventReliefPaused], count[statemap.EventReliefResumed])
 	}
 }
 

@@ -743,6 +743,7 @@ func (m *Map) DeclareProperty(p Property) error {
 	}
 	if len(p.Members) > 0 && !sameStrings(existing.Members, p.Members) {
 		changed["members"] = p.Members
+		changed["members_before"] = append([]string(nil), existing.Members...)
 		existing.Members = append([]string(nil), p.Members...)
 	}
 	if existing.Status == Retired {
@@ -1645,6 +1646,15 @@ func (m *Map) bump(kind EventKind, target, actor string, detail map[string]any, 
 		Actor:    actor,
 		Detail:   detail,
 	})
+}
+
+// RecordEvent journals a structural event a loop outside this package observed, such as
+// a relief phase change or a peer going quiet. Callers must not hold a lock the map
+// could call back into.
+func (m *Map) RecordEvent(kind EventKind, target, actor string, detail map[string]any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bump(kind, target, actor, detail, m.now())
 }
 
 func clamp01(v float64) float64 {

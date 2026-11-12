@@ -435,3 +435,32 @@ func TestOutcomesNewestFirst(t *testing.T) {
 		t.Fatalf("outcomes %+v", out)
 	}
 }
+
+func TestArrivalIsJournalled(t *testing.T) {
+	r := newRig(t)
+	r.accept("web")
+	r.arrive("web")
+	r.tick(time.Second)
+	var got []statemap.Event
+	for _, e := range r.j.Events(0, 0) {
+		if e.Kind == statemap.EventAdmissionArrived {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("arrival events %v; want one", got)
+	}
+	if e := got[0]; e.Target != "web" || e.Detail["subject"] != "pod:web" || e.Detail["accept"] != "admit-1-web" {
+		t.Errorf("event %+v", e)
+	}
+	r.tick(time.Second)
+	n := 0
+	for _, e := range r.j.Events(0, 0) {
+		if e.Kind == statemap.EventAdmissionArrived {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d arrival events after another tick; want still one", n)
+	}
+}

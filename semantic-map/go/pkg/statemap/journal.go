@@ -49,6 +49,14 @@ const (
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
 
+	// Events a loop outside this package records through Map.RecordEvent.
+	EventReliefPhase      EventKind = "relief.phase"
+	EventReliefPaused     EventKind = "relief.paused"
+	EventReliefResumed    EventKind = "relief.resumed"
+	EventAdmissionArrived EventKind = "admission.arrived"
+	EventPeerUnreachable  EventKind = "peer.unreachable"
+	EventPeerRecovered    EventKind = "peer.recovered"
+
 	// EventDecisionRefused records a commit under an id the journal already holds:
 	// the second answer is not recorded, and this says that it was given.
 	EventDecisionRefused EventKind = "decision.refused"

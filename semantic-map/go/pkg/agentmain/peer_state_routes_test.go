@@ -2,6 +2,7 @@ package agentmain
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -222,5 +223,54 @@ func TestPeerStateWithoutAnOwnerIsRefused(t *testing.T) {
 	}
 	if len(store.View(statemap.StateView{}).Peers) != 0 {
 		t.Error("unattributed state was stored anyway")
+	}
+}
+
+func TestPeerTransitionsAreJournalledOnce(t *testing.T) {
+	_, srv := nodeFixture(t, "node-2")
+	local, _ := nodeFixture(t, "node-1")
+	url := srv.URL
+	registry := peers.NewRegistry()
+	if _, err := registry.Add(url, "node-2"); err != nil {
+		t.Fatal(err)
+	}
+	f := &peerStateFetcher{registry: registry, client: peers.NewClient(time.Second),
+		store: statemap.NewPeerStore("node-1", time.Minute), state: local}
+	count := func(k statemap.EventKind) (n int) {
+		for _, e := range local.Journal().Events(0, 0) {
+			if e.Kind == k {
+				n++
+			}
+		}
+		return
+	}
+	ctx := context.Background()
+	if ok, _ := f.fetchAll(ctx); ok != 1 || count(statemap.EventPeerUnreachable)+count(statemap.EventPeerRecovered) != 0 {
+		t.Fatal("a first success must journal nothing")
+	}
+	addr := srv.Listener.Addr().String()
+	srv.Close()
+	f.fetchAll(ctx)
+	f.fetchAll(ctx)
+	if n := count(statemap.EventPeerUnreachable); n != 1 {
+		t.Fatalf("%d unreachable events after two failures; want one", n)
+	}
+	// The peer comes back at the same address.
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("cannot rebind %s: %v", addr, err)
+	}
+	mux := http.NewServeMux()
+	reborn := statemap.New(statemap.Config{Owner: "node-2"}, statemap.NewJournal(0))
+	registerStateRoutes(mux, reborn, nil, nil)
+	back := httptest.NewUnstartedServer(mux)
+	back.Listener.Close()
+	back.Listener = l
+	back.Start()
+	defer back.Close()
+	f.fetchAll(ctx)
+	f.fetchAll(ctx)
+	if n := count(statemap.EventPeerRecovered); n != 1 {
+		t.Fatalf("%d recovered events; want one", n)
 	}
 }
