@@ -68,10 +68,9 @@ func newAdmitNode(t *testing.T, id string, p float64) *testAgent {
 		}
 	}
 	ta := &testAgent{id: id, j: j}
-	ids := admission.NewIDs(admitT0)
 	ta.a = &admitter{
-		m: m, self: admission.Self{NodeID: id, Arch: "amd64"}, ids: ids,
-		tracker: admission.NewTracker(admission.TrackerConfig{Map: m, IDs: ids, Now: func() time.Time { return admitT0 },
+		m: m, self: admission.Self{NodeID: id, Arch: "amd64"},
+		tracker: admission.NewTracker(admission.TrackerConfig{Map: m, Now: func() time.Time { return admitT0 },
 			Shares: func(usage string) map[string]float64 { return relief.Shares(m, usage) },
 			Acted:  func(string, time.Time) (float64, bool) { return 0, false }}),
 		domains: func() []admission.Domain { return testDomains },

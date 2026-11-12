@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -120,12 +119,11 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 	if req.From != "" {
 		question += " for " + req.From
 	}
-	// The builder pins the revision; the id is named from that same revision, so the
-	// id and the record cannot disagree about when the question was asked.
-	b := m.Decide(req.ID, question)
-	if req.ID == "" {
-		b.id = m.admitID(b.revision, req)
+	id := req.ID
+	if id == "" {
+		id = m.admitID(req)
 	}
+	b := m.Decide(id, question)
 	b.Input("request", map[string]any{"from": req.From, "workload": req.Workload, "cpu_cores": req.CPUCores, "memory_bytes": req.MemoryBytes})
 	b.Input("thresholds", map[string]float64{"cpu_enter": req.CPUEnter, "memory_enter": req.MemoryEnter, "headroom": admitHeadroom})
 
@@ -139,6 +137,9 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 			a["cpu_after"], a["memory_after"] = *res.CPUAfter, *res.MemoryAfter
 		}
 		d := b.Commit(a)
+		if d == nil {
+			return AdmitResult{Err: "decision " + id + " was not recorded: duplicate id"}
+		}
 		res.DecisionID, res.Revision, res.Rationale, res.Caveats = d.ID, d.Revision, d.Rationale, d.Caveats
 		return res
 	}
@@ -297,24 +298,15 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 	return answer(true, fmt.Sprintf("cpu would reach %.3f and memory %.3f of the node, within %.2f", cpuAfter, memAfter, limit))
 }
 
-// admitID names an admission from the revision it was asked at and a digest of its
-// hypothesis. A retry of the same request at the same revision takes the next free
-// suffix (-2, -3, …), so no earlier record is overwritten. The id is reserved in the
-// journal as it is chosen, so concurrent identical requests take distinct ones.
-func (m *Map) admitID(rev uint64, req AdmitRequest) string {
+// admitID names an admission with a fresh ticket and a digest of its request, so a
+// retry of the same request is a second record, never an overwrite of the first.
+func (m *Map) admitID(req AdmitRequest) string {
 	raw, _ := json.Marshal(struct {
 		From, Workload                               string
 		CPUCores, MemoryBytes, CPUEnter, MemoryEnter float64
 	}{req.From, req.Workload, req.CPUCores, req.MemoryBytes, req.CPUEnter, req.MemoryEnter})
 	h := sha256.Sum256(raw)
-	base := "adm-" + strconv.FormatUint(rev, 10) + "-" + hex.EncodeToString(h[:])[:8]
-	id := base
-	for n := 2; ; n++ {
-		if m.journal.reserve(id) {
-			return id
-		}
-		id = base + "-" + strconv.Itoa(n)
-	}
+	return m.NewDecisionID("adm", hex.EncodeToString(h[:])[:8])
 }
 
 // ActiveWithPrefix lists the active properties whose id starts with prefix, sorted.

@@ -1,7 +1,6 @@
 package admission
 
 import (
-	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -98,10 +97,6 @@ func offer(cpu float64) Offer {
 	}}
 }
 
-var seq int
-
-func nextID() string { seq++; return fmt.Sprintf("admit-1-%d", seq) }
-
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 func ptrNear(p *float64, want float64) bool { return p != nil && near(*p, want) }
@@ -128,14 +123,14 @@ func TestArchGate(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
 	o := offer(0.4)
 	o.Arch = []string{"arm64"}
-	want(t, Decide(m, o, both, self, nextID()), Decline, "cannot run on amd64")
+	want(t, Decide(m, o, both, self, m.NewDecisionID("admit")), Decline, "cannot run on amd64")
 	o.Arch = []string{"arm64", "AMD64"}
-	want(t, Decide(m, o, both, self, nextID()), Accept, "")
+	want(t, Decide(m, o, both, self, m.NewDecisionID("admit")), Accept, "")
 }
 
 func TestNoDomains(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
-	want(t, Decide(m, offer(0.4), nil, self, nextID()), Decline, "no admission domains")
+	want(t, Decide(m, offer(0.4), nil, self, m.NewDecisionID("admit")), Decline, "no admission domains")
 }
 
 func TestReliefActiveDeclines(t *testing.T) {
@@ -144,7 +139,7 @@ func TestReliefActiveDeclines(t *testing.T) {
 	for _, phase := range []string{"relieving", "releasing", "", "warming"} {
 		c := cpuDom
 		c.Phase = phase
-		d := Decide(m, offer(0.4), []Domain{memDom, c}, self, nextID())
+		d := Decide(m, offer(0.4), []Domain{memDom, c}, self, m.NewDecisionID("admit"))
 		want(t, d, Decline, "relief active on cpu_contention_ratio")
 		if l := line(t, d, "cpu_contention_ratio"); l.Phase != phase {
 			t.Fatalf("line phase %q; want %q", l.Phase, phase)
@@ -158,25 +153,25 @@ func TestMissingDemand(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
 	o := offer(0.4)
 	delete(o.Demand, "memory")
-	want(t, Decide(m, o, both, self, nextID()), Decline, "unknown memory demand")
+	want(t, Decide(m, o, both, self, m.NewDecisionID("admit")), Decline, "unknown memory demand")
 }
 
 func TestCrossArchCPU(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
 	o := offer(0.4)
 	o.Demand["cpu"] = Demand{Value: 0.4, Source: "measured on n2", Arch: "arm64"}
-	want(t, Decide(m, o, both, self, nextID()), Decline, "cpu demand not from this architecture")
+	want(t, Decide(m, o, both, self, m.NewDecisionID("admit")), Decline, "cpu demand not from this architecture")
 
 	o = offer(0.4)
 	o.Demand["memory"] = Demand{Value: 64 << 20, Source: "measured on n2", Arch: "arm64"}
-	want(t, Decide(m, o, both, self, nextID()), Accept, "")
+	want(t, Decide(m, o, both, self, m.NewDecisionID("admit")), Accept, "")
 }
 
 // TestHeadroom: a calm node offered more than it has left declines on the gate,
 // where every pressure-based prediction would read 0.
 func TestHeadroom(t *testing.T) {
 	m, _ := node(t, 0.8, 0)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "cpu would reach")
 	if !strings.Contains(d.Reason, "past 0.90") {
 		t.Fatalf("reason %q does not name the limit", d.Reason)
@@ -188,9 +183,9 @@ func TestHeadroom(t *testing.T) {
 func TestZeroDemand(t *testing.T) {
 	m, _ := node(t, 0.4, 0.05)
 	o := Offer{Name: "web", Demand: map[string]Demand{"cpu": {Source: "declared"}, "memory": {Source: "declared"}}}
-	want(t, Decide(m, o, both, self, nextID()), Decline, "nothing to price")
+	want(t, Decide(m, o, both, self, m.NewDecisionID("admit")), Decline, "nothing to price")
 
-	d := Decide(m, offer(0), both, self, nextID())
+	d := Decide(m, offer(0), both, self, m.NewDecisionID("admit"))
 	want(t, d, Accept, "")
 	if l := line(t, d, "cpu_contention_ratio"); !ptrNear(l.UsagePred, 0.05) || l.Share != 0 {
 		t.Fatalf("cpu line %+v; want share 0, prediction the pressure", l)
@@ -201,7 +196,7 @@ func TestMapBasisDecides(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
 	effect(t, m, "pod:a", 0.2)
 	effect(t, m, "pod:b", 0.3)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Accept, "")
 	l := line(t, d, "cpu_contention_ratio")
 	if !ptrNear(l.K, 0.15) || !ptrNear(l.MapPred, 0.0575) ||
@@ -226,7 +221,7 @@ func TestMapBasisIgnoresEffectAfterSourceRetires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	l := line(t, d, "cpu_contention_ratio")
 	if l.Basis != "usage" || l.K != nil || l.MapPred != nil {
 		t.Fatalf("retired source still influenced prediction: %+v", l)
@@ -249,7 +244,7 @@ func TestMapBasisPreservesResponseSlopeAboveOne(t *testing.T) {
 	}
 	o := offer(0.4)
 	o.Demand["memory"] = Demand{Value: 0.05 * (8 << 30), Source: "declared"}
-	d := Decide(m, o, []Domain{memDom}, self, nextID())
+	d := Decide(m, o, []Domain{memDom}, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "memory_contention_ratio would reach")
 	l := line(t, d, "memory_contention_ratio")
 	if l.Basis != "map" || !ptrNear(l.K, 2) || !ptrNear(l.MapPred, 0.10) {
@@ -272,7 +267,7 @@ func TestPredictionChangedRequiresEveryFailureToBePredictionDriven(t *testing.T)
 			case "memory headroom":
 				record(t, m, "memory_admission_headroom_ratio", "", 0)
 			}
-			got := Decide(m, offer(1.6), domains, self, nextID())
+			got := Decide(m, offer(1.6), domains, self, m.NewDecisionID("admit"))
 			if got.Verdict != Decline || !got.Lines[0].predictionDeclined ||
 				got.Lines[1].Pass || got.Lines[1].predictionDeclined || got.PredictionChanged {
 				t.Fatalf("decision %+v; an independent non-prediction failure must exclude changed_by_prediction", got)
@@ -283,7 +278,7 @@ func TestPredictionChangedRequiresEveryFailureToBePredictionDriven(t *testing.T)
 
 func TestUsageBasisFallback(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Accept, "")
 	l := line(t, d, "cpu_contention_ratio")
 	if l.MapPred != nil || l.K != nil || l.Basis != "usage" || !ptrNear(l.UsagePred, 0.0325) {
@@ -327,7 +322,7 @@ func TestUnavailableMemoryHeadroomIsNamedAndFallsBack(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(t, m)
 			}
-			d := Decide(m, offer(1), both, self, nextID())
+			d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 			want(t, d, Accept, "")
 			l := line(t, d, "memory_contention_ratio")
 			note := "memory admission headroom unavailable: " + tc.status
@@ -351,7 +346,7 @@ func TestMemoryHeadroomBoundsCalmAdmission(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "memory demand share")
 	l := line(t, d, "memory_contention_ratio")
 	if l.Pass || l.Basis != "memory-headroom" || !ptrNear(l.MemoryHeadroom, 0.005) ||
@@ -364,13 +359,13 @@ func TestMemoryHeadroomBoundsCalmAdmission(t *testing.T) {
 func TestExitBoundary(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
 	effect(t, m, "pod:a", 0.3)
-	pred := *line(t, Decide(m, offer(1), both, self, nextID()), "cpu_contention_ratio").MapPred
+	pred := *line(t, Decide(m, offer(1), both, self, m.NewDecisionID("admit")), "cpu_contention_ratio").MapPred
 
 	c := cpuDom
 	c.Exit = pred
-	want(t, Decide(m, offer(1), []Domain{c, memDom}, self, nextID()), Accept, "")
+	want(t, Decide(m, offer(1), []Domain{c, memDom}, self, m.NewDecisionID("admit")), Accept, "")
 	c.Exit = pred - 1e-9
-	d := Decide(m, offer(1), []Domain{c, memDom}, self, nextID())
+	d := Decide(m, offer(1), []Domain{c, memDom}, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "cpu_contention_ratio would reach")
 	if l := line(t, d, "cpu_contention_ratio"); l.Pass || l.Basis != "map" {
 		t.Fatalf("cpu line %+v", l)
@@ -388,7 +383,7 @@ func TestNoSubjectsReadsZero(t *testing.T) {
 	memTotal(t, m, 8<<30)
 	record(t, m, "cpu_utilization", "", 0.4)
 	record(t, m, "memory_utilization", "", 0.2)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Accept, "")
 	l := line(t, d, "cpu_contention_ratio")
 	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subject reports cpu_contention_ratio") || !ptrNear(l.UsagePred, 0) {
@@ -402,7 +397,7 @@ func TestNoSubjectsReadsZero(t *testing.T) {
 func TestSubjectsWithoutContentionReadZero(t *testing.T) {
 	m, _ := node(t, 0.4, -1) // pod:a reports usage only
 	record(t, m, "cpu_utilization@unit:x", "unit:x", 0.05)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Accept, "")
 	l := line(t, d, "cpu_contention_ratio")
 	if l.Pressure != 0 || !strings.Contains(l.Reason, "no subject reports cpu_contention_ratio") || !l.Pass {
@@ -415,7 +410,7 @@ func TestSubjectsWithoutContentionReadZero(t *testing.T) {
 func TestReporterWithoutPressureUnpredictable(t *testing.T) {
 	m, _ := node(t, 0.4, -1)
 	record(t, m, "cpu_contention_ratio@pod:a", "pod:a", 0.01)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "no cpu_contention_ratio reading")
 	if l := line(t, d, "cpu_contention_ratio"); l.Pass || l.MapPred != nil || l.UsagePred != nil {
 		t.Fatalf("cpu line %+v", l)
@@ -433,7 +428,7 @@ func TestMemoryReporterWithoutPressureUnpredictable(t *testing.T) {
 	record(t, m, "memory_utilization", "", 0.2)
 	record(t, m, "cpu_contention_ratio", "", 0.02)
 	record(t, m, "memory_pressure_ratio@pod:x", "pod:x", 0.01)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "no memory_contention_ratio reading")
 	if l := line(t, d, "memory_contention_ratio"); l.Pass || l.UsagePred != nil {
 		t.Fatalf("memory line %+v", l)
@@ -466,7 +461,7 @@ func staleNode(t *testing.T) *statemap.Map {
 // emptied node, read as 0, as Admit reads it.
 func TestStaleWithoutReporterReadsZero(t *testing.T) {
 	m := staleNode(t)
-	d := Decide(m, offer(1), both, self, nextID())
+	d := Decide(m, offer(1), both, self, m.NewDecisionID("admit"))
 	want(t, d, Accept, "")
 	l := line(t, d, "memory_contention_ratio")
 	if l.Pressure != 0 || !strings.Contains(l.Reason, "memory_contention_ratio is stale and no subject reports it") {
@@ -480,11 +475,11 @@ func TestStaleWithoutReporterReadsZero(t *testing.T) {
 func TestStaleWithReporterUnpredictable(t *testing.T) {
 	m := staleNode(t)
 	record(t, m, "memory_pressure_ratio@pod:x", "pod:x", 0.01)
-	want(t, Decide(m, offer(1), both, self, nextID()), Decline, "the map's reading of memory_contention_ratio is stale")
+	want(t, Decide(m, offer(1), both, self, m.NewDecisionID("admit")), Decline, "the map's reading of memory_contention_ratio is stale")
 
 	mem := memDom
 	mem.Enter = 0
-	d := Decide(m, offer(1), []Domain{cpuDom, mem}, self, nextID())
+	d := Decide(m, offer(1), []Domain{cpuDom, mem}, self, m.NewDecisionID("admit"))
 	want(t, d, Decline, "memory_contention_ratio is stale while memory_pressure_ratio@pod:x still reports it")
 	if l := line(t, d, "memory_contention_ratio"); l.Pass || l.UsagePred != nil {
 		t.Fatalf("memory line %+v", l)
@@ -497,19 +492,19 @@ func TestMissingCapacity(t *testing.T) {
 	m, _ := node(t, 0.4, 0.02)
 	c := cpuDom
 	c.Capacity = "cpu_quota_cores"
-	want(t, Decide(m, offer(1), []Domain{c, memDom}, self, nextID()), Decline, "no cpu_quota_cores fact")
+	want(t, Decide(m, offer(1), []Domain{c, memDom}, self, m.NewDecisionID("admit")), Decline, "no cpu_quota_cores fact")
 }
 
 // TestNoBasis: zero usage and no measured effects leave nothing to predict from.
 func TestNoBasis(t *testing.T) {
 	m, _ := node(t, 0, 0.02)
-	want(t, Decide(m, offer(1), both, self, nextID()), Decline, "no basis to predict cpu_contention_ratio")
+	want(t, Decide(m, offer(1), both, self, m.NewDecisionID("admit")), Decline, "no basis to predict cpu_contention_ratio")
 }
 
 func TestDecisionRecorded(t *testing.T) {
 	m, j := node(t, 0.4, 0.02)
 	effect(t, m, "pod:a", 0.3)
-	id := nextID()
+	id := m.NewDecisionID("admit")
 	d := Decide(m, offer(1), both, self, id)
 	rec, ok := j.Decision(id)
 	if !ok {
@@ -536,7 +531,7 @@ func TestDecisionRecorded(t *testing.T) {
 	}
 
 	// A decline before the gate is recorded too.
-	id = nextID()
+	id = m.NewDecisionID("admit")
 	Decide(m, offer(1), nil, self, id)
 	if rec, ok := j.Decision(id); !ok || rec.Answer["verdict"] != Decline {
 		t.Fatalf("early decline recorded %v %v", ok, rec)

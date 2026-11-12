@@ -136,21 +136,11 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 			// requests from both passing this check.
 			return EstimateResult{Err: "decision id " + req.ID + " is already used"}
 		}
+	} else if len(req.Assume) > 0 || len(req.Without) > 0 {
+		// The hypothesis is part of the question, so it is part of the name of the answer.
+		id = m.NewDecisionID("est", target, hypothesisDigest(req))
 	} else {
-		base := "est-" + strconv.FormatUint(m.Revision(), 10) + "-" + target
-		// Neither Decide nor Commit advances the revision, so a baseline and a
-		// counterfactual asked at the same revision would claim the same id and
-		// the journal would keep only the last of them. The hypothesis is part of
-		// the question, so it is part of the name of the answer.
-		if len(req.Assume) > 0 || len(req.Without) > 0 {
-			base += "-" + hypothesisDigest(req)
-		}
-		// The same question asked twice at one revision is two answers; the
-		// second takes a suffix rather than replacing the first.
-		id = base
-		for n := 2; !m.journal.reserve(id); n++ {
-			id = base + "-" + strconv.Itoa(n)
-		}
+		id = m.NewDecisionID("est", target)
 	}
 
 	// Resolve `without` into assumptions at the floor before the question is named.
@@ -220,6 +210,9 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	p, ok := b.Property(target)
 	if !ok {
 		d := b.Commit(map[string]any{"error": "unknown property"})
+		if d == nil {
+			return EstimateResult{Err: "decision " + id + " was not recorded: duplicate id"}
+		}
 		return EstimateResult{DecisionID: d.ID, Revision: d.Revision, Caveats: d.Caveats, Err: "no property " + target}
 	}
 
@@ -357,6 +350,9 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	}
 
 	d := b.Commit(commit)
+	if d == nil {
+		return EstimateResult{Err: "decision " + id + " was not recorded: duplicate id"}
+	}
 	res := EstimateResult{DecisionID: d.ID, Revision: d.Revision, Answer: answer, Influences: influences,
 		Hypothetical: hypothetical, Rationale: d.Rationale, Caveats: d.Caveats}
 	// Assumptions and Excluded are copied out of the Decision, not referenced: the

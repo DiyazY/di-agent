@@ -259,8 +259,10 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		held, dropped, oldest := sm.Journal().Stats()
 		writeJSON(w, map[string]any{
-			"events":   sm.Journal().Events(since, limit),
-			"revision": sm.Revision(),
+			"events":      sm.Journal().Events(since, limit),
+			"revision":    sm.Revision(),
+			"incarnation": sm.Journal().Incarnation(),
+			"seq":         sm.Journal().Seq(),
 			// Reporting the window explicitly stops a caller from reading an absence
 			// as evidence that nothing happened.
 			"held":            held,

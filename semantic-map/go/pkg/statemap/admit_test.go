@@ -387,21 +387,20 @@ func TestAdmitAReusedExplicitIDRecordsNothing(t *testing.T) {
 }
 
 // TestAdmitIDsAreUnambiguousAndNeverOverwrite: two requests whose fields would join
-// to the same text get different ids, and an identical retry at the same revision
-// gets a suffixed one, so both records stay.
+// to the same text get different digests, and an identical retry gets a different
+// id, so both records stay.
 func TestAdmitIDsAreUnambiguousAndNeverOverwrite(t *testing.T) {
 	m, _ := admitFixture(t)
 	a := m.Admit(AdmitRequest{From: "n|pod:a", Workload: "b", CPUCores: 1, CPUEnter: 0.25, MemoryEnter: 0.08})
 	b := m.Admit(AdmitRequest{From: "n", Workload: "pod:a|b", CPUCores: 1, CPUEnter: 0.25, MemoryEnter: 0.08})
-	if a.DecisionID == b.DecisionID || strings.TrimSuffix(b.DecisionID, "-2") == a.DecisionID {
+	digest := func(id string) string { return id[strings.LastIndex(id, "-")+1:] }
+	if digest(a.DecisionID) == digest(b.DecisionID) {
 		t.Errorf("ids %s and %s; want two different digests", a.DecisionID, b.DecisionID)
 	}
 	first, retry := m.Admit(admitReq(1, 0)), m.Admit(admitReq(1, 0))
-	if first.Revision != retry.Revision || retry.DecisionID != first.DecisionID+"-2" {
-		t.Fatalf("ids %s and %s at revisions %d/%d; want the retry suffixed -2", first.DecisionID, retry.DecisionID, first.Revision, retry.Revision)
-	}
-	if third := m.Admit(admitReq(1, 0)); third.DecisionID != first.DecisionID+"-3" {
-		t.Errorf("third id %s; want -3", third.DecisionID)
+	if first.Revision != retry.Revision || retry.DecisionID == first.DecisionID ||
+		digest(retry.DecisionID) != digest(first.DecisionID) {
+		t.Fatalf("ids %s and %s at revisions %d/%d; want two ids over one digest", first.DecisionID, retry.DecisionID, first.Revision, retry.Revision)
 	}
 	for _, id := range []string{first.DecisionID, retry.DecisionID} {
 		if _, ok := m.Journal().Decision(id); !ok {

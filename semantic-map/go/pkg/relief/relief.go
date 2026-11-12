@@ -160,13 +160,11 @@ type Loop struct {
 	d      actuators.Descriptor
 	budget *Budget
 	act    actuators.Actuator // the descriptor's, from Acting
-	epoch  int64
 
 	effects effects       // what acting on each workload has done; safe on its own
 	timeout time.Duration // the longest a pass, or a manual revert, waits on the runtime
 
 	pass       sync.Mutex       // serialises the passes that change the system
-	seq        int              // decision counter; touched only under pass
 	reconciled bool             // the ledger has been reconciled; until then nothing is applied. Touched only under pass
 	spent      map[string]spend // by decision: steps that took an hourly slot and are not yet settled (left pending, or adopted after a failed Set), so reconcile neither spends again nor keeps the spend of a step that never took. Touched only under pass
 
@@ -190,8 +188,7 @@ type Loop struct {
 	nRefused     int
 }
 
-// New builds a loop in Calm. Its decision ids carry the time it was built, so a
-// restarted loop cannot reuse an id the journal already holds.
+// New builds a loop in Calm.
 func New(c Config) (*Loop, error) {
 	switch {
 	case c.Runtime == nil:
@@ -222,7 +219,7 @@ func New(c Config) (*Loop, error) {
 	}
 	now := c.Now()
 	return &Loop{
-		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act, epoch: now.Unix(),
+		cfg: c, c: c.Lever, d: act.Describe(), budget: c.Budget, act: act,
 		timeout: max(c.Interval, minCallTimeout),
 		trigger: NewTrigger(c.Lever), phase: Calm, since: now,
 		unread: map[string]*Unread{}, spent: map[string]spend{},
@@ -1040,12 +1037,9 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	b.Commit(map[string]any{"refused": why})
 }
 
-// id names the next decision: relief-<kind>-<action>-<loop start>-<n>. The
-// action keeps two levers' loops, started in the same second, from naming two
-// decisions alike.
+// id names the next decision from the map: relief-<kind>-<action>-<incarnation>.<n>.
 func (l *Loop) id(kind string) string {
-	l.seq++
-	return fmt.Sprintf("relief-%s-%s-%d-%d", kind, l.d.Action, l.epoch, l.seq)
+	return l.cfg.Map.NewDecisionID("relief-" + kind + "-" + l.d.Action)
 }
 
 // liveLocked is every action still in force. Caller holds mu.

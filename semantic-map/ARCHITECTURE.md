@@ -846,6 +846,11 @@ evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
+Every event carries `(incarnation, seq)`; a decision id is `<prefix>-<incarnation>.<n>`
+with `n` drawn from the same counter, so no crash and no restart can reissue an id,
+and order is total across restarts. The incarnation advances on every restore and is
+written back at once. A commit under an id already recorded is not recorded; it is
+journalled as `decision.refused`.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
@@ -1434,7 +1439,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
-| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<revision>-<target>`, plus a hypothesis digest when `assume`/`without` are given; a repeat at the same revision takes `-2`, `-3`, …, reserved in the journal as for admission ids; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
+| GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
 Errors on the new endpoints follow a single shape:
@@ -1812,7 +1817,7 @@ and nobody is reported as accepting. Asking on could make two nodes accept one
 workload. A failed dial (refused, no such host) never reached the peer and goes on. Each hop carries the
 URL it was asked at and its decision id, so `<url>/state/decisions/<id>` resolves on
 the node that decided; traceability is per node, and the submitter keeps the chain,
-not the peers' decisions. Ids are `admit-<agent start epoch>-<seq>` for accepts,
+not the peers' decisions. Ids are `admit-<incarnation>.<n>` from the map for accepts,
 declines and outcomes alike.
 
 **The outcome check.** An accept is a prediction, and the accepting node checks it

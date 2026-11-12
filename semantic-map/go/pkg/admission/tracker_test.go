@@ -62,7 +62,6 @@ func newRig(t *testing.T) *rig {
 		Acted: func(action string, _ time.Time) (float64, bool) {
 			return r.peak, action != "" && action == r.actedOn
 		},
-		IDs: NewIDs(t0),
 		Now: func() time.Time { return r.now },
 		Logf: func(f string, a ...any) {
 			r.mu.Lock()
@@ -374,7 +373,7 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	r := arrived(t)
 	r.tick(time.Minute)
 	o := r.result("held")
-	if o.AcceptID != "admit-1-web" || !strings.HasPrefix(o.OutcomeID, fmt.Sprintf("admit-%d-", t0.Unix())) {
+	if o.AcceptID != "admit-1-web" || o.OutcomeID == "" {
 		t.Fatalf("ids %q %q", o.AcceptID, o.OutcomeID)
 	}
 	rec, ok := r.j.Decision(o.OutcomeID)
@@ -383,6 +382,14 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	}
 	if rec.Inputs["accept"] != o.AcceptID || rec.Answer["outcome"] != "held" {
 		t.Fatalf("record inputs %v answer %v", rec.Inputs, rec.Answer)
+	}
+}
+
+func TestOutcomeIdsComeFromTheMap(t *testing.T) {
+	r := arrived(t)
+	r.tick(time.Minute)
+	if o := r.result("held"); !strings.HasPrefix(o.OutcomeID, "admit-1.") {
+		t.Fatalf("outcome id %q; want prefix admit-1.", o.OutcomeID)
 	}
 }
 

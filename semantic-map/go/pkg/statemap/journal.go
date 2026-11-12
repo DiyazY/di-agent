@@ -1,7 +1,10 @@
 package statemap
 
 import (
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,10 +47,20 @@ const (
 
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
+
+	// EventDecisionRefused records a commit under an id the journal already holds:
+	// the second answer is not recorded, and this says that it was given.
+	EventDecisionRefused EventKind = "decision.refused"
 )
+
+// ErrDuplicateDecision is RecordDecision's refusal of an id it already holds.
+var ErrDuplicateDecision = errors.New("decision id already recorded")
 
 // Event is one entry in the journal: a structural change, or a decision.
 type Event struct {
+	// Seq is the event's place in the journal's total order, which survives a
+	// restore; with the journal's incarnation it names the event uniquely.
+	Seq      uint64         `json:"seq"`
 	Revision uint64         `json:"revision"`
 	At       time.Time      `json:"at"`
 	Kind     EventKind      `json:"kind"`
@@ -118,6 +131,12 @@ type Journal struct {
 	capacity int
 	dropped  uint64
 
+	// seq is the last number handed out, to an event or a decision id; incarnation
+	// counts the journal's lives, advanced by every restore. Together they make an
+	// id or an event unique across restarts, a crash before a save included.
+	seq         uint64
+	incarnation uint64
+
 	decisions map[string]*Decision
 	// reserved holds ids claimed by decisions being built and not yet committed:
 	// a check of decisions alone leaves the window between choosing an id and
@@ -134,15 +153,22 @@ func NewJournal(capacity int) *Journal {
 		capacity = DefaultJournalCapacity
 	}
 	return &Journal{
-		capacity:  capacity,
-		events:    make([]Event, 0, 64),
-		decisions: make(map[string]*Decision),
+		capacity:    capacity,
+		events:      make([]Event, 0, 64),
+		decisions:   make(map[string]*Decision),
+		incarnation: 1,
 	}
 }
 
 func (j *Journal) append(e Event) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	j.appendLocked(e)
+}
+
+func (j *Journal) appendLocked(e Event) {
+	j.seq++
+	e.Seq = j.seq
 	j.events = append(j.events, e)
 	if len(j.events) > j.capacity {
 		drop := len(j.events) - j.capacity
@@ -180,12 +206,50 @@ func (j *Journal) reserve(id string) bool {
 	return true
 }
 
-// RecordDecision appends a decision and returns it.
-func (j *Journal) RecordDecision(d *Decision) *Decision {
-	if d == nil {
-		return nil
+// newID issues "<prefix>-<incarnation>.<n>", n a ticket from the event counter,
+// and reserves it before returning.
+func (j *Journal) newID(prefix string, suffix []string) string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.seq++
+	id := prefix + "-" + strconv.FormatUint(j.incarnation, 10) + "." + strconv.FormatUint(j.seq, 10)
+	if len(suffix) > 0 {
+		id += "-" + strings.Join(suffix, "-")
 	}
-	j.append(Event{
+	if j.reserved == nil {
+		j.reserved = map[string]bool{}
+	}
+	j.reserved[id] = true
+	return id
+}
+
+// Seq is the last number handed out, to an event or a decision id.
+func (j *Journal) Seq() uint64 {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.seq
+}
+
+// Incarnation counts the journal's lives: 1 when fresh, one more on each restore.
+func (j *Journal) Incarnation() uint64 {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.incarnation
+}
+
+// RecordDecision appends a decision and returns it. An id already recorded is
+// refused with ErrDuplicateDecision, since replacing it would rewrite the trace of
+// an answer already given; a reservation is not a record.
+func (j *Journal) RecordDecision(d *Decision) (*Decision, error) {
+	if d == nil {
+		return nil, nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if _, used := j.decisions[d.ID]; used {
+		return nil, ErrDuplicateDecision
+	}
+	j.appendLocked(Event{
 		Revision: d.Revision,
 		At:       d.At,
 		Kind:     EventDecision,
@@ -193,7 +257,7 @@ func (j *Journal) RecordDecision(d *Decision) *Decision {
 		Actor:    "agent",
 		Decision: d,
 	})
-	return d
+	return d, nil
 }
 
 // Events returns entries at or after sinceRevision, oldest first.
@@ -521,7 +585,15 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		Rationale:         joinNonEmpty(parts, "; "),
 		Caveats:           b.caveats,
 	}
-	return b.m.journal.RecordDecision(d)
+	rec, err := b.m.journal.RecordDecision(d)
+	if errors.Is(err, ErrDuplicateDecision) {
+		b.m.journal.append(Event{
+			Revision: b.revision, At: b.at, Kind: EventDecisionRefused,
+			Target: b.id, Actor: "agent", Detail: map[string]any{"reason": "duplicate id"},
+		})
+		return nil
+	}
+	return rec
 }
 
 func joinNonEmpty(parts []string, sep string) string {

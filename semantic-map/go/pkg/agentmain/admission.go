@@ -31,7 +31,6 @@ const submissionCap = 200
 type admitter struct {
 	m       *statemap.Map
 	self    admission.Self
-	ids     *admission.IDs
 	tracker *admission.Tracker
 	domains func() []admission.Domain // one per relief loop
 	// workloads maps each workload running here by Name to its subject.
@@ -76,7 +75,6 @@ type acceptor struct {
 // shares and moved-workload test confound outcomes, and its actions are relief
 // acting in an outcome window.
 func buildAdmission(cfg spec.Spec, m *statemap.Map, rt runtime.Runtime, loops []*relief.Loop, reg *peers.Registry) *admitter {
-	ids := admission.NewIDs(time.Now())
 	workloads := func(ctx context.Context) (map[string]string, error) {
 		ws, err := rt.Workloads(ctx)
 		if err != nil {
@@ -99,11 +97,10 @@ func buildAdmission(cfg spec.Spec, m *statemap.Map, rt runtime.Runtime, loops []
 			return relief.Moved(m, usage, at, except, 0.25, time.Now())
 		},
 		Acted: reliefActed(loops),
-		IDs:   ids,
 		Now:   time.Now,
 		Logf:  log.Printf,
 	})
-	return &admitter{m: m, self: admission.Self{NodeID: cfg.Node.ID, Arch: goruntime.GOARCH}, ids: ids, tracker: tr,
+	return &admitter{m: m, self: admission.Self{NodeID: cfg.Node.ID, Arch: goruntime.GOARCH}, tracker: tr,
 		domains: reliefDomains(loops), workloads: workloads, peers: reg.List, client: peers.NewClient(5 * time.Second)}
 }
 
@@ -325,7 +322,7 @@ func (a *admitter) decide(ctx context.Context, o admission.Offer) admission.Hop 
 		return a.decline(o, "already running here", "")
 	}
 	doms := a.domains()
-	d := admission.Decide(a.m, o, doms, a.self, a.ids.Next())
+	d := admission.Decide(a.m, o, doms, a.self, a.m.NewDecisionID("admit"))
 	a.recordPrediction(d)
 	if d.Verdict == admission.Accept {
 		if err := a.tracker.Accepted(o, d, doms); errors.Is(err, admission.ErrAlreadyPending) {
@@ -370,7 +367,7 @@ func (a *admitter) recordPrediction(d admission.Decision) {
 // decline records a decline made before Decide; superseded is the accept it
 // replaces when a name already pending lost a race, empty otherwise.
 func (a *admitter) decline(o admission.Offer, reason, superseded string) admission.Hop {
-	id := a.ids.Next()
+	id := a.m.NewDecisionID("admit")
 	b := a.m.Decide(id, "admit "+o.Name+"?")
 	b.Input("offer", o)
 	if superseded != "" {

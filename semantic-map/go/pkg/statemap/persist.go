@@ -40,7 +40,8 @@ import (
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
 // Version 4 added the intervention counters. Version 5 distinguishes associations
 // from directional relationships. Version 6 persists per-source intervention slopes.
-const SnapshotVersion = 6
+// Version 7 adds the journal's incarnation and sequence.
+const SnapshotVersion = 7
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -66,6 +67,11 @@ type Snapshot struct {
 	// Events carries the journal so the audit trail survives a restart. Decisions are
 	// inside their events, which is how they are reconstructed.
 	Events []Event `json:"events"`
+
+	// Incarnation and Seq are the journal's life count and last number handed
+	// out, so a restored agent never reissues an id or an event number.
+	Incarnation uint64 `json:"incarnation"`
+	Seq         uint64 `json:"seq"`
 
 	// JournalDropped preserves the count of entries the journal had already dropped,
 	// so a reader after a restart still knows the record is partial.
@@ -99,6 +105,8 @@ func (m *Map) Snapshot() Snapshot {
 	s.Events = m.journal.Events(0, 0)
 	_, dropped, _ := m.journal.Stats()
 	s.JournalDropped = dropped
+	s.Incarnation = m.journal.Incarnation()
+	s.Seq = m.journal.Seq()
 	return s
 }
 
@@ -238,6 +246,19 @@ func (m *Map) Load(path string) (bool, error) {
 			snap.Version, SnapshotVersion)
 	}
 
+	if err := m.loadLocked(snap, path); err != nil {
+		return false, err
+	}
+	// The new incarnation is written at once, so a crash before the next save cannot
+	// bring this life's number back, and with it ids this life has already issued.
+	if err := m.Save(path); err != nil {
+		return false, fmt.Errorf("reserving incarnation %d: %w", snap.Incarnation+1, err)
+	}
+	return true, nil
+}
+
+// loadLocked restores snap under the write lock.
+func (m *Map) loadLocked(snap Snapshot, path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -247,14 +268,14 @@ func (m *Map) Load(path string) (bool, error) {
 	// the provenance says "observed". This happens for mundane reasons: a state file
 	// copied with a config directory, an image built from a running node.
 	if snap.Owner != "" && m.owner != "" && snap.Owner != m.owner {
-		return false, fmt.Errorf(
+		return fmt.Errorf(
 			"snapshot at %s describes %q but this agent models %q: refusing to adopt "+
 				"another system's observations as this one's history",
 			path, snap.Owner, m.owner)
 	}
 
 	if len(m.properties) > 0 || len(m.relationships) > 0 {
-		return false, fmt.Errorf("refusing to load a snapshot into a map that already "+
+		return fmt.Errorf("refusing to load a snapshot into a map that already "+
 			"holds %d properties and %d relationships: load before seeding, so "+
 			"re-declaration rules apply and are journalled",
 			len(m.properties), len(m.relationships))
@@ -281,7 +302,8 @@ func (m *Map) Load(path string) (bool, error) {
 	}
 	m.baselineSweepLocked() // a restore is a first reading of both clocks, so a step before the first sweep is seen
 	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)
-	m.journal.restore(snap.Events, snap.JournalDropped)
+	inc := snap.Incarnation + 1
+	m.journal.restore(snap.Events, snap.JournalDropped, snap.Seq, inc)
 
 	// The estimator resumes from its conclusions, not its working memory: the pair
 	// windows are not restored, so the first pairs after a restart rebuild support
@@ -295,10 +317,11 @@ func (m *Map) Load(path string) (bool, error) {
 		"properties":     len(snap.Properties),
 		"relationships":  len(snap.Relationships),
 		"journal_events": len(snap.Events),
+		"incarnation":    inc,
 		"note": "pair windows are not restored; the estimator resumes from the strengths " +
 			"it had concluded, and rebuilds support from the first new pairs",
 	}, m.now())
-	return true, nil
+	return nil
 }
 
 // DiscoveryPersistence installs the proposer checkpoint callback and returns any
@@ -318,8 +341,9 @@ func (m *Map) DiscardDiscoveryCheckpoint() {
 	m.savedDiscovery = nil
 }
 
-// restore reinstates journal entries from a snapshot.
-func (j *Journal) restore(events []Event, dropped uint64) {
+// restore reinstates journal entries from a snapshot. Each event keeps its own
+// seq; the counter resumes past both the saved one and the highest held.
+func (j *Journal) restore(events []Event, dropped, seq, incarnation uint64) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.events = j.events[:0]
@@ -336,4 +360,11 @@ func (j *Journal) restore(events []Event, dropped uint64) {
 		}
 	}
 	j.dropped += dropped
+	j.seq = seq
+	for _, e := range j.events {
+		if e.Seq > j.seq {
+			j.seq = e.Seq
+		}
+	}
+	j.incarnation = incarnation
 }

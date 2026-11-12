@@ -92,7 +92,6 @@ type TrackerConfig struct {
 	// Acted says whether relief acted in the action's domain since the time given,
 	// and the highest contention it acted at.
 	Acted func(action string, since time.Time) (peak float64, acted bool)
-	IDs   *IDs
 	Now   func() time.Time
 	Logf  func(string, ...any)
 }
@@ -402,7 +401,7 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 
 // record commits the outcome decision, linked to the accept.
 func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
-	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.IDs.Next(), Subject: e.subject,
+	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.Map.NewDecisionID("admit"), Subject: e.subject,
 		Result: result, Reason: reason, Lines: lines, At: now}
 	b := t.c.Map.Decide(o.OutcomeID, "outcome of "+e.name+"?")
 	b.Input("accept", e.acceptID)

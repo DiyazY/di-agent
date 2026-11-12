@@ -628,6 +628,16 @@ func (m *Map) StaleAfter() time.Duration { return m.cfg.StaleAfter }
 // Journal exposes the change and decision record.
 func (m *Map) Journal() *Journal { return m.journal }
 
+// Incarnation counts this map's lives: 1 when new, one more on each restore.
+func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
+
+// NewDecisionID issues a decision id no other in this map's history has had:
+// "<prefix>-<incarnation>.<n>", followed by "-"-joined suffix parts when given, n a
+// ticket from the journal's event counter. The id is reserved before it is returned.
+func (m *Map) NewDecisionID(prefix string, suffix ...string) string {
+	return m.journal.newID(prefix, suffix)
+}
+
 // ── Property lifecycle ────────────────────────────────────────────────────────
 
 // DeclareProperty creates or updates a property's definition — not its value.

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,60 @@ func TestUndeclaredMetricBecomesAPropertyAndIsJournalled(t *testing.T) {
 	if !found {
 		t.Error("the admission is not in the journal, so nobody can find out why the " +
 			"map contains a property they never declared")
+	}
+}
+
+// TestJournalEventsCarrySeqAcrossRestore: every event the journal route returns
+// carries a seq, strictly increasing across a save and restore, and the body names
+// the incarnation and the counter.
+func TestJournalEventsCarrySeqAcrossRestore(t *testing.T) {
+	sm, _ := stateFixture(t)
+	for _, id := range []string{"a_metric", "b_metric", "c_metric"} {
+		if err := sm.Observe(id, 0.5, timeZero()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "snap.json")
+	if err := sm.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	sm2 := statemap.New(statemap.Config{ConvergenceObservations: 4, AdmitUnknown: true}, statemap.NewJournal(0))
+	if _, err := sm2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"d_metric", "e_metric"} {
+		if err := sm2.Observe(id, 0.5, timeZero()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm2, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var journal struct {
+		Events      []statemap.Event `json:"events"`
+		Incarnation uint64           `json:"incarnation"`
+		Seq         *uint64          `json:"seq"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != 200 {
+		t.Fatalf("GET /state/journal returned %d", code)
+	}
+	if journal.Incarnation != 2 {
+		t.Errorf("incarnation %d; want 2", journal.Incarnation)
+	}
+	var prev uint64
+	for i, e := range journal.Events {
+		if e.Seq <= prev {
+			t.Fatalf("event %d (%s %s) has seq %d after %d; want strictly increasing", i, e.Kind, e.Target, e.Seq, prev)
+		}
+		prev = e.Seq
+	}
+	if journal.Seq == nil || *journal.Seq != prev {
+		t.Errorf("body seq %v; want the last event's %d", journal.Seq, prev)
+	}
+	if last := journal.Events[len(journal.Events)-1]; last.Target != "e_metric" {
+		t.Errorf("last event targets %q; want the post-restore e_metric", last.Target)
 	}
 }
 

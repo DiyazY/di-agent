@@ -549,6 +549,15 @@ func TestTheRateLimitHolds(t *testing.T) {
 	}
 }
 
+func TestReliefIdsCarryTheMapsIncarnation(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.act("pod:a")
+	a := h.action("pod:a")
+	if !strings.HasPrefix(a.DecisionID, "relief-act-cpu.limit-1.") {
+		t.Fatalf("act decision id %q; want prefix relief-act-cpu.limit-1.", a.DecisionID)
+	}
+}
+
 func TestEveryStepIsADecision(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 	h.act("pod:a")
