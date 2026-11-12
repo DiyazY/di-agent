@@ -596,6 +596,7 @@ func (m *Map) baselineSweepLocked() {
 }
 
 // SetMonotonic overrides the monotonic reading silence is measured on. For tests.
+// The hook must return a value > 0: zero means "no baseline" to the sweep.
 func (m *Map) SetMonotonic(f func() time.Duration) {
 	m.mu.Lock()
 	m.mono = f
@@ -870,7 +871,13 @@ func (m *Map) Record(o Observation) error {
 	}
 	p.NObservations++
 	p.LastObserved = at
-	p.lastSeen = m.mono()
+	// Anchor silence to the data's age at receipt, not to the receipt: an old-stamped
+	// reading, or a producer re-sending one stamp, must not read as fresh. Monotonic
+	// time since then is immune to wall steps. Zero means unseen, so nudge off it.
+	p.lastSeen = m.mono() - max(0, m.now().Sub(at))
+	if p.lastSeen == 0 {
+		p.lastSeen--
+	}
 	m.baselineSweepLocked()
 	p.Confidence = clamp01(float64(p.NObservations) / float64(m.cfg.ConvergenceObservations))
 	if p.Status == Retired {
@@ -1172,7 +1179,7 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 		// Silence is process time where this process has seen the property; right
 		// after a restore it is the snapshot's wall gap, which the grace covers.
 		silence := now.Sub(p.LastObserved)
-		if p.lastSeen > 0 {
+		if p.lastSeen != 0 {
 			silence = mono - p.lastSeen
 		}
 		switch {

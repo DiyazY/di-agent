@@ -820,7 +820,7 @@ stay reconstructible.
 
 `Record` refuses a reading older than the property's last, or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup.
 
-Silence is measured on the process's monotonic clock, not the sample's wall time, so an NTP step after boot does not read as a week of silence; a step larger than the pair window is journalled as `clock.stepped`.
+Silence is the reading's age at receipt (receipt time minus its stamp) plus the monotonic time since then, never a wall-clock difference taken later, so an NTP step after boot does not read as a week of silence; a step larger than the pair window is journalled as `clock.stepped`.
 
 After a restore nothing retires until `retire_after` of this process's time has passed: a snapshot's last observations are hours old by definition, and retiring on that would cascade every relationship away on the first sweep.
 

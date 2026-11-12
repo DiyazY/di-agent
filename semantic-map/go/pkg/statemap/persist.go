@@ -279,7 +279,7 @@ func (m *Map) Load(path string) (bool, error) {
 	if m.cfg.RetireAfter > 0 {
 		m.graceUntil = m.mono() + m.cfg.RetireAfter
 	}
-	m.baselineSweepLocked()
+	m.baselineSweepLocked() // a restore is a first reading of both clocks, so a step before the first sweep is seen
 	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)
 	m.journal.restore(snap.Events, snap.JournalDropped)
 

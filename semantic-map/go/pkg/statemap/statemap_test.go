@@ -2317,6 +2317,25 @@ func TestAWallClockStepBackwardRetiresNothing(t *testing.T) {
 	}
 }
 
+func TestAnOldStampedReadingIsAlreadyStale(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	if err := m.DeclareProperty(Property{ID: "disk_io"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("disk_io", 0.1, c.now().Add(-31*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stale, retired := m.Sweep()
+	if len(stale) != 1 || len(retired) != 0 {
+		t.Fatalf("stale=%v retired=%v; a reading stamped 31s ago is stale on arrival", stale, retired)
+	}
+	// A wall step does not change that, nor un-stale it.
+	c.stepWall(time.Hour)
+	if _, retired = m.Sweep(); len(retired) != 0 {
+		t.Errorf("retired=%v after a wall step", retired)
+	}
+}
+
 func TestOrdinarySilenceStillRetires(t *testing.T) {
 	m, c := observedDiskIO(t)
 	c.advance(3 * time.Minute)

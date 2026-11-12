@@ -452,8 +452,6 @@ func staleNode(t *testing.T) *statemap.Map {
 	if err := m.Record(statemap.Observation{ID: "memory_contention_ratio", Value: 0.04, At: old, Range: &unit}); err != nil {
 		t.Fatal(err)
 	}
-	// Silence is process time: let two stale periods pass on the monotonic clock too.
-	m.SetMonotonic(func() time.Duration { return time.Second + 2*m.StaleAfter() })
 	m.Sweep()
 	record(t, m, "cpu_utilization", "", 0.4)
 	record(t, m, "memory_utilization", "", 0.2)
