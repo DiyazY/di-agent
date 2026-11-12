@@ -1,6 +1,7 @@
 package agentmain
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,5 +115,14 @@ func TestShutdownSaveIsUnconditional(t *testing.T) {
 	}
 	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
 		t.Errorf("shutdown save did not rewrite the file: %v, %v", fi, err)
+	}
+}
+
+// TestServerHasReadTimeouts: a client that opens a connection and sends nothing must
+// not hold it forever.
+func TestServerHasReadTimeouts(t *testing.T) {
+	s := newServer(":0", http.NewServeMux())
+	if s.ReadHeaderTimeout != 10*time.Second || s.ReadTimeout != 30*time.Second {
+		t.Errorf("ReadHeaderTimeout %v, ReadTimeout %v; want 10s and 30s", s.ReadHeaderTimeout, s.ReadTimeout)
 	}
 }

@@ -14,11 +14,11 @@ import (
 
 // fakeCollector is a member that never needs to be called: the route reports
 // status, it does not collect.
-type fakeCollector struct{}
+type fakeCollector struct{ samples []*types.MetricSample }
 
-func (fakeCollector) Collect() ([]*types.MetricSample, error) { return nil, nil }
-func (fakeCollector) SourceID() string                        { return "fake" }
-func (fakeCollector) AvailableMetrics() []types.MetricType    { return nil }
+func (f fakeCollector) Collect() ([]*types.MetricSample, error) { return f.samples, nil }
+func (fakeCollector) SourceID() string                          { return "fake" }
+func (fakeCollector) AvailableMetrics() []types.MetricType      { return nil }
 
 func getCollectors(t *testing.T, sup *collectors.Supervisor) map[string]any {
 	t.Helper()
@@ -67,4 +67,21 @@ func TestCollectorsRouteNil(t *testing.T) {
 		t.Fatalf("body = %s, want \"collectors\":[]", rec.Body)
 	}
 	getCollectors(t, nil)
+}
+
+// TestCollectorsRouteReportsViolationKinds pins that violations are broken down by
+// reason in the response.
+func TestCollectorsRouteReportsViolationKinds(t *testing.T) {
+	sup := collectors.NewSupervisor(collectors.Env{NodeID: "n1"}, []collectors.Member{
+		{Name: "probe", Kind: "type", Type: "fake", C: fakeCollector{samples: []*types.MetricSample{nil}}, Timeout: time.Second},
+	})
+	if _, err := sup.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	got := getCollectors(t, sup)
+	m := got["collectors"].([]any)[0].(map[string]any)
+	kinds, ok := m["violation_kinds"].(map[string]any)
+	if !ok || kinds["nil sample"] != float64(1) {
+		t.Errorf("violation_kinds = %v, want {\"nil sample\": 1}", m["violation_kinds"])
+	}
 }

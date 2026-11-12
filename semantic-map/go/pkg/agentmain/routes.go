@@ -575,7 +575,12 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		var req MetricSampleRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIngestBody)).Decode(&req); err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+				return
+			}
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -947,3 +952,7 @@ func knownPeers(sm *semmap.SemanticMap) []*peers.Descriptor {
 	}
 	return list
 }
+
+// maxIngestBody bounds a POST /ingest-sample body, in bytes. A sample is a few hundred
+// bytes; a megabyte is far past any honest producer.
+const maxIngestBody = 1 << 20

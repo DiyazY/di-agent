@@ -700,6 +700,8 @@ Each `MetricSample` carries:
 
 **`available_metrics()` may change.** It is at least every type the last `collect()` emitted. A fixed collector (cgroup) returns one set throughout; one driven by include patterns (Netdata) learns what exists only by asking its source, and that grows as disks, interfaces and workloads appear. It used to be static for the instance's lifetime, which a pattern-driven collector cannot promise.
 
+At most 16384 samples per member per tick are admitted; the excess is a counted violation, so one producer cannot make the tick's lock hold unbounded.
+
 ### MetricType catalogue
 
 Routing is declared in `domain_spec.json`, not in code, and every *routed* type is a

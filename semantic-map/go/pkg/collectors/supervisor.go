@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -49,17 +50,23 @@ type Member struct {
 	Timeout time.Duration
 }
 
+// maxSamplesPerTick is the most samples one member may deliver in one Collect; the
+// excess is dropped as a "flood" violation.
+const maxSamplesPerTick = 16384
+
 // MemberStatus is one member's entry in GET /collectors.
 type MemberStatus struct {
-	Name             string             `json:"name"`
-	Kind             string             `json:"kind"`
-	Type             string             `json:"type"`
-	State            string             `json:"state"`
-	LastSuccessUnix  int64              `json:"last_success_unix"`
-	LastError        string             `json:"last_error"`
-	LastErrorUnix    int64              `json:"last_error_unix"`
-	Samples          int64              `json:"samples"`
-	Violations       int64              `json:"violations"`
+	Name            string `json:"name"`
+	Kind            string `json:"kind"`
+	Type            string `json:"type"`
+	State           string `json:"state"`
+	LastSuccessUnix int64  `json:"last_success_unix"`
+	LastError       string `json:"last_error"`
+	LastErrorUnix   int64  `json:"last_error_unix"`
+	Samples         int64  `json:"samples"`
+	Violations      int64  `json:"violations"`
+	// ViolationKinds breaks Violations down by reason, e.g. {"flood": 3616}.
+	ViolationKinds   map[string]int64   `json:"violation_kinds,omitempty"`
 	OwnershipDrops   int64              `json:"ownership_drops"`
 	Restarts         int64              `json:"restarts"`
 	BackoffUntilUnix int64              `json:"backoff_until_unix"`
@@ -94,6 +101,7 @@ type memberState struct {
 	abandoned bool
 
 	samples, violations, ownershipDrops int64
+	violationKinds                      map[string]int64
 
 	// available is the member's AvailableMetrics answer, read in the member's own
 	// goroutine right after a successful Collect. Asking it from elsewhere could run
@@ -373,7 +381,18 @@ func (s *Supervisor) fault(ms *memberState, now time.Time, msg string) {
 // Members are admitted in list order, so within a tick an earlier member claims a
 // type before a later one is checked against it.
 func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSample, out []*types.MetricSample) []*types.MetricSample {
+	kept := 0
 	for _, smp := range samples {
+		if kept == maxSamplesPerTick {
+			// The first maxSamplesPerTick are kept; one producer cannot make the
+			// tick's admission, and the lock it holds, unbounded.
+			mt := types.MetricType("")
+			if smp != nil {
+				mt = smp.MetricType
+			}
+			s.violate(ms, "flood", mt)
+			continue
+		}
 		if kind := s.violation(ms, smp); kind != "" {
 			mt := types.MetricType("")
 			if smp != nil {
@@ -391,6 +410,7 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 			continue
 		}
 		ms.samples++
+		kept++
 		out = append(out, smp)
 	}
 	return out
@@ -400,6 +420,10 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 // and logs the first of each kind and type.
 func (s *Supervisor) violate(ms *memberState, kind string, mt types.MetricType) {
 	ms.violations++
+	if ms.violationKinds == nil {
+		ms.violationKinds = map[string]int64{}
+	}
+	ms.violationKinds[kind]++
 	k := violationKey{kind, mt}
 	if ms.loggedViol[k] {
 		return
@@ -472,6 +496,7 @@ func (s *Supervisor) Status() []MemberStatus {
 			LastErrorUnix:   ms.lastErrorUnix,
 			Samples:         ms.samples,
 			Violations:      ms.violations,
+			ViolationKinds:  maps.Clone(ms.violationKinds),
 			OwnershipDrops:  ms.ownershipDrops,
 			Available:       append([]types.MetricType{}, ms.available...),
 		}

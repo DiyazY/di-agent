@@ -558,3 +558,48 @@ func TestSupervisorHandBuiltMemberTimeoutFollowsInterval(t *testing.T) {
 		t.Errorf("exec member waits %s, want 1s plus the grace", w)
 	}
 }
+
+func manySamples(n int) []*types.MetricSample {
+	out := make([]*types.MetricSample, n)
+	for i := range out {
+		out[i] = sample("cpu_utilization", "ratio")
+	}
+	return out
+}
+
+// TestSupervisorCapsSamplesPerTick: one producer cannot make a tick's admission
+// unbounded; the excess is a counted "flood" violation.
+func TestSupervisorCapsSamplesPerTick(t *testing.T) {
+	f := &fakeCollector{id: "f", samples: manySamples(20000)}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	if len(out) != 16384 {
+		t.Fatalf("len(out) = %d; want 16384", len(out))
+	}
+	st := statusOf(t, s, "f")
+	if st.Samples != 16384 || st.Violations != 3616 || st.ViolationKinds["flood"] != 3616 {
+		t.Errorf("samples %d, violations %d, kinds %v; want 16384, 3616, flood 3616", st.Samples, st.Violations, st.ViolationKinds)
+	}
+}
+
+// TestSupervisorCapIsInclusive: the 16384th sample passes; the 16385th is the flood.
+func TestSupervisorCapIsInclusive(t *testing.T) {
+	f := &fakeCollector{id: "f", samples: manySamples(16384)}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	st := statusOf(t, s, "f")
+	if len(out) != 16384 || st.Violations != 0 {
+		t.Errorf("16384 samples: kept %d, violations %d; want 16384, 0", len(out), st.Violations)
+	}
+	if _, ok := st.ViolationKinds["flood"]; ok {
+		t.Error("flood key present at exactly the cap")
+	}
+
+	f = &fakeCollector{id: "g", samples: manySamples(16385)}
+	s, _ = newTestSupervisor(t, member("g", f))
+	out, _ = s.Collect()
+	st = statusOf(t, s, "g")
+	if len(out) != 16384 || st.Violations != 1 {
+		t.Errorf("16385 samples: kept %d, violations %d; want 16384, 1", len(out), st.Violations)
+	}
+}

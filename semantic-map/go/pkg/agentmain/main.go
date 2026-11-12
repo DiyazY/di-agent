@@ -367,7 +367,7 @@ func Main() {
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 	registerConsole(mux, cfg.Node.UI)
 
-	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
+	srv := newServer(cfg.Node.Addr, mux)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -769,6 +769,17 @@ func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duratio
 			}
 		}
 	}()
+}
+
+// newServer bounds how long a client may take to send its request, so a connection
+// that opens and says nothing cannot be held forever. There is no WriteTimeout: the
+// explain endpoints stream answers from a model that may think for minutes.
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr: addr, Handler: h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+	}
 }
 
 // saveIfChanged saves the map unless its revision is the one last saved. *lastSaved

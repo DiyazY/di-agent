@@ -1145,3 +1145,32 @@ func TestIngestSample_OldReadingIsCountedNotRecorded(t *testing.T) {
 		t.Errorf("counts.readings_out_of_order = %d; want 1", got)
 	}
 }
+
+// TestIngestSample_OversizedBodyIs413: a body over 1 MiB is refused with 413, and an
+// ordinary one is still accepted.
+func TestIngestSample_OversizedBodyIs413(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	big := `{"node_id":"master","metric_type":"cpu_utilization","value":1,"labels":{"pad":"` +
+		strings.Repeat("a", 1<<20) + `"}}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body answered %d; want 413", resp.StatusCode)
+	}
+
+	small := `{"node_id":"master","metric_type":"cpu_utilization","value":1,"labels":{"pad":"` +
+		strings.Repeat("a", 1000) + `"}}`
+	resp, err = http.Post(base+"/ingest-sample", "application/json", strings.NewReader(small))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 204 && resp.StatusCode != 202 {
+		t.Errorf("small body answered %d; want 204 or 202", resp.StatusCode)
+	}
+}

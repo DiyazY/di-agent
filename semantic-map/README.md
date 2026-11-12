@@ -495,7 +495,7 @@ Admission. `POST /tasks` submits a workload to any node: it decides from its own
 Feed one typed `MetricSample` to the facade's `IngestSample`. The daemon records
 the observation as a property, recomputes whatever derives from it, and folds it
 into every relationship incident to that property — the same path an in-process
-collector uses.
+collector uses. A body over 1 MiB answers `413`.
 
 ```json
 {"node_id":"master","metric_type":"cpu_utilization","value":0.71,
@@ -569,7 +569,7 @@ Read-only: collectors are configured in the spec, not over HTTP.
  "collectors":[
   {"name":"cgroup","kind":"type","type":"cgroup","state":"ok",
    "last_success_unix":1761160000,"last_error":"","last_error_unix":0,
-   "samples":51234,"violations":0,"ownership_drops":0,"restarts":0,
+   "samples":51234,"violations":12,"violation_kinds":{"flood":12},"ownership_drops":0,"restarts":0,
    "backoff_until_unix":0,"available":["cpu_utilization","..."]}]}
 ```
 
@@ -585,6 +585,7 @@ malformed or duplicate sample in a plugin's reply, an invalid metric type, subje
 `available` entry); `ownership_drops` counts node-level samples dropped because an earlier
 collector in the list owns that type; `restarts` counts an exec plugin's process restarts,
 after a fault or after the plugin exited on its own between ticks.
+`violation_kinds` breaks `violations` down by reason; `flood` counts samples beyond the 16384 a member may deliver in one tick — the first 16384 are kept, the rest dropped.
 With no collectors configured the list is `[]`.
 
 ### `GET /candidates`
@@ -790,6 +791,8 @@ agent -config /etc/semantic-map/agent.yaml
 printf 'domain:\n  path: ../domain_spec.json\npersist:\n  file: /tmp/di-agent/state.json\n' > /tmp/agent.yaml
 go run ./cmd/agent -config /tmp/agent.yaml
 ```
+
+The HTTP server reads a request header within 10 s and the whole request within 30 s.
 
 ### The agent is described by `agent.yaml`
 
