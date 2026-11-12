@@ -537,3 +537,67 @@ func TestDecisionRecorded(t *testing.T) {
 		t.Fatalf("early decline recorded %v %v", ok, rec)
 	}
 }
+
+func feed(t *testing.T, m *statemap.Map, domain, basis string, n int, absErr float64) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		m.RecordPrediction("admission."+domain, basis, absErr, 0, true)
+	}
+}
+
+func TestBasisChosenByCalibration(t *testing.T) {
+	const dom = "cpu_contention_ratio"
+	for _, c := range []struct {
+		name               string
+		mapN, useN         int
+		mapAbs, useAbs     float64
+		basis, by          string
+		bothCalibrationKey bool
+	}{
+		{"both below N", 4, 4, 0.05, 0.01, "map", "default", false},
+		{"map below N", 4, 6, 0.05, 0.01, "map", "default", false},
+		{"usage better", 5, 5, 0.05, 0.01, "usage", "calibration", true},
+		{"map better", 5, 5, 0.01, 0.05, "map", "calibration", true},
+		{"tie", 5, 5, 0.02, 0.02, "map", "calibration", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, j := node(t, 0.4, 0.02)
+			effect(t, m, "pod:a", 0.2)
+			feed(t, m, dom, "map", c.mapN, c.mapAbs)
+			feed(t, m, dom, "usage", c.useN, c.useAbs)
+			id := m.NewDecisionID("admit")
+			dd := cpuDom
+			if c.basis == "usage" {
+				dd.Exit = 0.05 // map (0.07) would decline, usage (0.0325) accepts
+			}
+			d := Decide(m, offer(1), []Domain{dd, memDom}, self, id)
+			l := line(t, d, dom)
+			if l.Basis != c.basis || l.ChosenBy != c.by {
+				t.Fatalf("basis %s by %s; want %s by %s", l.Basis, l.ChosenBy, c.basis, c.by)
+			}
+			if c.basis == "usage" {
+				want(t, d, Accept, "")
+			}
+			rec, _ := j.Decision(id)
+			if got := rec.Inputs["basis_chosen_by"].(map[string]string)[dom]; got != c.by {
+				t.Fatalf("recorded basis_chosen_by %q; want %q", got, c.by)
+			}
+			cal, _ := rec.Inputs["calibration"].(map[string]statemap.Calibration)
+			_, hasMap := cal["admission."+dom+"/map"]
+			_, hasUsage := cal["admission."+dom+"/usage"]
+			if c.bothCalibrationKey && !(hasMap && hasUsage) {
+				t.Fatalf("calibration input %v; want both cpu keys", cal)
+			}
+		})
+	}
+}
+
+func TestBasisChoiceNeedsBothPredictions(t *testing.T) {
+	m, _ := node(t, 0.4, 0.02)
+	feed(t, m, "cpu_contention_ratio", "map", 10, 0.001)
+	feed(t, m, "cpu_contention_ratio", "usage", 10, 0.5)
+	l := line(t, Decide(m, offer(1), both, self, m.NewDecisionID("admit")), "cpu_contention_ratio")
+	if l.Basis != "usage" || l.ChosenBy != "default" {
+		t.Fatalf("basis %s by %s; want usage by default", l.Basis, l.ChosenBy)
+	}
+}

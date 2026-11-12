@@ -878,6 +878,8 @@ predicted level fell on the same side of the exit as the settled one). A dry run
 unbound cap, a confounded outcome or an accept relief acted on feeds nothing. The
 verify and outcome decisions carry the updated records as a `calibration` input. It is
 persisted in its own snapshot field and `GET /state` carries it as `calibration`.
+Admission reads it back: when both its predictions exist and each basis has at least
+`calibrationMinN` (5) outcomes, the one with the lower mean absolute error decides.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
@@ -1752,6 +1754,12 @@ no domains and every offer declines: a node never admits blind.
 6. Prediction, per domain: the pressure the domain would reach with the workload
    added must be at or below `Exit`, the level relief releases caps at. Admitting up
    to `Enter` would hold pressure in the band where caps never release.
+   Two predictions exist when they can be made (`map`: the measured response slope;
+   `usage`: pressure scaled by the usage the workload adds). The basis with the lower
+   `MeanAbsErr` in the calibration record decides, once both have `calibrationMinN`
+   (5) outcomes; a tie, a missing prediction or too few outcomes keeps the default,
+   the map basis when it exists, else usage. The record carries `basis_chosen_by`
+   (`calibration` or `default`, per domain) and the `calibration` read.
 
 A name already awaiting its outcome on this node declines `already pending` before
 any of this, and the check-and-register is one critical section, so two concurrent

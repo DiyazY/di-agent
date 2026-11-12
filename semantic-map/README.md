@@ -426,6 +426,8 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 Admission. `POST /tasks` submits a workload to any node: it decides from its own map, and on a decline offers it to each registered peer in id order through their `POST /offers` until one accepts. The submitter starts the workload on `accepted_by` under `name`; the agent never starts it.
 
+When a domain has both a map and a usage prediction, the one with the better calibration record decides once each has 5 outcomes, else the map prediction; the decision records this as `basis_chosen_by` (`calibration` or `default`) per domain.
+
 ```json
 // POST /tasks request (also the POST /offers body, which adds "chain")
 {
