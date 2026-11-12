@@ -285,6 +285,21 @@ func TestStaleReadingConfounds(t *testing.T) {
 	}
 }
 
+func TestUnobservableReadingConfounds(t *testing.T) {
+	r := arrived(t)
+	// The Relieves reading comes from a source that is now down.
+	if err := r.m.Record(statemap.Observation{ID: "cpu_contention_ratio", Value: 0.02, At: t0, Source: "cgroup", Range: &unit}); err != nil {
+		t.Fatal(err)
+	}
+	r.m.SetSourceDown("cgroup", true)
+	r.m.Sweep()
+	r.tick(time.Minute)
+	o := r.result("confounded")
+	if !strings.Contains(o.Reason, "unobservable reading") {
+		t.Fatalf("reason %q", o.Reason)
+	}
+}
+
 func TestNotArrived(t *testing.T) {
 	r := newRig(t)
 	r.accept("web")

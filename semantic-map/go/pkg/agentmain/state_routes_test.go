@@ -686,3 +686,30 @@ func TestEstimate_RegimeCaveatIsServed(t *testing.T) {
 	}
 	t.Fatalf("caveats %q; want the regime caveat", res.Caveats)
 }
+
+func TestStateRouteAcceptsStatusUnobservable(t *testing.T) {
+	sm, srv := stateFixture(t)
+	if err := sm.Record(statemap.Observation{ID: "q_depth", Value: 1, At: time.Now(), Source: "netdata"}); err != nil {
+		t.Fatal(err)
+	}
+	sm.SetSourceDown("netdata", true)
+	sm.Sweep()
+
+	var out struct {
+		Properties []struct{ ID string }
+		Counts     map[string]any
+	}
+	if code := getState(t, srv.URL+"/state?status=unobservable", &out); code != http.StatusOK {
+		t.Fatalf("status %d; want 200", code)
+	}
+	if n, ok := out.Counts["properties_unobservable"].(float64); !ok || n != 1 {
+		t.Errorf("counts %v; want properties_unobservable 1", out.Counts)
+	}
+	if len(out.Properties) != 1 || out.Properties[0].ID != "q_depth" {
+		t.Errorf("properties %+v; want only q_depth", out.Properties)
+	}
+	var bad map[string]any
+	if code := getState(t, srv.URL+"/state?status=bogus", &bad); code != http.StatusBadRequest {
+		t.Errorf("status %d for ?status=bogus; want 400", code)
+	}
+}

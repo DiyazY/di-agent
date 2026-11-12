@@ -426,7 +426,11 @@ func Main() {
 	if sup != nil {
 		collector = sup
 	}
-	startCollectionLoop(ctx, sm, collector, cfg.Sources.Interval, headroomMu)
+	var status func() []collectors.MemberStatus
+	if sup != nil {
+		status = sup.Status
+	}
+	startCollectionLoop(ctx, sm, collector, status, state, cfg.Sources.Interval, headroomMu)
 	if reviewer != nil {
 		go reviewer.Run(ctx)
 	}
@@ -501,6 +505,8 @@ func startCollectionLoop(
 	ctx context.Context,
 	sm *semmap.SemanticMap,
 	collector contracts.CollectorContract,
+	status func() []collectors.MemberStatus,
+	state *statemap.Map,
 	interval time.Duration,
 	headroomMu *sync.Mutex,
 ) {
@@ -514,7 +520,7 @@ func startCollectionLoop(
 	}
 
 	log.Printf("collection loop started: source=%s interval=%s", collector.SourceID(), interval)
-	go runCollectionLoop(ctx, sm, collector, interval, headroomMu)
+	go runCollectionLoop(ctx, sm, collector, status, state, interval, headroomMu)
 }
 
 // runCollectionLoop is the body of the scheduler goroutine. Errors from the
@@ -526,6 +532,8 @@ func runCollectionLoop(
 	ctx context.Context,
 	sm *semmap.SemanticMap,
 	collector contracts.CollectorContract,
+	status func() []collectors.MemberStatus,
+	state *statemap.Map,
 	interval time.Duration,
 	headroomMu *sync.Mutex,
 ) {
@@ -538,7 +546,19 @@ func runCollectionLoop(
 			return
 		case <-t.C:
 			collectAndIngest(collector, headroomMu, sm.IngestSample)
+			// After the ingest, so a member whose first good tick carries samples
+			// revives its properties before it is marked up.
+			syncSources(state, status())
 		}
+	}
+}
+
+// syncSources tells the map which collector members are down: one in backoff or
+// stuck cannot be heard from, so what it last produced is unobservable rather than
+// silent. The map journals only transitions.
+func syncSources(state *statemap.Map, members []collectors.MemberStatus) {
+	for _, ms := range members {
+		state.SetSourceDown(ms.Name, ms.State == "backoff" || ms.State == "stuck")
 	}
 }
 

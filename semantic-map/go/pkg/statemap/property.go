@@ -79,6 +79,12 @@ const (
 	// past and silence is not evidence about the present.
 	Stale Status = "stale"
 
+	// Unobservable: the collector that produced it is down (backoff or stuck), so
+	// its silence has a known cause and is not evidence the property left. Not
+	// fresh, not active, not retired: the sweep never retires it while its source
+	// is down, and its next observation makes it active.
+	Unobservable Status = "unobservable"
+
 	// Retired: withdrawn from reasoning. Set by an operator, or automatically for a
 	// property whose silence has outlasted the retirement window.
 	Retired Status = "retired"
@@ -572,6 +578,13 @@ type Map struct {
 	// a snapshot's last observations are hours old by definition. Zero means no grace.
 	graceUntil time.Duration
 
+	// downSources holds the collector members known to be down; sourceUpMono is the
+	// monotonic reading at which a member last came back. Neither is persisted: a
+	// restart knows nothing about members until the first tick, and the restore
+	// grace covers the gap.
+	downSources  map[string]bool
+	sourceUpMono map[string]time.Duration
+
 	// onRetire is called, outside the lock, with the id of every property that
 	// retires — by an operator or by silence. See SetRetireHook.
 	onRetire func(propertyID string)
@@ -595,6 +608,8 @@ func New(cfg Config, journal *Journal) *Map {
 		learning:      c.Learn,
 		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
+		downSources:   make(map[string]bool),
+		sourceUpMono:  make(map[string]time.Duration),
 		now:           time.Now,
 		epoch:         time.Now(),
 	}
@@ -670,9 +685,9 @@ func (m *Map) DeclareProperty(p Property) error {
 		return err
 	}
 	switch p.Status {
-	case "", Active, Stale, Retired:
+	case "", Active, Stale, Unobservable, Retired:
 	default:
-		return fmt.Errorf("property %q declares status %q; want active, stale or retired", p.ID, p.Status)
+		return fmt.Errorf("property %q declares status %q; want active, stale, unobservable or retired", p.ID, p.Status)
 	}
 	if p.Kind == Derived && p.Subject != "" && !IsGroup(p.Subject) {
 		// A derived property is node-level structure: a summary scoped to one
@@ -882,9 +897,6 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 			p.Range = *o.Range
 			p.RangeDeclared = true
 		}
-		if o.Source != "" {
-			p.Source = o.Source
-		}
 		if len(o.Labels) > 0 {
 			p.Labels = copyLabels(o.Labels)
 		}
@@ -907,6 +919,9 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 		}
 	}
 
+	if o.Source != "" {
+		p.Source = o.Source
+	}
 	if p.Range != ([2]float64{}) && (value < p.Range[0] || value > p.Range[1]) {
 		p.OutOfRange++
 	}
@@ -1229,6 +1244,20 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 		if p.lastSeen != 0 {
 			silence = mono - p.lastSeen
 		}
+		if m.downSources[p.Source] {
+			// Silence with a known cause is not evidence of departure.
+			if p.Status == Active || p.Status == Stale {
+				p.Status = Unobservable
+			}
+			continue
+		}
+		if p.Status == Unobservable {
+			// The source is back but has not re-emitted this property: its silence
+			// starts when the source returned, not before the outage.
+			if up, ok := m.sourceUpMono[p.Source]; ok && p.lastSeen != 0 {
+				silence = mono - max(p.lastSeen, up)
+			}
+		}
 		switch {
 		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter &&
 			(m.graceUntil == 0 || mono >= m.graceUntil):
@@ -1245,6 +1274,27 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 	sort.Strings(retired)
 	m.recomputeDerivedLocked(now)
 	return stale, retired
+}
+
+// SetSourceDown records whether a collector member is down. A property last
+// produced by a down member is Unobservable at the next sweep and is never retired
+// while the member stays down. Idempotent: collector.down and collector.up are
+// journaled only on a transition.
+func (m *Map) SetSourceDown(source string, down bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.downSources[source] == down {
+		return
+	}
+	kind := EventCollectorUp
+	if down {
+		m.downSources[source] = true
+		kind = EventCollectorDown
+	} else {
+		delete(m.downSources, source)
+		m.sourceUpMono[source] = m.mono()
+	}
+	m.bump(kind, source, "collector", map[string]any{"member": source}, m.now())
 }
 
 // recomputeDerivedLocked refreshes derived properties from their members. Caller

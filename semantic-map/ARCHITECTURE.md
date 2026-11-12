@@ -830,6 +830,14 @@ the machine as it was when it was written.
 journals the admission, so the map follows a system that changes rather than a schema
 someone wrote down. Silence marks a property stale and can retire it, because a model
 that keeps reporting a departed metric's last value asserts what it cannot support.
+A property whose collector is down (backoff or stuck) is `unobservable`, not stale,
+and is never retired while the collector stays down: silence with a known cause is not
+evidence of departure, and retiring on it would cascade away every relationship the
+outage touched. The Supervisor stamps each admitted sample with its member's name, the
+loop tells the map which members are down after each tick, and a property stays
+unobservable until its next observation; once the member is back its silence counts
+from the return, not from before the outage. An HTTP producer is stamped `http`, so it
+cannot name itself after a member.
 Retiring a property cascades to the relationships referencing it, since an edge to
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
 stay reconstructible.
@@ -860,6 +868,8 @@ evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
+A collector member entering or leaving backoff or stuck records `collector.down` or
+`collector.up`, once per transition, with the member as target.
 The map's own changes are `property.*` and `relationship.*` events:
 `relationship.declared`, `relationship.asserted`, `relationship.intervention`,
 `relationship.retired` (with a `reason`, `sign-contradicted` when the agent retires
@@ -1518,7 +1528,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/confirm`        | optional `ConfirmRequest{from}`; required for an undirected candidate  | `204 No Content`; `400` when the orientation is missing or wrong | Promote a proposer candidate: a Discovered relationship between properties, or a validated proposition between constructs |
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
-| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 

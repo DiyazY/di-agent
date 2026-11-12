@@ -513,7 +513,6 @@ Five more fields are optional and let a producer describe what it is reporting:
 | `subject` | `str`         | Empty for a node-level reading; `<kind>:<identity>` (e.g. `pod:1234`) to scope it to something other than the node itself |
 | `unit`    | `str`         | The unit the value is expressed in                                       |
 | `range`   | `[lo, hi]`    | The value's declared bounds                                              |
-| `source`  | `str`         | Free-form identifier for the producer, distinct from `node_id`           |
 | `chart`   | `str`         | The series the producer computes together from one reading, as parts of one whole (a stacked Netdata chart, one `/proc/stat` line) — not series that are merely drawn together, such as received and sent. Series of one chart and one subject whose pair reaches \|r\| ≥ 0.99, and holds within its sampling error of it, are an arithmetic group: discovery reports them once instead of proposing them |
 | `part_of` | `str`         | On a sample with a subject: the node-level metric type the subject's quantity is summed into (a physical disk's `disk.io.writes` into `system.io.out`). A candidate from it to that type is marked `composition`, as one against the node metric of the same name already is. Send it on every sample it applies to: a sample without it withdraws the declaration. `400` without a subject or when it is not a metric type |
 
@@ -741,7 +740,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/tasks`                            | — `{submissions, answered, pending, outcomes}`: recent submissions with their chains, this node's answers by verdict, its accepts awaiting an outcome, and their outcomes | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` (`active`, `stale`, `unobservable`, `retired`) repeat or take a comma list; an unknown value is `400`. Counts carry `properties_unobservable`, the properties whose collector is down. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
@@ -915,6 +914,7 @@ every sample, queryable and traceable.
 
 ```bash
 # what is this system doing right now
+# (counts carry properties_active, properties_stale, properties_unobservable, properties_retired, ...)
 curl -s localhost:8080/state | jq '.counts'
 
 # what the machine is: OS, CPU, memory, disk, read at startup
@@ -996,7 +996,9 @@ A metric the specification never declared still becomes a property: `/ingest-sam
 answers 202 with `routed:false` rather than rejecting it, because a reading the system
 produced is not a typo to discard, and the journal records the admission. Silence
 marks a property stale (`map.stale_after`) and optionally retires it (`map.retire_after`);
-`map.admit: false` closes the model for a deployment that wants that.
+a property whose collector is in backoff or stuck is `unobservable` instead, not stale,
+and is never retired while the collector is down; it becomes active on its next
+observation. `map.admit: false` closes the model for a deployment that wants that.
 
 ### One agent per machine
 
@@ -1216,7 +1218,7 @@ the shape of the real thing.
 | `profile.priors`           | `""`             | Path to `prior_weights.json` from the initialization pipeline. Supplies structure only — which propositions to instantiate and in which direction |
 | `profile.kd`               | `""`             | KD running on this node (`k3s`/`k0s`/`k8s`/`kubeEdge`/`openYurt`). Validated against the artefact's `distributions` list; the daemon refuses to start on a name that is not there. It no longer selects a magnitude — two agents differing only in `profile.kd` answer identically until telemetry arrives. |
 | `sources.interval` | `10s`            | How often the autonomous collection loop ticks the collectors in `sources.collectors`; at least `1s`, since timestamps are whole seconds. Set to `0s` to disable the loop (only manual `POST /ingest-sample` then updates the model). |
-| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello (an exec plugin has 30 s, or its `timeout` if longer, to start and answer it, and the same again at each restart) — is refused at startup, naming the entry. |
+| `sources.collectors` | `[{name: cgroup, type: cgroup}]` | The ordered list of telemetry collectors. A list in the file replaces the default, it does not add to it; `[]` runs none (only `POST /ingest-sample` then updates the model). Order is ownership priority: a node-level metric type (no subject) is taken from the earliest-listed collector that has emitted it, and the same type from any other collector is dropped and counted (`ownership_drops` in `GET /collectors`); subject-scoped samples have no owner. Every collector runs under a supervisor: one that errors, panics or exceeds its timeout loses only its own samples for that tick and backs off (1 s doubling to 5 min), and a sample that breaks the collector contract is dropped and counted. A member in backoff or stuck marks the properties it last produced `unobservable`; every admitted sample carries the member name as its source. A list the agent cannot build — an unknown type, a config key the collector does not know, a plugin that does not complete its hello (an exec plugin has 30 s, or its `timeout` if longer, to start and answer it, and the same again at each restart) — is refused at startup, naming the entry. |
 | `sources.collectors[].name` | — | Instance name, `[A-Za-z0-9._-]+`, unique in the list. It names the collector in the log and in `GET /collectors`. |
 | `sources.collectors[].type` | — | A built-in collector: `cgroup`, `netdata` or `script`. Exactly one of `type`, `exec` and `http` per entry. |
 | `sources.collectors[].exec` | — | `{command, args}`: an out-of-process plugin the agent starts and speaks wire protocol v1 to on its stdin and stdout; restarted when it exits. |

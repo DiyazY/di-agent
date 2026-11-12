@@ -981,12 +981,13 @@ func TestIngestSample_RejectsMalformedSubject(t *testing.T) {
 	}
 }
 
+// The body names a source; it is ignored.
 func TestIngestSample_CarriesSubjectUnitRangeSource(t *testing.T) {
 	base, sm, cleanup := newTestAgent(t)
 	defer cleanup()
 
 	body := `{"node_id":"","metric_type":"queue_depth","value":7,"timestamp_unix":1000,
-	          "event_id":"e1","subject":"pod:abc","unit":"items","range":[0,100],"source":"app:ingest"}`
+	          "event_id":"e1","subject":"pod:abc","unit":"items","range":[0,100],"source":"app:ingest"}` // a body field naming a source is ignored
 	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -999,8 +1000,8 @@ func TestIngestSample_CarriesSubjectUnitRangeSource(t *testing.T) {
 	if !ok {
 		t.Fatal("scoped property was not admitted under metric_type@subject")
 	}
-	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != [2]float64{0, 100} || p.Source != "app:ingest" {
-		t.Errorf("admitted property %+v; want subject/unit/range/source stamped from the sample", p)
+	if p.Subject != "pod:abc" || p.Unit != "items" || p.Range != [2]float64{0, 100} || p.Source != "http" {
+		t.Errorf("admitted property %+v; want subject/unit/range stamped from the sample and source http (a caller cannot name itself after a member)", p)
 	}
 }
 

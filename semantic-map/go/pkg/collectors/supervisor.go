@@ -409,6 +409,9 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 			}
 			continue
 		}
+		// The member's name is the sample's source, whatever the member wrote: it is
+		// how the map knows which properties a down member last produced.
+		smp.Source = ms.m.Name
 		ms.samples++
 		kept++
 		out = append(out, smp)

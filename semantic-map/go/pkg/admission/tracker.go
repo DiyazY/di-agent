@@ -409,14 +409,16 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 	}
 
 	var stale []string
+	var why statemap.Status
 	for _, d := range e.domains {
-		if p, ok := t.c.Map.Property(d.Relieves); ok && p.Status == statemap.Stale {
+		if p, ok := t.c.Map.Property(d.Relieves); ok && p.Status != statemap.Active && p.Status != statemap.Retired {
 			stale = append(stale, d.Relieves)
+			why = p.Status
 		}
 	}
 	if len(stale) > 0 {
 		inputs["stale"] = stale
-		return t.record(e, Confounded, "stale reading: "+strings.Join(stale, ", "), lines, inputs, now)
+		return t.record(e, Confounded, string(why)+" reading: "+strings.Join(stale, ", "), lines, inputs, now)
 	}
 
 	result := Held

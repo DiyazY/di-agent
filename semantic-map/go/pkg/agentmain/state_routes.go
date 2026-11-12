@@ -65,7 +65,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 			return
 		}
 		q.Kinds = kinds
-		statuses, err := enumParam(r, "status", statemap.Active, statemap.Stale, statemap.Retired)
+		statuses, err := enumParam(r, "status", statemap.Active, statemap.Stale, statemap.Unobservable, statemap.Retired)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

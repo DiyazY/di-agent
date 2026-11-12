@@ -16,7 +16,7 @@ type Query struct {
 	// Kinds restricts to observed or derived properties. Empty means both.
 	Kinds []Kind
 
-	// Statuses restricts by lifecycle. Empty means active and stale but NOT
+	// Statuses restricts by lifecycle. Empty means active, stale and unobservable but NOT
 	// retired: a retired property is not part of the current system, and returning
 	// it by default would put withdrawn state into an agent's answers.
 	Statuses []Status
@@ -64,20 +64,23 @@ type StateView struct {
 
 // StateCounts is a census of the map.
 type StateCounts struct {
-	PropertiesTotal    int `json:"properties_total"`
-	PropertiesActive   int `json:"properties_active"`
-	PropertiesStale    int `json:"properties_stale"`
-	PropertiesRetired  int `json:"properties_retired"`
-	Observed           int `json:"observed"`
-	Derived            int `json:"derived"`
-	RelationshipsTotal int `json:"relationships_total"`
-	RelationshipsLive  int `json:"relationships_live"`
-	Seeded             int `json:"seeded"`
-	Learned            int `json:"learned"`
-	Asserted           int `json:"asserted"`
-	Discovered         int `json:"discovered"`
-	Intervened         int `json:"intervened"`
-	Unobserved         int `json:"properties_unobserved"`
+	PropertiesTotal  int `json:"properties_total"`
+	PropertiesActive int `json:"properties_active"`
+	PropertiesStale  int `json:"properties_stale"`
+	// PropertiesUnobservable counts properties whose collector is down: silent for
+	// a known cause, neither stale nor retired.
+	PropertiesUnobservable int `json:"properties_unobservable"`
+	PropertiesRetired      int `json:"properties_retired"`
+	Observed               int `json:"observed"`
+	Derived                int `json:"derived"`
+	RelationshipsTotal     int `json:"relationships_total"`
+	RelationshipsLive      int `json:"relationships_live"`
+	Seeded                 int `json:"seeded"`
+	Learned                int `json:"learned"`
+	Asserted               int `json:"asserted"`
+	Discovered             int `json:"discovered"`
+	Intervened             int `json:"intervened"`
+	Unobserved             int `json:"properties_unobserved"`
 
 	// Subjects is the number of distinct non-empty subjects across non-retired
 	// properties: how many things narrower than the node the map currently models.
@@ -107,6 +110,7 @@ func (m *Map) State(q Query) StateView {
 	if len(q.Statuses) == 0 {
 		wantStatus[Active] = true
 		wantStatus[Stale] = true
+		wantStatus[Unobservable] = true
 	} else {
 		for _, s := range q.Statuses {
 			wantStatus[s] = true
@@ -266,6 +270,8 @@ func (m *Map) censusLocked() StateCounts {
 			c.PropertiesActive++
 		case Stale:
 			c.PropertiesStale++
+		case Unobservable:
+			c.PropertiesUnobservable++
 		case Retired:
 			c.PropertiesRetired++
 		}
