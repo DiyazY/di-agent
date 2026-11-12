@@ -872,6 +872,8 @@ system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
 evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
+`pace.changed` records every change of the agent's attention with its reason, and
+every decision's `inputs.pace` says which attention level it was taken at.
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
 A collector member entering or leaving backoff or stuck records `collector.down` or
