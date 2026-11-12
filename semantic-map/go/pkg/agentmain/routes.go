@@ -579,7 +579,7 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		sample, err := sampleRequestToTypes(&req, sm)
+		sample, err := sampleRequestToTypes(&req, sm, time.Now())
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

@@ -317,7 +317,8 @@ func tuneAdjToDTO(a *types.TuneAdjustment) TuneAdjustmentDTO {
 // metric type is NOT rejected: the state model records it as a property, and the
 // handler answers 202 so the caller learns nothing summarises it. A malformed subject
 // is rejected, because it would produce a property id the HTTP surface cannot address.
-func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*types.MetricSample, error) {
+// A sample without a timestamp (0) is taken at now, the time the request arrived.
+func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator, now time.Time) (*types.MetricSample, error) {
 	if req.MetricType == "" {
 		return nil, fmt.Errorf("metric_type is required")
 	}
@@ -336,11 +337,15 @@ func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator) (*typ
 		return nil, fmt.Errorf("range %v is empty: hi must exceed lo", *req.Range)
 	}
 	_ = v
+	ts := req.TimestampUnix
+	if ts == 0 {
+		ts = now.Unix()
+	}
 	return &types.MetricSample{
 		NodeID:        req.NodeID,
 		MetricType:    types.MetricType(req.MetricType),
 		Value:         req.Value,
-		TimestampUnix: req.TimestampUnix,
+		TimestampUnix: ts,
 		EventID:       req.EventID,
 		Subject:       req.Subject,
 		Unit:          req.Unit,

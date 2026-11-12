@@ -502,6 +502,8 @@ collector uses.
  "timestamp_unix":1703208286,"event_id":"replay:idle_run1:master:system.cpu:idle:0"}
 ```
 
+`timestamp_unix` omitted or `0` is the time the request arrived.
+
 Five more fields are optional and let a producer describe what it is reporting:
 
 | Field     | Type          | Meaning                                                                 |

@@ -1089,3 +1089,24 @@ func TestIngestSample_ScopedReadingOfARoutedTypeIs202(t *testing.T) {
 		t.Errorf("202 body %v; want routed:false with a note about scoped readings", ack)
 	}
 }
+
+func TestIngestSample_WithoutTimestampIsRecordedNow(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
+		NodeID: "master", MetricType: "cpu_utilization", Value: 0.7, EventID: "ingest-no-ts",
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("POST /ingest-sample: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	p, ok := sm.State().Property("cpu_utilization")
+	if !ok {
+		t.Fatal("no property for cpu_utilization")
+	}
+	if p.LastObserved.Year() < 2025 || time.Since(p.LastObserved) > 2*time.Second {
+		t.Errorf("LastObserved = %v, want about now", p.LastObserved)
+	}
+}
