@@ -265,6 +265,14 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 		if perr := r.peers.MarkSeen(p.ID, now); perr != nil {
 			log.Printf("reasoner.RecommendPeer: MarkSeen failed: %v", perr)
 		}
+		// A re-probe answers whether the peer is back, not whether it is trusted
+		// enough: one that is still under the floor after its reward is not ranked.
+		if p.Trust < r.minTrustScore {
+			if d, gerr := r.peers.Get(p.ID); gerr != nil || d.Trust < r.minTrustScore {
+				skippedBelowTrust++
+				continue
+			}
+		}
 		savings := myCost.ResourceCost - peerCost.ResourceCost
 		weighted := savings * p.Trust
 		if savings <= 0 {

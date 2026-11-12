@@ -1540,7 +1540,7 @@ For every call, the reasoner:
 4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
 5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
 
-Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, and recommended only once its reward lifts it back to the floor; one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
 
 ### Demo scenario
 

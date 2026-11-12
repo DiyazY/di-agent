@@ -40,7 +40,18 @@ func newTrustFixture(t *testing.T) *trustFixture {
 	f.reg = peers.NewRegistry()
 	f.d, _ = f.reg.Add(srv.URL, "")
 	r := minimal.NewRuleEngineReasoner(mustSpec(), 0.5, f.reg, peers.NewClient(time.Second))
-	r.AttachState(stateFor(t))
+	// A loaded node, so a peer at cost 0.01 saves something and can be recommended.
+	state := stateFor(t)
+	spec := mustSpec()
+	for _, rt := range spec.MetricRouting {
+		if rt.ConstructID == spec.CostModel.ResourceConstruct {
+			if err := state.Observe(rt.MetricType, 0.9, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	r.AttachState(state)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	f.now = &now
 	r.SetClock(func() time.Time { return *f.now })
@@ -78,7 +89,9 @@ func TestAPenalisedPeerIsReprobedAfterTenMinutes(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	*f.now = f.now.Add(10 * time.Minute)
-	_ = f.ask()
+	if err := f.ask(); err != nil {
+		t.Fatalf("a re-probed peer back at the floor was not recommended: %v", err)
+	}
 	if f.hits.Load() != 2 {
 		t.Fatalf("hits %d, want 2 after ten minutes", f.hits.Load())
 	}
@@ -145,5 +158,28 @@ func TestAnOperatorFloorOverAnAgentPenaltyIsNotReprobed(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "1 peers below trust floor") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAReprobedPeerStillBelowTheFloorIsNotRecommended(t *testing.T) {
+	f := newTrustFixture(t)
+	f.fail.Store(true)
+	for i := 0; i < 4; i++ { // 0.50 → 0.30, one penalty per retry wait
+		_ = f.ask()
+		*f.now = f.now.Add(10 * time.Minute)
+	}
+	if d := f.peer(t); !near(d.Trust, 0.30) {
+		t.Fatalf("precondition: trust %v, want 0.30", d.Trust)
+	}
+	f.fail.Store(false)
+	err := f.ask()
+	if f.hits.Load() != 5 {
+		t.Fatalf("hits %d, want 5: the stamp expired, so it is re-probed", f.hits.Load())
+	}
+	if d := f.peer(t); !near(d.Trust, 0.35) {
+		t.Errorf("trust %v after a successful re-probe, want 0.35", d.Trust)
+	}
+	if !errors.Is(err, contracts.ErrInsufficientTrust) || !strings.Contains(err.Error(), "1 peers below trust floor") {
+		t.Fatalf("a peer at 0.35 under a 0.5 floor was recommended or misreported: err = %v", err)
 	}
 }
