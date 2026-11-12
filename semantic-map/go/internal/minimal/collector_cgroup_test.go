@@ -1211,3 +1211,123 @@ func TestSharesAreOfTheMachinesCPUsNotTheAgents(t *testing.T) {
 		t.Fatalf("numCPU %v; want the machine's 12 from /proc/stat", c.numCPU)
 	}
 }
+
+func writeSelfCgroup(t *testing.T, procRoot, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(procRoot, "self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(procRoot, "self", "cgroup"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func collectTwice(t *testing.T, c *CgroupCollector, bump func()) []*types.MetricSample {
+	t.Helper()
+	if _, err := c.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	bump()
+	time.Sleep(20 * time.Millisecond)
+	s, err := c.Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestSelfIsASubjectWithTheSelfLabel(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	self := filepath.Join(root, "system.slice", "di-agent.service")
+	writeCgroup(t, self, 1_000_000, 0, 0, "50000000")
+	writeSelfCgroup(t, procRoot, "0::/system.slice/di-agent.service\n")
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot, UnitGlobs: []string{"di-agent.service"}})
+	c.numCPU = 4
+	got := bySubject(collectTwice(t, c, func() { advance(t, self, 1_040_000, 0, 0) }))
+	s := got["unit:di-agent"]
+	if s[types.CPUUtilization] == nil || s[types.MemoryUtilization] == nil {
+		t.Fatalf("unit:di-agent lacks cpu/memory: %v", s)
+	}
+	l := s[types.CPUUtilization].Labels
+	if l["self"] != "true" || l["unit"] != "di-agent.service" || l["kind"] != "unit" {
+		t.Errorf("labels = %v", l)
+	}
+	if got["unit:di-agent.service"] != nil {
+		t.Error("the self directory must not also be unit:di-agent.service")
+	}
+	if got[""][types.CPUUtilization] == nil {
+		t.Error("node samples missing")
+	}
+}
+
+func TestSelfAsAPodKeepsThePodAndSkipsItsOwnContainerPart(t *testing.T) {
+	root, podA, _, _, procRoot := fakeTree(t)
+	rel, _ := filepath.Rel(root, filepath.Join(podA, "cri-containerd-abc.scope"))
+	writeSelfCgroup(t, procRoot, "0::/"+filepath.ToSlash(rel)+"\n")
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MaxSubjects: 256, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c.numCPU = 4
+	got := bySubject(collectTwice(t, c, func() { advance(t, podA, 1_040_000, 110, 15) }))
+	if got["pod:"+testUID] == nil || got["unit:di-agent"] == nil {
+		t.Fatalf("want pod and unit:di-agent, got %v", got)
+	}
+	for sub := range got {
+		if strings.HasPrefix(sub, "container:") {
+			t.Errorf("self container part must not be emitted: %s", sub)
+		}
+	}
+}
+
+func TestSelfCgroupPicksTheUnifiedLineOnAHybridHierarchy(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	self := filepath.Join(root, "system.slice", "di-agent.service")
+	writeCgroup(t, self, 1_000_000, 0, 0, "50000000")
+	writeSelfCgroup(t, procRoot, "12:cpu,cpuacct:/user.slice\n0::/system.slice/di-agent.service\n")
+	c := NewCgroupCollectorWithOptions("n1", root, CgroupOptions{Subjects: true, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	if bySubject(collectTwice(t, c, func() {}))["unit:di-agent"] == nil {
+		t.Error("unit:di-agent absent on a hybrid file")
+	}
+
+	root2, _, _, _, procRoot2 := fakeTree(t)
+	writeSelfCgroup(t, procRoot2, "12:cpu,cpuacct:/user.slice\n")
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MemTotalBytes: 4 << 30, ProcRoot: procRoot2})
+	c2 := NewCgroupCollectorWithOptions("n1", root2, opts)
+	if bySubject(collectTwice(t, c2, func() {}))["unit:di-agent"] != nil {
+		t.Error("unit:di-agent present without a 0:: line")
+	}
+	n := 0
+	for _, l := range *lines {
+		if strings.Contains(l, "self/cgroup") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("want one self/cgroup log line, got %d: %v", n, *lines)
+	}
+}
+
+func TestSelfPathMissingUnderRootIsLoggedOnceAndSkipped(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	writeSelfCgroup(t, procRoot, "0::/system.slice/nothere.service\n")
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	var last []*types.MetricSample
+	for i := 0; i < 3; i++ {
+		last, _ = c.Collect()
+	}
+	if bySubject(last)["unit:di-agent"] != nil {
+		t.Error("missing self dir must not be collected")
+	}
+	if len(*lines) != 1 {
+		t.Errorf("want one log line, got %v", *lines)
+	}
+}
+
+func TestNoSelfCgroupFileIsSilent(t *testing.T) {
+	root, _, _, _, procRoot := fakeTree(t)
+	opts, lines := captureLogs(CgroupOptions{Subjects: true, MemTotalBytes: 4 << 30, ProcRoot: procRoot})
+	c := NewCgroupCollectorWithOptions("n1", root, opts)
+	got := bySubject(collectTwice(t, c, func() {}))
+	if got["unit:di-agent"] != nil || len(*lines) != 0 {
+		t.Errorf("want silent absence, got %v lines=%v", got["unit:di-agent"], *lines)
+	}
+}

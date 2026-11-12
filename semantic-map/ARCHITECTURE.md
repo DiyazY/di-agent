@@ -692,7 +692,7 @@ Each `MetricSample` carries:
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
 | `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
 | `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Declared where the quantity has one (a share, a percentage), absent for a rate or a count; the same on every sample of a type. Without one the map assumes [0,1] and says so |
-| `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
+| `source`         | `str`        | Set by the Supervisor to the member name (`http` for `/ingest-sample`); a producer's own value is overwritten |
 | `chart`          | `str`        | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line); optional. Discovery groups a chart's series that stay perfectly correlated (§6) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
@@ -830,9 +830,23 @@ the machine as it was when it was written.
 journals the admission, so the map follows a system that changes rather than a schema
 someone wrote down. Silence marks a property stale and can retire it, because a model
 that keeps reporting a departed metric's last value asserts what it cannot support.
+A property whose collector is down (backoff or stuck) is `unobservable`, not stale,
+and is never retired while the collector stays down: silence with a known cause is not
+evidence of departure, and retiring on it would cascade away every relationship the
+outage touched. The Supervisor stamps each admitted sample with its member's name, the
+loop tells the map which members are down after each tick, and a property stays
+unobservable until its next observation; once the member is back its silence counts
+from the return, not from before the outage. An HTTP producer is stamped `http`, so it
+cannot name itself after a member.
 Retiring a property cascades to the relationships referencing it, since an edge to
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
-stay reconstructible.
+stay reconstructible. It is soft for a day: an observed property retired for 24 hours
+(`forgetAfter`) is forgotten by the sweep, which deletes it, its retired relationships
+and the per-pair state keyed by them, and leaves a tombstone (id and `RetiredAt`) for
+another day, so a decision that read it still resolves to "retired" (`GET
+/state/properties/{id}` answers 410) while the map and snapshot stop growing with pod
+churn. Derived properties are never forgotten; a re-observation after forgetting is a
+new admission.
 
 `Record` refuses a reading older than the property's last reading, judged on the agent's monotonic clock (the anchor silence runs on, so a wall-clock step cannot make every correct reading look old; a property restored from a snapshot and not yet seen by this process accepts), or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record; `RecordAccepted` reports the refusal so ingestion keeps the reading from the proposer too. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup. So "older" means by a whole second, which also absorbs the two clocks being read one after the other; such a reading does not move the silence anchor back.
 
@@ -860,6 +874,16 @@ evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
+A collector member entering or leaving backoff or stuck records `collector.down` or
+`collector.up`, once per transition, with the member as target.
+The sweep deleting a property retired for 24 hours records `property.forgotten` (target
+the id; detail `retired_at`, the `relationships` removed, and `kept` for any live edge
+left in place).
+Save keeps one previous generation (`<persist.file>.prev`) and Load falls back to it
+when the current file is absent or unreadable; when neither is usable the map starts
+cold and its first event is `restore.failed` (target the path, detail `error` and
+`prev_error`), so a cold start is visible in the journal rather than a crash loop.
+A version or owner mismatch is still refused outright, with no fallback.
 The map's own changes are `property.*` and `relationship.*` events:
 `relationship.declared`, `relationship.asserted`, `relationship.intervention`,
 `relationship.retired` (with a `reason`, `sign-contradicted` when the agent retires
@@ -1182,7 +1206,7 @@ association's strength.
 
 | Plugin              | Source                           | Profile                 | Status  | Available metrics                                                    |
 | ------------------- | -------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------- |
-| `CgroupCollector` — built-in `type: cgroup` | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; when runtime requests are known, emits node memory admission headroom from `MemAvailable` after reserving each pod's unused request; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, memory\_admission\_headroom\_ratio, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
+| `CgroupCollector` — built-in `type: cgroup` | `/sys/fs/cgroup/`                | `edge-minimal`          | ✅ done — `internal/minimal/collector_cgroup.go`. Reads the root and walks pod cgroups (systemd and cgroupfs drivers) and allowlisted units as subjects; a pod's subject is `pod:<uid>`, stable and unique, and the pod is labelled `namespace` and `pod` from the kubelet's log directory (`<namespace>_<name>_<uid>` under the cgroup entry's `config.pod_logs`), which needs no API access — the console shows the name, the map keeps the UID, so a recreated pod of the same name is a new subject; declares CPU and memory as `fraction` `[0,1]` of the node, the unit the domain spec declares for those routed properties (`cpu_throttle_ratio` as `share-of-periods`); CPU, I/O and memory pressure from `cpu.pressure`, `io.pressure` and `memory.pressure`, per node and per subject; CPU steal from `/proc/stat`, node only; subject memory against `MemTotal`, none when that is unknown, the node's own from `/proc/meminfo` because a v2 root has no memory files; when runtime requests are known, emits node memory admission headroom from `MemAvailable` after reserving each pod's unused request; the agent's own cgroup, read from `/proc/self/cgroup` (the `0::` line) and resolved under `config.root`, is always the subject `unit:di-agent` (label `self: "true"`), outside `config.max_subjects` and `config.subjects`, never listed in `config.units`, and never counted twice: the directory equal to it is skipped by the walk and as a container part, so a pod running the agent keeps its `pod:<uid>` and a configured `di-agent.service` yields no second subject; an unreadable or `0::`-less file, the root itself, or a path absent under the root is logged once and self is not collected; bounded by `config.max_subjects`; silence, not events, marks a departed subject; a pod with more than one container named in the kubelet's `/var/log/containers` links is broken into `container:<uid>.<name>` subjects labelled with the pod as `parent` (a single-container pod is its container, and gets no part that would only repeat it; the sandbox has no link and is no container); unit names outside the subject charset are sanitised with a short hash suffix (the `unit` label keeps the true name) and a malformed `config.units` pattern is refused at startup. | cpu\_utilization, memory\_utilization, memory\_admission\_headroom\_ratio, cpu\_throttle\_ratio, cpu\_pressure\_ratio, io\_pressure\_ratio, memory\_pressure\_ratio, cpu\_steal\_ratio |
 | `ApplicationPush`   | `POST /ingest-sample` from the workload itself via `pkg/ingest/client` | `edge-minimal` | ✅ done — `pkg/ingest/client/client.go`. The wire face; same subject as the cgroup walk when the pod pushes under `pod:<uid>`. `Push` refuses a malformed subject or metric type, an empty unit or an empty range before sending, and returns an `Ack` saying whether a construct summarises the reading (204) or it was recorded as a property nothing summarises (202, with the agent's note). | any `MetricType` the workload declares |
 | `ScriptedCollector` | programmable patterns (in-process) | demo / scenarios / replay | ✅ done — `internal/scripted/collector.go`     | any MetricType the patterns declare (Constant / Ramp / Step / Sine / Burst / Noisy) |
 | `SystemScript` — built-in `type: script` | scenario file (in-process)         | demo / scenarios / replay | ✅ done — `internal/scripted/system.go`. A scenario-driven synthetic system with known ground truth — subjects with schedules and a coupled node model; the runner in `internal/minimal/tests/scenario_files_test.go` scores lifecycle, discovery, counterfactual and replay assertions against it; scenario files live in `scenarios/`. | any MetricType the scenario declares (subjects and node metrics) |
@@ -1518,7 +1542,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/confirm`        | optional `ConfirmRequest{from}`; required for an undirected candidate  | `204 No Content`; `400` when the orientation is missing or wrong | Promote a proposer candidate: a Discovered relationship between properties, or a validated proposition between constructs |
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
-| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `source`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 

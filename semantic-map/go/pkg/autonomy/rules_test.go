@@ -154,8 +154,8 @@ func TestPersistentAssociationSurvivesRestartWithoutEnteringEstimates(t *testing
 		t.Fatal(err)
 	}
 	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
-	if ok, err := state.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := state.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	m, p = build(state)
 	cs, err := m.PendingCandidates()
@@ -198,8 +198,8 @@ func TestPersistentAssociationSurvivesRestartWithoutEnteringEstimates(t *testing
 		t.Fatal(err)
 	}
 	state = statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
-	if ok, err := state.Load(path); err != nil || !ok {
-		t.Fatalf("load confirmed association: %v %v", ok, err)
+	if r, err := state.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load confirmed association: %v %v", r.Loaded, err)
 	}
 	m, p = build(state)
 	if cs, err := m.PendingCandidates(); err != nil || len(cs) != 0 || !state.Associated(from, to, 1) {

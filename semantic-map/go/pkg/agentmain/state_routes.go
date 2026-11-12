@@ -65,7 +65,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 			return
 		}
 		q.Kinds = kinds
-		statuses, err := enumParam(r, "status", statemap.Active, statemap.Stale, statemap.Retired)
+		statuses, err := enumParam(r, "status", statemap.Active, statemap.Stale, statemap.Unobservable, statemap.Retired)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -99,6 +99,14 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 	// terminal without a client to render JSON.
 	mux.HandleFunc("GET /state/properties/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		// A property the sweep forgot answers 410, not 404: it existed, and a
+		// decision that read it still names it.
+		if at, gone := sm.Forgotten(id); gone {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGone)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "retired_at": at, "forgotten": true})
+			return
+		}
 		if strings.Contains(r.Header.Get("Accept"), "text/plain") {
 			out, err := sm.Explain(id)
 			if err != nil {

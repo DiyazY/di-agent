@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -770,7 +771,8 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 	}
 
 	m2, _ := newTestMap(t, Config{ConvergenceObservations: 20, Learn: true})
-	loaded, err := m2.Load(path)
+	r, err := m2.Load(path)
+	loaded := r.Loaded
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +817,8 @@ func TestLoadRefusesAmbiguity(t *testing.T) {
 	dir := t.TempDir()
 
 	m, _ := newTestMap(t, Config{})
-	loaded, err := m.Load(dir + "/absent.json")
+	r, err := m.Load(dir + "/absent.json")
+	loaded := r.Loaded
 	if err != nil || loaded {
 		t.Errorf("a missing snapshot should be a quiet first start; got loaded=%v err=%v", loaded, err)
 	}
@@ -875,7 +878,8 @@ func TestSaveIsAtomicUnderConcurrentWriters(t *testing.T) {
 
 	// The destination is a complete snapshot, not a half-written one.
 	fresh, _ := newTestMap(t, Config{Owner: "node-x"})
-	loaded, err := fresh.Load(path)
+	r, err := fresh.Load(path)
+	loaded := r.Loaded
 	if err != nil || !loaded {
 		t.Fatalf("after concurrent saves the snapshot did not load cleanly: loaded=%v err=%v", loaded, err)
 	}
@@ -1527,8 +1531,8 @@ func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
 	}
 
 	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("Load = %v, %v; want a restored snapshot", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("Load = %v, %v; want a restored snapshot", r.Loaded, err)
 	}
 	for _, id := range []string{"a", "b@pod:1"} {
 		if p, _ := restored.Property(id); p.RangeDeclared {
@@ -1829,7 +1833,7 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	d := b.Commit(nil)
 	var found bool
 	for _, cv := range d.Caveats {
-		if strings.Contains(cv, "stale endpoint src") {
+		if strings.Contains(cv, "has an endpoint src that is stale") {
 			found = true
 		}
 	}
@@ -1846,7 +1850,7 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	d = b.Commit(nil)
 	var stale []string
 	for _, cv := range d.Caveats {
-		if strings.Contains(cv, "stale endpoint") {
+		if strings.Contains(cv, "that is stale") {
 			stale = append(stale, cv)
 		}
 	}
@@ -1856,7 +1860,7 @@ func TestDecisionCaveatsAStaleEndpoint(t *testing.T) {
 	var named int
 	for _, end := range []string{"src", "dst"} {
 		for _, cv := range stale {
-			if strings.HasSuffix(cv, "stale endpoint "+end) {
+			if strings.Contains(cv, "has an endpoint "+end+" that is stale") {
 				named++
 			}
 		}
@@ -2438,8 +2442,8 @@ func restoredMap(t *testing.T) (*Map, *clock) {
 	b, cB := newTestMap(t, cfg)
 	cB.t = cA.t.Add(72 * time.Hour)
 	cB.m = time.Second
-	if ok, err := b.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := b.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	return b, cB
 }
@@ -2871,8 +2875,8 @@ func TestRegimeSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, _ := newTestMap(t, Config{Learn: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	after, _ := restored.Relationship(id)
 	if !after.Regime || !after.RegimeSince.Equal(before.RegimeSince) {
@@ -2967,5 +2971,500 @@ func TestRegimeIsNotUpdatedOnARetiredRelationship(t *testing.T) {
 		if e.Seq > since && e.Kind == EventRelationshipRegime {
 			t.Fatalf("regime event for a retired relationship: %+v", e)
 		}
+	}
+}
+
+// ── A down source makes its properties unobservable, not departed ─────────────
+
+func recordFrom(t *testing.T, m *Map, id string, v float64, at time.Time, source string) {
+	t.Helper()
+	o := Observation{ID: id, Value: v, At: at, Source: source}
+	if i := strings.Index(id, "@"); i >= 0 {
+		o.Subject = id[i+1:]
+	}
+	if err := m.Record(o); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func statusOfProp(t *testing.T, m *Map, id string) Status {
+	t.Helper()
+	p, ok := m.Property(id)
+	if !ok {
+		t.Fatalf("property %s missing", id)
+	}
+	return p.Status
+}
+
+// outageMap is a map with cpu@pod:a and cpu from "netdata" and a relationship
+// between them.
+func outageMap(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", 0.5, c.now(), "netdata")
+	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	return m, c
+}
+
+func TestSourceDownMakesPropertiesUnobservableNotRetired(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true)
+	c.advance(2 * 2 * time.Minute)
+	m.Sweep()
+	_, retired := m.Sweep()
+	for _, id := range []string{"cpu@pod:a", "cpu"} {
+		if s := statusOfProp(t, m, id); s != Unobservable {
+			t.Errorf("%s is %s; want unobservable", id, s)
+		}
+	}
+	if len(retired) != 0 {
+		t.Errorf("retired %v while the source was down", retired)
+	}
+	rels := m.State(Query{}).Relationships
+	if len(rels) != 1 || rels[0].Status != Active {
+		t.Errorf("relationships %+v; want the one still active", rels)
+	}
+	cs := m.Census()
+	if cs.PropertiesUnobservable != 2 || cs.PropertiesRetired != 0 {
+		t.Errorf("census %+v; want 2 unobservable, 0 retired", cs)
+	}
+}
+
+func TestRecoveredSourceLeavesPropertiesUnobservableUntilObserved(t *testing.T) {
+	m, c := outageMap(t)
+	m.SetSourceDown("netdata", true)
+	c.advance(2 * 2 * time.Minute)
+	m.Sweep()
+
+	m.SetSourceDown("netdata", false)
+	if _, retired := m.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v at recovery; silence counts from the recovery", retired)
+	}
+	if s := statusOfProp(t, m, "cpu@pod:a"); s != Unobservable {
+		t.Fatalf("cpu@pod:a is %s; want unobservable until observed", s)
+	}
+
+	// cpu is observed again within the window; cpu@pod:a is not.
+	c.advance(time.Minute)
+	recordFrom(t, m, "cpu", 0.6, c.now(), "netdata")
+	if p, _ := m.Property("cpu"); p.Status != Active || p.NObservations != 2 {
+		t.Fatalf("cpu %s with %d observations; want active, 2", p.Status, p.NObservations)
+	}
+	c.advance(time.Minute + time.Second)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "cpu@pod:a" {
+		t.Errorf("retired %v; want only cpu@pod:a, silent RetireAfter since recovery", retired)
+	}
+}
+
+func TestSetSourceDownJournalsEachTransitionOnce(t *testing.T) {
+	m, _ := newTestMap(t, Config{AdmitUnknown: true})
+	for _, down := range []bool{true, true, true, false, false, true} {
+		m.SetSourceDown("x", down)
+	}
+	var got []EventKind
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind != EventCollectorDown && e.Kind != EventCollectorUp {
+			continue
+		}
+		got = append(got, e.Kind)
+		if e.Target != "x" || e.Detail["member"] != "x" || e.Actor != "collector" {
+			t.Errorf("event %+v; want target x, member x, actor collector", e)
+		}
+	}
+	want := []EventKind{EventCollectorDown, EventCollectorUp, EventCollectorDown}
+	if !slices.Equal(got, want) {
+		t.Errorf("events %v; want %v", got, want)
+	}
+}
+
+func TestSetSourceDownOnAnUnknownSourceIsRecordedAndHarmless(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	m.SetSourceDown("ghost", false)
+	if n := len(m.Journal().Events(0, 0)); n != 0 {
+		t.Fatalf("%d events for a source that was never down", n)
+	}
+	m.SetSourceDown("ghost", true)
+	if n := len(m.Journal().Events(0, 0)); n != 1 {
+		t.Fatalf("%d events; want one collector.down", n)
+	}
+	recordFrom(t, m, "late", 1, c.now(), "ghost")
+	m.Sweep()
+	if s := statusOfProp(t, m, "late"); s != Unobservable {
+		t.Errorf("late is %s; want unobservable", s)
+	}
+}
+
+func TestOwnerDownMakesTheTypeUnobservableNotTheOtherMember(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
+	m.SetSourceDown("cgroup", true)
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu"); s != Active {
+		t.Fatalf("cpu is %s after another member went down; want active", s)
+	}
+	m.SetSourceDown("netdata", true)
+	m.Sweep()
+	if s := statusOfProp(t, m, "cpu"); s != Unobservable {
+		t.Errorf("cpu is %s; want unobservable", s)
+	}
+}
+
+func TestRecordUpdatesSourceOnEveryObservation(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	recordFrom(t, m, "cpu", 0.5, c.now(), "a")
+	c.advance(time.Second)
+	recordFrom(t, m, "cpu", 0.5, c.now(), "b")
+	if p, _ := m.Property("cpu"); p.Source != "b" {
+		t.Errorf("source %q; want b", p.Source)
+	}
+}
+
+func TestStateDefaultViewIncludesUnobservable(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	recordFrom(t, m, "cpu", 0.5, c.now(), "netdata")
+	m.SetSourceDown("netdata", true)
+	m.Sweep()
+	if v := m.State(Query{}); len(v.Properties) != 1 || v.Properties[0].Status != Unobservable {
+		t.Errorf("default view %+v; want the unobservable property", v.Properties)
+	}
+	recordFrom(t, m, "mem", 0.5, c.now(), "other")
+	if v := m.State(Query{Statuses: []Status{Unobservable}}); len(v.Properties) != 1 || v.Properties[0].ID != "cpu" {
+		t.Errorf("unobservable view %+v; want only cpu", v.Properties)
+	}
+}
+
+func TestDecisionCaveatsAnUnobservableEndpoint(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu@pod:a", .5, c.now(), "netdata")
+	recordFrom(t, m, "cpu", .5, c.now(), "other")
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	m.SetSourceDown("netdata", true)
+	m.Sweep()
+	b := m.Decide("d1", "estimate", "test")
+	b.RelationshipsInto("cpu")
+	d := b.Commit(nil)
+	want := "relationship cpu@pod:a->cpu has an endpoint cpu@pod:a that is unobservable"
+	if !slices.Contains(d.Caveats, want) {
+		t.Errorf("caveats %v; want %q", d.Caveats, want)
+	}
+}
+
+func TestDecisionCaveatsAnUnobservableProperty(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 10 * time.Second, AdmitUnknown: true})
+	recordFrom(t, m, "cpu", .5, c.now(), "netdata")
+	m.SetSourceDown("netdata", true)
+	m.Sweep()
+	b := m.Decide("d1", "estimate", "test")
+	if _, ok := b.Property("cpu"); !ok {
+		t.Fatal("property missing")
+	}
+	d := b.Commit(nil)
+	var found bool
+	for _, cv := range d.Caveats {
+		if strings.HasPrefix(cv, "property cpu is unobservable: its collector is down, last observed ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("caveats %v; want one naming the unobservable property", d.Caveats)
+	}
+}
+
+// ── Retired properties are forgotten, leaving a tombstone ─────────────────────
+
+func lastEventOf(m *Map, kind EventKind) (Event, bool) {
+	evs := m.Journal().Events(0, 0)
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind == kind {
+			return evs[i], true
+		}
+	}
+	return Event{}, false
+}
+
+func observeScoped(m *Map, id string, v float64, at time.Time) error {
+	_, subject, _ := strings.Cut(id, "@")
+	return m.Record(Observation{ID: id, Value: v, At: at, Subject: subject})
+}
+
+func forgetCfg() Config {
+	return Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true}
+}
+
+func TestRetiredPropertyIsForgottenAfterADayWithATombstone(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	p, _ := m.Property("cpu@pod:a")
+	if p.Status != Retired || !p.RetiredAt.Equal(c.now()) {
+		t.Fatalf("status %s retired_at %v, want retired now", p.Status, p.RetiredAt)
+	}
+	retiredAt := c.now()
+	before := m.Census().PropertiesTotal
+	c.advance(forgetAfter - time.Second)
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); !ok {
+		t.Fatal("forgotten before forgetAfter")
+	}
+	c.advance(2 * time.Second)
+	m.Sweep()
+	if _, ok := m.Property("cpu@pod:a"); ok {
+		t.Fatal("still present after forgetAfter")
+	}
+	at, ok := m.Forgotten("cpu@pod:a")
+	if !ok || !at.Equal(retiredAt) {
+		t.Errorf("tombstone %v %v, want %v", at, ok, retiredAt)
+	}
+	forgotEvent := false // cpu is forgotten in the same sweep, in no fixed order
+	for _, e := range m.Journal().Events(0, 0) {
+		forgotEvent = forgotEvent || (e.Kind == EventPropertyForgotten && e.Target == "cpu@pod:a")
+	}
+	if !forgotEvent {
+		t.Errorf("no property.forgotten event for the id")
+	}
+	if got := m.Census().PropertiesTotal; got != before-2 { // cpu is forgotten too, being silent
+		t.Errorf("properties_total %d, want %d", got, before-2)
+	}
+}
+
+func TestForgettingDropsTheRetiredRelationshipsToo(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = m.Observe("cpu", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	if err := m.DeclareRelationship(Relationship{From: "cpu@pod:a", To: "cpu", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	_ = m.Observe("cpu", 0.5, c.now()) // revived, so only the pod is forgotten
+	m.Sweep()
+	id := RelationshipID("cpu@pod:a", "cpu", "")
+	if _, ok := m.Relationship(id); ok {
+		t.Error("the retired relationship outlived its endpoint")
+	}
+	found := false
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyForgotten && e.Target == "cpu@pod:a" {
+			rels, _ := e.Detail["relationships"].([]string)
+			found = slices.Contains(rels, id)
+		}
+	}
+	if !found {
+		t.Error("the forgotten event does not list the relationship it removed")
+	}
+}
+
+func TestForgetFiresNoRetireHookAndReobservationIsANewAdmission(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	n := 0
+	m.SetRetireHook(func(string) { n++ })
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now().Add(time.Second))
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	if n != 1 {
+		t.Errorf("retire hook fired %d times, want 1", n)
+	}
+	if err := observeScoped(m, "cpu@pod:a", 0.4, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := m.Property("cpu@pod:a")
+	if !ok || p.Status != Active || p.NObservations != 1 {
+		t.Errorf("after re-observation: %+v ok=%v, want active with 1 observation", p, ok)
+	}
+	if _, gone := m.Forgotten("cpu@pod:a"); gone {
+		t.Error("tombstone survived re-admission")
+	}
+	e, _ := lastEventOf(m, EventPropertyAdmitted)
+	if e.Detail["after_forgotten"] != true {
+		t.Errorf("admission detail %v lacks after_forgotten", e.Detail)
+	}
+}
+
+func TestTombstoneExpiresAfterTwiceForgetAfter(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	if _, ok := m.Forgotten("cpu@pod:a"); !ok {
+		t.Fatal("no tombstone after forgetting")
+	}
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	if _, ok := m.Forgotten("cpu@pod:a"); ok {
+		t.Error("tombstone outlived twice forgetAfter")
+	}
+}
+
+func TestDerivedPropertiesAreNeverForgotten(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	if err := m.DeclareProperty(Property{ID: "RC", Kind: Derived, Members: []string{"cpu"}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.Observe("cpu", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	d, ok := m.Property("RC")
+	if !ok {
+		t.Fatal("derived property was forgotten")
+	}
+	if _, ok := m.Property("cpu"); ok {
+		t.Fatal("the member should have been forgotten")
+	}
+	if d.Confidence != 0 || !slices.Contains(d.Members, "cpu") {
+		t.Errorf("derived %+v: want confidence 0 and the member id kept", d)
+	}
+}
+
+func TestForgottenSurvivesASnapshot(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	_ = observeScoped(m, "cpu@pod:b", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	_ = observeScoped(m, "cpu@pod:c", 0.5, c.now())
+	c.advance(forgetAfter - time.Minute)
+	_ = observeScoped(m, "cpu@pod:c", 0.5, c.now())
+	m.Sweep() // a and b not yet forgotten? they are retired 1 minute short of a day
+	c.advance(2 * time.Minute)
+	_ = observeScoped(m, "cpu@pod:c", 0.5, c.now())
+	m.Sweep()
+	if _, ok := m.Forgotten("cpu@pod:a"); !ok {
+		t.Fatal("setup: a not forgotten")
+	}
+	path := filepath.Join(t.TempDir(), "s.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, forgetCfg())
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m2.Forgotten("cpu@pod:a"); !ok {
+		t.Error("tombstone lost across a restore")
+	}
+}
+
+func TestRetiredAtSurvivesASnapshot(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	want := c.now()
+	path := filepath.Join(t.TempDir(), "s.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, forgetCfg())
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m2.Property("cpu@pod:a")
+	if !p.RetiredAt.Equal(want) {
+		t.Errorf("retired_at %v, want %v", p.RetiredAt, want)
+	}
+}
+
+func TestForgettingDropsPerPairStateKeyedByTheProperty(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	_ = observeScoped(m, "cpu@pod:a", 0.5, c.now())
+	m.mu.Lock()
+	m.interventions[interventionKey("cpu@pod:a", "cpu")] = &Interventions{}
+	m.interventions[interventionKey("x", "y")] = &Interventions{}
+	m.mu.Unlock()
+	c.advance(3 * time.Minute)
+	m.Sweep()
+	c.advance(forgetAfter + time.Second)
+	m.Sweep()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.interventions[interventionKey("cpu@pod:a", "cpu")]; ok {
+		t.Error("intervention counters for a forgotten property remain")
+	}
+	if _, ok := m.interventions[interventionKey("x", "y")]; !ok {
+		t.Error("an unrelated pair's counters were dropped")
+	}
+}
+
+func TestChurnedPodsDoNotGrowTheMap(t *testing.T) {
+	m, c := newTestMap(t, forgetCfg())
+	for i := 0; i < 100; i++ {
+		n := strconv.Itoa(i)
+		_ = observeScoped(m, "cpu@pod:"+n, 0.5, c.now())
+		_ = observeScoped(m, "memory@pod:"+n, 0.5, c.now())
+	}
+	live := func() {
+		_ = m.Observe("cpu", 0.5, c.now())
+		_ = m.Observe("memory", 0.5, c.now())
+	}
+	tombstones := func() int {
+		n := 0
+		for i := 0; i < 100; i++ {
+			for _, k := range []string{"cpu@pod:", "memory@pod:"} {
+				if _, ok := m.Forgotten(k + strconv.Itoa(i)); ok {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	step := func(d time.Duration, total time.Duration) {
+		for el := time.Duration(0); el < total; el += d {
+			c.advance(d)
+			live()
+			m.Sweep()
+		}
+	}
+	step(time.Minute, 3*time.Minute)
+	step(time.Hour, forgetAfter+time.Hour)
+	if got := m.Census().PropertiesTotal; got != 2 {
+		t.Errorf("properties_total %d after the pods churned away, want 2", got)
+	}
+	if got := tombstones(); got != 200 {
+		t.Errorf("%d tombstones, want 200", got)
+	}
+	step(time.Hour, 2*forgetAfter)
+	if got := tombstones(); got != 0 {
+		t.Errorf("%d tombstones after twice forgetAfter, want 0", got)
+	}
+}
+
+func TestRestoredPropertyOfReturningSourceCountsSilenceFromReturn(t *testing.T) {
+	m1, _ := outageMap(t)
+	path := t.TempDir() + "/state.json"
+	if err := m1.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	m2.SetSourceDown("netdata", true)
+	c.advance(3 * time.Minute) // past RetireAfter and the restore grace
+	if _, retired := m2.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v while the source is down", retired)
+	}
+	m2.SetSourceDown("netdata", false)
+	if _, retired := m2.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v at return; silence counts from the return", retired)
+	}
+	c.advance(2*time.Minute + time.Second)
+	if _, retired := m2.Sweep(); len(retired) != 2 {
+		t.Errorf("retired %v; want both, RetireAfter since the return", retired)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,23 +85,183 @@ func TestASaveWaitingItsTurnSavesTheLaterState(t *testing.T) {
 	}
 }
 
-// TestSaveLeavesOnlyTheSnapshot: a saved snapshot replaces the last, and no
-// temporary file is left beside it.
-func TestSaveLeavesOnlyTheSnapshot(t *testing.T) {
-	m, _ := newTestMap(t, Config{})
+// savedTwice saves a map at two revisions to path and returns them.
+func savedTwice(t *testing.T) (path string, r1, r2 uint64) {
+	t.Helper()
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	path = filepath.Join(t.TempDir(), "state.json")
+	now := time.Now()
+	if err := m.Observe("cpu", 0.5, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	r1 = m.Revision()
+	if err := m.Observe("ram", 0.5, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	return path, r1, m.Revision()
+}
+
+func snapRevision(t *testing.T, path string) uint64 {
+	t.Helper()
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s Snapshot
+	if err := json.Unmarshal(blob, &s); err != nil {
+		t.Fatal(err)
+	}
+	return s.Revision
+}
+
+// TestSaveKeepsOnePreviousGeneration: each save moves the last one to path.prev,
+// and nothing else is left beside them.
+func TestSaveKeepsOnePreviousGeneration(t *testing.T) {
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	for i := 0; i < 2; i++ {
+	var revs []uint64
+	for _, id := range []string{"a", "b", "c"} {
+		if err := m.Observe(id, 0.5, time.Now()); err != nil {
+			t.Fatal(err)
+		}
 		if err := m.Save(path); err != nil {
 			t.Fatal(err)
 		}
+		revs = append(revs, m.Revision())
+	}
+	if got := snapRevision(t, path); got != revs[2] {
+		t.Errorf("current is revision %d; want %d", got, revs[2])
+	}
+	if got := snapRevision(t, path+".prev"); got != revs[1] {
+		t.Errorf("previous is revision %d; want %d", got, revs[1])
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "state.json" {
-		t.Fatalf("directory holds %v; want only state.json", entries)
+	if len(entries) != 2 || entries[0].Name() != "state.json" || entries[1].Name() != "state.json.prev" {
+		t.Fatalf("directory holds %v; want state.json and state.json.prev", entries)
+	}
+}
+
+func TestLoadFallsBackToPrevOnACorruptCurrent(t *testing.T) {
+	path, _, _ := savedTwice(t)
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, blob[:len(blob)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	r, err := m.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Loaded || r.From != path+".prev" || r.CurrentError == "" {
+		t.Fatalf("Restore = %+v; want loaded from .prev with a CurrentError", r)
+	}
+	found := false
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventPropertyRedeclared && e.Actor == "restore" {
+			found = true
+			if e.Detail["current_error"] == nil || e.Detail["restored_from"] != path+".prev" {
+				t.Errorf("restore detail %v lacks current_error / restored_from", e.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Error("no restore event journalled")
+	}
+}
+
+func TestLoadUsesPrevWhenCurrentIsAbsent(t *testing.T) {
+	path, _, _ := savedTwice(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	r, err := m.Load(path)
+	if err != nil || !r.Loaded || r.From != path+".prev" {
+		t.Fatalf("Restore = %+v, err %v; want loaded from .prev", r, err)
+	}
+}
+
+func TestLoadStartsColdWithRestoreFailedWhenBothAreCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	for _, p := range []string{path, path + ".prev"} {
+		if err := os.WriteFile(p, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	r, err := m.Load(path)
+	if err != nil || r.Loaded {
+		t.Fatalf("Restore = %+v, err %v; want a cold start without error", r, err)
+	}
+	if r.CurrentError == "" || r.PrevError == "" {
+		t.Errorf("Restore = %+v; want both errors named", r)
+	}
+	ev := m.Journal().Events(0, 0)
+	if len(ev) == 0 || ev[0].Kind != "restore.failed" {
+		t.Fatalf("first event %v; want restore.failed", ev)
+	}
+	if ev[0].Detail["error"] == "" || ev[0].Detail["prev_error"] == "" {
+		t.Errorf("detail %v lacks error / prev_error", ev[0].Detail)
+	}
+}
+
+func TestLoadStillRefusesAVersionMismatchWithoutFallback(t *testing.T) {
+	path, _, _ := savedTwice(t)
+	if err := os.WriteFile(path, []byte(`{"version":4}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	r, err := m.Load(path)
+	if err == nil || !errors.Is(err, ErrSnapshotRefused) || r.Loaded {
+		t.Fatalf("Restore = %+v, err %v; want a refusal", r, err)
+	}
+	if m.Census().PropertiesTotal != 0 {
+		t.Error("the previous generation was restored behind a refusal")
+	}
+}
+
+func TestLoadStillRefusesAnotherOwnerWithoutFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	far := New(Config{Owner: "node-2", AdmitUnknown: true}, NewJournal(0))
+	for i := 0; i < 2; i++ {
+		if err := far.Observe("cpu", 0.5, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := far.Save(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local := New(Config{Owner: "node-1", AdmitUnknown: true}, NewJournal(0))
+	r, err := local.Load(path)
+	if err == nil || !errors.Is(err, ErrSnapshotRefused) || r.Loaded {
+		t.Fatalf("Restore = %+v, err %v; want a refusal", r, err)
+	}
+	if local.Census().PropertiesTotal != 0 {
+		t.Error("another system's snapshot was adopted")
+	}
+}
+
+func TestFirstStartWithNeitherFileIsSilent(t *testing.T) {
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	r, err := m.Load(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil || r.Loaded || r.CurrentError != "" {
+		t.Fatalf("Restore = %+v, err %v; want a quiet first start", r, err)
+	}
+	if ev := m.Journal().Events(0, 0); len(ev) != 0 {
+		t.Errorf("first start journalled %v", ev)
 	}
 }
 

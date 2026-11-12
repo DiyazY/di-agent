@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -28,6 +29,12 @@ import (
 // after it, across a gap of unknown length. The learned strengths and their
 // confidences survive; the raw pairs behind them do not, so the estimator resumes
 // from what it concluded rather than from what it was mid-way through concluding.
+//
+// Save keeps one previous generation, path+".prev". A snapshot that cannot be read
+// is then not the end of the model: Load falls back to the previous one, and when
+// neither is usable the agent starts cold with restore.failed as the first journal
+// event rather than crash-looping. A version or owner mismatch is still refused, with
+// no fallback — that is a deliberate refusal, not damage.
 
 // SnapshotVersion identifies the on-disk format. Other versions are refused rather
 // than guessed at: restoring a misread field would
@@ -41,8 +48,9 @@ import (
 // Version 4 added the intervention counters. Version 5 distinguishes associations
 // from directional relationships. Version 6 persists per-source intervention slopes.
 // Version 7 adds the journal's incarnation and sequence. Version 8 adds the
-// calibration record of the map's own predictions.
-const SnapshotVersion = 8
+// calibration record of the map's own predictions. Version 9 adds `retired_at` and
+// the tombstones of forgotten properties.
+const SnapshotVersion = 9
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -69,6 +77,9 @@ type Snapshot struct {
 	// Interventions are the counters by pair "from->to", saved apart from the
 	// relationships because they exist before any relationship does.
 	Interventions map[string]Interventions `json:"interventions,omitempty"`
+
+	// Forgotten is the tombstones: id to the time the property was retired.
+	Forgotten map[string]time.Time `json:"forgotten,omitempty"`
 
 	// Calibration is how the map's own predictions have fared, by kind and basis.
 	Calibration []CalibrationEntry `json:"calibration"`
@@ -111,6 +122,9 @@ func (m *Map) Snapshot() Snapshot {
 			s.Interventions = map[string]Interventions{}
 		}
 		s.Interventions[k] = *iv
+	}
+	if len(m.forgotten) > 0 {
+		s.Forgotten = maps.Clone(m.forgotten)
 	}
 	s.Calibration = m.calibrationListLocked()
 	s.Events = m.journal.Events(0, 0)
@@ -194,6 +208,11 @@ func (m *Map) Save(path string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("closing snapshot: %w", err)
 	}
+	// The previous generation is moved aside only now that the new one is fully on
+	// disk under the temp name, so a crash between the renames leaves .prev good.
+	if err := os.Rename(path, path+".prev"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("keeping the previous snapshot: %w", err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replacing snapshot: %w", err)
 	}
@@ -241,45 +260,104 @@ func CanSave(path string) error {
 	return os.Remove(name)
 }
 
-// Load restores a snapshot into an empty map.
+// Restore reports what Load did.
+type Restore struct {
+	Loaded       bool   // a snapshot was restored
+	From         string // the file it came from: path or path+".prev"
+	CurrentError string // why path was not used ("" when it was, or was absent on a cold start)
+	PrevError    string // why path+".prev" was not used, when it was tried
+}
+
+// ErrSnapshotRefused marks a snapshot that is deliberately not adopted: another
+// version, another owner, or a map that already holds state. It is never fallen back
+// from, since the previous generation would carry the same refusal or hide it.
+var ErrSnapshotRefused = errors.New("snapshot refused")
+
+// Load restores a snapshot into an empty map. It tries path, then path+".prev" (the
+// generation Save moved aside) when path is absent or unreadable. A refusal is
+// returned as an error without trying the other file. When neither file is usable
+// but at least one exists, the map starts cold with restore.failed as its first
+// journal event; when neither exists it is a first start and nothing is recorded.
 //
 // Restoring into a non-empty map is refused: merging a snapshot with a seeded model
 // would silently pick a winner for every property declared in both, and the choice
 // would be invisible. A caller wanting both should load first and seed afterwards,
 // where re-declaration rules apply and are journalled.
-func (m *Map) Load(path string) (bool, error) {
-	blob, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return false, nil // nothing saved yet: a first start, not a failure
+func (m *Map) Load(path string) (Restore, error) {
+	snap, err := readSnapshot(path)
+	from := path
+	var curErr, prevErr error
+	if err == nil {
+		err = m.restoreLocked(snap, from, "")
 	}
-	if err != nil {
-		return false, fmt.Errorf("reading snapshot: %w", err)
+	if err == nil {
+		return m.reserveIncarnation(path, from, snap, "")
 	}
+	if errors.Is(err, ErrSnapshotRefused) {
+		return Restore{}, err
+	}
+	curErr = err
 
-	var snap Snapshot
-	if err := json.Unmarshal(blob, &snap); err != nil {
-		return false, fmt.Errorf("decoding snapshot: %w", err)
+	prev := path + ".prev"
+	snap, err = readSnapshot(prev)
+	if err == nil {
+		err = m.restoreLocked(snap, prev, curErr.Error())
 	}
-	if snap.Version != SnapshotVersion {
-		return false, fmt.Errorf(
-			"snapshot is version %d, this agent writes version %d: refusing to guess at "+
-				"the difference, since a misread field would become state the agent reasons from",
-			snap.Version, SnapshotVersion)
+	if err == nil {
+		return m.reserveIncarnation(path, prev, snap, curErr.Error())
 	}
+	if errors.Is(err, ErrSnapshotRefused) {
+		return Restore{}, err
+	}
+	prevErr = err
 
-	if err := m.loadLocked(snap, path); err != nil {
-		return false, err
+	if os.IsNotExist(curErr) && os.IsNotExist(prevErr) {
+		return Restore{}, nil // nothing saved yet: a first start, not a failure
 	}
-	// The new incarnation is written at once, so a crash before the next save cannot
-	// bring this life's number back, and with it ids this life has already issued.
-	if err := m.Save(path); err != nil {
-		return false, fmt.Errorf("reserving incarnation %d: %w", snap.Incarnation+1, err)
-	}
-	return true, nil
+	m.mu.Lock()
+	m.bump(EventRestoreFailed, path, "restore", map[string]any{
+		"path":       path,
+		"error":      curErr.Error(),
+		"prev_error": prevErr.Error(),
+	}, m.now())
+	m.mu.Unlock()
+	return Restore{CurrentError: curErr.Error(), PrevError: prevErr.Error()}, nil
 }
 
-// loadLocked restores snap under the write lock.
-func (m *Map) loadLocked(snap Snapshot, path string) error {
+// reserveIncarnation writes the new incarnation at once, so a crash before the next
+// save cannot bring this life's number back, and with it ids this life has already
+// issued.
+func (m *Map) reserveIncarnation(path, from string, snap Snapshot, curErr string) (Restore, error) {
+	// After a fallback to .prev this save rotates the corrupt current into .prev; the freshly written current is the good generation.
+	if err := m.Save(path); err != nil {
+		return Restore{}, fmt.Errorf("reserving incarnation %d: %w", snap.Incarnation+1, err)
+	}
+	return Restore{Loaded: true, From: from, CurrentError: curErr}, nil
+}
+
+// readSnapshot reads, decodes and version-checks one snapshot file. A version
+// mismatch wraps ErrSnapshotRefused; a missing file satisfies os.IsNotExist.
+func readSnapshot(path string) (Snapshot, error) {
+	var snap Snapshot
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return snap, err
+	}
+	if err := json.Unmarshal(blob, &snap); err != nil {
+		return snap, fmt.Errorf("decoding snapshot %s: %w", path, err)
+	}
+	if snap.Version != SnapshotVersion {
+		return snap, fmt.Errorf(
+			"%w: snapshot %s is version %d, this agent writes version %d: refusing to guess at "+
+				"the difference, since a misread field would become state the agent reasons from",
+			ErrSnapshotRefused, path, snap.Version, SnapshotVersion)
+	}
+	return snap, nil
+}
+
+// restoreLocked restores snap under the write lock. from is the file it was read
+// from; currentError, when non-empty, says why the current file was passed over.
+func (m *Map) restoreLocked(snap Snapshot, from, currentError string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -290,16 +368,16 @@ func (m *Map) loadLocked(snap Snapshot, path string) error {
 	// copied with a config directory, an image built from a running node.
 	if snap.Owner != "" && m.owner != "" && snap.Owner != m.owner {
 		return fmt.Errorf(
-			"snapshot at %s describes %q but this agent models %q: refusing to adopt "+
+			"%w: snapshot at %s describes %q but this agent models %q: refusing to adopt "+
 				"another system's observations as this one's history",
-			path, snap.Owner, m.owner)
+			ErrSnapshotRefused, from, snap.Owner, m.owner)
 	}
 
 	if len(m.properties) > 0 || len(m.relationships) > 0 {
-		return fmt.Errorf("refusing to load a snapshot into a map that already "+
+		return fmt.Errorf("%w: refusing to load a snapshot into a map that already "+
 			"holds %d properties and %d relationships: load before seeding, so "+
 			"re-declaration rules apply and are journalled",
-			len(m.properties), len(m.relationships))
+			ErrSnapshotRefused, len(m.properties), len(m.relationships))
 	}
 
 	for i := range snap.Properties {
@@ -317,6 +395,7 @@ func (m *Map) loadLocked(snap Snapshot, path string) error {
 		iv := iv
 		m.interventions[k] = &iv
 	}
+	maps.Copy(m.forgotten, snap.Forgotten)
 	for _, e := range snap.Calibration {
 		m.calibration[CalibrationKey{e.Kind, e.Basis}] = e.Calibration
 	}
@@ -336,8 +415,8 @@ func (m *Map) loadLocked(snap Snapshot, path string) error {
 	m.latest = make(map[string]observation)
 	m.windows = make(map[string]*stats.PairWindow)
 
-	m.bump(EventPropertyRedeclared, "", "restore", map[string]any{
-		"restored_from":  path,
+	detail := map[string]any{
+		"restored_from":  from,
 		"saved_at":       snap.SavedAt,
 		"properties":     len(snap.Properties),
 		"relationships":  len(snap.Relationships),
@@ -345,7 +424,11 @@ func (m *Map) loadLocked(snap Snapshot, path string) error {
 		"incarnation":    inc,
 		"note": "pair windows are not restored; the estimator resumes from the strengths " +
 			"it had concluded, and rebuilds support from the first new pairs",
-	}, m.now())
+	}
+	if currentError != "" {
+		detail["current_error"] = currentError
+	}
+	m.bump(EventPropertyRedeclared, "", "restore", detail, m.now())
 	return nil
 }
 

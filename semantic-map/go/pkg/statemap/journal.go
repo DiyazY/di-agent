@@ -20,7 +20,12 @@ const (
 	EventPropertyStale      EventKind = "property.stale"
 	EventPropertyRetired    EventKind = "property.retired"
 	EventPropertyConflict   EventKind = "property.conflict"
-	EventHookFailed         EventKind = "hook.failed"
+
+	// EventPropertyForgotten: the sweep deleted an observed property retired for
+	// forgetAfter (Target = id; Detail retired_at, relationships removed, and kept
+	// for any live edge left in place).
+	EventPropertyForgotten EventKind = "property.forgotten"
+	EventHookFailed        EventKind = "hook.failed"
 
 	EventRelationshipDeclared EventKind = "relationship.declared"
 	EventRelationshipAsserted EventKind = "relationship.asserted"
@@ -45,11 +50,21 @@ const (
 	// adjustment from two unrelated ones that happened to be adjacent in the log.
 	EventOperatorIntent EventKind = "operator.intent"
 
+	// EventCollectorDown and EventCollectorUp record a collector member entering or
+	// leaving backoff or stuck. Target is the member; the properties it last
+	// produced are unobservable in between.
+	EventCollectorDown EventKind = "collector.down"
+	EventCollectorUp   EventKind = "collector.up"
+
 	// EventClockStepped records a sweep that found the wall clock and the process's
 	// monotonic clock disagreeing by more than the pair window: the wall clock was
 	// stepped, by NTP or an operator. Silence is measured on the monotonic clock, so
 	// nothing is retired by it; the record says why a timestamp jumped.
 	EventClockStepped EventKind = "clock.stepped"
+
+	// EventRestoreFailed: no snapshot was usable (Target = path; Detail path, error,
+	// prev_error), so the map started cold. It is the first event of that life.
+	EventRestoreFailed EventKind = "restore.failed"
 
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
@@ -556,6 +571,9 @@ func (b *DecisionBuilder) read(id string, retiredValueUsed bool) (Property, bool
 	case Stale:
 		b.caveats = append(b.caveats,
 			fmt.Sprintf("property %s is stale: last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
+	case Unobservable:
+		b.caveats = append(b.caveats,
+			fmt.Sprintf("property %s is unobservable: its collector is down, last observed %s", id, copied.LastObserved.UTC().Format(time.RFC3339)))
 	}
 	if copied.NObservations == 0 {
 		b.caveats = append(b.caveats,
@@ -577,15 +595,15 @@ func (b *DecisionBuilder) RelationshipsInto(propertyID string) []Relationship {
 	var out []Relationship
 	// Both endpoints can be stale at once, and both are the reader's business: a
 	// single slot per relationship silently kept whichever was checked last.
-	staleEnds := map[string][]string{}
+	staleEnds := map[string][]endStatus{}
 	for _, r := range b.m.relationships {
 		if r.To != propertyID || r.Status == Retired || r.Association {
 			continue
 		}
 		out = append(out, b.m.relationshipViewLocked(r))
 		for _, end := range []string{r.From, r.To} {
-			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
-				staleEnds[r.ID] = append(staleEnds[r.ID], end)
+			if p, ok := b.m.properties[end]; ok && (p.Status == Stale || p.Status == Unobservable) {
+				staleEnds[r.ID] = append(staleEnds[r.ID], endStatus{end, p.Status})
 			}
 		}
 	}
@@ -608,12 +626,12 @@ func (b *DecisionBuilder) Relationship(id string) (Relationship, bool) {
 	b.m.mu.RLock()
 	r, ok := b.m.relationships[id]
 	var out Relationship
-	var staleEnds []string
+	var staleEnds []endStatus
 	if ok {
 		out = b.m.relationshipViewLocked(r)
 		for _, end := range []string{r.From, r.To} {
-			if p, ok := b.m.properties[end]; ok && p.Status == Stale {
-				staleEnds = append(staleEnds, end)
+			if p, ok := b.m.properties[end]; ok && (p.Status == Stale || p.Status == Unobservable) {
+				staleEnds = append(staleEnds, endStatus{end, p.Status})
 			}
 		}
 	}
@@ -630,9 +648,15 @@ func (b *DecisionBuilder) Relationship(id string) (Relationship, bool) {
 	return out, true
 }
 
-func (b *DecisionBuilder) relationshipCaveats(r Relationship, staleEnds []string) {
-	for _, end := range staleEnds {
-		b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has a stale endpoint %s", r.ID, end))
+// endStatus is a relationship endpoint whose reading is not current, with why.
+type endStatus struct {
+	id     string
+	status Status
+}
+
+func (b *DecisionBuilder) relationshipCaveats(r Relationship, staleEnds []endStatus) {
+	for _, e := range staleEnds {
+		b.caveats = append(b.caveats, fmt.Sprintf("relationship %s has an endpoint %s that is %s", r.ID, e.id, e.status))
 	}
 	if r.Regime {
 		established := 0.0

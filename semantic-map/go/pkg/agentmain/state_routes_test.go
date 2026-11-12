@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -168,6 +169,34 @@ func TestUndeclaredMetricBecomesAPropertyAndIsJournalled(t *testing.T) {
 	if !found {
 		t.Error("the admission is not in the journal, so nobody can find out why the " +
 			"map contains a property they never declared")
+	}
+}
+
+// TestJournalRouteShowsRestoreFailedFirst: a map that found no usable snapshot says
+// so as the first thing its journal holds.
+func TestJournalRouteShowsRestoreFailedFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	for _, p := range []string{path, path + ".prev"} {
+		if err := os.WriteFile(p, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sm := statemap.New(statemap.Config{ConvergenceObservations: 4, AdmitUnknown: true}, statemap.NewJournal(0))
+	if r, err := sm.Load(path); err != nil || r.Loaded {
+		t.Fatalf("Load = %+v, %v; want a cold start", r, err)
+	}
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	var journal struct {
+		Events []statemap.Event `json:"events"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != 200 {
+		t.Fatalf("GET /state/journal returned %d", code)
+	}
+	if len(journal.Events) == 0 || journal.Events[0].Kind != "restore.failed" {
+		t.Fatalf("events %v; want restore.failed first", journal.Events)
 	}
 }
 
@@ -685,4 +714,70 @@ func TestEstimate_RegimeCaveatIsServed(t *testing.T) {
 		}
 	}
 	t.Fatalf("caveats %q; want the regime caveat", res.Caveats)
+}
+
+func TestStateRouteAcceptsStatusUnobservable(t *testing.T) {
+	sm, srv := stateFixture(t)
+	if err := sm.Record(statemap.Observation{ID: "q_depth", Value: 1, At: time.Now(), Source: "netdata"}); err != nil {
+		t.Fatal(err)
+	}
+	sm.SetSourceDown("netdata", true)
+	sm.Sweep()
+
+	var out struct {
+		Properties []struct{ ID string }
+		Counts     map[string]any
+	}
+	if code := getState(t, srv.URL+"/state?status=unobservable", &out); code != http.StatusOK {
+		t.Fatalf("status %d; want 200", code)
+	}
+	if n, ok := out.Counts["properties_unobservable"].(float64); !ok || n != 1 {
+		t.Errorf("counts %v; want properties_unobservable 1", out.Counts)
+	}
+	if len(out.Properties) != 1 || out.Properties[0].ID != "q_depth" {
+		t.Errorf("properties %+v; want only q_depth", out.Properties)
+	}
+	var bad map[string]any
+	if code := getState(t, srv.URL+"/state?status=bogus", &bad); code != http.StatusBadRequest {
+		t.Errorf("status %d for ?status=bogus; want 400", code)
+	}
+}
+
+func TestForgottenPropertyAnswers410(t *testing.T) {
+	sm, srv := stateFixture(t)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	mono := time.Second
+	sm.SetClock(func() time.Time { return now })
+	sm.SetMonotonic(func() time.Duration { return mono })
+	if err := sm.Record(statemap.Observation{ID: "cpu@pod:a", Value: 0.5, At: now, Subject: "pod:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.RetireProperty("cpu@pod:a", "test", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	now, mono = now.Add(25*time.Hour), mono+25*time.Hour
+	sm.Sweep()
+
+	resp, err := http.Get(srv.URL + "/state/properties/cpu@pod:a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status %d, want 410", resp.StatusCode)
+	}
+	var body struct {
+		ID        string    `json:"id"`
+		RetiredAt time.Time `json:"retired_at"`
+		Forgotten bool      `json:"forgotten"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ID != "cpu@pod:a" || !body.Forgotten || body.RetiredAt.IsZero() {
+		t.Errorf("body %+v", body)
+	}
+	if code := getState(t, srv.URL+"/state/properties/never-seen", nil); code != http.StatusNotFound {
+		t.Errorf("unknown id answered %d, want 404", code)
+	}
 }

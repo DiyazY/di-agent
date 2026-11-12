@@ -75,8 +75,8 @@ func TestAssociationsNeverBecomeCausalInfluences(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("restore: %v %v", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("restore: %v %v", r.Loaded, err)
 	}
 	r, _ = restored.Relationship(id)
 	if !r.Association {

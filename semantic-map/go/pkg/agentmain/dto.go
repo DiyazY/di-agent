@@ -93,7 +93,6 @@ type MetricSampleRequest struct {
 	Subject       string            `json:"subject,omitempty"`
 	Unit          string            `json:"unit,omitempty"`
 	Range         *[2]float64       `json:"range,omitempty"`
-	Source        string            `json:"source,omitempty"`
 	Chart         string            `json:"chart,omitempty"`
 	PartOf        string            `json:"part_of,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
@@ -352,7 +351,7 @@ func sampleRequestToTypes(req *MetricSampleRequest, v metricTypeValidator, now t
 		Subject:       req.Subject,
 		Unit:          req.Unit,
 		Range:         req.Range,
-		Source:        req.Source,
+		Source:        "http", // an HTTP producer cannot be marked down, so it cannot name itself after a member
 		Chart:         req.Chart,
 		PartOf:        req.PartOf,
 		Labels:        req.Labels,

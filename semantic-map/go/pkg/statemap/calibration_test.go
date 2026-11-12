@@ -71,17 +71,17 @@ func TestCalibrationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	m2, _ := newTestMap(t, Config{})
-	if ok, err := m2.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	if !reflect.DeepEqual(m1.Calibration(), m2.Calibration()) || m2.Calibration()[CalibrationKey{"relief.cpu.limit", "map"}].N != 2 {
 		t.Fatalf("restored %v; had %v", m2.Calibration(), m1.Calibration())
 	}
 
 	blob, _ := os.ReadFile(path)
-	old := strings.Replace(string(blob), `"version":8`, `"version":7`, 1)
+	old := strings.Replace(string(blob), `"version":9`, `"version":7`, 1)
 	if old == string(blob) {
-		t.Fatal("snapshot does not carry version 8")
+		t.Fatal("snapshot does not carry version 9")
 	}
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
 		t.Fatal(err)

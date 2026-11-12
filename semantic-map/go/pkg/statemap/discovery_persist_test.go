@@ -35,8 +35,8 @@ func TestDiscoveryCheckpointSharesAtomicStateSnapshot(t *testing.T) {
 		t.Fatalf("failed capture changed the durable snapshot: %v", err)
 	}
 	q, _ := newTestMap(t, Config{})
-	if ok, err := q.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := q.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	var checkpoint map[string]int
 	if err := json.Unmarshal(q.DiscoveryPersistence(nil), &checkpoint); err != nil || checkpoint["progress"] != 2 {
@@ -50,7 +50,7 @@ func TestVersionFourSnapshotIsRejected(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"version":4,"revision":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := m.Load(path); err == nil || ok {
-		t.Fatalf("version 4 should be rejected, got loaded=%v err=%v", ok, err)
+	if r, err := m.Load(path); err == nil || r.Loaded {
+		t.Fatalf("version 4 should be rejected, got loaded=%v err=%v", r.Loaded, err)
 	}
 }

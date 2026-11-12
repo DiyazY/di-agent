@@ -195,8 +195,8 @@ func TestScenario_ReflectiveCore(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored := statemap.New(cfg, statemap.NewJournal(0))
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	if r, _ := restored.Relationship(backId); r.Status != statemap.Retired || r.RetiredReason != statemap.ReasonSignContradicted {
 		t.Fatalf("restored %s: %v %q; want retired, sign-contradicted", backId, r.Status, r.RetiredReason)

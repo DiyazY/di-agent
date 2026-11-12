@@ -1097,3 +1097,62 @@ func establishedOf(r statemap.Relationship) float64 {
 	}
 	return *r.Established
 }
+
+// ── Scenario: an outage is not a departure ───────────────────────────────────
+
+// TestScenario_OutageIsNotDeparture: a collector goes down for longer than
+// retire_after. Silence with a known cause is not evidence the properties left, so
+// they become unobservable, the relationship between them survives, and the first
+// good tick after the source returns makes them active again.
+func TestScenario_OutageIsNotDeparture(t *testing.T) {
+	var (
+		wall = time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+		mono = time.Second
+		unit = [2]float64{0, 1}
+	)
+	step := func(d time.Duration) { wall, mono = wall.Add(d), mono+d }
+	m := statemap.New(statemap.Config{Owner: "n1", AdmitUnknown: true, Alpha: 0.5,
+		StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute}, statemap.NewJournal(0))
+	m.SetClock(func() time.Time { return wall })
+	m.SetMonotonic(func() time.Duration { return mono })
+
+	tick := func(v float64) {
+		t.Helper()
+		step(time.Second)
+		for id, subject := range map[string]string{"cpu_utilization@pod:a": "pod:a", "cpu_utilization": ""} {
+			if err := m.Record(statemap.Observation{ID: id, Value: v, At: wall, Range: &unit, Source: "netdata", Subject: subject}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	census := func(when string) statemap.StateCounts {
+		c := m.Census()
+		t.Logf("%-7s active=%d stale=%d unobservable=%d retired=%d relationships_live=%d",
+			when, c.PropertiesActive, c.PropertiesStale, c.PropertiesUnobservable, c.PropertiesRetired, c.RelationshipsLive)
+		return c
+	}
+
+	tick(0.4)
+	if err := m.DeclareRelationship(statemap.Relationship{From: "cpu_utilization@pod:a", To: "cpu_utilization", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	before := census("before")
+
+	m.SetSourceDown("netdata", true)
+	for i := 0; i < 8; i++ {
+		step(30 * time.Second)
+		m.Sweep()
+	}
+	during := census("during")
+	if during.PropertiesUnobservable != 2 || during.PropertiesRetired != 0 || during.RelationshipsLive != before.RelationshipsLive {
+		t.Fatalf("during the outage: %+v; want 2 unobservable, none retired, relationships unchanged", during)
+	}
+
+	m.SetSourceDown("netdata", false)
+	tick(0.5)
+	m.Sweep()
+	after := census("after")
+	if after.PropertiesActive != 2 || after.PropertiesUnobservable != 0 || after.RelationshipsLive != before.RelationshipsLive {
+		t.Fatalf("after recovery: %+v; want 2 active and the relationship live", after)
+	}
+}

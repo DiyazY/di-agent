@@ -626,6 +626,27 @@ func TestStalePressureTakesNoAction(t *testing.T) {
 	}
 }
 
+func TestReliefDoesNotActOnAnUnobservablePressure(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.run(50*time.Second, 0.5)
+	// The pressure's source goes down while the last reading is still recent.
+	if err := h.m.Record(statemap.Observation{ID: contention, Value: 0.5, At: h.clock(), Source: "cgroup", Range: &unit}); err != nil {
+		t.Fatal(err)
+	}
+	h.m.SetSourceDown("cgroup", true)
+	h.m.Sweep()
+	if _, _, fresh := h.l.pressure(h.clock()); fresh {
+		t.Fatal("an unobservable pressure reads as fresh")
+	}
+	for i := 0; i < 20; i++ {
+		h.advance(tick)
+		h.l.Tick(h.ctx)
+	}
+	if n := len(h.ledger.All()); n != 0 || len(h.decisions("act")) != 0 {
+		t.Fatalf("applied %d changes on an unobservable pressure", n)
+	}
+}
+
 func TestAManualRevertCoolsDown(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
 	h.act("pod:a")

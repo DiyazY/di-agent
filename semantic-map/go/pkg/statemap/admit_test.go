@@ -700,3 +700,52 @@ func TestAdmitIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
 		t.Errorf("%d requests got the explicit id; want exactly one", won)
 	}
 }
+
+func TestAdmitDeclinesNamingAnUnobservableReading(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true, StaleAfter: time.Minute})
+	if err := m.RecordFacts("test", []Fact{NumberFact("cpu_cores", 4, "cores"), NumberFact("memory_total", 8<<30, "bytes")}); err != nil {
+		t.Fatal(err)
+	}
+	for id, v := range map[string]float64{
+		"cpu_utilization": 0.4, "memory_utilization": 0.5,
+		"cpu_contention_ratio": 0.05, "memory_contention_ratio": 0.01,
+	} {
+		if err := m.Record(Observation{ID: id, Value: v, At: c.now(), Source: "cgroup"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.SetSourceDown("cgroup", true)
+	m.Sweep()
+	res := m.Admit(admitReq(1, 1<<30))
+	if res.Accepted || !strings.Contains(res.Reason, "unobservable") {
+		t.Errorf("%+v; want declined naming an unobservable reading", res)
+	}
+}
+
+// Node utilization from one source, contention from another: only the second goes
+// down. Its pod reporters are unobservable too, so the node's contention is unknown
+// and Admit must not take it as calm.
+func TestAdmitDeclinesWhenOnlyTheContentionSourceIsDown(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true, StaleAfter: time.Minute})
+	if err := m.RecordFacts("test", []Fact{NumberFact("cpu_cores", 4, "cores"), NumberFact("memory_total", 8<<30, "bytes")}); err != nil {
+		t.Fatal(err)
+	}
+	for id, v := range map[string]float64{
+		"cpu_utilization": 0.4, "memory_utilization": 0.5,
+		"cpu_contention_ratio": 0.05, "memory_contention_ratio": 0.01,
+	} {
+		src := "A"
+		if strings.HasSuffix(id, "contention_ratio") {
+			src = "B"
+		}
+		if err := m.Record(Observation{ID: id, Value: v, At: c.now(), Source: src}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.SetSourceDown("B", true)
+	m.Sweep()
+	res := m.Admit(admitReq(1, 1<<30))
+	if res.Accepted || !strings.Contains(res.Reason, "unobservable") {
+		t.Errorf("%+v; want declined naming an unobservable contention reading", res)
+	}
+}

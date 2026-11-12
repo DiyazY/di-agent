@@ -66,8 +66,16 @@ const (
 // Retirement is a soft delete throughout. A retired entry keeps its history and
 // stays visible to a query that asks for it, because "this property used to exist
 // and stopped" is information an operator needs, and because a decision taken
-// before the retirement must remain reconstructible.
+// before the retirement must remain reconstructible. For an observed property the
+// softness lasts forgetAfter: then it is forgotten, removed from the map and the
+// snapshot, and only a tombstone (its id and RetiredAt) remains for a day more, so
+// a decision that read it still resolves to "retired" and pod churn cannot grow the
+// map without bound.
 type Status string
+
+// forgetAfter is how long a retired observed property stays in the map before the
+// sweep deletes it, leaving a tombstone for as long again.
+const forgetAfter = 24 * time.Hour
 
 const (
 	// Active: observed within its staleness window, or a relationship whose
@@ -78,6 +86,12 @@ const (
 	// value is retained and marked, because a stale reading is evidence about the
 	// past and silence is not evidence about the present.
 	Stale Status = "stale"
+
+	// Unobservable: the collector that produced it is down (backoff or stuck), so
+	// its silence has a known cause and is not evidence the property left. Not
+	// fresh, not active, not retired: the sweep never retires it while its source
+	// is down, and its next observation makes it active.
+	Unobservable Status = "unobservable"
 
 	// Retired: withdrawn from reasoning. Set by an operator, or automatically for a
 	// property whose silence has outlasted the retirement window.
@@ -149,6 +163,10 @@ type Property struct {
 	FirstObserved time.Time `json:"first_observed,omitzero"`
 	LastObserved  time.Time `json:"last_observed,omitzero"`
 	RetiredReason string    `json:"retired_reason,omitempty"`
+
+	// RetiredAt is when retireLocked withdrew the property (wall time), cleared on
+	// every revive. A retired observed property is forgotten forgetAfter after it.
+	RetiredAt time.Time `json:"retired_at,omitzero"`
 
 	// lastSeen is the process-monotonic time of the last accepted observation, the
 	// clock silence is measured on so a wall-clock step cannot read as silence. Not
@@ -532,6 +550,10 @@ type Map struct {
 	// facts are what the machine is, read rather than observed; see Fact.
 	facts map[string]Fact
 
+	// forgotten holds a tombstone per forgotten property id: when it was retired.
+	// Tombstones are dropped after 2*forgetAfter, past the reach of the journal.
+	forgotten map[string]time.Time
+
 	// latest holds the most recent observation per property, windows the paired
 	// observations per relationship. Together they are the estimator's memory: the map
 	// learns strengths itself rather than recording an estimate computed elsewhere, so
@@ -572,6 +594,13 @@ type Map struct {
 	// a snapshot's last observations are hours old by definition. Zero means no grace.
 	graceUntil time.Duration
 
+	// downSources holds the collector members known to be down; sourceUpMono is the
+	// monotonic reading at which a member last came back. Neither is persisted: a
+	// restart knows nothing about members until the first tick, and the restore
+	// grace covers the gap.
+	downSources  map[string]bool
+	sourceUpMono map[string]time.Duration
+
 	// onRetire is called, outside the lock, with the id of every property that
 	// retires — by an operator or by silence. See SetRetireHook.
 	onRetire func(propertyID string)
@@ -589,12 +618,15 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		interventions: make(map[string]*Interventions),
+		forgotten:     make(map[string]time.Time),
 		calibration:   make(map[CalibrationKey]Calibration),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
 		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
+		downSources:   make(map[string]bool),
+		sourceUpMono:  make(map[string]time.Duration),
 		now:           time.Now,
 		epoch:         time.Now(),
 	}
@@ -670,9 +702,9 @@ func (m *Map) DeclareProperty(p Property) error {
 		return err
 	}
 	switch p.Status {
-	case "", Active, Stale, Retired:
+	case "", Active, Stale, Unobservable, Retired:
 	default:
-		return fmt.Errorf("property %q declares status %q; want active, stale or retired", p.ID, p.Status)
+		return fmt.Errorf("property %q declares status %q; want active, stale, unobservable or retired", p.ID, p.Status)
 	}
 	if p.Kind == Derived && p.Subject != "" && !IsGroup(p.Subject) {
 		// A derived property is node-level structure: a summary scoped to one
@@ -714,10 +746,15 @@ func (m *Map) DeclareProperty(p Property) error {
 		np.FirstObserved = time.Time{}
 		np.LastObserved = time.Time{}
 		m.properties[p.ID] = &np
-		m.bump(EventPropertyDeclared, np.ID, "system", map[string]any{
+		detail := map[string]any{
 			"kind": string(np.Kind), "unit": np.Unit, "source": np.Source,
 			"members": np.Members,
-		}, now)
+		}
+		if _, gone := m.forgotten[p.ID]; gone {
+			delete(m.forgotten, p.ID)
+			detail["after_forgotten"] = true
+		}
+		m.bump(EventPropertyDeclared, np.ID, "system", detail, now)
 		return nil
 	}
 
@@ -768,6 +805,7 @@ func (m *Map) DeclareProperty(p Property) error {
 		changed["status"] = string(Active)
 		existing.Status = Active
 		existing.RetiredReason = ""
+		existing.RetiredAt = time.Time{}
 	}
 	if len(changed) > 0 {
 		m.bump(EventPropertyRedeclared, existing.ID, "system", changed, now)
@@ -882,18 +920,20 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 			p.Range = *o.Range
 			p.RangeDeclared = true
 		}
-		if o.Source != "" {
-			p.Source = o.Source
-		}
 		if len(o.Labels) > 0 {
 			p.Labels = copyLabels(o.Labels)
 		}
 		m.properties[id] = p
-		m.bump(EventPropertyAdmitted, id, "system", map[string]any{
+		detail := map[string]any{
 			"value": value, "subject": o.Subject, "unit": o.Unit,
 			"range_declared": p.RangeDeclared,
 			"reason":         "first observation of an undeclared property",
-		}, at)
+		}
+		if _, gone := m.forgotten[id]; gone {
+			delete(m.forgotten, id)
+			detail["after_forgotten"] = true
+		}
+		m.bump(EventPropertyAdmitted, id, "system", detail, at)
 	} else {
 		// Checked before reconciling: a derived id is rejected outright, and
 		// reconciling first would journal a conflict and advance the revision for an
@@ -907,6 +947,9 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 		}
 	}
 
+	if o.Source != "" {
+		p.Source = o.Source
+	}
 	if p.Range != ([2]float64{}) && (value < p.Range[0] || value > p.Range[1]) {
 		p.OutOfRange++
 	}
@@ -933,6 +976,7 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 		// structure re-earns its place through the proposer.
 		p.Status = Active
 		p.RetiredReason = ""
+		p.RetiredAt = time.Time{}
 		m.bump(EventPropertyRedeclared, id, "system", map[string]any{
 			"revived": true, "reason": "observed after retirement",
 		}, at)
@@ -1088,6 +1132,7 @@ func (m *Map) SetRetireHook(fn func(propertyID string)) {
 func (m *Map) retireLocked(p *Property, reason, actor string, now time.Time) {
 	p.Status = Retired
 	p.RetiredReason = reason
+	p.RetiredAt = now
 	for _, r := range m.relationships {
 		if r.Status == Retired {
 			continue
@@ -1229,6 +1274,20 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 		if p.lastSeen != 0 {
 			silence = mono - p.lastSeen
 		}
+		if m.downSources[p.Source] {
+			// Silence with a known cause is not evidence of departure.
+			if p.Status == Active || p.Status == Stale {
+				p.Status = Unobservable
+			}
+			continue
+		}
+		if p.Status == Unobservable {
+			// The source is back but has not re-emitted this property: its silence
+			// starts when the source returned, not before the outage.
+			if up, ok := m.sourceUpMono[p.Source]; ok {
+				silence = mono - max(p.lastSeen, up)
+			}
+		}
 		switch {
 		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter &&
 			(m.graceUntil == 0 || mono >= m.graceUntil):
@@ -1241,10 +1300,77 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 				map[string]any{"silence_s": silence.Seconds()}, now)
 		}
 	}
+	for _, p := range m.properties {
+		if p.Kind == Observed && p.Status == Retired && !p.RetiredAt.IsZero() &&
+			now.Sub(p.RetiredAt) > forgetAfter {
+			m.forgetLocked(p, now)
+		}
+	}
+	for id, at := range m.forgotten {
+		if now.Sub(at) > 2*forgetAfter {
+			delete(m.forgotten, id)
+		}
+	}
 	sort.Strings(stale)
 	sort.Strings(retired)
 	m.recomputeDerivedLocked(now)
 	return stale, retired
+}
+
+// forgetLocked deletes a long-retired observed property, its retired relationships
+// and the per-pair state keyed by them, and leaves a tombstone. A relationship that
+// is somehow still live is kept and named in the event. Caller holds the write lock.
+func (m *Map) forgetLocked(p *Property, now time.Time) {
+	id := p.ID
+	var dropped, kept []string
+	for rid, r := range m.relationships {
+		if r.From != id && r.To != id {
+			continue
+		}
+		if r.Status != Retired {
+			kept = append(kept, rid)
+			continue
+		}
+		delete(m.relationships, rid)
+		delete(m.windows, rid)
+		dropped = append(dropped, rid)
+	}
+	for k := range m.interventions {
+		if from, to, _ := strings.Cut(k, "->"); from == id || to == id {
+			delete(m.interventions, k)
+		}
+	}
+	delete(m.properties, id)
+	delete(m.latest, id)
+	m.forgotten[id] = p.RetiredAt
+	sort.Strings(dropped)
+	detail := map[string]any{"retired_at": p.RetiredAt, "relationships": dropped}
+	if len(kept) > 0 {
+		sort.Strings(kept)
+		detail["kept"] = kept
+	}
+	m.bump(EventPropertyForgotten, id, "sweep", detail, now)
+}
+
+// SetSourceDown records whether a collector member is down. A property last
+// produced by a down member is Unobservable at the next sweep and is never retired
+// while the member stays down. Idempotent: collector.down and collector.up are
+// journaled only on a transition.
+func (m *Map) SetSourceDown(source string, down bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.downSources[source] == down {
+		return
+	}
+	kind := EventCollectorUp
+	if down {
+		m.downSources[source] = true
+		kind = EventCollectorDown
+	} else {
+		delete(m.downSources, source)
+		m.sourceUpMono[source] = m.mono()
+	}
+	m.bump(kind, source, "collector", map[string]any{"member": source}, m.now())
 }
 
 // recomputeDerivedLocked refreshes derived properties from their members. Caller
