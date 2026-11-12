@@ -135,6 +135,7 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 	}
 
 	strength := math.Abs(rr)
+	wasEligible := m.signRetireEligible(r)
 	if signAgrees(rr, r.Sign) {
 		r.SignAgreements++
 	} else {
@@ -151,6 +152,13 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 		strength = 0
 	}
 	r.SignSuspectFlag = r.SignSuspect()
+	if !wasEligible && m.signRetireEligible(r) && r.Provenance != Asserted {
+		// On the transition only: a relationship an operator re-declares keeps its
+		// counters and its flag, and is not retired again until the predicate drops
+		// and rises once more. An asserted one is the operator's claim to overrule; it
+		// stays flagged.
+		m.retireSignContradictedLocked(r, at)
+	}
 
 	if r.NObservations == 0 {
 		r.Recent = strength
@@ -167,7 +175,69 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 	if r.Provenance == Seeded {
 		r.Provenance = Learned
 	}
+	m.updateRegimeLocked(r, w.Len(), at)
 	m.revision++
+}
+
+// regimeBand is two standard errors of Fisher's z, the bar Outdated uses, at the
+// window's effective size rather than its count: 2 / sqrt(max(n_eff − 3, 1)).
+//
+// The paired values are EMA-smoothed with weight alpha, an AR(1) with φ = 1 − alpha,
+// so n pairs carry n_eff = n·(1 − φ²)/(1 + φ²) independent ones. The independent-pair
+// band is far too narrow for them: on a stationary stream at the defaults it put the
+// relationship in and out of regime dozens of times per thousand pairs. At alpha 1
+// nothing is smoothed and n_eff = n.
+func regimeBand(nWindow int, alpha float64) float64 {
+	phi2 := (1 - alpha) * (1 - alpha)
+	nEff := float64(nWindow) * (1 - phi2) / (1 + phi2)
+	return 2 / math.Sqrt(math.Max(nEff-3, 1))
+}
+
+// updateRegimeLocked moves a relationship into or out of a regime: the recent layer
+// outside the established one's band, in Fisher's z, for a full window of folds
+// running — consecutive folds share all but one pair, so a shorter run is one draw
+// seen several times. Caller holds the write lock.
+func (m *Map) updateRegimeLocked(r *Relationship, nWindow int, at time.Time) {
+	if r.Status == Retired { // retired on this fold: it has no present to differ
+		return
+	}
+	if r.Established == nil { // a fold always seeds Established first; this guards direct callers only
+		r.regimeRun = 0
+		return
+	}
+	z := func(v float64) float64 { return math.Atanh(math.Min(math.Abs(v), 0.9999)) }
+	band := regimeBand(nWindow, m.cfg.Alpha)
+	outside := math.Abs(z(r.Recent)-z(*r.Established)) > band
+	if outside == r.Regime {
+		r.regimeRun = 0
+		return
+	}
+	r.regimeRun++
+	if r.regimeRun < nWindow {
+		return
+	}
+	r.regimeRun = 0
+	r.Regime = outside
+	r.RegimeSince = time.Time{}
+	if outside {
+		r.RegimeSince = at
+	}
+	m.bump(EventRelationshipRegime, r.ID, "agent", map[string]any{
+		"recent": r.Recent, "established": *r.Established, "band": band, "started": outside,
+	}, at)
+}
+
+// signRetireWindows is how many windows of pairs the sign counters must cover before
+// the agent retires a sign-suspect relationship. Folds share all but one pair of a
+// window of smoothed values, so the first folds rest on one or two effective draws: a
+// conflict share over them is noise, and retirement is permanent. Three windows is
+// enough independent evidence for the share to mean what it says.
+const signRetireWindows = 3
+
+// signRetireEligible is the retirement predicate: sign-suspect, over at least
+// signRetireWindows windows of pairs. SignSuspect alone stays the advisory flag.
+func (m *Map) signRetireEligible(r *Relationship) bool {
+	return r.SignSuspect() && r.SignAgreements+r.SignConflicts >= signRetireWindows*m.learn.Window
 }
 
 // pairIdentity names a paired observation from its two contributing event IDs, in a

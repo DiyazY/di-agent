@@ -265,6 +265,16 @@ type Relationship struct {
 	// the JSON does not have to re-derive the predicate to see the verdict.
 	SignSuspectFlag bool `json:"sign_suspect"`
 
+	// Regime says the recent layer has sat outside the established one's band for a
+	// window of consecutive folds: the present differs from what this machine has
+	// shown. It changes no strength — Effective is unchanged — and a decision that
+	// reads the relationship carries a caveat saying so.
+	Regime      bool      `json:"regime"`
+	RegimeSince time.Time `json:"regime_since,omitzero"`
+	// regimeRun counts consecutive folds on the other side of the band from Regime.
+	// Not serialised: it restarts at 0 after a restore, like the pair window.
+	regimeRun int
+
 	Status        Status    `json:"status"`
 	FirstObserved time.Time `json:"first_observed,omitzero"`
 	LastObserved  time.Time `json:"last_observed,omitzero"`
@@ -516,6 +526,9 @@ type Map struct {
 	// interventions holds the counters by pair "from->to"; see Interventions.
 	interventions map[string]*Interventions
 
+	// calibration is how the map's own predictions have fared; see Calibration.
+	calibration map[CalibrationKey]Calibration
+
 	// facts are what the machine is, read rather than observed; see Fact.
 	facts map[string]Fact
 
@@ -576,6 +589,7 @@ func New(cfg Config, journal *Journal) *Map {
 		properties:    make(map[string]*Property),
 		relationships: make(map[string]*Relationship),
 		interventions: make(map[string]*Interventions),
+		calibration:   make(map[CalibrationKey]Calibration),
 		latest:        make(map[string]observation),
 		windows:       make(map[string]*stats.PairWindow),
 		learning:      c.Learn,
@@ -1555,6 +1569,7 @@ func (m *Map) ResetRelationship(id, actor, reason string) error {
 	r.SignAgreements = 0
 	r.SignConflicts = 0
 	r.SignSuspectFlag = false
+	r.Regime, r.RegimeSince, r.regimeRun = false, time.Time{}, 0
 	if r.Provenance == Learned {
 		// Back to seeded: the strength in force is the prior again, and provenance has to
 		// say so or the next reader will treat an unobserved edge as a measured one.
@@ -1603,6 +1618,24 @@ func (m *Map) retireRelationshipLocked(r *Relationship, reason, actor string, at
 		iv.SlopeSum, iv.SlopeN = 0, 0
 	}
 	m.bump(EventRelationshipRetired, r.ID, actor, map[string]any{"reason": reason}, at)
+}
+
+// ReasonSignContradicted is the retired_reason the agent writes when the machine
+// contradicts a relationship's declared sign past SignSuspect's bar.
+const ReasonSignContradicted = "sign-contradicted"
+
+// retireSignContradictedLocked retires a relationship the machine keeps contradicting.
+// The pair's intervention counters are untouched: what the agent did and saw on this
+// pair is a fact about the pair, not about the claim. Caller holds the write lock.
+func (m *Map) retireSignContradictedLocked(r *Relationship, at time.Time) {
+	r.Status = Retired
+	r.RetiredReason = ReasonSignContradicted
+	m.bump(EventRelationshipRetired, r.ID, "agent", map[string]any{
+		"reason":     ReasonSignContradicted,
+		"agreements": r.SignAgreements,
+		"conflicts":  r.SignConflicts,
+		"provenance": string(r.Provenance),
+	}, at)
 }
 
 // admitEventLocked reports whether an event identity is new, recording it if so.

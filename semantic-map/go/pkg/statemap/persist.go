@@ -40,8 +40,9 @@ import (
 // Version 3 renamed a relationship's recent layer from "strength" to "recent".
 // Version 4 added the intervention counters. Version 5 distinguishes associations
 // from directional relationships. Version 6 persists per-source intervention slopes.
-// Version 7 adds the journal's incarnation and sequence.
-const SnapshotVersion = 7
+// Version 7 adds the journal's incarnation and sequence. Version 8 adds the
+// calibration record of the map's own predictions.
+const SnapshotVersion = 8
 
 // Snapshot is the persisted form of a map.
 type Snapshot struct {
@@ -68,6 +69,9 @@ type Snapshot struct {
 	// Interventions are the counters by pair "from->to", saved apart from the
 	// relationships because they exist before any relationship does.
 	Interventions map[string]Interventions `json:"interventions,omitempty"`
+
+	// Calibration is how the map's own predictions have fared, by kind and basis.
+	Calibration []CalibrationEntry `json:"calibration"`
 
 	// Events carries the journal so the audit trail survives a restart. Decisions are
 	// inside their events, which is how they are reconstructed.
@@ -108,6 +112,7 @@ func (m *Map) Snapshot() Snapshot {
 		}
 		s.Interventions[k] = *iv
 	}
+	s.Calibration = m.calibrationListLocked()
 	s.Events = m.journal.Events(0, 0)
 	_, dropped, _ := m.journal.Stats()
 	s.JournalDropped = dropped
@@ -311,6 +316,9 @@ func (m *Map) loadLocked(snap Snapshot, path string) error {
 	for k, iv := range snap.Interventions {
 		iv := iv
 		m.interventions[k] = &iv
+	}
+	for _, e := range snap.Calibration {
+		m.calibration[CalibrationKey{e.Kind, e.Basis}] = e.Calibration
 	}
 	m.revision = snap.Revision
 	if m.cfg.RetireAfter > 0 {

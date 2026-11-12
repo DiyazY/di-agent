@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -600,4 +601,88 @@ func TestOnlyTheMapMayClaimIntervened(t *testing.T) {
 			t.Errorf("provenance %q: status %d, want 400", prov, resp.StatusCode)
 		}
 	}
+}
+
+func TestStateCarriesCalibration(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.RecordPrediction("admission.cpu_contention_ratio", "map", 0.09, 0.07, true)
+	var body map[string]any
+	if code := getState(t, srv.URL+"/state", &body); code != 200 {
+		t.Fatalf("status %d", code)
+	}
+	list, _ := body["calibration"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("calibration %v; want one entry", body["calibration"])
+	}
+	e, _ := list[0].(map[string]any)
+	for _, k := range []string{"kind", "basis", "n", "mean_err", "mean_abs_err", "hit_rate"} {
+		if _, ok := e[k]; !ok {
+			t.Errorf("entry %v lacks %q", e, k)
+		}
+	}
+	if e["n"] != float64(1) {
+		t.Errorf("n %v", e["n"])
+	}
+}
+
+// driveRegime feeds correlated, then opposed pairs on from -> to until the
+// relationship id is in regime.
+func driveRegime(t *testing.T, sm *statemap.Map, now *time.Time, from, to, id string, limit int) {
+	t.Helper()
+	unit := [2]float64{0, 1}
+	obs := func(prop string, v float64, ev string) {
+		*now = now.Add(time.Second)
+		if err := sm.Record(statemap.Observation{ID: prop, Value: v, At: *now, Range: &unit, EventID: ev}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; ; i++ {
+		if i == limit {
+			t.Fatalf("no regime after %d pairs", limit)
+		}
+		x := float64(i%10) / 10
+		y := x
+		if i >= 60 {
+			y = 1 - x // against the declared sign: strength folds as zero
+		}
+		obs(from, x, "x"+strconv.Itoa(i))
+		obs(to, y, "y"+strconv.Itoa(i))
+		if r, _ := sm.Relationship(id); r.Regime {
+			return
+		}
+	}
+}
+
+func TestEstimate_RegimeCaveatIsServed(t *testing.T) {
+	sm := statemap.New(statemap.Config{AdmitUnknown: true, Alpha: 1, Learn: true,
+		LearnConfig: statemap.LearnConfig{PairWindowSeconds: 15, MinSupport: 8, Window: 10}}, statemap.NewJournal(0))
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	sm.SetClock(func() time.Time { return now })
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	const from, to = "resource", "pressure"
+	unit := [2]float64{0, 1}
+	for _, id := range []string{from, to} {
+		if err := sm.DeclareProperty(statemap.Property{ID: id, Range: unit}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sm.DeclareRelationship(statemap.Relationship{From: from, To: to, Sign: 1, Label: "raises"}); err != nil {
+		t.Fatal(err)
+	}
+	driveRegime(t, sm, &now, from, to, statemap.RelationshipID(from, to, "raises"), 400)
+
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target="+to, &res); code != 200 {
+		t.Fatalf("estimate: %d", code)
+	}
+	for _, c := range res.Caveats {
+		if strings.Contains(c, "present differs from established") {
+			return
+		}
+	}
+	t.Fatalf("caveats %q; want the regime caveat", res.Caveats)
 }

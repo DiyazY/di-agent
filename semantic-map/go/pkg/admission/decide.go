@@ -29,6 +29,8 @@ type Self struct{ NodeID, Arch string }
 // after the workload arrives, and which one decided.
 type Line struct {
 	Domain, Phase, Basis, Reason string
+	// ChosenBy is "calibration" when the basis was picked by its record, else "default".
+	ChosenBy                     string
 	Share, Pressure, Usage, Exit float64
 	MapPred, UsagePred, K        *float64
 	MemoryHeadroom               *float64
@@ -119,10 +121,22 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	for _, f := range b.Facts() {
 		facts[f.Key] = f
 	}
+	cal := m.Calibration()
+	chosenBy := map[string]string{}
+	calInput := map[string]statemap.Calibration{}
 	reason := ""
 	nonPredictionFailure := false
 	for i, d := range domains {
-		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity])
+		lines[i] = predict(b, m, d, o.Demand[d.Resource].Value, facts[d.Capacity], cal)
+		if lines[i].ChosenBy != "" { // a line that failed before prediction chose no basis
+			chosenBy[d.Relieves] = lines[i].ChosenBy
+		}
+		for _, basis := range []string{"map", "usage"} {
+			k := statemap.CalibrationKey{Kind: "admission." + d.Relieves, Basis: basis}
+			if c := cal[k]; c.N > 0 {
+				calInput[k.Kind+"/"+basis] = c
+			}
+		}
 		predictionChanged = predictionChanged || lines[i].predictionDeclined
 		nonPredictionFailure = nonPredictionFailure || (!lines[i].Pass && !lines[i].predictionDeclined)
 		if !lines[i].Pass && reason == "" {
@@ -130,6 +144,8 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 		}
 		predictionChanged = predictionChanged && !nonPredictionFailure
 	}
+	b.Input("basis_chosen_by", chosenBy)
+	b.Input("calibration", calInput)
 	if reason != "" {
 		return answer(Decline, reason)
 	}
@@ -138,7 +154,7 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 
 // predict evaluates one domain. Both predictions are made whenever their inputs
 // exist, so the record shows what the basis that did not decide would have said.
-func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand float64, capacity statemap.Fact) Line {
+func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand float64, capacity statemap.Fact, cal map[statemap.CalibrationKey]statemap.Calibration) Line {
 	l := Line{Domain: d.Relieves, Phase: d.Phase, Exit: d.Exit}
 	var notes []string
 	fail := func(why string) Line {
@@ -202,6 +218,13 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	// k is the strongest response slope measured on a live relationship from this
 	// usage metric to relieves. Unlike relationship strength, it may exceed 1.
 	// Its estimate is shrunk toward zero until repeated outcomes build support.
+	// The relationships k is drawn from are read through the builder, so the record
+	// lists them and carries their caveats (a stale endpoint, a regime).
+	for _, e := range m.MeasuredEffects(d.Relieves) {
+		if strings.HasPrefix(e.From, d.Usage+"@") {
+			b.Relationship(e.Relationship)
+		}
+	}
 	if e, ok := m.MeasuredDomainEffect(d.Usage, d.Relieves); ok {
 		k := e.Estimate()
 		l.K, l.KObservations = &k, e.N
@@ -219,13 +242,9 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 		l.Basis = "memory-headroom"
 		return fail(fmt.Sprintf("memory demand share %.4f exceeds admission headroom %.4f", l.Share, memoryHeadroom))
 	}
-	var pred float64
-	switch {
-	case l.MapPred != nil:
-		l.Basis, pred = "map", *l.MapPred
-	case l.UsagePred != nil:
-		l.Basis, pred = "usage", *l.UsagePred
-	default:
+	pred := 0.0
+	l.Basis, pred, l.ChosenBy = chooseBasis(l, cal)
+	if l.Basis == "" {
 		return fail("no basis to predict " + d.Relieves)
 	}
 	if pred > d.Exit {
@@ -235,6 +254,34 @@ func predict(b *statemap.DecisionBuilder, m *statemap.Map, d Domain, demand floa
 	l.Pass = true
 	l.Reason = strings.Join(notes, "; ")
 	return l
+}
+
+// calibrationMinN is how many outcomes a basis needs before its record is trusted.
+const calibrationMinN = 5
+
+// chooseBasis picks which prediction decides a domain: when both exist and both
+// calibrations have at least calibrationMinN outcomes, the lower MeanAbsErr; a tie,
+// one missing prediction, or too few outcomes -> the map basis when it exists, else
+// usage. Returns basis, prediction, and "calibration" | "default"; basis is empty
+// when neither prediction exists.
+func chooseBasis(l Line, cal map[statemap.CalibrationKey]statemap.Calibration) (basis string, pred float64, by string) {
+	switch {
+	case l.MapPred != nil && l.UsagePred != nil:
+		mc := cal[statemap.CalibrationKey{Kind: "admission." + l.Domain, Basis: "map"}]
+		uc := cal[statemap.CalibrationKey{Kind: "admission." + l.Domain, Basis: "usage"}]
+		if mc.N >= calibrationMinN && uc.N >= calibrationMinN {
+			if uc.MeanAbsErr < mc.MeanAbsErr {
+				return "usage", *l.UsagePred, "calibration"
+			}
+			return "map", *l.MapPred, "calibration"
+		}
+		return "map", *l.MapPred, "default"
+	case l.MapPred != nil:
+		return "map", *l.MapPred, "default"
+	case l.UsagePred != nil:
+		return "usage", *l.UsagePred, "default"
+	}
+	return "", 0, ""
 }
 
 // reading is a property's value when it rests on an observation; a seeded or

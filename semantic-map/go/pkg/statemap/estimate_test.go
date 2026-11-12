@@ -3,6 +3,7 @@ package statemap
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -504,5 +505,27 @@ func TestEstimateIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
 	}
 	if won != 1 {
 		t.Errorf("%d requests got the explicit id; want exactly one", won)
+	}
+}
+
+func TestEstimateCaveatsARegimeRelationship(t *testing.T) {
+	m, _ := estimateFixture(t)
+	r := m.relationships[RelationshipID("queue@pod:a", "pressure", "d")]
+	est := 0.8
+	r.Regime, r.Recent, r.Established = true, 0.2, &est
+	res := m.Estimate(EstimateRequest{Target: "pressure"})
+	const want = "relationship queue@pod:a->pressure:d: present differs from established (recent 0.200, established 0.800)"
+	n := 0
+	for _, c := range res.Caveats {
+		if c == want {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("caveats %q; want exactly one %q", res.Caveats, want)
+	}
+	d, ok := m.Journal().Decision(res.DecisionID)
+	if !ok || !slices.Contains(d.Caveats, want) {
+		t.Fatalf("decision caveats %q; want %q", d.Caveats, want)
 	}
 }

@@ -426,6 +426,8 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
 
 Admission. `POST /tasks` submits a workload to any node: it decides from its own map, and on a decline offers it to each registered peer in id order through their `POST /offers` until one accepts. The submitter starts the workload on `accepted_by` under `name`; the agent never starts it.
 
+When a domain has both a map and a usage prediction, the one with the better calibration record decides once each has 5 outcomes, else the map prediction; the decision records this as `basis_chosen_by` (`calibration` or `default`) per domain.
+
 ```json
 // POST /tasks request (also the POST /offers body, which adds "chain")
 {
@@ -739,11 +741,11 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/tasks`                            | — `{submissions, answered, pending, outcomes}`: recent submissions with their chains, this node's answers by verdict, its accepts awaiting an outcome, and their outcomes | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` repeat or take a comma list; an unknown value is `400`. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
-| GET  | `/state/relationships`              | `?from=&to=`                                             | State model |
+| GET  | `/state/relationships`              | `?from=&to=` — each relationship carries `regime` and `regime_since` when its recent layer differs from its established one | State model |
 | POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused; relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
@@ -921,6 +923,10 @@ curl -s localhost:8080/state | jq -r '.facts[] | "\(.key)\t\(.value) \(.unit // 
 # how many property pairs discovery is testing, of how many it could
 curl -s localhost:8080/state | jq '.discovery'
 
+# how the map's own predictions have fared, per kind and basis: n outcomes, mean
+# signed error (predicted - observed), mean absolute error, share of verdicts right
+curl -s localhost:8080/state | jq '.calibration'
+
 # one property, readable in a terminal
 curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 
@@ -977,7 +983,10 @@ bug. `sign_conflicts`, `sign_agreements` and `sign_suspect` on each relationship
 relationship is flagged when at least 30 pairs have been folded in and 60% or more of
 them contradicted its sign; a sign that is merely regime-dependent lands near 50% and
 is not flagged, because that is a fact about the system rather than a wrong
-declaration. Investigate a flagged relationship as a defect in the specification —
+declaration. Flagging is not the only effect: once the flag holds over three windows of
+pairs (`map.pair_history` each, 180 at the default 60), the agent retires a non-asserted
+relationship with `retired_reason` `sign-contradicted`; an asserted one is only flagged.
+Investigate a flagged relationship as a defect in the specification —
 usually a direction inherited from a framework that phrased its outcome in the opposite
 polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarity).
 
@@ -1061,6 +1070,11 @@ bias-corrected). `Effective()` picks between them by authority rather than by ar
 — an operator assertion first, else what the agent's interventions measured, else the
 established baseline, else the recent estimate, else `unknown` — and `basis` on every
 edge names which one answered.
+When the recent estimate sits outside the established one's band (two standard errors
+of Fisher's z at the pair window's effective size, since the paired values are
+smoothed) for a full window of folds running, the edge reports `regime: true` and
+`regime_since`, and every decision that reads it carries a "present differs from
+established" caveat; a window of folds back inside clears it.
 
 ```bash
 # agent.yaml
@@ -1084,7 +1098,10 @@ Two consequences worth knowing before reading a number off `/edges`:
   each one rejected at the gate, and holds a strength of zero — which is also what a
   relationship on a quiet system holds. Every relationship therefore carries
   `sign_agreements` and `sign_conflicts`, exposes a conflict share, and is flagged
-  `sign_suspect` past 30 pairs at 60% conflict; the census of every view reports how many
+  `sign_suspect` past 30 pairs at 60% conflict. Once that holds over three windows of
+  pairs the agent retires it (`retired_reason` `sign-contradicted`) unless an operator
+  asserted it, in which case it stays active and flagged; a re-declared relationship is
+  not retired again while the flag holds, but is if the flag clears and returns; the census of every view reports how many
   relationships the machine persistently refutes. This is not hypothetical: two of the
   four propositions an earlier specification carried sat in that state on every cluster,
   and nothing in the aggregate metrics showed it.
