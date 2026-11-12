@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -168,6 +169,34 @@ func TestUndeclaredMetricBecomesAPropertyAndIsJournalled(t *testing.T) {
 	if !found {
 		t.Error("the admission is not in the journal, so nobody can find out why the " +
 			"map contains a property they never declared")
+	}
+}
+
+// TestJournalRouteShowsRestoreFailedFirst: a map that found no usable snapshot says
+// so as the first thing its journal holds.
+func TestJournalRouteShowsRestoreFailedFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	for _, p := range []string{path, path + ".prev"} {
+		if err := os.WriteFile(p, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sm := statemap.New(statemap.Config{ConvergenceObservations: 4, AdmitUnknown: true}, statemap.NewJournal(0))
+	if r, err := sm.Load(path); err != nil || r.Loaded {
+		t.Fatalf("Load = %+v, %v; want a cold start", r, err)
+	}
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm, nil, nil)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	var journal struct {
+		Events []statemap.Event `json:"events"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != 200 {
+		t.Fatalf("GET /state/journal returned %d", code)
+	}
+	if len(journal.Events) == 0 || journal.Events[0].Kind != "restore.failed" {
+		t.Fatalf("events %v; want restore.failed first", journal.Events)
 	}
 }
 

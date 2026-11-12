@@ -771,7 +771,8 @@ func TestSnapshotSurvivesRestart(t *testing.T) {
 	}
 
 	m2, _ := newTestMap(t, Config{ConvergenceObservations: 20, Learn: true})
-	loaded, err := m2.Load(path)
+	r, err := m2.Load(path)
+	loaded := r.Loaded
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +817,8 @@ func TestLoadRefusesAmbiguity(t *testing.T) {
 	dir := t.TempDir()
 
 	m, _ := newTestMap(t, Config{})
-	loaded, err := m.Load(dir + "/absent.json")
+	r, err := m.Load(dir + "/absent.json")
+	loaded := r.Loaded
 	if err != nil || loaded {
 		t.Errorf("a missing snapshot should be a quiet first start; got loaded=%v err=%v", loaded, err)
 	}
@@ -876,7 +878,8 @@ func TestSaveIsAtomicUnderConcurrentWriters(t *testing.T) {
 
 	// The destination is a complete snapshot, not a half-written one.
 	fresh, _ := newTestMap(t, Config{Owner: "node-x"})
-	loaded, err := fresh.Load(path)
+	r, err := fresh.Load(path)
+	loaded := r.Loaded
 	if err != nil || !loaded {
 		t.Fatalf("after concurrent saves the snapshot did not load cleanly: loaded=%v err=%v", loaded, err)
 	}
@@ -1528,8 +1531,8 @@ func TestSnapshotRestoredRangesAreDeclaredAgainOnRedeclaration(t *testing.T) {
 	}
 
 	restored, _ := newTestMap(t, Config{AdmitUnknown: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("Load = %v, %v; want a restored snapshot", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("Load = %v, %v; want a restored snapshot", r.Loaded, err)
 	}
 	for _, id := range []string{"a", "b@pod:1"} {
 		if p, _ := restored.Property(id); p.RangeDeclared {
@@ -2439,8 +2442,8 @@ func restoredMap(t *testing.T) (*Map, *clock) {
 	b, cB := newTestMap(t, cfg)
 	cB.t = cA.t.Add(72 * time.Hour)
 	cB.m = time.Second
-	if ok, err := b.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := b.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	return b, cB
 }
@@ -2872,8 +2875,8 @@ func TestRegimeSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, _ := newTestMap(t, Config{Learn: true})
-	if ok, err := restored.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := restored.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	after, _ := restored.Relationship(id)
 	if !after.Regime || !after.RegimeSince.Equal(before.RegimeSince) {

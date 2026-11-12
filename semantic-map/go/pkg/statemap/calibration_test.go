@@ -71,8 +71,8 @@ func TestCalibrationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	m2, _ := newTestMap(t, Config{})
-	if ok, err := m2.Load(path); err != nil || !ok {
-		t.Fatalf("load: %v %v", ok, err)
+	if r, err := m2.Load(path); err != nil || !r.Loaded {
+		t.Fatalf("load: %v %v", r.Loaded, err)
 	}
 	if !reflect.DeepEqual(m1.Calibration(), m2.Calibration()) || m2.Calibration()[CalibrationKey{"relief.cpu.limit", "map"}].N != 2 {
 		t.Fatalf("restored %v; had %v", m2.Calibration(), m1.Calibration())

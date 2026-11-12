@@ -870,6 +870,11 @@ A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
 A collector member entering or leaving backoff or stuck records `collector.down` or
 `collector.up`, once per transition, with the member as target.
+Save keeps one previous generation (`<persist.file>.prev`) and Load falls back to it
+when the current file is absent or unreadable; when neither is usable the map starts
+cold and its first event is `restore.failed` (target the path, detail `error` and
+`prev_error`), so a cold start is visible in the journal rather than a crash loop.
+A version or owner mismatch is still refused outright, with no fallback.
 The map's own changes are `property.*` and `relationship.*` events:
 `relationship.declared`, `relationship.asserted`, `relationship.intervention`,
 `relationship.retired` (with a `reason`, `sign-contradicted` when the agent retires

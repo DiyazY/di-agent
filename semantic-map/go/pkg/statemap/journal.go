@@ -57,6 +57,10 @@ const (
 	// nothing is retired by it; the record says why a timestamp jumped.
 	EventClockStepped EventKind = "clock.stepped"
 
+	// EventRestoreFailed: no snapshot was usable (Target = path; Detail path, error,
+	// prev_error), so the map started cold. It is the first event of that life.
+	EventRestoreFailed EventKind = "restore.failed"
+
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
 

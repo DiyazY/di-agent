@@ -232,16 +232,25 @@ func Main() {
 			log.Fatalf("persist.file %s cannot be written: %v. Set persist.file to a writable "+
 				"path, or to \"\" to keep the map in memory only", cfg.Persist.File, err)
 		}
-		loaded, err := state.Load(cfg.Persist.File)
+		r, err := state.Load(cfg.Persist.File)
 		if err != nil {
 			log.Fatalf("restoring state from %s: %v", cfg.Persist.File, err)
 		}
-		if loaded {
+		switch {
+		case r.Loaded:
+			if r.From != cfg.Persist.File {
+				log.Printf("state model: %s unreadable (%s); restored the previous generation %s",
+					cfg.Persist.File, r.CurrentError, r.From)
+			}
 			c := state.Census()
 			log.Printf("state model: restored %d properties and %d relationships from %s "+
 				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, cfg.Persist.File,
 				state.Revision())
-		} else {
+		case r.CurrentError != "":
+			log.Printf("state model: %s unreadable (%s) and %s unreadable (%s): starting cold, "+
+				"journalled as restore.failed", cfg.Persist.File, r.CurrentError,
+				cfg.Persist.File+".prev", r.PrevError)
+		default:
 			log.Printf("state model: no snapshot at %s, starting cold", cfg.Persist.File)
 		}
 	}
