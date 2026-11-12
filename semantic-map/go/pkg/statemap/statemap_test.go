@@ -2467,3 +2467,63 @@ func TestAClockStepDuringGraceRetiresNothing(t *testing.T) {
 		t.Errorf("retired=%v once grace elapsed, want both", retired)
 	}
 }
+
+// ── Reading order is judged on the monotonic clock ────────────────────────────
+
+func TestReadingsAfterABackwardWallStepKeepThePropertyLive(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(10 * time.Second)
+	c.stepWall(-time.Hour)
+	// The producer stamps with the stepped clock: every reading is an hour older
+	// than LastObserved by wall time, yet each is newer than the last.
+	for i := 0; i < 20; i++ { // 200 s, past retire_after
+		if err := m.Observe("disk_io", 0.2, c.now()); err != nil {
+			t.Fatal(err)
+		}
+		m.Sweep()
+		c.advance(10 * time.Second)
+	}
+	if p, _ := m.Property("disk_io"); p.Status != Active || p.NObservations != 21 {
+		t.Errorf("after a backward step: status %s, n=%d; want active and 21", p.Status, p.NObservations)
+	}
+	if n := m.State(Query{}).Counts.ReadingsOutOfOrder; n != 0 {
+		t.Errorf("readings_out_of_order = %d; want 0", n)
+	}
+}
+
+func TestARestoredPropertyAcceptsReadingsStampedBeforeItsLastObserved(t *testing.T) {
+	m, c := restoredMap(t)
+	// A board whose RTC came up in 1970: its readings predate the snapshot.
+	c.t = time.Unix(1000, 0).UTC()
+	if err := m.Observe("cpu", 0.7, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(10 * time.Second)
+	c.stepWall(56 * 365 * 24 * time.Hour) // NTP fixes the clock
+	if err := m.Observe("cpu", 0.8, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.NObservations != 3 || p.Status != Active {
+		t.Errorf("cpu n=%d status %s; want 3 and active", p.NObservations, p.Status)
+	}
+	if n := m.State(Query{}).Counts.ReadingsOutOfOrder; n != 0 {
+		t.Errorf("readings_out_of_order = %d; want 0", n)
+	}
+}
+
+// Two clocks read one after the other never agree to the nanosecond, so a repeated
+// stamp lands a hair before the last anchor; it is still the same instant.
+func TestARepeatedStampAcrossClockReadJitterIsAccepted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	at := c.now()
+	if err := m.Observe("cpu", 0.1, at); err != nil {
+		t.Fatal(err)
+	}
+	c.stepWall(time.Millisecond) // wall read later than mono, relative to the last record
+	if err := m.Observe("cpu", 0.2, at); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.NObservations != 2 {
+		t.Errorf("n=%d; a repeated stamp was refused as out of order", p.NObservations)
+	}
+}

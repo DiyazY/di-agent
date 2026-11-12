@@ -798,15 +798,26 @@ func (m *Map) Record(o Observation) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// A reading is refused, not folded in, when it is from the future or not newer
-	// than the property's last: it would enter the EMA as the newest value and make
-	// silence negative. Both checks run before the event id is recorded, so a refused
-	// reading does not consume the identity a correct delivery of it will carry.
+	// A reading is refused, not folded in, when it is from the future or older than
+	// the property's last: it would enter the EMA as the newest value and make
+	// silence negative. Order is judged on the monotonic anchor silence runs on — the
+	// reading's age at receipt subtracted from process time — so a wall-clock step
+	// cannot make every correct reading look old. A property this process has not
+	// seen (restored, lastSeen 0) accepts. Both checks run before the event id is
+	// recorded, so a refused reading does not consume the identity a correct
+	// delivery of it will carry.
 	if at.After(m.now().Add(time.Duration(m.learn.PairWindowSeconds) * time.Second)) {
 		m.readingsFuture++
 		return nil
 	}
-	if p, ok := m.properties[id]; ok && at.Before(p.LastObserved) {
+	// Zero means unseen, so nudge off it. Older means by a whole stamp: stamps are
+	// Unix seconds, and the wall and monotonic clocks are read one after the other,
+	// so a repeated stamp's anchor can land a hair before the last one's.
+	anchor := m.mono() - max(0, m.now().Sub(at))
+	if anchor == 0 {
+		anchor--
+	}
+	if p, ok := m.properties[id]; ok && p.lastSeen != 0 && p.lastSeen-anchor >= time.Second {
 		m.readingsOutOfOrder++
 		return nil
 	}
@@ -873,10 +884,10 @@ func (m *Map) Record(o Observation) error {
 	p.LastObserved = at
 	// Anchor silence to the data's age at receipt, not to the receipt: an old-stamped
 	// reading, or a producer re-sending one stamp, must not read as fresh. Monotonic
-	// time since then is immune to wall steps. Zero means unseen, so nudge off it.
-	p.lastSeen = m.mono() - max(0, m.now().Sub(at))
-	if p.lastSeen == 0 {
-		p.lastSeen--
+	// time since then is immune to wall steps. A reading under a second older is
+	// accepted but does not move the anchor back.
+	if p.lastSeen == 0 || anchor > p.lastSeen {
+		p.lastSeen = anchor
 	}
 	m.baselineSweepLocked()
 	p.Confidence = clamp01(float64(p.NObservations) / float64(m.cfg.ConvergenceObservations))
