@@ -359,6 +359,7 @@ func (j *Journal) restore(events []Event, dropped, seq, incarnation uint64) {
 			j.decisions[d.ID] = &d
 		}
 	}
+	j.rebuildCitedByLocked()
 	j.dropped += dropped
 	j.seq = seq
 	for _, e := range j.events {

@@ -400,7 +400,10 @@ func (r *Reviewer) review(ctx context.Context, c *types.CandidateEdge, pending [
 	// The candidate's hash lets a reader group a candidate's reviews.
 	h := sha256.Sum256([]byte(c.CandidateID))
 	id := st.NewDecisionID("review", hex.EncodeToString(h[:])[:8])
-	b := st.Decide(id, "review candidate "+c.CandidateID)
+	b := st.Decide(id, "review", "review candidate "+c.CandidateID)
+	if c.Review != nil {
+		b.Cite(c.Review.DecisionID)
+	}
 	from, _ := b.Property(c.FromID)
 	to, _ := b.Property(c.ToID)
 	ev := Evidence{Candidate: *c, From: from, To: to, Neighbours: neighbours(c, pending), Facts: b.Facts()}

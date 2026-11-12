@@ -378,7 +378,7 @@ func (r *RuleEngineReasoner) costFromState(taskType, nodeID, resourceID, pressur
 		who = "self"
 	}
 	id := r.state.NewDecisionID("cost", taskType, who)
-	b := r.state.Decide(id, fmt.Sprintf("cost of %s on %s", taskType, who))
+	b := r.state.Decide(id, "cost", fmt.Sprintf("cost of %s on %s", taskType, who))
 
 	level := func(propertyID string) (float64, float64) {
 		p, ok := b.Property(propertyID)

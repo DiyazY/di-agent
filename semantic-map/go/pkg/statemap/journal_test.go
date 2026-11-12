@@ -20,7 +20,7 @@ func TestEventsCarrySeqStrictlyIncreasing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m.Decide("explicit", "q").Commit(nil)
+	m.Decide("explicit", "estimate", "q").Commit(nil)
 	events := m.Journal().Events(0, 0)
 	if len(events) < 11 {
 		t.Fatalf("journal holds %d events; want at least 11", len(events))
@@ -60,7 +60,7 @@ func TestNewDecisionIDIsUniqueUnderConcurrency(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := m.NewDecisionID("p", "s")
-			m.Decide(id, "q").Commit(nil)
+			m.Decide(id, "estimate", "q").Commit(nil)
 			ids[i] = id
 		}(i)
 	}
@@ -99,7 +99,7 @@ func TestRecordDecisionRefusesADuplicate(t *testing.T) {
 	if _, err := j.RecordDecision(&Decision{ID: "d"}); !errors.Is(err, ErrDuplicateDecision) {
 		t.Fatalf("second record err %v; want ErrDuplicateDecision", err)
 	}
-	if got := j.Decisions(0); len(got) != 1 {
+	if got := j.Decisions(0, ""); len(got) != 1 {
 		t.Errorf("journal holds %d decisions; want 1", len(got))
 	}
 	for _, e := range j.Events(0, 0) {
@@ -111,10 +111,10 @@ func TestRecordDecisionRefusesADuplicate(t *testing.T) {
 
 func TestCommitOnADuplicateRecordsRefusal(t *testing.T) {
 	m, _ := newTestMap(t, Config{})
-	if d := m.Decide("d", "q").Commit(nil); d == nil {
+	if d := m.Decide("d", "estimate", "q").Commit(nil); d == nil {
 		t.Fatal("first commit returned nil")
 	}
-	if d := m.Decide("d", "q").Commit(nil); d != nil {
+	if d := m.Decide("d", "estimate", "q").Commit(nil); d != nil {
 		t.Fatalf("second commit returned %+v; want nil", d)
 	}
 	events := m.Journal().Events(0, 0)
@@ -158,7 +158,7 @@ func TestRestoreOfAnOlderSnapshotStillGivesFreshIds(t *testing.T) {
 	issued := map[string]bool{}
 	for i := 0; i < 3; i++ {
 		id := m1.NewDecisionID("est")
-		m1.Decide(id, "q").Commit(nil)
+		m1.Decide(id, "estimate", "q").Commit(nil)
 		issued[id] = true
 	}
 	if err := m1.Save(path); err != nil {
@@ -167,7 +167,7 @@ func TestRestoreOfAnOlderSnapshotStillGivesFreshIds(t *testing.T) {
 	// Decisions after the save that never reach disk: the simulated crash.
 	for i := 0; i < 5; i++ {
 		id := m1.NewDecisionID("est")
-		m1.Decide(id, "q").Commit(nil)
+		m1.Decide(id, "estimate", "q").Commit(nil)
 		issued[id] = true
 	}
 	m2, _ := newTestMap(t, Config{})
@@ -242,5 +242,163 @@ func TestLoadRefusesAVersion6Snapshot(t *testing.T) {
 	m, _ := newTestMap(t, Config{})
 	if _, err := m.Load(path); err == nil || !strings.Contains(err.Error(), "version 6") {
 		t.Fatalf("load err %v; want a refusal naming version 6", err)
+	}
+}
+
+func TestDecisionCarriesItsKindInTheEvent(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	d := m.Decide("e", "estimate", "q").Commit(nil)
+	if d == nil || d.Kind != "estimate" {
+		t.Fatalf("decision %+v; want kind estimate", d)
+	}
+	events := m.Journal().Events(0, 0)
+	last := events[len(events)-1]
+	if last.Kind != EventDecision || last.Detail["kind"] != "estimate" {
+		t.Errorf("last event %s detail %v; want decision with kind estimate", last.Kind, last.Detail)
+	}
+}
+
+func TestCiteIsOrderedAndDeduplicated(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	b := m.Decide("d", "review", "q")
+	b.Cite("b")
+	b.Cite("")
+	b.Cite("a")
+	b.Cite("b")
+	d := b.Commit(nil)
+	if got := strings.Join(d.Cites, ","); got != "b,a" {
+		t.Errorf("cites %q; want b,a", got)
+	}
+}
+
+// chainIDs is the ids of a chain's cites, in order.
+func chainIDs(c Chain) string {
+	ids := make([]string, len(c.Cites))
+	for i, l := range c.Cites {
+		ids[i] = l.ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// actVerifyRevert records the three decisions of a reverted relief action.
+func actVerifyRevert(m *Map) {
+	m.Decide("act", "relief.act", "q").Commit(nil)
+	v := m.Decide("verify", "relief.verify", "q")
+	v.Cite("act")
+	v.Commit(nil)
+	r := m.Decide("revert", "relief.revert", "q")
+	r.Cite("verify")
+	r.Cite("act")
+	r.Commit(nil)
+}
+
+func TestChainWalksAncestryInCiteOrder(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	actVerifyRevert(m)
+	c, ok := m.Journal().Chain("revert")
+	if !ok {
+		t.Fatal("revert not held")
+	}
+	if got := chainIDs(c); got != "verify,act" {
+		t.Errorf("revert cites %q; want verify,act", got)
+	}
+	if c.Cites[0].Decision == nil || c.Cites[0].Evicted {
+		t.Errorf("held ancestor %+v; want its decision", c.Cites[0])
+	}
+	a, _ := m.Journal().Chain("act")
+	if got := strings.Join(a.CitedBy, ","); got != "verify,revert" {
+		t.Errorf("act cited by %q; want verify,revert", got)
+	}
+	if _, ok := m.Journal().Chain("nope"); ok {
+		t.Error("Chain of an id never held reported ok")
+	}
+}
+
+func TestChainIsCycleSafeOnAFullJournal(t *testing.T) {
+	j := NewJournal(2000)
+	n := 2000
+	id := func(i int) string { return fmt.Sprintf("d%d", i) }
+	for i := 0; i < n; i++ {
+		d := &Decision{ID: id(i), Kind: "review"}
+		if i > 0 {
+			d.Cites = []string{id(i - 1)}
+		} else {
+			d.Cites = []string{id(n - 1)}
+		}
+		if i == n-1 {
+			d.Cites = append(d.Cites, id(i))
+		}
+		if _, err := j.RecordDecision(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, ok := j.Chain(id(n - 1))
+	if !ok {
+		t.Fatal("last not held")
+	}
+	if len(c.Cites) != n-1 {
+		t.Fatalf("%d links; want %d", len(c.Cites), n-1)
+	}
+	seen := map[string]bool{}
+	for _, l := range c.Cites {
+		if seen[l.ID] || l.ID == id(n-1) {
+			t.Fatalf("link %s repeated or the decision itself", l.ID)
+		}
+		seen[l.ID] = true
+	}
+}
+
+func TestChainFlagsAnEvictedAncestor(t *testing.T) {
+	j := NewJournal(3)
+	rec := func(id string, rev uint64, cites ...string) {
+		if _, err := j.RecordDecision(&Decision{ID: id, Revision: rev, Cites: cites}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec("a", 1)
+	rec("b", 2, "a")
+	rec("c", 3)
+	rec("d", 4)
+	c, ok := j.Chain("b")
+	if !ok {
+		t.Fatal("b not held")
+	}
+	if len(c.Cites) != 1 || c.Cites[0].ID != "a" || !c.Cites[0].Evicted || c.Cites[0].Decision != nil {
+		t.Errorf("b cites %+v; want [{a evicted}]", c.Cites)
+	}
+	if _, ok := j.Chain("a"); ok {
+		t.Error("evicted a still reports a chain")
+	}
+}
+
+func TestDecisionsFilterByKind(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	m.Decide("e1", "estimate", "q").Commit(nil)
+	m.Decide("a1", "admit", "q").Commit(nil)
+	m.Decide("e2", "estimate", "q").Commit(nil)
+	m.Decide("a2", "admit", "q").Commit(nil)
+	got := m.Journal().Decisions(0, "admit")
+	if len(got) != 2 || got[0].ID != "a2" || got[1].ID != "a1" {
+		t.Errorf("admit decisions %v; want a2, a1", got)
+	}
+	if all := m.Journal().Decisions(0, ""); len(all) != 4 {
+		t.Errorf("%d decisions with no kind filter; want 4", len(all))
+	}
+}
+
+func TestRestoreRebuildsCitedBy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap.json")
+	m1, _ := newTestMap(t, Config{})
+	actVerifyRevert(m1)
+	if err := m1.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{})
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	c, ok := m2.Journal().Chain("act")
+	if !ok || strings.Join(c.CitedBy, ",") != "verify,revert" {
+		t.Errorf("restored act cited by %v (held %v); want verify,revert", c.CitedBy, ok)
 	}
 }

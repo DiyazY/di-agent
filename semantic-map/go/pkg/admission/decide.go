@@ -52,7 +52,7 @@ type Decision struct {
 // level relief lets caps go at: admitting up to Enter would hold pressure in the
 // band where caps never release.
 func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) Decision {
-	b := m.Decide(id, "admit "+o.Name+"?")
+	b := m.Decide(id, "admission", "admit "+o.Name+"?")
 	b.Input("offer", cloneOffer(o))
 	lines := make([]Line, len(domains))
 	for i, d := range domains {
@@ -106,6 +106,7 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	}
 	gate := m.Admit(req)
 	b.Input("gate", gate.DecisionID)
+	b.Cite(gate.DecisionID)
 	if gate.Err != "" {
 		return answer(Decline, gate.Err)
 	}

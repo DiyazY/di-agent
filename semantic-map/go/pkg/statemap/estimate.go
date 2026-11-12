@@ -200,7 +200,7 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		question += " without " + strings.Join(excluded, ", ")
 	}
 
-	b := m.Decide(id, question)
+	b := m.Decide(id, "estimate", question)
 	for _, c := range withoutCaveats {
 		b.Caveat("%s", c)
 	}

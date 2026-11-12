@@ -93,7 +93,7 @@ func (ta *testAgent) knows(others ...*testAgent) {
 	}
 }
 
-func (ta *testAgent) decisions() int { return len(ta.j.Decisions(0)) }
+func (ta *testAgent) decisions() int { return len(ta.j.Decisions(0, "")) }
 
 func smallOffer(name string) admission.Offer {
 	return admission.Offer{Name: name, Demand: map[string]admission.Demand{

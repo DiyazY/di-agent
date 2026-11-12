@@ -385,6 +385,19 @@ func TestOutcomeLinksAccept(t *testing.T) {
 	}
 }
 
+func TestOutcomeCitesTheAccept(t *testing.T) {
+	r := arrived(t)
+	r.tick(time.Minute)
+	o := r.result("held")
+	rec, ok := r.j.Decision(o.OutcomeID)
+	if !ok {
+		t.Fatal("outcome decision not recorded")
+	}
+	if rec.Kind != "admission.outcome" || len(rec.Cites) != 1 || rec.Cites[0] != o.AcceptID {
+		t.Fatalf("outcome kind %q cites %v; want admission.outcome citing %s", rec.Kind, rec.Cites, o.AcceptID)
+	}
+}
+
 func TestOutcomeIdsComeFromTheMap(t *testing.T) {
 	r := arrived(t)
 	r.tick(time.Minute)

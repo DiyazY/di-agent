@@ -616,8 +616,9 @@ func (l *Loop) neverTook(ctx context.Context, now time.Time, ws []runtime.Worklo
 	if spent && !restore {
 		l.budget.refund(sp.at)
 	}
-	b := l.cfg.Map.Decide(l.id(OutcomeNotApplied), fmt.Sprintf("did the change to %s's %s through %s take?", e.Subject, l.d.Resource, l.d.Action))
+	b := l.decide(OutcomeNotApplied, fmt.Sprintf("did the change to %s's %s through %s take?", e.Subject, l.d.Resource, l.d.Action))
 	b.Input("entry", e)
+	b.Cite(e.DecisionID)
 	if restored.Action != "" {
 		b.Input("restored", restored)
 	}
@@ -923,7 +924,11 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 	}
 
 	id := l.id("act")
-	b := l.cfg.Map.Decide(id, l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+	b := l.cfg.Map.Decide(id, "relief.act", l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+	b.Cite(plan.EstimateID)
+	if k != nil {
+		b.Cite(k.DecisionID)
+	}
 	b.Property(l.d.Relieves)
 	b.Property(l.d.Usage + "@" + plan.Subject)
 	b.Facts()
@@ -939,7 +944,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		} else {
 			l.budget.refund(now)
 		}
-		r := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+		r := l.decide("refused", l.ask("cap %s's %s through %s to relieve %s?", plan.Subject))
+		r.Cite(plan.EstimateID)
 		r.Input("plan", plan)
 		r.Input("policy", eff)
 		r.Input("rule", eff.Rule)
@@ -1028,7 +1034,7 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 	l.noted = why
 	l.nRefused++
 	l.mu.Unlock()
-	b := l.cfg.Map.Decide(l.id("refused"), fmt.Sprintf("relieve %s through %s?", l.d.Relieves, l.d.Action))
+	b := l.decide("refused", fmt.Sprintf("relieve %s through %s?", l.d.Relieves, l.d.Action))
 	b.Property(l.d.Relieves)
 	for k, v := range inputs {
 		b.Input(k, v)
@@ -1040,6 +1046,11 @@ func (l *Loop) refuse(why string, inputs map[string]any) {
 // id names the next decision from the map: relief-<kind>-<action>-<incarnation>.<n>.
 func (l *Loop) id(kind string) string {
 	return l.cfg.Map.NewDecisionID("relief-" + kind + "-" + l.d.Action)
+}
+
+// decide starts a decision of kind relief.<kind> under the next id for kind.
+func (l *Loop) decide(kind, question string) *statemap.DecisionBuilder {
+	return l.cfg.Map.Decide(l.id(kind), "relief."+kind, question)
 }
 
 // liveLocked is every action still in force. Caller holds mu.
@@ -1090,9 +1101,10 @@ func (l *Loop) refuseUnanchored(a *Action) {
 		return
 	}
 	why := fmt.Sprintf("origin of %s's change is unknown: no original setting was recorded and the journal does not hold its first act %s", a.Subject, a.ID)
-	b := l.cfg.Map.Decide(l.id("refused"), l.ask("cap %s's %s further through %s to relieve %s?", a.Subject))
+	b := l.decide("refused", l.ask("cap %s's %s further through %s to relieve %s?", a.Subject))
 	b.Input("action", a.ID)
 	b.Input("entry", a.Entry)
+	b.Cite(a.DecisionID)
 	b.Caveat("%s", why)
 	b.Commit(map[string]any{"refused": why})
 }

@@ -105,7 +105,7 @@ func TestSaveIfChangedSavesADecisionOnlyChange(t *testing.T) {
 		t.Fatalf("first call = (%v, %v); want (true, nil)", saved, err)
 	}
 	rev := state.Revision()
-	state.Decide("dec-1", "anything?").Commit(map[string]any{"answer": "no"})
+	state.Decide("dec-1", "estimate", "anything?").Commit(map[string]any{"answer": "no"})
 	if state.Revision() != rev {
 		t.Fatalf("precondition: a decision moved the revision")
 	}

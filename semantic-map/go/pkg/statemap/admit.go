@@ -123,7 +123,7 @@ func (m *Map) Admit(req AdmitRequest) AdmitResult {
 	if id == "" {
 		id = m.admitID(req)
 	}
-	b := m.Decide(id, question)
+	b := m.Decide(id, "admit", question)
 	b.Input("request", map[string]any{"from": req.From, "workload": req.Workload, "cpu_cores": req.CPUCores, "memory_bytes": req.MemoryBytes})
 	b.Input("thresholds", map[string]float64{"cpu_enter": req.CPUEnter, "memory_enter": req.MemoryEnter, "headroom": admitHeadroom})
 

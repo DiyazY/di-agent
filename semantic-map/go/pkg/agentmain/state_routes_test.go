@@ -304,7 +304,7 @@ func TestDecisionIsRetrievableByID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := sm.Decide("d-http-1", "how loaded is this system?")
+	b := sm.Decide("d-http-1", "estimate", "how loaded is this system?")
 	p, _ := b.Property("cpu_utilization")
 	b.Note("read cpu_utilization=%.3f", p.Value)
 	b.Commit(map[string]any{"load": p.Value})
@@ -325,6 +325,46 @@ func TestDecisionIsRetrievableByID(t *testing.T) {
 	// different answers to an auditor.
 	if code := getState(t, srv.URL+"/state/decisions/never-happened", nil); code != http.StatusNotFound {
 		t.Errorf("unknown decision returned %d, want 404", code)
+	}
+}
+
+// TestDecisionChainOverHTTP: ?chain=1 walks a decision's ancestry, and ?kind=
+// filters the list.
+func TestDecisionChainOverHTTP(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.Decide("act", "relief.act", "cap?").Commit(nil)
+	v := sm.Decide("verify", "relief.verify", "did it help?")
+	v.Cite("act")
+	v.Commit(nil)
+	r := sm.Decide("revert", "relief.revert", "give it back?")
+	r.Cite("verify")
+	r.Cite("act")
+	r.Commit(nil)
+
+	var chain struct {
+		Decision *statemap.Decision `json:"decision"`
+		Cites    []struct {
+			ID      string `json:"id"`
+			Evicted bool   `json:"evicted"`
+		} `json:"cites"`
+		CitedBy []string `json:"cited_by"`
+	}
+	if code := getState(t, srv.URL+"/state/decisions/revert?chain=1", &chain); code != 200 {
+		t.Fatalf("GET chain returned %d", code)
+	}
+	if chain.Decision == nil || chain.Decision.ID != "revert" || len(chain.Cites) != 2 ||
+		chain.Cites[0].ID != "verify" || chain.Cites[1].ID != "act" || chain.CitedBy == nil || len(chain.CitedBy) != 0 {
+		t.Errorf("chain %+v; want revert citing verify then act, cited by none", chain)
+	}
+
+	var list struct {
+		Decisions []statemap.Decision `json:"decisions"`
+	}
+	if code := getState(t, srv.URL+"/state/decisions?kind=relief.verify", &list); code != 200 {
+		t.Fatalf("GET decisions returned %d", code)
+	}
+	if len(list.Decisions) != 1 || list.Decisions[0].ID != "verify" {
+		t.Errorf("relief.verify decisions %+v; want verify alone", list.Decisions)
 	}
 }
 

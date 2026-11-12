@@ -368,10 +368,11 @@ func (a *admitter) recordPrediction(d admission.Decision) {
 // replaces when a name already pending lost a race, empty otherwise.
 func (a *admitter) decline(o admission.Offer, reason, superseded string) admission.Hop {
 	id := a.m.NewDecisionID("admit")
-	b := a.m.Decide(id, "admit "+o.Name+"?")
+	b := a.m.Decide(id, "admission", "admit "+o.Name+"?")
 	b.Input("offer", o)
 	if superseded != "" {
 		b.Input("superseded", superseded)
+		b.Cite(superseded)
 	}
 	b.Commit(map[string]any{"verdict": admission.Decline, "reason": reason})
 	return admission.Hop{Node: a.self.NodeID, DecisionID: id, Verdict: admission.Decline, Reason: reason}

@@ -457,7 +457,7 @@ func (h *harness) firstVerify(limit time.Duration, p float64) *statemap.Decision
 // resumeWithPrediction puts a change on pod:a whose act the journal holds, for
 // the loop to take up at its first tick.
 func resumeWithPrediction(h *harness) {
-	b := h.m.Decide("relief-act-1-1", "earlier act")
+	b := h.m.Decide("relief-act-1-1", "relief.act", "earlier act")
 	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1, From: 1.6, To: 1.2, Basis: BasisMap})
 	b.Commit(nil)
 	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,

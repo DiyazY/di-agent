@@ -851,6 +851,13 @@ with `n` drawn from the same counter, so no crash and no restart can reissue an 
 and order is total across restarts. The incarnation advances on every restore and is
 written back at once. A commit under an id already recorded is not recorded; it is
 journalled as `decision.refused`.
+A decision carries a `kind` (`estimate`, `admit`, `relief.act`, `relief.verify`,
+`admission`, `review`, `cost`, …) and `cites`, the earlier decisions it rests on: a
+verdict cites its act, a revert its act and verdict, an admission outcome its accept,
+a review the review or verdict before it. The journal indexes cites both ways, so the
+chain act → verify → revert → intervention is walkable from any link, back through
+its ancestry and forward to what cites it (`?chain=1`). An ancestor the bound has
+evicted is reported as `{id, evicted}` rather than left out.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept

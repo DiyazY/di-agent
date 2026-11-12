@@ -749,8 +749,8 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
 | GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq` | State model |
-| GET  | `/state/decisions`                  | `?limit=`                                                | State model |
-| GET  | `/state/decisions/{id}`             | path only — `410` when the journal has dropped it        | State model |
+| GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
+| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` when the journal has dropped it | State model |
 | POST | `/state/sweep`                      | —                                                        | State model |
 | GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
 | GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |

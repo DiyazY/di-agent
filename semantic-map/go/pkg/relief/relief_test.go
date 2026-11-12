@@ -310,7 +310,7 @@ func (h *harness) action(subject string) Action {
 
 func (h *harness) decisions(kind string) []*statemap.Decision {
 	var out []*statemap.Decision
-	for _, d := range h.m.Journal().Decisions(0) {
+	for _, d := range h.m.Journal().Decisions(0, "") {
 		if strings.HasPrefix(d.ID, "relief-"+kind+"-") {
 			out = append(out, d)
 		}
@@ -410,7 +410,7 @@ func TestAnExpiredChangeIsRevertedInAnyPhase(t *testing.T) {
 func TestReconcileResumesAndRevertsExpired(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4, "pod:b": 0.3, "pod:c": 0.2}})
 	record(t, h.m, contention, "", 0.5, h.now)
-	b := h.m.Decide("relief-act-1-1", "earlier act")
+	b := h.m.Decide("relief-act-1-1", "relief.act", "earlier act")
 	b.Input("plan", Plan{Subject: "pod:a", Predicted: 0.1})
 	b.Commit(nil)
 	h.seed(actuators.Entry{NodeID: "n1", Subject: "pod:a", Action: cpu.Action,
@@ -519,9 +519,9 @@ func TestAGoneWorkloadFreesTheSlot(t *testing.T) {
 	if a := h.action("pod:b"); a.Outcome != "gone" {
 		t.Fatalf("pod:b %+v; want gone at expiry", a)
 	}
-	n := len(h.m.Journal().Decisions(0))
+	n := len(h.m.Journal().Decisions(0, ""))
 	h.run(10*time.Minute, 0.42)
-	if got := len(h.m.Journal().Decisions(0)); got != n || len(h.decisions("gone")) != 2 {
+	if got := len(h.m.Journal().Decisions(0, "")); got != n || len(h.decisions("gone")) != 2 {
 		t.Fatalf("decisions %d → %d; a gone workload must not be retried", n, got)
 	}
 }
@@ -889,7 +889,7 @@ func TestNoPlanIsNotReattributedEveryTick(t *testing.T) {
 	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}, strength: 0.1})
 	estimates := func() int {
 		n := 0
-		for _, d := range h.m.Journal().Decisions(0) {
+		for _, d := range h.m.Journal().Decisions(0, "") {
 			if strings.HasPrefix(d.ID, "est-") {
 				n++
 			}
@@ -957,7 +957,7 @@ func TestAResumedChangeOfUnknownOriginIsNotSteppedAgain(t *testing.T) {
 	})
 	t.Run("only a further step journalled", func(t *testing.T) {
 		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.3}})
-		b := h.m.Decide("relief-act-1-2", "a further step")
+		b := h.m.Decide("relief-act-1-2", "relief.act", "a further step")
 		b.Input("plan", Plan{Subject: "pod:a", From: 1.6, To: 1.2, Predicted: 0.1})
 		b.Input("previous", map[string]any{"act": "relief-act-1-1", "action": "relief-act-1-1"})
 		b.Commit(nil)
@@ -975,10 +975,10 @@ func TestAResumedChangeOfUnknownOriginIsNotSteppedAgain(t *testing.T) {
 	})
 	t.Run("the first act anchors the floor", func(t *testing.T) {
 		h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.3}})
-		first := h.m.Decide("relief-act-1-1", "the first step")
+		first := h.m.Decide("relief-act-1-1", "relief.act", "the first step")
 		first.Input("plan", Plan{Subject: "pod:a", From: 4, To: 3})
 		first.Commit(nil)
-		later := h.m.Decide("relief-act-1-2", "a further step")
+		later := h.m.Decide("relief-act-1-2", "relief.act", "a further step")
 		later.Input("plan", Plan{Subject: "pod:a", From: 1.6, To: 1.2, Predicted: 0.1})
 		later.Input("previous", map[string]any{"act": "relief-act-1-1", "action": "relief-act-1-1"})
 		later.Commit(nil)
@@ -1161,7 +1161,7 @@ func TestARestartDoesNotResetTheHourlyBudget(t *testing.T) {
 	})
 	t.Run("journalled: counted from the act", func(t *testing.T) {
 		h := setup(t)
-		b := h.m.Decide("earlier-act-1", "earlier act")
+		b := h.m.Decide("earlier-act-1", "relief.act", "earlier act")
 		b.Commit(nil)
 		h.advance(61 * time.Minute)
 		for _, s := range []string{"pod:a", "pod:b", "pod:c"} {
@@ -1196,6 +1196,28 @@ func TestARetriedRevertCitesItsVerdict(t *testing.T) {
 	}
 	if got := h.decisions("revert")[0].Inputs["verify"]; got != verify[0].ID {
 		t.Fatalf("revert cites verify %v; want %s", got, verify[0].ID)
+	}
+}
+
+// TestVerifyAndRevertCiteTheAct: a reverted action's verdict cites the act, and
+// its revert cites the act and the verdict, so the chain is walkable.
+func TestVerifyAndRevertCiteTheAct(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.act("pod:a")
+	h.run(2*time.Minute, 0.5)
+	acts, verify, revert := h.decisions("act"), h.decisions("verify"), h.decisions("revert")
+	if len(acts) != 1 || len(verify) != 1 || len(revert) != 1 {
+		t.Fatalf("%d acts, %d verify, %d revert; want one each", len(acts), len(verify), len(revert))
+	}
+	act := acts[0].ID
+	if acts[0].Kind != "relief.act" || verify[0].Kind != "relief.verify" || revert[0].Kind != "relief.revert" {
+		t.Errorf("kinds %q, %q, %q", acts[0].Kind, verify[0].Kind, revert[0].Kind)
+	}
+	if got := strings.Join(verify[0].Cites, ","); got != act {
+		t.Errorf("verify cites %q; want %s", got, act)
+	}
+	if got := strings.Join(revert[0].Cites, ","); got != act+","+verify[0].ID {
+		t.Errorf("revert cites %q; want %s,%s", got, act, verify[0].ID)
 	}
 }
 

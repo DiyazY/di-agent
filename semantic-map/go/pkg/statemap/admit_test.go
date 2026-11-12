@@ -357,13 +357,13 @@ func TestAdmitRefusesAReusedID(t *testing.T) {
 
 func TestAdmitRefusesABadDemand(t *testing.T) {
 	m, _ := admitFixture(t)
-	before := len(m.Journal().Decisions(0))
+	before := len(m.Journal().Decisions(0, ""))
 	for _, req := range []AdmitRequest{admitReq(-1, 0), admitReq(math.NaN(), 0), admitReq(0, math.Inf(1))} {
 		if res := m.Admit(req); res.Err == "" || res.DecisionID != "" {
 			t.Errorf("%+v; want the demand refused before a decision", res)
 		}
 	}
-	if after := len(m.Journal().Decisions(0)); after != before {
+	if after := len(m.Journal().Decisions(0, "")); after != before {
 		t.Errorf("journal holds %d decisions, was %d; a refused request must record nothing", after, before)
 	}
 }
@@ -377,11 +377,11 @@ func TestAdmitAReusedExplicitIDRecordsNothing(t *testing.T) {
 	if res := m.Admit(req); res.Err != "" || res.DecisionID != "est-1-gate" {
 		t.Fatalf("%+v; want the explicit id kept", res)
 	}
-	before := len(m.Journal().Decisions(0))
+	before := len(m.Journal().Decisions(0, ""))
 	if res := m.Admit(req); !strings.Contains(res.Err, "already used") {
 		t.Errorf("%+v; want the reused id refused", res)
 	}
-	if after := len(m.Journal().Decisions(0)); after != before {
+	if after := len(m.Journal().Decisions(0, "")); after != before {
 		t.Errorf("journal holds %d decisions, was %d", after, before)
 	}
 }
@@ -657,7 +657,7 @@ func TestAdmitAnUnseenPodIsPricedOnItsDeclaredDemand(t *testing.T) {
 func TestAdmitIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
 	m, _ := admitFixture(t)
 	const n = 16
-	before := len(m.Journal().Decisions(0))
+	before := len(m.Journal().Decisions(0, ""))
 	results := make([]AdmitResult, n)
 	var wg sync.WaitGroup
 	for i := range n {
@@ -676,7 +676,7 @@ func TestAdmitIDsAreUniqueUnderConcurrentRequests(t *testing.T) {
 			t.Errorf("decision %s: record %+v does not match what the caller got", r.DecisionID, d)
 		}
 	}
-	if after := len(m.Journal().Decisions(0)); after != before+n {
+	if after := len(m.Journal().Decisions(0, "")); after != before+n {
 		t.Errorf("journal holds %d decisions, was %d; want %d new records", after, before, n)
 	}
 
