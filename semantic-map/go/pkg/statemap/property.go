@@ -633,7 +633,8 @@ func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
 
 // NewDecisionID issues a decision id no other in this map's history has had:
 // "<prefix>-<incarnation>.<n>", followed by "-"-joined suffix parts when given, n a
-// ticket from the journal's event counter. The id is reserved before it is returned.
+// ticket from the journal's event counter. Tickets are never reissued, so the id
+// needs no reservation; explicit operator ids are reserved instead.
 func (m *Map) NewDecisionID(prefix string, suffix ...string) string {
 	return m.journal.newID(prefix, suffix)
 }

@@ -206,8 +206,9 @@ func (j *Journal) reserve(id string) bool {
 	return true
 }
 
-// newID issues "<prefix>-<incarnation>.<n>", n a ticket from the event counter,
-// and reserves it before returning.
+// newID issues "<prefix>-<incarnation>.<n>", n a ticket from the event counter.
+// It reserves nothing: a ticket is never reissued, so a generated id cannot collide
+// with another, and an id whose decision is abandoned leaves nothing behind.
 func (j *Journal) newID(prefix string, suffix []string) string {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -216,10 +217,6 @@ func (j *Journal) newID(prefix string, suffix []string) string {
 	if len(suffix) > 0 {
 		id += "-" + strings.Join(suffix, "-")
 	}
-	if j.reserved == nil {
-		j.reserved = map[string]bool{}
-	}
-	j.reserved[id] = true
 	return id
 }
 

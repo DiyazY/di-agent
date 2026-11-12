@@ -77,6 +77,20 @@ func TestNewDecisionIDIsUniqueUnderConcurrency(t *testing.T) {
 	}
 }
 
+func TestAnAbandonedGeneratedIdLeavesNothingReserved(t *testing.T) {
+	m, _ := newTestMap(t, Config{})
+	for i := 0; i < 5; i++ {
+		m.NewDecisionID("relief-act-cpu.limit") // issued, never committed
+	}
+	j := m.Journal()
+	j.mu.RLock()
+	n := len(j.reserved)
+	j.mu.RUnlock()
+	if n != 0 {
+		t.Errorf("%d ids reserved after issuing without committing; want 0", n)
+	}
+}
+
 func TestRecordDecisionRefusesADuplicate(t *testing.T) {
 	j := NewJournal(0)
 	if _, err := j.RecordDecision(&Decision{ID: "d"}); err != nil {
@@ -188,10 +202,12 @@ func TestRestoreSeqNeverFallsBelowHeldEvents(t *testing.T) {
 	if _, err := m2.Load(path); err != nil {
 		t.Fatal(err)
 	}
-	// Load journals the restore itself: that is the next event after the held 20.
+	held := m1.Journal().Events(0, 0)
+	highest := held[len(held)-1].Seq
+	// Load journals the restore itself: that is the next event after the held ones.
 	events := m2.Journal().Events(0, 0)
-	if got := events[len(events)-1].Seq; got != 21 {
-		t.Errorf("next event seq %d; want 21", got)
+	if got := events[len(events)-1].Seq; got != highest+1 {
+		t.Errorf("next event seq %d; want %d", got, highest+1)
 	}
 }
 
