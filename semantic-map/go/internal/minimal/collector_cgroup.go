@@ -320,7 +320,7 @@ func NewCgroupCollectorWithOptions(nodeID, cgroupRoot string, opts CgroupOptions
 		c.selfLogOnce("cgroup collector: %s unreadable (%v): the agent's own cgroup will not be observed",
 			filepath.Join(opts.ProcRoot, "self/cgroup"), err)
 	} else if rel == "/" {
-		c.selfLogOnce("cgroup collector: %s names the cgroup root: the node totals already are the agent's cgroup, so it is not a separate subject",
+		c.selfLogOnce("cgroup collector: %s names the root of its cgroup namespace; self is not collected",
 			filepath.Join(opts.ProcRoot, "self/cgroup"))
 	} else if rel != "" {
 		c.selfRel = strings.TrimPrefix(rel, "/")

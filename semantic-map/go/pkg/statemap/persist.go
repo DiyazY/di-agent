@@ -328,6 +328,7 @@ func (m *Map) Load(path string) (Restore, error) {
 // save cannot bring this life's number back, and with it ids this life has already
 // issued.
 func (m *Map) reserveIncarnation(path, from string, snap Snapshot, curErr string) (Restore, error) {
+	// After a fallback to .prev this save rotates the corrupt current into .prev; the freshly written current is the good generation.
 	if err := m.Save(path); err != nil {
 		return Restore{}, fmt.Errorf("reserving incarnation %d: %w", snap.Incarnation+1, err)
 	}

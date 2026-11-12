@@ -3223,8 +3223,12 @@ func TestRetiredPropertyIsForgottenAfterADayWithATombstone(t *testing.T) {
 	if !ok || !at.Equal(retiredAt) {
 		t.Errorf("tombstone %v %v, want %v", at, ok, retiredAt)
 	}
-	if e, ok := lastEventOf(m, EventPropertyForgotten); !ok || e.Target != "cpu@pod:a" {
-		t.Errorf("no property.forgotten event for the id: %+v", e)
+	forgotEvent := false // cpu is forgotten in the same sweep, in no fixed order
+	for _, e := range m.Journal().Events(0, 0) {
+		forgotEvent = forgotEvent || (e.Kind == EventPropertyForgotten && e.Target == "cpu@pod:a")
+	}
+	if !forgotEvent {
+		t.Errorf("no property.forgotten event for the id")
 	}
 	if got := m.Census().PropertiesTotal; got != before-2 { // cpu is forgotten too, being silent
 		t.Errorf("properties_total %d, want %d", got, before-2)
@@ -3437,5 +3441,30 @@ func TestChurnedPodsDoNotGrowTheMap(t *testing.T) {
 	step(time.Hour, 2*forgetAfter)
 	if got := tombstones(); got != 0 {
 		t.Errorf("%d tombstones after twice forgetAfter, want 0", got)
+	}
+}
+
+func TestRestoredPropertyOfReturningSourceCountsSilenceFromReturn(t *testing.T) {
+	m1, _ := outageMap(t)
+	path := t.TempDir() + "/state.json"
+	if err := m1.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute, AdmitUnknown: true})
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	m2.SetSourceDown("netdata", true)
+	c.advance(3 * time.Minute) // past RetireAfter and the restore grace
+	if _, retired := m2.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v while the source is down", retired)
+	}
+	m2.SetSourceDown("netdata", false)
+	if _, retired := m2.Sweep(); len(retired) != 0 {
+		t.Fatalf("retired %v at return; silence counts from the return", retired)
+	}
+	c.advance(2*time.Minute + time.Second)
+	if _, retired := m2.Sweep(); len(retired) != 2 {
+		t.Errorf("retired %v; want both, RetireAfter since the return", retired)
 	}
 }

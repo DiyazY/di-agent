@@ -692,7 +692,7 @@ Each `MetricSample` carries:
 | `subject`        | `str`        | Empty for node-level readings; set to `<kind>:<identity>` for a scoped subject |
 | `unit`           | `str`        | What the value means (`fraction`, `items`, …); stamped on the property at admission |
 | `range`          | `[lo, hi]`   | The value's bounds; the estimator normalises by it. Declared where the quantity has one (a share, a percentage), absent for a rate or a count; the same on every sample of a type. Without one the map assumes [0,1] and says so |
-| `source`         | `str`        | Which instrument produced it (`cgroup:<node>`, `app:<name>`, …) |
+| `source`         | `str`        | Set by the Supervisor to the member name (`http` for `/ingest-sample`); a producer's own value is overwritten |
 | `chart`          | `str`        | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line); optional. Discovery groups a chart's series that stay perfectly correlated (§6) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 

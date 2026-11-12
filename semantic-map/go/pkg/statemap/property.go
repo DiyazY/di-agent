@@ -1284,7 +1284,7 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 		if p.Status == Unobservable {
 			// The source is back but has not re-emitted this property: its silence
 			// starts when the source returned, not before the outage.
-			if up, ok := m.sourceUpMono[p.Source]; ok && p.lastSeen != 0 {
+			if up, ok := m.sourceUpMono[p.Source]; ok {
 				silence = mono - max(p.lastSeen, up)
 			}
 		}
