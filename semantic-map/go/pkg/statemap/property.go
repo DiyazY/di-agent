@@ -231,6 +231,10 @@ type Relationship struct {
 	// assertion or the established layer when there is one.
 	Recent     float64 `json:"recent"`
 	Confidence float64 `json:"confidence"`
+	// StrengthSE is one Fisher-z standard error of Recent at the window size of the
+	// last fold, mapped back to the r scale (see strengthSE). 1 means the window was
+	// too short to bound it; it is meaningful only once NObservations > 0.
+	StrengthSE float64 `json:"strength_se"`
 
 	// Established is the long-run estimate: what this machine has shown across
 	// regimes, accumulated from the same pairs on a slower time constant than

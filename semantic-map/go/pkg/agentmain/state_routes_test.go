@@ -885,3 +885,35 @@ func TestDecisionFallsThroughToTheLogOverHTTP(t *testing.T) {
 		t.Fatal("journal without a log reports one")
 	}
 }
+
+func TestEstimateReportsBoundsOverHTTP(t *testing.T) {
+	sm, srv := stateFixture(t)
+	rng := [2]float64{0, 100}
+	_ = sm.Record(statemap.Observation{ID: "queue@pod:a", Value: 50, At: time.Now(), Subject: "pod:a", Range: &rng})
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	_ = sm.DeclareRelationship(statemap.Relationship{From: "queue@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
+	_ = sm.AssertRelationshipStrength(statemap.RelationshipID("queue@pod:a", "cpu_pressure_ratio", "discovered"), 0.8, "op", "t")
+
+	var body struct {
+		Answer     map[string]any   `json:"answer"`
+		Influences []map[string]any `json:"influences"`
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio", &body); code != 200 {
+		t.Fatalf("code %d", code)
+	}
+	for _, k := range []string{"sensitivity_low", "sensitivity_high"} {
+		if _, ok := body.Answer[k]; !ok {
+			t.Errorf("answer lacks %s: %v", k, body.Answer)
+		}
+	}
+	if len(body.Influences) == 0 {
+		t.Fatal("no influences")
+	}
+	for _, inf := range body.Influences {
+		for _, k := range []string{"contribution_low", "contribution_high"} {
+			if _, ok := inf[k]; !ok {
+				t.Errorf("influence lacks %s: %v", k, inf)
+			}
+		}
+	}
+}

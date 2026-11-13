@@ -964,7 +964,7 @@ telemetry arrived. Note what this no longer buys: with no seeded magnitudes the 
 *empty* on a fresh agent rather than approximate, so a cold-start agent cannot answer a
 counterfactual at all — which is an honest report, and the gap §"What the artefact
 contains" accepts in exchange for never reporting an unmeasured number.
-`/state/estimate` reports both, and calls the value-weighted one a contribution.
+`/state/estimate` reports both, and calls the value-weighted one a contribution. It also reports the sensitivity and each contribution as an interval; admission still decides on the point.
 
 **Details.** `CostOfAction` reads the cost constructs' levels and
 their incoming relationships through a DecisionBuilder, so the properties that reach
@@ -1084,6 +1084,11 @@ recent estimate at `α = 0.20` (memory ≈ 5 pairs) and an established baseline 
 not spend its first thousand pairs reporting the zero it started from. The pairing is what
 makes the two comparable; nothing interpolates between them, because `Effective()` chooses
 by authority rather than by arithmetic.
+
+The window's Fisher-z standard error is carried on the relationship as `strength_se`,
+mapped to the r scale as `tanh(atanh(r) + 1/√(n−3)) − r` (the whole range `1` under 4
+pairs, where z has no standard error). It is the same arithmetic `CandidateReview.Outdated`
+uses to decide whether evidence moved.
 
 Two properties follow:
 

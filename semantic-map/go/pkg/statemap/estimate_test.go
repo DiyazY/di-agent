@@ -529,3 +529,99 @@ func TestEstimateCaveatsARegimeRelationship(t *testing.T) {
 		t.Fatalf("decision caveats %q; want %q", d.Caveats, want)
 	}
 }
+
+// learnedEstimateFixture folds n pairs on resource → pressure and returns the map.
+func learnedEstimateFixture(t *testing.T, n int) *Map {
+	t.Helper()
+	m, _ := learnedEstimate(t, n, false)
+	return m
+}
+
+// learnedEstimate folds n pairs, or with firstFold stops at the first fold, when the
+// window holds exactly MinSupport (3) pairs.
+func learnedEstimate(t *testing.T, n int, firstFold bool) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{
+		ConvergenceObservations: 500, Alpha: 0.2, AlphaSlow: 0.001, Learn: true,
+		LearnConfig: LearnConfig{PairWindowSeconds: 15, MinSupport: 3, Window: 60},
+	})
+	for _, id := range []string{"resource", "pressure"} {
+		if err := m.DeclareProperty(Property{ID: id, Range: [2]float64{0, 1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: "resource", To: "pressure", Label: "raises", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	id := RelationshipID("resource", "pressure", "raises")
+	if firstFold {
+		for k := 0; ; k++ {
+			if r, _ := m.Relationship(id); r.NObservations > 0 {
+				break
+			}
+			observeHalf(t, m, c, k, same, "e")
+		}
+		return m, c
+	}
+	feedPairs(t, m, c, n, 0.8, "e")
+	return m, c
+}
+
+func TestEstimateBoundsBracketThePoint(t *testing.T) {
+	m := learnedEstimateFixture(t, 10)
+	res := m.Estimate(EstimateRequest{Target: "pressure"})
+	a := res.Answer
+	if a.SensitivityLow > a.Sensitivity || a.Sensitivity > a.SensitivityHigh ||
+		(a.SensitivityLow == a.Sensitivity && a.Sensitivity == a.SensitivityHigh) {
+		t.Errorf("sensitivity %v not strictly bracketed by [%v, %v]", a.Sensitivity, a.SensitivityLow, a.SensitivityHigh)
+	}
+	if len(res.Influences) == 0 {
+		t.Fatal("no influences")
+	}
+	for _, inf := range res.Influences {
+		if inf.Low > inf.Contribution || inf.Contribution > inf.High {
+			t.Errorf("%s: contribution %v outside [%v, %v]", inf.Relationship, inf.Contribution, inf.Low, inf.High)
+		}
+	}
+}
+
+func TestEstimateBoundIsTheWholeRangeUnderFourPairs(t *testing.T) {
+	m, _ := learnedEstimate(t, 0, true)
+	res := m.Estimate(EstimateRequest{Target: "pressure"})
+	src, _ := m.Property("resource")
+	if len(res.Influences) != 1 || !res.Influences[0].Known {
+		t.Fatalf("influences %+v, want one known", res.Influences)
+	}
+	inf := res.Influences[0]
+	if inf.Low != 0 || inf.High != normalise(src, src.Value) {
+		t.Errorf("bounds [%v, %v], want [0, %v]", inf.Low, inf.High, normalise(src, src.Value))
+	}
+}
+
+func TestAssertedStrengthHasNoInterval(t *testing.T) {
+	m, _ := estimateFixture(t)
+	res := m.Estimate(EstimateRequest{Target: "pressure"})
+	for _, inf := range res.Influences {
+		if inf.Low != inf.Contribution || inf.High != inf.Contribution {
+			t.Errorf("%s: [%v, %v] around %v, want a point", inf.Relationship, inf.Low, inf.High, inf.Contribution)
+		}
+	}
+	a := res.Answer
+	if a.SensitivityLow != a.Sensitivity || a.SensitivityHigh != a.Sensitivity {
+		t.Errorf("sensitivity [%v, %v] around %v, want a point", a.SensitivityLow, a.SensitivityHigh, a.Sensitivity)
+	}
+}
+
+func TestEstimateDecisionRecordsTheBounds(t *testing.T) {
+	m := learnedEstimateFixture(t, 10)
+	res := m.Estimate(EstimateRequest{Target: "pressure", ID: "bounds-1"})
+	d, ok := m.Journal().Decision(res.DecisionID)
+	if !ok {
+		t.Fatal("decision not recorded")
+	}
+	for _, k := range []string{"sensitivity_low", "sensitivity_high"} {
+		if _, ok := d.Answer[k]; !ok {
+			t.Errorf("decision answer lacks %s: %v", k, d.Answer)
+		}
+	}
+}

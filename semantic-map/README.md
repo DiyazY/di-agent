@@ -748,7 +748,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/state/relationships`              | `Relationship` — `learned` and `intervened` provenance are refused; relationships carry `interventions` (agreed, null, confounded counts) once the agent has acted on them | State model |
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
-| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id | State model |
+| GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id; `answer.sensitivity_low/high` and each influence's `contribution_low/high` are the point ± one Fisher-z standard error of each learned strength at its window size (whole range under 4 pairs; none for an assertion) | State model |
 | GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq`; carries `log: {file, bytes, indexed, corrupt_lines, foreign_lines}` when `persist.file` is set | State model |
 | GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
 | GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` only when neither the journal nor the log holds it; a log hit carries `from: "log"` (and `cited_by: null` on a chain: the log has no reverse index). `inputs.pace` is the pace the decision was taken at | State model |
@@ -957,7 +957,7 @@ agent reasons with, and `basis` naming which layer that came from — assertion,
 measured, then established, then recent. Read `effective`: `recent` is the fastest-moving
 layer and answers only when none of the others exists. `effective` and the pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
-nothing and absence is not that claim.
+nothing and absence is not that claim. `strength_se` is the point ± one Fisher-z standard error of the learned strength at its window size (whole range under 4 pairs; none for an assertion).
 
 ```bash
 # what each relationship is worth, and on what basis

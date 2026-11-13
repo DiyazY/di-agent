@@ -332,3 +332,24 @@ func TestLoopsCaptureRunsOutsideTheLock(t *testing.T) {
 		t.Fatal("Save deadlocked on a capture that reads the map")
 	}
 }
+
+func TestSnapshotCarriesStrengthSE(t *testing.T) {
+	m := learnedEstimateFixture(t, 10)
+	id := RelationshipID("resource", "pressure", "raises")
+	before, _ := m.Relationship(id)
+	if before.StrengthSE == 0 {
+		t.Fatal("precondition: StrengthSE not set")
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := newTestMap(t, Config{ConvergenceObservations: 500, Alpha: 0.2, Learn: true})
+	if _, err := m2.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	after, ok := m2.Relationship(id)
+	if !ok || after.StrengthSE != before.StrengthSE {
+		t.Errorf("StrengthSE after load %v (found %v), want %v", after.StrengthSE, ok, before.StrengthSE)
+	}
+}
