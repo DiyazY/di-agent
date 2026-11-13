@@ -614,3 +614,68 @@ func TestCloseFlushesAfterAFailedRotationLeftNoFile(t *testing.T) {
 		t.Fatalf("line = %+v, %v", l, ok)
 	}
 }
+
+// A cold start's restore.failed is recorded by Load, before the log opens; it
+// reaches the log when it opens, under the incarnation the log gives this life.
+// Events restored from a snapshot are not written again.
+func TestRestoreFailedReachesTheLogOpenedAfterIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	a := New(Config{Owner: "n1"}, NewJournal(0))
+	if err := a.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	a.RecordEvent(EventPaceChanged, "attention", "agent", nil)
+	if err := a.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	a.CloseLog()
+
+	r := New(Config{Owner: "n1"}, NewJournal(0))
+	if _, err := r.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	r.CloseLog()
+	if n := logKindCount(t, dir, EventPaceChanged); n != 1 {
+		t.Fatalf("pace.changed lines = %d after a restore; want the one, not rewritten", n)
+	}
+
+	for _, f := range []string{path, path + ".prev"} {
+		os.WriteFile(f, []byte("{"), 0o600)
+	}
+	b := New(Config{Owner: "n1"}, NewJournal(0))
+	if _, err := b.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	b.CloseLog()
+	lines := fileLines(t, filepath.Join(dir, JournalFileName))
+	var found bool
+	for _, raw := range lines {
+		if l, ok := decodeLine(raw); ok && l.Kind == EventRestoreFailed {
+			found = true
+			if l.Inc != b.Incarnation() {
+				t.Errorf("restore.failed logged under incarnation %d, want %d", l.Inc, b.Incarnation())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("restore.failed is not in the log")
+	}
+}
+
+func logKindCount(t *testing.T, dir string, k EventKind) int {
+	t.Helper()
+	n := 0
+	for _, raw := range fileLines(t, filepath.Join(dir, JournalFileName)) {
+		if l, ok := decodeLine(raw); ok && l.Kind == k {
+			n++
+		}
+	}
+	return n
+}

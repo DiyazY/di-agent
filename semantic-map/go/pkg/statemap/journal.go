@@ -183,6 +183,9 @@ type Journal struct {
 	// id or an event unique across restarts, a crash before a save included.
 	seq         uint64
 	incarnation uint64
+	// restoredSeq is seq as a snapshot restored it: held events at or below it
+	// came from an earlier life, and the log already has them.
+	restoredSeq uint64
 
 	decisions map[string]*Decision
 	// citedBy maps a decision id to the held decisions citing it, in seq order.

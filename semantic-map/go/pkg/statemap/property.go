@@ -705,8 +705,9 @@ func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
 // Open it after Load and before any id is issued: when the log already holds this
 // owner's lines from an incarnation at or above the current one (a cold start
 // over a surviving log), the journal moves to the incarnation after the highest,
-// so no earlier life's id is reissued. Events restored from a snapshot are not
-// rewritten. A second call is refused.
+// so no earlier life's id is reissued. Events this life recorded before the log
+// opened (a cold start's restore.failed) are written to it then; events restored
+// from a snapshot are not rewritten. A second call is refused.
 func (m *Map) OpenLog(dir string) error {
 	j := m.journal
 	j.mu.RLock()
@@ -730,6 +731,11 @@ func (m *Map) OpenLog(dir string) error {
 	}
 	f.inc = j.incarnation
 	j.log = f
+	for _, e := range j.events {
+		if e.Seq > j.restoredSeq {
+			f.Append(e) // under j.mu, so they precede anything appended after
+		}
+	}
 	j.mu.Unlock()
 	return nil
 }
