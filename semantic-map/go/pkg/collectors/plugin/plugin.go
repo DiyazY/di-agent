@@ -44,8 +44,9 @@ type Hello struct {
 // every type the plugin can produce now, and an empty non-nil slice says it can
 // produce none; when nil the agent takes the types in samples. A sample whose
 // value is NaN or ±Inf cannot be sent as JSON: it is left out of the reply and a
-// line on stderr says so. An error is a fault: the agent restarts the plugin with
-// backoff.
+// line on stderr says so. An error made by Unhealthy says the plugin's source did
+// not answer: the reply carries the reason, and the agent asks again next tick. Any
+// other error is a fault: the agent restarts the plugin with backoff.
 type CollectFunc func(now time.Time) (samples []*types.MetricSample, available []types.MetricType, err error)
 
 // Serve answers the agent on stdin and stdout until stdin closes, which is how the
@@ -89,7 +90,18 @@ type collectReply struct {
 	Seq       uint64                `json:"seq"`
 	Available *[]types.MetricType   `json:"available,omitempty"`
 	Samples   []*types.MetricSample `json:"samples"`
+	Unhealthy string                `json:"unhealthy,omitempty"`
 }
+
+// unhealthy is the error Unhealthy makes.
+type unhealthy string
+
+func (u unhealthy) Error() string { return string(u) }
+
+// Unhealthy is the error a CollectFunc returns when its source did not answer —
+// the daemon it reads is down, the device is gone — with the reason. It is not a
+// fault: the agent marks the plugin unhealthy and keeps asking every tick.
+func Unhealthy(reason string) error { return unhealthy(reason) }
 
 type errorReply struct {
 	Seq   uint64 `json:"seq"`
@@ -189,6 +201,10 @@ func answer(collect CollectFunc, req request, errOut io.Writer) (r any) {
 		}
 	}()
 	samples, available, err := collect(time.Unix(req.NowUnix, 0))
+	var u unhealthy
+	if errors.As(err, &u) {
+		return collectReply{Seq: req.Seq, Samples: []*types.MetricSample{}, Unhealthy: string(u)}
+	}
 	if err != nil {
 		return errorReply{Seq: req.Seq, Error: err.Error()}
 	}

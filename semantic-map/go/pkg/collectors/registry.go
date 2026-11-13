@@ -18,11 +18,15 @@ import (
 // collection interval, and where it logs. Logf may be nil, which discards. Requests is
 // the pods' memory requests the cgroup collector counts memory contention against; nil
 // drops that condition.
+//
+// OnDoctor receives what a member's doctor ran and how it ended (see Doctor); nil
+// drops the report, which is still logged.
 type Env struct {
 	NodeID   string
 	Interval time.Duration
 	Logf     func(format string, args ...any)
 	Requests *minimal.Requests
+	OnDoctor func(member string, detail map[string]any)
 }
 
 // Factory builds the collector of one registered type. It decodes its own config

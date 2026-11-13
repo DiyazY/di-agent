@@ -2,6 +2,7 @@ package collectors
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +94,8 @@ type ExecCollector struct {
 	availMu   sync.Mutex
 	available []types.MetricType
 	drops     []contracts.SampleDrop
+	health    error
+	doctor    []string // the hello's, kept across restarts until the next hello
 
 	restarts atomic.Int64
 
@@ -224,8 +227,46 @@ func (e *ExecCollector) Collect() ([]*types.MetricSample, error) {
 	e.availMu.Lock()
 	e.available = avail
 	e.drops = drops
+	e.health = replyHealth(r)
 	e.availMu.Unlock()
 	return samples, nil
+}
+
+// Health is the last reply's unhealthy reason, or nil.
+func (e *ExecCollector) Health() error {
+	e.availMu.Lock()
+	defer e.availMu.Unlock()
+	return e.health
+}
+
+// DoctorCommand is the doctor the plugin declared in its last hello, or nil.
+func (e *ExecCollector) DoctorCommand() []string {
+	e.availMu.Lock()
+	defer e.availMu.Unlock()
+	return append([]string(nil), e.doctor...)
+}
+
+// RunDoctor runs the declared doctor as the plugin runs: in the plugin's directory
+// (when its command is a path) with the plugin's minimal environment, in its own
+// process group, killed with it when ctx ends.
+func (e *ExecCollector) RunDoctor(ctx context.Context) ([]byte, error) {
+	argv := e.DoctorCommand()
+	if len(argv) == 0 {
+		return nil, errors.New("no doctor declared")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	if filepath.Base(e.sp.Command) != e.sp.Command {
+		if path, err := exec.LookPath(e.sp.Command); err == nil {
+			if abs, err := filepath.Abs(path); err == nil {
+				cmd.Dir = filepath.Dir(abs)
+			}
+		}
+	}
+	cmd.Env = e.childEnv()
+	ownGroup(cmd)
+	cmd.Cancel = func() error { signalGroup(cmd, syscall.SIGKILL); return nil }
+	cmd.WaitDelay = time.Second
+	return cmd.CombinedOutput()
 }
 
 // TakeDrops returns what the last Collect dropped from the plugin's reply —
@@ -349,6 +390,9 @@ func (e *ExecCollector) spawn(deadline time.Time) error {
 	if err := checkHello(r); err != nil {
 		return e.fault(err)
 	}
+	e.availMu.Lock()
+	e.doctor = r.Doctor
+	e.availMu.Unlock()
 	return nil
 }
 

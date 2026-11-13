@@ -50,6 +50,7 @@ type HTTPCollector struct {
 	// availMu guards the last successful reply's available list and drops.
 	availMu   sync.Mutex
 	available []types.MetricType
+	health    error
 	drops     []contracts.SampleDrop
 }
 
@@ -115,8 +116,17 @@ func (h *HTTPCollector) Collect() ([]*types.MetricSample, error) {
 	h.availMu.Lock()
 	h.available = avail
 	h.drops = drops
+	h.health = replyHealth(r)
 	h.availMu.Unlock()
 	return samples, nil
+}
+
+// Health is the last reply's unhealthy reason, or nil. A doctor an http sidecar
+// declares is not run: a network endpoint does not name commands for this node.
+func (h *HTTPCollector) Health() error {
+	h.availMu.Lock()
+	defer h.availMu.Unlock()
+	return h.health
 }
 
 // TakeDrops returns what the last Collect dropped from the plugin's reply —

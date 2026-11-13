@@ -487,4 +487,5 @@ func (j *Journal) restore(events []Event, dropped, seq, incarnation uint64) {
 		}
 	}
 	j.incarnation = incarnation
+	j.restoredSeq = j.seq
 }

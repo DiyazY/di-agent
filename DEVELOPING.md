@@ -141,13 +141,14 @@ A Collector reads some metric source and emits typed `MetricSample`s. This is th
 
 **Most collectors do not belong in this repository.** A collector in any language can run as an `exec` or `http` plugin, and a Go one can be compiled into a custom binary, all without editing the agent. [`docs/collectors.md`](docs/collectors.md) is the guide for those: the contract's guarantees, the wire protocol, the rules every producer follows, ownership, certification with `mapctl collector check`, and worked examples. Read it first even for an in-tree collector — its §4 producer rules apply here too.
 
-The steps below are for a collector that ships *inside* the agent as a built-in type. The contract is three methods:
+The steps below are for a collector that ships *inside* the agent as a built-in type. The contract is four methods:
 
 ```go
 type CollectorContract interface {
     Collect() ([]*types.MetricSample, error)
     SourceID() string
     AvailableMetrics() []types.MetricType
+    Health() error
 }
 ```
 
@@ -155,7 +156,7 @@ type CollectorContract interface {
 
 1. Create `internal/minimal/collector_<source>.go`. Model it on `collector_netdata.go` (HTTP source, include patterns) or `collector_cgroup.go` (filesystem source).
 2. Emit a deterministic `EventID` — the same physical observation must always produce the same ID, or idempotency breaks and replays double-count. The three built-ins all derive it deterministically: `cgroup` and `netdata` hash `(sourceID, nodeID, subject, metricType, timestamp)`, and `script` hashes `(source, node, metric, tick)` so a replay is reproducible; `client.EventID` in `pkg/ingest/client` is the first hash, and the one a new collector should use. Two samples of one batch must not share an `EventID` — the compliance suite's `NoDuplicateSamplesInBatch` fails it, since the map would keep only the first.
-3. Return an empty batch and a nil error for "no data right now". Never error on an empty source; a missing file or an unreachable endpoint is normal.
+3. Return an empty batch and a nil error for "no data right now". Never error on an empty source. A source that cannot be read (an unreachable endpoint, a refused connection, an error answer) is not an error either: return the empty batch and report why from `Health()` until a read succeeds, so the agent marks the collector unhealthy and its properties unobservable instead of letting them go stale.
 4. Register it in `pkg/collectors/builtin.go`: `Register("<source>", newSource)` in `init()`, with a factory `func(env Env, config *yaml.Node) (contracts.CollectorContract, error)` that owns its config struct, decodes it with `decodeStrict` (an unknown key is refused) and validates it, as `newCgroup` and `newNetdata` do. List it as `type: <source>` in `sources.collectors`. The Supervisor runs it beside the others; no profile changes.
 5. Add `internal/minimal/collector_<source>_test.go` and run the compliance suite against it:
 

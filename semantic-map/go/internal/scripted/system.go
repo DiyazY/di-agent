@@ -75,6 +75,9 @@ func (s *SystemScript) log(format string, args ...any) {
 	log.Printf(format, args...)
 }
 
+// Health is always nil: a script has no source to lose.
+func (s *SystemScript) Health() error { return nil }
+
 func (s *SystemScript) AvailableMetrics() []types.MetricType {
 	out := make([]types.MetricType, len(s.available))
 	copy(out, s.available)

@@ -54,11 +54,16 @@ const (
 	// "attention"; Detail has from, to and reason.
 	EventPaceChanged EventKind = "pace.changed"
 
-	// EventCollectorDown and EventCollectorUp record a collector member entering or
-	// leaving backoff or stuck. Target is the member; the properties it last
-	// produced are unobservable in between.
+	// EventCollectorDown and EventCollectorUp record a collector member going down
+	// (unhealthy, in backoff or stuck) and coming back. Target is the member; down's
+	// Detail has the reason; the properties it last produced are unobservable in
+	// between.
 	EventCollectorDown EventKind = "collector.down"
 	EventCollectorUp   EventKind = "collector.up"
+
+	// EventCollectorDoctor records a doctor the agent ran for a member that stayed
+	// down: Detail has member, command, down_because, output, seconds and error.
+	EventCollectorDoctor EventKind = "collector.doctor"
 
 	// EventClockStepped records a sweep that found the wall clock and the process's
 	// monotonic clock disagreeing by more than the pair window: the wall clock was
@@ -178,6 +183,9 @@ type Journal struct {
 	// id or an event unique across restarts, a crash before a save included.
 	seq         uint64
 	incarnation uint64
+	// restoredSeq is seq as a snapshot restored it: held events at or below it
+	// came from an earlier life, and the log already has them.
+	restoredSeq uint64
 
 	decisions map[string]*Decision
 	// citedBy maps a decision id to the held decisions citing it, in seq order.

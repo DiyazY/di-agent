@@ -269,3 +269,14 @@ func TestServeUnencodableReplyIsErrorReply(t *testing.T) {
 		t.Fatalf("next tick = %q", got[2])
 	}
 }
+
+func TestServeUnhealthyIsAReplyNotAnError(t *testing.T) {
+	got, _ := drive(t, func(Hello) (CollectFunc, error) {
+		return func(time.Time) ([]*types.MetricSample, []types.MetricType, error) {
+			return nil, nil, Unhealthy("daemon refused the connection")
+		}, nil
+	}, hello, `{"op":"collect","seq":4,"now_unix":1}`)
+	if len(got) != 2 || got[1] != `{"seq":4,"samples":[],"unhealthy":"daemon refused the connection"}` {
+		t.Fatalf("replies = %q", got)
+	}
+}

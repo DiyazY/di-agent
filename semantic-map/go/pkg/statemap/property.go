@@ -705,8 +705,9 @@ func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
 // Open it after Load and before any id is issued: when the log already holds this
 // owner's lines from an incarnation at or above the current one (a cold start
 // over a surviving log), the journal moves to the incarnation after the highest,
-// so no earlier life's id is reissued. Events restored from a snapshot are not
-// rewritten. A second call is refused.
+// so no earlier life's id is reissued. Events this life recorded before the log
+// opened (a cold start's restore.failed) are written to it then; events restored
+// from a snapshot are not rewritten. A second call is refused.
 func (m *Map) OpenLog(dir string) error {
 	j := m.journal
 	j.mu.RLock()
@@ -730,6 +731,11 @@ func (m *Map) OpenLog(dir string) error {
 	}
 	f.inc = j.incarnation
 	j.log = f
+	for _, e := range j.events {
+		if e.Seq > j.restoredSeq {
+			f.Append(e) // under j.mu, so they precede anything appended after
+		}
+	}
 	j.mu.Unlock()
 	return nil
 }
@@ -1482,8 +1488,8 @@ func (m *Map) forgetLocked(p *Property, now time.Time) {
 // SetSourceDown records whether a collector member is down. A property last
 // produced by a down member is Unobservable at the next sweep and is never retired
 // while the member stays down. Idempotent: collector.down and collector.up are
-// journaled only on a transition.
-func (m *Map) SetSourceDown(source string, down bool) {
+// journaled only on a transition; collector.down carries reason when it is not empty.
+func (m *Map) SetSourceDown(source string, down bool, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.downSources[source] == down {
@@ -1497,7 +1503,11 @@ func (m *Map) SetSourceDown(source string, down bool) {
 		delete(m.downSources, source)
 		m.sourceUpMono[source] = m.mono()
 	}
-	m.bump(kind, source, "collector", map[string]any{"member": source}, m.now())
+	detail := map[string]any{"member": source}
+	if down && reason != "" {
+		detail["reason"] = reason
+	}
+	m.bump(kind, source, "collector", detail, m.now())
 }
 
 // recomputeDerivedLocked refreshes derived properties from their members. Caller

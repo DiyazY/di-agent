@@ -227,6 +227,10 @@ type TunerContract interface {
 //   - Pure read: Collect never modifies any system state.
 //   - Empty on no data: Collect returns ([], nil) when no new samples are ready;
 //     it never returns a non-nil error for a temporarily unavailable source.
+//   - Health: a source that could not be read (refused, unreachable, an error
+//     answer) is reported by Health, not by Collect's error, which is for the
+//     collector itself failing. An unhealthy collector is polled on every tick and
+//     what it last produced is unobservable until it is healthy again.
 //   - Deterministic EventID: the same physical observation (source, node, subject,
 //     metric, anchor timestamp) always produces the same EventID.
 //   - Declared types: every MetricType a Collect emits is in the AvailableMetrics
@@ -257,6 +261,11 @@ type CollectorContract interface {
 	// at least every type its last Collect emitted. It may grow or shrink as the
 	// source changes; see "Declared types" above.
 	AvailableMetrics() []types.MetricType
+
+	// Health reports the source as the last Collect found it: nil when it
+	// answered, or why it did not ("GET http://localhost:19999/...: connection
+	// refused"). Read after every Collect that returned no error.
+	Health() error
 }
 
 // Kinds of SampleDrop a collector that validates its own source reports.

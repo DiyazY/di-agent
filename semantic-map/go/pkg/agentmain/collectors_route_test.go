@@ -19,6 +19,7 @@ type fakeCollector struct{ samples []*types.MetricSample }
 func (f fakeCollector) Collect() ([]*types.MetricSample, error) { return f.samples, nil }
 func (fakeCollector) SourceID() string                          { return "fake" }
 func (fakeCollector) AvailableMetrics() []types.MetricType      { return nil }
+func (fakeCollector) Health() error                             { return nil }
 
 func getCollectors(t *testing.T, sup *collectors.Supervisor) map[string]any {
 	t.Helper()

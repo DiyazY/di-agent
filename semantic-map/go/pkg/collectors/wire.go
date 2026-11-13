@@ -36,9 +36,13 @@ func newHello(env Env, name string, config map[string]any) Hello {
 }
 
 // HelloReply accepts the hello with the plugin's protocol, or refuses it with Error.
+// Doctor, optional, is a command the agent runs when the plugin stays unhealthy
+// (see Doctor); only an exec plugin's is run, since the agent already runs its
+// command.
 type HelloReply struct {
-	Protocol int    `json:"protocol"`
-	Error    string `json:"error,omitempty"`
+	Protocol int      `json:"protocol"`
+	Error    string   `json:"error,omitempty"`
+	Doctor   []string `json:"doctor,omitempty"`
 }
 
 // CollectRequest asks for one batch. Seq is echoed so a late reply to an earlier
@@ -71,12 +75,14 @@ func (c *nowClock) next(t time.Time) int64 {
 // wire: absent (or null) lets the agent take the set of types in Samples; present,
 // even as [], is the full set of types the plugin can produce now. A nil Available
 // encodes as absent, a non-nil empty one as []. An empty Samples is "no data right
-// now"; Error is a fault.
+// now"; Error is a fault of the plugin; Unhealthy says the plugin's source did not
+// answer, and why (the collector's Health).
 type CollectReply struct {
 	Seq       uint64
 	Available []types.MetricType
 	Samples   []*types.MetricSample
 	Error     string
+	Unhealthy string
 }
 
 // MarshalJSON writes available only when it is non-nil, and samples always.
@@ -86,8 +92,9 @@ func (r CollectReply) MarshalJSON() ([]byte, error) {
 		Available *[]types.MetricType   `json:"available,omitempty"`
 		Samples   []*types.MetricSample `json:"samples"`
 		Error     string                `json:"error,omitempty"`
+		Unhealthy string                `json:"unhealthy,omitempty"`
 	}
-	o := out{Seq: r.Seq, Samples: r.Samples, Error: r.Error}
+	o := out{Seq: r.Seq, Samples: r.Samples, Error: r.Error, Unhealthy: r.Unhealthy}
 	if r.Available != nil {
 		o.Available = &r.Available
 	}
@@ -104,6 +111,7 @@ type rawReply struct {
 	Available []types.MetricType `json:"available"`
 	Samples   []json.RawMessage  `json:"samples"`
 	Error     string             `json:"error"`
+	Unhealthy string             `json:"unhealthy"`
 }
 
 // decodeReply parses a collect reply. Only a body that is not a JSON object of
@@ -275,6 +283,14 @@ func checkHello(r HelloReply) error {
 		return fmt.Errorf("plugin speaks protocol %d, agent speaks %d", r.Protocol, ProtocolVersion)
 	}
 	return nil
+}
+
+// replyHealth is a successful reply's health: nil, or its unhealthy reason.
+func replyHealth(r *rawReply) error {
+	if r.Unhealthy == "" {
+		return nil
+	}
+	return errors.New(r.Unhealthy)
 }
 
 // checkCollect decides whether a collect reply is a usable answer to request seq:

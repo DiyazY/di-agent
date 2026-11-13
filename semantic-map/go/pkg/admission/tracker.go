@@ -242,7 +242,16 @@ func (t *Tracker) Restore(mem Memory) {
 	t.pending = nil
 	for _, p := range mem.Pending {
 		e := &entry{name: p.Name, acceptID: p.AcceptID, at: p.AcceptedAt, subject: p.Subject}
-		t.outcomes = append(t.outcomes, t.record(e, Confounded, "agent restarted", nil, nil, now))
+		// One id per accept: a snapshot older than the restart that closed it
+		// (state.json.prev) brings it back as pending, and the outcome already in
+		// the journal or its log closes it again without a second record.
+		id := p.AcceptID + "-restarted"
+		if d, ok := t.recorded(id); ok {
+			t.outcomes = append(t.outcomes, Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id,
+				Subject: e.subject, Result: Confounded, Reason: "agent restarted", At: d.At})
+			continue
+		}
+		t.outcomes = append(t.outcomes, t.recordAs(id, e, Confounded, "agent restarted", nil, nil, now))
 	}
 	t.trimOutcomes()
 }
@@ -458,7 +467,12 @@ func (t *Tracker) judge(e *entry, now time.Time) Outcome {
 
 // record commits the outcome decision, linked to the accept.
 func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
-	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.Map.NewDecisionID("admit"), Subject: e.subject,
+	return t.recordAs(t.c.Map.NewDecisionID("admit"), e, result, reason, lines, inputs, now)
+}
+
+// recordAs is record under a given outcome id.
+func (t *Tracker) recordAs(id string, e *entry, result, reason string, lines []OutcomeLine, inputs map[string]any, now time.Time) Outcome {
+	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: id, Subject: e.subject,
 		Result: result, Reason: reason, Lines: lines, At: now}
 	b := t.c.Map.Decide(o.OutcomeID, "admission.outcome", "outcome of "+e.name+"?")
 	b.Input("name", e.name)
@@ -475,6 +489,16 @@ func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, i
 	}
 	b.Commit(answer)
 	return o
+}
+
+// recorded finds a decision held in the journal or written to its log.
+func (t *Tracker) recorded(id string) (*statemap.Decision, bool) {
+	j := t.c.Map.Journal()
+	if d, ok := j.Decision(id); ok {
+		return d, true
+	}
+	d, ok, err := j.DecisionFromLog(id)
+	return d, ok && err == nil
 }
 
 // rise is a basis's predicted rise over the pressure it was made from, and its

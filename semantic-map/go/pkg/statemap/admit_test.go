@@ -714,7 +714,7 @@ func TestAdmitDeclinesNamingAnUnobservableReading(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m.SetSourceDown("cgroup", true)
+	m.SetSourceDown("cgroup", true, "")
 	m.Sweep()
 	res := m.Admit(admitReq(1, 1<<30))
 	if res.Accepted || !strings.Contains(res.Reason, "unobservable") {
@@ -742,7 +742,7 @@ func TestAdmitDeclinesWhenOnlyTheContentionSourceIsDown(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m.SetSourceDown("B", true)
+	m.SetSourceDown("B", true, "")
 	m.Sweep()
 	res := m.Admit(admitReq(1, 1<<30))
 	if res.Accepted || !strings.Contains(res.Reason, "unobservable") {

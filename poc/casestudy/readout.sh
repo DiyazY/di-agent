@@ -274,12 +274,12 @@ r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" --slurpfile ev "$W/ev.json" '.
 echo "$r" >"$W/m7.json"
 row M7 02 "each accept has an outcome citing it, admission.arrived between" \
     "$(jq -r 'if length == 0 then "not exercised" elif all(.ordered) then "pass" else "fail" end' <<<"$r")" "accepts: $(jq -c 'map({name, outcome: .outcome.result, ordered})' <<<"$r"); probe verdicts: $(jq -c --argjson a "$M7s" '[.[] | select(.kind == "admission" and .k >= $a and ((.inputs.offer.name // "") | startswith("probe-"))) | "\(.inputs.offer.name) \(.answer.verdict): \(.answer.reason)"]' "$W/dec.json")"
-r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b) | .answer.lines[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
-row M7 03 "both bases recorded: usage_rise always, map_rise when a measured effect exists" \
+r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b and (.answer.outcome == "held" or .answer.outcome == "breached")) | (.inputs.lines // .answer.lines)[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
+row M7 03 "both bases recorded on scored outcomes: usage_rise always, map_rise when a measured effect exists" \
     "$(jq -r 'if length == 0 then "not exercised" elif (all(.usage_rise) | not) then "fail" elif any(.map_rise) then "pass" else "not exercised" end' <<<"$r")" \
     "$(jq -c 'group_by(.domain) | map({domain: .[0].domain, lines: length, with_map_rise: (map(select(.map_rise)) | length)})' <<<"$r") (JSON names map_rise/usage_rise)"
 r=$(jq -c '[.[]? | select(.kind | startswith("admission."))]' <<<"$cal")
-sc=$(jq -c '[.[] | select(.kind == "admission.outcome") | .answer.lines[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
+sc=$(jq -c '[.[] | select(.kind == "admission.outcome" and (.answer.outcome == "held" or .answer.outcome == "breached")) | (.inputs.lines // .answer.lines)[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
 row M7 03 "calibration per domain: admission.memory/cpu_contention_ratio entries, n = scored outcomes" \
     "$(verdict "$(jq -nr --argjson c "$r" --argjson s "${sc:-null}" 'if $s == null and ($c | length) == 0 then "not-exercised" else ($c | map(.kind) | index("admission.memory_contention_ratio")) != null and ($c | map(.kind) | index("admission.cpu_contention_ratio")) != null and all($c[] | select(.basis == "usage"); .n == ($s[(.kind | sub("admission."; ""))] // 0)) end')")" "entries: $r; scored outcome lines by domain: $sc"
 r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission" and .k >= $a and .k <= $b and (.inputs.offer.name | startswith("probe-")))] | last | {name: .inputs.offer.name, basis_chosen_by: .inputs.basis_chosen_by,
@@ -295,7 +295,11 @@ r=$(jq -c --argjson a "$M8s" --argjson b "$M8e" --argjson td "${td:-0}" '[.[] | 
 row M8 05 "one base->slow at 175 + 10 min (+- 1 tick), reason names calm" \
     "$(verdict "$(jq '[.[] | select(.d == "base->slow")] | length == 1 and (.[0].after_delete_min >= 9 and .[0].after_delete_min <= 12) and (.[0].reason | test("calm"))' <<<"$r")")" "$r"
 slow=$(jq '[.[] | select(.kind == "pace.changed" and .detail.to == "slow")] | last | .ts // null' "$W/ev.json")
-r=$(jq -c --argjson s "${slow:-null}" '[.[] | select(.endpoint == "/collectors" and .status == 200) | {t, n: (.body.collectors[] | select(.name == "cgroup") | .samples)}] as $c
+# For a slow period after M5, only the captures after the last one stamped before M5 began: earlier ones include M4's
+# forward-stepped wall clock, whose stamps fall inside M8's windows, and another process's counter.
+m5t=$(t M5 '^start$')
+r=$(jq -c --argjson s "${slow:-null}" --argjson m5 "${m5t:-0}" '[.[] | select(.endpoint == "/collectors" and .status == 200) | {t, n: (.body.collectors[] | select(.name == "cgroup") | .samples)}]
+    | (if ($s // 0) > $m5 then (([to_entries[] | select(.value.t < $m5) | .key] | last) // -1) else -1 end) as $i0 | .[$i0 + 1:] as $c
     | def rate(a; b): ([$c[] | select(.t >= a and .t <= b)]) | if length < 2 then null else ((.[-1].n - .[0].n) / (.[-1].t - .[0].t)) end;
     if $s == null then null else {base: rate($s - 300; $s - 30), slow: rate($s + 30; $s + 300)} | . + {ratio: (if .slow and .slow > 0 then .base / .slow else null end)} end' "$W/cap.json")
 row M8 05 "loops slowed: collection rate under slow ~1/4 of base (cgroup samples per second)" \

@@ -575,8 +575,10 @@ Read-only: collectors are configured in the spec, not over HTTP.
 ```
 
 `kind` is `type` (a built-in), `exec` or `http`; `type` is the built-in's name and empty
-otherwise. `state` is `starting` until the first successful collect, `ok` after one, and
-`backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
+otherwise. `state` is `starting` until the first successful collect, `ok` after one,
+`unhealthy` when the call succeeded but the collector's source did not answer (its
+`Health`; `last_error` is the reason; no backoff, it is asked every tick and is `ok` on
+the first healthy answer), and `backoff` after an error, panic or timeout, until `backoff_until_unix` (1 s doubling to
 5 min, reset by a success), and `stuck` while a call that outlived its timeout has not
 returned — the member is skipped until it does, and its return is then recorded as a
 fault at that moment (`backoff`, a fresh `backoff_until_unix`, `last_error` saying how it

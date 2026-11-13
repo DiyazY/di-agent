@@ -35,6 +35,7 @@ type CollectorContract interface {
     Collect() ([]*types.MetricSample, error)
     SourceID() string
     AvailableMetrics() []types.MetricType
+    Health() error // nil, or why the source did not answer the last Collect
 }
 ```
 
@@ -43,6 +44,10 @@ The contract's guarantees, verbatim from its doc comment:
 > - Pure read: Collect never modifies any system state.
 > - Empty on no data: Collect returns ([], nil) when no new samples are ready;
 >   it never returns a non-nil error for a temporarily unavailable source.
+> - Health: a source that could not be read (refused, unreachable, an error
+>   answer) is reported by Health, not by Collect's error, which is for the
+>   collector itself failing. An unhealthy collector is polled on every tick and
+>   what it last produced is unobservable until it is healthy again.
 > - Deterministic EventID: the same physical observation (source, node, subject,
 >   metric, anchor timestamp) always produces the same EventID.
 > - Declared types: every MetricType a Collect emits is in the AvailableMetrics
@@ -109,6 +114,7 @@ One envelope, two transports:
  "config":{ /* the entry's config block, verbatim, as JSON */ }}
 // plugin → agent
 {"protocol":1}
+// optionally {"protocol":1,"doctor":["./doctor.sh","--verbose"]}
 // or {"error":"no nvidia-smi on PATH"}
 
 // agent → plugin: every tick
@@ -118,8 +124,12 @@ One envelope, two transports:
  "available":["gpu_util","gpu_mem_used"],
  "samples":[{"metric_type":"gpu_util","value":0.37,"timestamp_unix":1761160000,
              "unit":"share","range":[0,1],"subject":"pod:9f3…","chart":"gpu"}]}
+// or {"seq":42,"samples":[],"unhealthy":"nvidia-smi: no devices found"}
 // or {"seq":42,"error":"…"}
 ```
+
+- **Health.** `unhealthy` says the plugin is working but its source did not answer (the daemon it reads is down, the device is gone), with the reason. It is not a fault: the plugin is not restarted or backed off, it is asked again next tick, `GET /collectors` shows it `unhealthy` with the reason as `last_error`, and the map journals `collector.down` and holds what it last produced `unobservable` until a reply without `unhealthy`. Report a down source this way, not with an empty reply: an empty reply is "no data right now" and its properties would only go stale. The Go SDK's `plugin.Unhealthy(reason)` and the Python SDK's `Unhealthy(reason)` exception send it.
+- **Doctor.** An exec plugin MAY name a command in its hello reply's `doctor`. When the member stays down (unhealthy, backoff or stuck) for one minute, the agent runs it once for that episode, never twice within ten minutes, for at most 30 s, in the plugin's directory with the plugin's environment and process group, and journals the command, its output (first 4 KiB) and how it ended as a `collector.doctor` event. An http sidecar's `doctor` is ignored. No `doctor`, nothing runs.
 
 - `samples` entries are `types.MetricSample` JSON, the same body `POST /ingest-sample` takes ([field reference](../semantic-map/README.md#post-ingest-sample)). Each entry is decoded **strictly**: a field `MetricSample` does not have (a misspelt `"valu"`), a field of the wrong type, a missing or `null` `value`, a `null` entry or one that is not an object makes that sample *malformed*. A malformed sample is dropped and counted as a violation (`malformed sample`, §5); the rest of the reply is kept, and the tick is not a fault. A typo therefore never becomes a reading of zero.
 - Within one reply, a sample whose `event_id` (§3.2) repeats an earlier one's is a *duplicate*: the first is kept, the rest are dropped and counted as violations (`duplicate sample`). The map would drop them anyway; dropping them here keeps the `samples` counter to what reaches the map.
@@ -211,6 +221,7 @@ How to read it when something is wrong:
 | You see | It means |
 | ------- | -------- |
 | `state: starting` | No successful collect yet. |
+| `state: unhealthy`, `last_error` | The call worked but the source did not answer (`Health`, or a reply's `unhealthy`); `last_error` is the reason. Asked again every tick, no backoff. |
 | `state: backoff`, `last_error` | The last call faulted; the member is skipped until `backoff_until_unix`. `last_error` names the cause (`no reply within 3s`, `reply seq 4, want 5`, `plugin error: …`). |
 | `state: stuck` | A call outlived its timeout and has not returned (an in-process collector that hangs; the exec and http adapters enforce their own timeout, so they rarely get here). The member is skipped until it returns. Its return is then recorded as a fault at that moment — `backoff` with a fresh `backoff_until_unix`, and `last_error` saying how it ended (`abandoned call ended: …`, or that it returned late and its samples were discarded). |
 | `restarts` climbing | An exec plugin is crashing, being killed on faults, or exiting on its own between ticks (logged as `plugin exited between ticks`). Its stderr is in the agent log under `collector[<name>]:`. |

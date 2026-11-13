@@ -1,0 +1,90 @@
+[13:58:29] prep: moved aside
+[13:58:29] prep: moved aside
+[13:58:29] prep: moved aside
+[13:58:29] prep: moved aside
+[13:58:29] prep: ran: systemctl stop ollama.service
+[13:58:29] prep: ready
+[13:58:30] M0: start
+[14:08:30] M0: end
+[14:08:30] M1: start
+[14:08:30] M1: applied cycler
+[14:09:12] M1: applied mem-wave
+[14:09:54] M1: applied mem-squeeze
+[14:10:37] M1: applied io-wave
+[14:11:19] M1: applied twin-a
+[14:12:02] M1: applied twin-b
+[14:12:44] M1: applied noise
+[14:48:30] M1: end
+[14:48:30] M2: start
+[14:48:31] M2: estimate without mem-wave
+[14:49:01] M2: deleted mem-wave
+[15:03:30] M2: end
+[15:03:30] M3: start
+[15:03:40] M3: ran: systemctl stop netdata.service
+[15:10:30] M3: offered offer-m3 (not applied)
+[15:16:29] M3: ran: systemctl start netdata.service
+[15:18:30] M3: end
+[15:18:30] M4: start
+[15:18:30] M4: ran: timedatectl set-ntp false
+[17:18:30] M4: ran: date -s +2 hours
+[17:18:50] M4: node ready after forward step
+[15:22:30] M4: ran: date -s -2 hours
+[15:22:30] M4: ran: timedatectl set-ntp true
+[15:22:51] M4: node ready after backward step
+[15:25:01] M4: deleted noise
+[15:25:01] M4: end
+[15:25:30] M5: start
+[15:25:30] M5: learned state saved
+[15:25:30] M5: ran: pkill -KILL -x agent
+[15:25:31] M5: restarted after kill -9
+[15:32:31] M5: stopped
+[15:32:31] M5: ran: truncate -s 410938 /var/lib/di-agent/state.json
+[15:32:33] M5: restarted on a truncated state.json
+[15:35:31] M5: stopped
+[15:35:31] M5: ran: truncate -s 431005 /var/lib/di-agent/state.json
+[15:35:31] M5: ran: truncate -s 419713 /var/lib/di-agent/state.json.prev
+[15:35:32] M5: restarted on truncated state.json and state.json.prev
+[15:38:30] M5: end
+[15:38:30] M6: start
+[15:38:31] M6: applied mem-victim
+[15:39:37] M6: applied page-hog
+[16:23:51] M6: end
+[16:23:51] M7: start
+[16:24:27] M7: deleted page-hog
+[16:49:01] M7: relief calm
+[16:49:31] M7: offered probe-1
+[16:49:32] M7: applied probe-1
+[16:51:49] M7: outcome for probe-1
+[16:52:22] M7: deleted probe-1
+[16:53:30] M7: offered probe-2
+[16:53:31] M7: applied probe-2
+[16:55:48] M7: outcome for probe-2
+[16:56:21] M7: deleted probe-2
+[16:57:30] M7: offered probe-3
+[16:57:30] M7: applied probe-3
+[16:59:48] M7: outcome for probe-3
+[17:00:19] M7: deleted probe-3
+[17:01:30] M7: offered probe-4
+[17:01:30] M7: applied probe-4
+[17:03:48] M7: outcome for probe-4
+[17:04:19] M7: deleted probe-4
+[17:05:30] M7: offered probe-5
+[17:05:31] M7: applied probe-5
+[17:08:03] M7: outcome for probe-5
+[17:08:36] M7: deleted probe-5
+[17:09:30] M7: offered probe-6
+[17:09:30] M7: applied probe-6
+[17:11:48] M7: outcome for probe-6
+[17:12:19] M7: deleted probe-6
+[17:12:19] M7: end
+[17:18:30] M8: start
+[17:19:03] M8: deleted every planted pod
+[17:31:30] M8: estimate at 188
+[17:33:30] M8: applied noise
+[17:38:30] M8: end
+[17:38:30] M9: start
+[17:38:30] M9: read for the readout
+[17:43:30] M9: end
+[17:43:30] teardown: start
+[17:44:02] teardown: ran: systemctl start ollama.service
+[17:44:02] teardown: end

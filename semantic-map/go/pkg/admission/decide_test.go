@@ -145,6 +145,13 @@ func TestReliefActiveDeclines(t *testing.T) {
 		if l := line(t, d, "cpu_contention_ratio"); l.Phase != phase {
 			t.Fatalf("line phase %q; want %q", l.Phase, phase)
 		}
+		// The decline rests on the gate sub-decision, recorded and cited like an
+		// accept's, so the record says what the headroom was when relief refused.
+		rec, ok := m.Journal().Decision(d.ID)
+		gate := d.ID + "-gate"
+		if !ok || len(rec.Cites) != 1 || rec.Cites[0] != gate || rec.Inputs["gate"] != gate {
+			t.Fatalf("decline %s cites %v, inputs.gate %v; want %s", d.ID, rec.Cites, rec.Inputs["gate"], gate)
+		}
 	}
 }
 
