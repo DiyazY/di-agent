@@ -58,6 +58,10 @@ type StateView struct {
 	// read in.
 	Facts []Fact `json:"facts,omitempty"`
 
+	// Pace is the attention level the agent runs at and when it last changed.
+	Pace      string    `json:"pace"`
+	PaceSince time.Time `json:"pace_since"`
+
 	// Counts summarises the whole map, not just the selection, so a caller can see
 	// what the filter excluded.
 	Counts StateCounts `json:"counts"`
@@ -142,7 +146,7 @@ func (m *Map) State(q Query) StateView {
 	// Empty, not nil: a filter that matches nothing is an answer, and it should
 	// serialise as [] rather than null, which a client has to special-case.
 	view := StateView{
-		Owner: m.owner, Revision: m.revision, Counts: m.censusLocked(), Facts: m.factsLocked(),
+		Owner: m.owner, Revision: m.revision, Pace: m.pace, PaceSince: m.paceSince, Counts: m.censusLocked(), Facts: m.factsLocked(),
 		Calibration: m.calibrationListLocked(), Properties: []Property{}, Relationships: []Relationship{},
 	}
 	selected := map[string]bool{}

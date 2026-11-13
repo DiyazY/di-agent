@@ -50,6 +50,10 @@ const (
 	// adjustment from two unrelated ones that happened to be adjacent in the log.
 	EventOperatorIntent EventKind = "operator.intent"
 
+	// EventPaceChanged records a change of the agent's attention level. Target is
+	// "attention"; Detail has from, to and reason.
+	EventPaceChanged EventKind = "pace.changed"
+
 	// EventCollectorDown and EventCollectorUp record a collector member entering or
 	// leaving backoff or stuck. Target is the member; the properties it last
 	// produced are unobservable in between.
@@ -520,9 +524,11 @@ func (m *Map) Decide(id, kind, question string) *DecisionBuilder {
 	m.mu.RLock()
 	rev := m.revision
 	now := m.now()
+	pace := m.pace
 	m.mu.RUnlock()
 	return &DecisionBuilder{
 		m: m, id: id, kind: kind, question: question, at: now, revision: rev,
+		inputs:   map[string]any{"pace": pace},
 		seenProp: map[string]bool{}, seenRel: map[string]bool{},
 		assumptions: map[string]float64{},
 	}

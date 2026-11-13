@@ -192,7 +192,7 @@ semantic-map/
     │   │   ├── host.go         host: /proc, /sys, /etc/os-release under an optional root
     │   │   └── statfs_*.go     Disk size by statfs, where the platform has it
     │   ├── autonomy/           Autonomous candidate review (concrete, NOT a contract)
-    │   │   ├── autonomy.go     Levels, thresholds, the review loop, the tiers, decision records
+    │   │   ├── autonomy.go     Levels, thresholds, the review cycle, the tiers, decision records
     │   │   ├── registry.go     Named parts: backends, rules, tools, renderers; Build() from names
     │   │   ├── rules.go        Tier 0: Rule, composition and persistent-correlation
     │   │   ├── decider.go      Tier 1 systemone: Ollama decision models over /v1/systemone
@@ -730,7 +730,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | POST | `/relief/pause`                     | JSON content type — every lever stops making changes; verifying, reverting a failed action and expiry go on; journalled as `relief.paused` (and `/relief/resume` as `relief.resumed`) with actor `operator`; answers as `GET /relief` | relief   |
 | POST | `/relief/resume`                    | JSON content type — undo pause, on every lever            | relief   |
 | GET  | `/groups`                           | —                                                        | groups | The node's topology: `groups` (`id`, `name`, `source`, `members`, `consumers` — whether the map holds the group's sums as `cpu_utilization@group:<name>` and `memory_utilization@group:<name>`) and `parents` (a container's or a `veth`'s pod) |
-| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts; `{"level":"off"}` without one |
+| GET  | `/autonomy`                         | —                                                        | autonomy | The reviewer's level, models, thresholds and counts (`waiting`: due candidates passed over for an inactive end; `due`: those with active ends, the work a cycle can act on); `{"level":"off"}` without one |
 | GET  | `/peers`                            | —                                                        | Step 4.9 |
 | POST | `/peers`                            | `{url, note?}`                                           | Step 4.9 |
 | DELETE | `/peers/{id}`                     | path only                                                | Step 4.9 |
@@ -740,7 +740,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/tasks`                            | — `{submissions, answered, pending, outcomes}`: recent submissions with their chains, this node's answers by verdict, its accepts awaiting an outcome, and their outcomes | Admission |
 | POST | `/explain`                          | `{question, session_id?, use_planner?, use_critic?, stream?, max_iterations?, max_tool_calls?}` | Explain v1/v2 |
 | GET  | `/ui/...`                           | — the web console; only with `node.ui: true`, `404` otherwise | Phase 2B |
-| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` (`active`, `stale`, `unobservable`, `retired`) repeat or take a comma list; an unknown value is `400`. Counts carry `properties_unobservable`, the properties whose collector is down. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
+| GET  | `/state`                            | `?kind=&status=&min-confidence=&related-to=&id=&subject=` — `kind` and `status` (`active`, `stale`, `unobservable`, `retired`) repeat or take a comma list; an unknown value is `400`. `pace` and `pace_since` say the attention level (`base` or `slow`) and when it last changed. Counts carry `properties_unobservable`, the properties whose collector is down. Carries `discovery`, the pair budget and how far it rationed, and `calibration`, each prediction basis's record (n, mean error, mean absolute error, hit rate) | State model |
 | GET  | `/state/properties/{id}`            | path only; `Accept: text/plain` renders the neighbourhood; `410` with `{id, retired_at, forgotten: true}` for a property forgotten after 24 h retired | State model |
 | POST | `/state/properties`                 | `Property`                                               | State model |
 | DELETE | `/state/properties/{id}`          | `?reason=&actor=` — `reason` required                    | State model |
@@ -751,7 +751,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id | State model |
 | GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq` | State model |
 | GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
-| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` when the journal has dropped it | State model |
+| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` when the journal has dropped it. `inputs.pace` is the pace the decision was taken at | State model |
 | POST | `/state/sweep`                      | —                                                        | State model |
 | GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
 | GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
@@ -1002,6 +1002,8 @@ observation. A property retired for 24 hours is forgotten: removed from the map 
 snapshot, with a tombstone kept a day more, so an old decision id still resolves to
 "retired" and the snapshot stops growing with pod churn. `map.admit: false` closes the
 model for a deployment that wants that.
+
+**The pace.** The agent has two attention levels and no setting for them. After ten minutes in which every relief lever is calm, no accept awaits its outcome, no candidate is due for review and no property was admitted, it goes `slow`: collection, review, persist and group refresh run at a quarter of their cadence. An offer (`POST /tasks`, `/offers`), an operator mutation (any request other than GET, HEAD or OPTIONS, a pushed sample `POST /ingest-sample` excepted: that is telemetry) or a newly admitted property returns it to `base` at once; a lever leaving calm, a pending accept or a due review does so at the next one-minute check. The change is journalled as `pace.changed` with its reason, and every decision records the pace it was taken at. The sweep keeps wall-clock time, so staleness means the same at both paces; relief, admission tracking and peer polling keep their own cadence. If `sources.interval × 4` would reach `map.stale_after`, the agent logs once at start and never slows. A restart starts at `base`. An unclean exit under `slow` can lose up to four `persist.interval`s; a clean shutdown saves as before.
 
 ### One agent per machine
 
@@ -1890,7 +1892,7 @@ An agent's rejection or deferral is not final: the pair is still tested, and the
 returns to pending, to be reviewed again, once its evidence moves materially or crosses
 the persistent-correlation approval threshold. A reviewed candidate is not reviewed again
 until then, so the models are not asked the same question every cycle.
-A candidate whose end is stale waits. The decision record holds the candidate, both
+A candidate whose end is stale waits, and is counted in the status's `waiting`, not in `due`. The decision record holds the candidate, both
 properties as read, the text each model was given, each model's answer, the tool calls,
 and the level and thresholds in force. `GET /state` carries the same `autonomy` status, so
 a reader of the map can see the level it was shaped under.

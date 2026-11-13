@@ -486,3 +486,18 @@ func (refusingMap) ConfirmCandidate(string, string, types.CandidateReview) error
 func (refusingMap) AnnotateCandidate(string, types.CandidateReview) error {
 	return errors.New("the operator closed the candidate")
 }
+
+// TestStatusDueCountsActiveDueCandidates: Due is the due work a cycle could act on.
+// A candidate waiting for an inactive end is not due work, so it is in Waiting only.
+func TestStatusDueCountsActiveDueCandidates(t *testing.T) {
+	const a, b = "cpu_utilization@pod:a->cpu_pressure", "cpu_utilization@pod:b->cpu_pressure"
+	const gone = "cpu_utilization@pod:gone->cpu_pressure"
+	m := newFakeMap(t, directed(a, ""), directed(b, ""), directed(gone, ""))
+	if err := m.st.RetireProperty("cpu_utilization@pod:gone", "test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, m, autonomy.Config{Level: autonomy.Suggest})
+	if s := r.Status(); s.Due != 2 || s.Waiting != 1 {
+		t.Errorf("status due=%d waiting=%d; want 2 due and 1 waiting", s.Due, s.Waiting)
+	}
+}

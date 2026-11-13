@@ -604,7 +604,20 @@ type Map struct {
 	// onRetire is called, outside the lock, with the id of every property that
 	// retires — by an operator or by silence. See SetRetireHook.
 	onRetire func(propertyID string)
+
+	// pace is the attention level the agent runs at, paceSince when it last
+	// changed, lastAdmitted when a property was last admitted. Not persisted.
+	pace         string
+	paceSince    time.Time
+	lastAdmitted time.Time
+	// onAdmit is called, outside the lock, once per admission. See SetAdmitHook.
+	onAdmit func(propertyID string)
 }
+
+const (
+	PaceBase = "base" // full attention: every loop at its configured cadence
+	PaceSlow = "slow" // calm: paced loops at paceSlowFactor × cadence
+)
 
 // New builds an empty map.
 func New(cfg Config, journal *Journal) *Map {
@@ -629,6 +642,8 @@ func New(cfg Config, journal *Journal) *Map {
 		sourceUpMono:  make(map[string]time.Duration),
 		now:           time.Now,
 		epoch:         time.Now(),
+		pace:          PaceBase,
+		paceSince:     time.Now(),
 	}
 	m.mono = func() time.Duration { return time.Since(m.epoch) }
 	return m
@@ -870,8 +885,19 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	accepted, admitted, err := m.recordLocked(o, id, value, at, eventID)
+	fn := m.onAdmit
+	m.mu.Unlock()
+	// Outside the lock, so the hook may call back into the map (SetPace).
+	if admitted != "" && fn != nil {
+		m.callHook(fn, admitted)
+	}
+	return accepted, err
+}
 
+// recordLocked is RecordAccepted's body under the write lock. admitted is the id
+// of the property this reading admitted, "" when it admitted none.
+func (m *Map) recordLocked(o Observation, id string, value float64, at time.Time, eventID string) (accepted bool, admitted string, err error) {
 	// A reading is refused, not folded in, when it is from the future or older than
 	// the property's last: it would enter the EMA as the newest value and make
 	// silence negative. Order is judged on the monotonic anchor silence runs on — the
@@ -882,7 +908,7 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 	// delivery of it will carry.
 	if at.After(m.now().Add(time.Duration(m.learn.PairWindowSeconds) * time.Second)) {
 		m.readingsFuture++
-		return false, nil
+		return false, "", nil
 	}
 	// Zero means unseen, so nudge off it. Older means by a whole stamp: stamps are
 	// Unix seconds, and the wall and monotonic clocks are read one after the other,
@@ -893,23 +919,23 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 	}
 	if p, ok := m.properties[id]; ok && p.lastSeen != 0 && p.lastSeen-anchor >= time.Second {
 		m.readingsOutOfOrder++
-		return false, nil
+		return false, "", nil
 	}
 
 	// Keyed by property as well as event, because an event identity is only unique
 	// within the reading it names: one collector tick can carry several metrics, and
 	// some collectors number them from a shared counter.
 	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
-		return false, nil
+		return false, "", nil
 	}
 
 	p, ok := m.properties[id]
 	if !ok {
 		if !m.cfg.AdmitUnknown {
-			return false, fmt.Errorf("property %q is not declared and admission is disabled", id)
+			return false, "", fmt.Errorf("property %q is not declared and admission is disabled", id)
 		}
 		if err := validScope(id, o.Subject); err != nil {
-			return false, err
+			return false, "", err
 		}
 		p = &Property{
 			ID: id, Kind: Observed, Status: Active,
@@ -934,16 +960,18 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 			detail["after_forgotten"] = true
 		}
 		m.bump(EventPropertyAdmitted, id, "system", detail, at)
+		m.lastAdmitted = at
+		admitted = id
 	} else {
 		// Checked before reconciling: a derived id is rejected outright, and
 		// reconciling first would journal a conflict and advance the revision for an
 		// observation that is about to be refused anyway.
 		if p.Kind == Derived {
-			return false, fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
+			return false, "", fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
 				id, p.Members)
 		}
 		if err := m.reconcileDeclarationLocked(p, o, at); err != nil {
-			return false, err
+			return false, "", err
 		}
 	}
 
@@ -1003,7 +1031,7 @@ func (m *Map) RecordAccepted(o Observation) (bool, error) {
 		m.latest[d.ID] = dobs
 		m.learnFromObservationLocked(d.ID, dobs)
 	}
-	return true, nil
+	return true, admitted, nil
 }
 
 // reconcileDeclarationLocked merges what a later observation says about a property
@@ -1126,6 +1154,51 @@ func (m *Map) SetRetireHook(fn func(propertyID string)) {
 	m.onRetire = fn
 }
 
+// SetAdmitHook registers a function called, outside the lock, with the id of every
+// property admitted on first observation.
+func (m *Map) SetAdmitHook(fn func(propertyID string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onAdmit = fn
+}
+
+// LastAdmitted is when a property was last admitted; zero until the first.
+func (m *Map) LastAdmitted() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastAdmitted
+}
+
+// Pace is the attention level the agent runs at: PaceBase on a new map.
+func (m *Map) Pace() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.pace
+}
+
+// PaceSince is when the pace last changed (map creation until it does).
+func (m *Map) PaceSince() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.paceSince
+}
+
+// SetPace changes the pace and journals pace.changed with the reason. It reports
+// false, changing nothing, when p is already the pace. The value is the caller's.
+func (m *Map) SetPace(p, reason string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p == m.pace {
+		return false
+	}
+	now := m.now()
+	m.bump(EventPaceChanged, "attention", "agent", map[string]any{
+		"from": m.pace, "to": p, "reason": reason,
+	}, now)
+	m.pace, m.paceSince = p, now
+	return true
+}
+
 // retireLocked withdraws a property and every relationship incident to it. Caller
 // holds the write lock. Both retirement paths use it, so an edge cannot be left
 // active with a retired endpoint whichever way the endpoint went.
@@ -1171,14 +1244,14 @@ func (m *Map) fireRetireHook(ids []string) {
 		if !retired {
 			continue
 		}
-		m.callRetireHook(fn, id)
+		m.callHook(fn, id)
 	}
 }
 
-// callRetireHook runs one hook call under a recover: the hook is the caller's
+// callHook runs one hook call under a recover: the hook is the caller's
 // code on the sweep goroutine, and a panic there must neither take the sweep down
 // nor skip the properties after it. The failure is journaled, not hidden.
-func (m *Map) callRetireHook(fn func(string), id string) {
+func (m *Map) callHook(fn func(string), id string) {
 	defer func() {
 		if r := recover(); r != nil {
 			m.mu.Lock()

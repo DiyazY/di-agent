@@ -383,7 +383,30 @@ func Main() {
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 	registerConsole(mux, cfg.Node.UI)
 
-	srv := newServer(cfg.Node.Addr, mux)
+	pace := NewPace(state, PaceInputs{
+		LeverPhases: func() []string {
+			phases := make([]string, 0, len(reliefLoops))
+			for _, l := range reliefLoops {
+				phases = append(phases, string(l.Status().Phase))
+			}
+			return phases
+		},
+		PendingAccepts: func() int { return len(admit.tracker.PendingList()) },
+		ReviewDue: func() int {
+			if reviewer == nil {
+				return 0
+			}
+			return reviewer.Status().Due
+		},
+		LastAdmitted: state.LastAdmitted,
+	}, time.Now, log.Printf)
+	// Before Run: Pin does not move a pace that is already slow back to base.
+	paceOK, paceWhy := paceAllowed(cfg.Sources.Interval, state.StaleAfter())
+	if !paceOK {
+		pace.Pin(paceWhy)
+	}
+
+	srv := newServer(cfg.Node.Addr, pace.Wakeful(mux))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -425,7 +448,12 @@ func Main() {
 		log.Printf("memory requests: listed from runtime %s every %s", rt.Name(), requestsEvery)
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
-	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval)
+	if paceOK {
+		log.Printf("pace: base; slow after %s of calm (×%d on collection, review, persist, groups)",
+			paceCalmFor, paceSlowFactor)
+	}
+	go pace.Run(ctx)
+	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval, pace)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
 	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
@@ -439,12 +467,10 @@ func Main() {
 	if sup != nil {
 		status = sup.Status
 	}
-	startCollectionLoop(ctx, sm, collector, status, state, cfg.Sources.Interval, headroomMu)
-	if reviewer != nil {
-		go reviewer.Run(ctx)
-	}
+	startCollectionLoop(ctx, sm, collector, status, state, cfg.Sources.Interval, headroomMu, pace)
+	startReviewLoop(ctx, reviewer, cfg.Loops.Review.Interval, pace)
 	if cfg.Groups.Interval > 0 {
-		go grp.run(ctx, cfg.Groups.Interval)
+		go grp.run(ctx, cfg.Groups.Interval, pace)
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -518,6 +544,7 @@ func startCollectionLoop(
 	state *statemap.Map,
 	interval time.Duration,
 	headroomMu *sync.Mutex,
+	p *Pace,
 ) {
 	switch {
 	case collector == nil:
@@ -529,7 +556,7 @@ func startCollectionLoop(
 	}
 
 	log.Printf("collection loop started: source=%s interval=%s", collector.SourceID(), interval)
-	go runCollectionLoop(ctx, sm, collector, status, state, interval, headroomMu)
+	go runCollectionLoop(ctx, sm, collector, status, state, interval, headroomMu, p)
 }
 
 // runCollectionLoop is the body of the scheduler goroutine. Errors from the
@@ -545,20 +572,17 @@ func runCollectionLoop(
 	state *statemap.Map,
 	interval time.Duration,
 	headroomMu *sync.Mutex,
+	p *Pace,
 ) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if !p.wait(ctx, interval) {
 			log.Printf("collection loop exiting: %v", ctx.Err())
 			return
-		case <-t.C:
-			collectAndIngest(collector, headroomMu, sm.IngestSample)
-			// After the ingest, so a member whose first good tick carries samples
-			// revives its properties before it is marked up.
-			syncSources(state, status())
 		}
+		collectAndIngest(collector, headroomMu, sm.IngestSample)
+		// After the ingest, so a member whose first good tick carries samples
+		// revives its properties before it is marked up.
+		syncSources(state, status())
 	}
 }
 
@@ -843,7 +867,7 @@ func saveIfChanged(state *statemap.Map, path string, last *saveMark) (saved bool
 	return true, nil
 }
 
-// startSaveLoop snapshots the map on a ticker when its revision moved, and once more when the context ends.
+// startSaveLoop snapshots the map every interval of the pace when its revision moved.
 //
 // This loop only does the periodic saves, which bound what an UNCLEAN exit costs. The
 // save that makes a clean restart lossless is done synchronously by main after the
@@ -851,7 +875,7 @@ func saveIfChanged(state *statemap.Map, path string, last *saveMark) (saved bool
 // enough to be useless. A failed save is logged rather than fatal — an agent that
 // cannot write its snapshot should keep answering questions about the system it can
 // still see.
-func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every time.Duration) {
+func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every time.Duration, p *Pace) {
 	if state == nil || path == "" {
 		return
 	}
@@ -860,24 +884,20 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 	}
 	log.Printf("state model: persisting to %s every %s", path, every)
 	go func() {
-		t := time.NewTicker(every)
-		defer t.Stop()
 		var lastSaved saveMark
 		for {
-			select {
-			case <-ctx.Done():
+			if !p.wait(ctx, every) {
 				// The shutdown save is main's job, done synchronously so the process
 				// cannot exit before it lands.
 				return
-			case <-t.C:
-				saved, err := saveIfChanged(state, path, &lastSaved)
-				if err != nil {
-					log.Printf("state model: periodic save failed: %v", err)
-					continue
-				}
-				if saved {
-					log.Printf("state model: saved at revision %d (periodic)", lastSaved.rev)
-				}
+			}
+			saved, err := saveIfChanged(state, path, &lastSaved)
+			if err != nil {
+				log.Printf("state model: periodic save failed: %v", err)
+				continue
+			}
+			if saved {
+				log.Printf("state model: saved at revision %d (periodic)", lastSaved.rev)
 			}
 		}
 	}()

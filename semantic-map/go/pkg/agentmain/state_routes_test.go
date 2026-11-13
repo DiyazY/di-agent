@@ -781,3 +781,36 @@ func TestForgottenPropertyAnswers410(t *testing.T) {
 		t.Errorf("unknown id answered %d, want 404", code)
 	}
 }
+
+// TestStateCarriesThePace: GET /state says the attention level and since when, and a
+// decision records the pace it was taken at.
+func TestStateCarriesThePace(t *testing.T) {
+	sm, srv := stateFixture(t)
+	var view struct {
+		Pace      string `json:"pace"`
+		PaceSince string `json:"pace_since"`
+	}
+	if code := getState(t, srv.URL+"/state", &view); code != 200 || view.Pace != "base" {
+		t.Fatalf("GET /state: code=%d pace=%q, want 200 and base", code, view.Pace)
+	}
+	if at, err := time.Parse(time.RFC3339, view.PaceSince); err != nil || at.IsZero() {
+		t.Fatalf("pace_since %q does not parse as a non-zero RFC3339 time: %v", view.PaceSince, err)
+	}
+	sm.SetPace(statemap.PaceSlow, "test")
+	if code := getState(t, srv.URL+"/state", &view); code != 200 || view.Pace != "slow" {
+		t.Fatalf("GET /state after SetPace: code=%d pace=%q, want slow", code, view.Pace)
+	}
+	if err := sm.Observe("cpu_pressure_ratio", 0.3, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var res statemap.EstimateResult
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio", &res); code != 200 || res.DecisionID == "" {
+		t.Fatalf("estimate: code=%d decision_id=%q", code, res.DecisionID)
+	}
+	var d struct {
+		Inputs map[string]any `json:"inputs"`
+	}
+	if code := getState(t, srv.URL+"/state/decisions/"+res.DecisionID, &d); code != 200 || d.Inputs["pace"] != "slow" {
+		t.Fatalf("decision %s: code=%d inputs.pace=%v, want slow", res.DecisionID, code, d.Inputs["pace"])
+	}
+}
