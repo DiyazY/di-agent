@@ -25,11 +25,20 @@ func resolveDecision(j *statemap.Journal, id string) (d *statemap.Decision, from
 }
 
 // resolveChain is Journal.Chain with the log behind it. A held decision's chain
-// comes from the journal. One only the log holds is walked depth-first in cite
+// comes from the journal, each link it marks evicted filled from the log when the
+// log has it (its own ancestors are not walked further). One only the log holds is walked depth-first in cite
 // order, each id once, every hop through resolveDecision; an id neither holds is
 // marked evicted. CitedBy is nil: the log has no reverse index.
 func resolveChain(j *statemap.Journal, id string) (statemap.Chain, string, bool) {
 	if c, ok := j.Chain(id); ok {
+		for i, l := range c.Cites {
+			if !l.Evicted {
+				continue
+			}
+			if d, _, held := resolveDecision(j, l.ID); held {
+				c.Cites[i] = statemap.ChainLink{ID: l.ID, Decision: d}
+			}
+		}
 		return c, "journal", true
 	}
 	d, from, ok := resolveDecision(j, id)

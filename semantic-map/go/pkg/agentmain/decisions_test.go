@@ -70,3 +70,37 @@ func TestResolveChainWalksThroughTheLog(t *testing.T) {
 		t.Fatal("an id neither holds resolved")
 	}
 }
+
+// A root still held keeps its memory chain; an ancestor the journal evicted is
+// filled from the log.
+func TestResolveChainFillsAnEvictedAncestorFromTheLog(t *testing.T) {
+	m := statemap.New(statemap.Config{Owner: "n1"}, statemap.NewJournal(3))
+	if err := m.OpenLog(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.CloseLog() })
+	act := m.NewDecisionID("act")
+	m.Decide(act, "relief.act", "q").Commit(nil)
+	verify := m.NewDecisionID("verify")
+	b := m.Decide(verify, "relief.verify", "q")
+	b.Cite(act)
+	b.Cite("ghost")
+	b.Commit(nil)
+	for i := 0; i < 2; i++ {
+		m.Decide(m.NewDecisionID("est"), "estimate", "q").Commit(nil)
+	}
+	j := m.Journal()
+	if _, held := j.Decision(act); held {
+		t.Fatal("act should be evicted")
+	}
+	c, from, ok := resolveChain(j, verify)
+	if !ok || from != "journal" || len(c.Cites) != 2 {
+		t.Fatalf("resolveChain = %+v, from %q, ok %v", c, from, ok)
+	}
+	if l := c.Cites[0]; l.ID != act || l.Evicted || l.Decision == nil || l.Decision.ID != act {
+		t.Fatalf("act link = %+v, want held from the log", l)
+	}
+	if l := c.Cites[1]; l.ID != "ghost" || !l.Evicted {
+		t.Fatalf("ghost link = %+v, want evicted", l)
+	}
+}
