@@ -574,3 +574,14 @@ func TestConfoundedAndReliefActedFeedNothing(t *testing.T) {
 		t.Fatalf("relief-acted outcome fed %v", r.m.Calibration())
 	}
 }
+
+func TestOutcomeRecordsTheName(t *testing.T) {
+	r := arrived(t)
+	record(t, r.m, "cpu_contention_ratio", "", 0.07)
+	r.tick(time.Minute)
+	o := r.only()
+	rec, ok := r.j.Decision(o.OutcomeID)
+	if !ok || rec.Inputs["name"] != "web" {
+		t.Fatalf("outcome inputs %v; want name web", rec.Inputs)
+	}
+}
