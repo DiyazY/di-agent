@@ -295,7 +295,11 @@ r=$(jq -c --argjson a "$M8s" --argjson b "$M8e" --argjson td "${td:-0}" '[.[] | 
 row M8 05 "one base->slow at 175 + 10 min (+- 1 tick), reason names calm" \
     "$(verdict "$(jq '[.[] | select(.d == "base->slow")] | length == 1 and (.[0].after_delete_min >= 9 and .[0].after_delete_min <= 12) and (.[0].reason | test("calm"))' <<<"$r")")" "$r"
 slow=$(jq '[.[] | select(.kind == "pace.changed" and .detail.to == "slow")] | last | .ts // null' "$W/ev.json")
-r=$(jq -c --argjson s "${slow:-null}" '[.[] | select(.endpoint == "/collectors" and .status == 200) | {t, n: (.body.collectors[] | select(.name == "cgroup") | .samples)}] as $c
+# For a slow period after M5, only the captures after the last one stamped before M5 began: earlier ones include M4's
+# forward-stepped wall clock, whose stamps fall inside M8's windows, and another process's counter.
+m5t=$(t M5 '^start$')
+r=$(jq -c --argjson s "${slow:-null}" --argjson m5 "${m5t:-0}" '[.[] | select(.endpoint == "/collectors" and .status == 200) | {t, n: (.body.collectors[] | select(.name == "cgroup") | .samples)}]
+    | (if ($s // 0) > $m5 then (([to_entries[] | select(.value.t < $m5) | .key] | last) // -1) else -1 end) as $i0 | .[$i0 + 1:] as $c
     | def rate(a; b): ([$c[] | select(.t >= a and .t <= b)]) | if length < 2 then null else ((.[-1].n - .[0].n) / (.[-1].t - .[0].t)) end;
     if $s == null then null else {base: rate($s - 300; $s - 30), slow: rate($s + 30; $s + 300)} | . + {ratio: (if .slow and .slow > 0 then .base / .slow else null end)} end' "$W/cap.json")
 row M8 05 "loops slowed: collection rate under slow ~1/4 of base (cgroup samples per second)" \
