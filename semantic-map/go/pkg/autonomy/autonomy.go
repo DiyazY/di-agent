@@ -213,7 +213,8 @@ type Status struct {
 	// because an end is not active, so the evidence is not moving. Due is the last
 	// cycle's count of due candidates whose ends are active (due less Waiting): work a
 	// cycle could act on, which is what the review pace follows. With no decision
-	// model a candidate is due only when a rule answers it now.
+	// model a candidate is due only when a rule answers it now. A candidate the cycle's
+	// rules settled is not counted.
 	Reviewed  int    `json:"reviewed"`
 	Applied   int    `json:"applied"`
 	Suggested int    `json:"suggested"`
@@ -346,6 +347,14 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 			settled[c.CandidateID] = true
 		}
 	}
+	// Due is reported until the next cycle, minutes away at the slow pace, so what the
+	// rules settled just now is not counted: it is work done, not work waiting.
+	done := 0
+	for _, c := range due {
+		if settled[c.CandidateID] {
+			done++
+		}
+	}
 	for _, c := range due {
 		if reviewed >= r.cfg.MaxPer || ctx.Err() != nil {
 			break
@@ -369,7 +378,7 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 	}
 	r.mu.Lock()
 	r.status.Waiting = waiting
-	r.status.Due = len(due) - waiting
+	r.status.Due = len(due) - waiting - done
 	r.status.Cycles++
 	r.status.LastCycle = r.cfg.Now()
 	r.mu.Unlock()
