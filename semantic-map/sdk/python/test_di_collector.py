@@ -55,6 +55,13 @@ class ServeTest(unittest.TestCase):
         replies, _ = drive(lambda h: (lambda now: ([], [])), HELLO, collect_req(3))
         self.assertEqual(replies[1], {"seq": 3, "samples": [], "available": []})
 
+    def test_unhealthy_is_a_reply_not_an_error(self):
+        def collect(now):
+            raise di_collector.Unhealthy("daemon refused the connection")
+
+        replies, _ = drive(lambda h: collect, HELLO, collect_req(4))
+        self.assertEqual(replies[1], {"seq": 4, "samples": [], "unhealthy": "daemon refused the connection"})
+
     def test_collect_exception_is_error_reply_and_serving_continues(self):
         calls = []
 

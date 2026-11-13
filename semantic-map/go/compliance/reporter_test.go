@@ -12,6 +12,7 @@ type emptyCollector struct{}
 
 func (emptyCollector) SourceID() string                        { return "empty" }
 func (emptyCollector) AvailableMetrics() []types.MetricType    { return nil }
+func (emptyCollector) Health() error                           { return nil }
 func (emptyCollector) Collect() ([]*types.MetricSample, error) { return nil, nil }
 
 // A failing check must be reported by name, and Fatalf must end only the check that
@@ -54,6 +55,7 @@ type dupCollector struct{ drops []contracts.SampleDrop }
 
 func (*dupCollector) SourceID() string                     { return "dup" }
 func (*dupCollector) AvailableMetrics() []types.MetricType { return []types.MetricType{"x"} }
+func (*dupCollector) Health() error                        { return nil }
 func (*dupCollector) Collect() ([]*types.MetricSample, error) {
 	s := &types.MetricSample{NodeID: "n", MetricType: "x", EventID: "e1", Unit: "u", PartOf: "cpu"}
 	return []*types.MetricSample{s, s}, nil

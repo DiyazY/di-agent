@@ -274,6 +274,9 @@ func (c *ScriptedCollector) SourceID() string { return c.sourceID }
 
 // AvailableMetrics returns the deduped union of MetricTypes declared by
 // the patterns, sorted for stable iteration.
+// Health is always nil: a script has no source to lose.
+func (c *ScriptedCollector) Health() error { return nil }
+
 func (c *ScriptedCollector) AvailableMetrics() []types.MetricType {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/DiyazY/di-agent/internal/minimal"
@@ -200,10 +201,11 @@ func TestNetdataCollapsesOntoTheMapsTypes(t *testing.T) {
 	}
 }
 
-// TestNetdataUnreachableIsSilentAndTypesGrow: an unreachable Netdata yields no samples
-// and no error, and AvailableMetrics is what has been emitted, so it is empty before
-// the first read and then lists every type collected.
-func TestNetdataUnreachableIsSilentAndTypesGrow(t *testing.T) {
+// TestNetdataUnreachableIsUnhealthyAndTypesGrow: an unreachable Netdata yields no
+// samples and no error, and Health says why; an error answer is unhealthy too, and a
+// good read is healthy again. AvailableMetrics is what has been emitted, so it is
+// empty before the first read and then lists every type collected.
+func TestNetdataUnreachableIsUnhealthyAndTypesGrow(t *testing.T) {
 	var lines []string
 	down := minimal.NewNetdataCollectorWithOptions("n1", "http://127.0.0.1:1", minimal.NetdataOptions{
 		Logf: func(f string, a ...any) { lines = append(lines, f) }})
@@ -211,15 +213,30 @@ func TestNetdataUnreachableIsSilentAndTypesGrow(t *testing.T) {
 		if s, err := down.Collect(); err != nil || len(s) != 0 {
 			t.Fatalf("unreachable Netdata: %d samples, err %v; want none and nil", len(s), err)
 		}
+		if err := down.Health(); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("unreachable Netdata: Health = %v, want the refused connection", err)
+		}
 	}
 	if len(lines) != 1 {
 		t.Errorf("logged %d lines over three failed ticks; want one", len(lines))
+	}
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer broken.Close()
+	b := minimal.NewNetdataCollectorWithOptions("n1", broken.URL, minimal.NetdataOptions{Logf: func(string, ...any) {}})
+	b.Collect()
+	if err := b.Health(); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("Netdata answering 503: Health = %v, want the status", err)
 	}
 	c := minimal.NewNetdataCollectorWithOptions("n1", netdataServer(t).URL, minimal.NetdataOptions{})
 	if n := len(c.AvailableMetrics()); n != 0 {
 		t.Errorf("%d types available before any read; want 0", n)
 	}
 	samples, _ := c.Collect()
+	if err := c.Health(); err != nil {
+		t.Fatalf("Health after a good read = %v, want nil", err)
+	}
 	avail := map[types.MetricType]bool{}
 	for _, mt := range c.AvailableMetrics() {
 		avail[mt] = true

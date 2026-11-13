@@ -125,6 +125,7 @@ type CgroupCollector struct {
 	// changes): a collector that goes silent is the failure this project treats as
 	// worse than an error, because nothing about an empty map looks wrong.
 	rootWarned   bool
+	rootErr      error // the last Collect's root read, for Health
 	noPodsWarned bool
 	lastSkipped  int
 
@@ -355,6 +356,17 @@ func (c *CgroupCollector) now() time.Time {
 func (c *CgroupCollector) SourceID() string                     { return c.sid }
 func (c *CgroupCollector) AvailableMetrics() []types.MetricType { return cgroupAvailMetrics }
 
+// Health is unhealthy while the root cgroup could not be read: no node property
+// is produced then. A subject that cannot be read is not a fault of the source.
+func (c *CgroupCollector) Health() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rootErr != nil {
+		return fmt.Errorf("cgroup root %s unreadable: %w", c.cgroupRoot, c.rootErr)
+	}
+	return nil
+}
+
 // Collect reads the root and, when enabled, every recognised subject, at one instant.
 // A subject exists iff its directory is present, recognised, within the depth bound and
 // the subject cap, and readable this tick; nothing is emitted for one that has gone, and
@@ -372,6 +384,7 @@ func (c *CgroupCollector) Collect() ([]*types.MetricSample, error) {
 	}
 	c.lastCollect = now
 	out, rootErr := c.collectOneLocked("", c.cgroupRoot, nil, now)
+	c.rootErr = rootErr
 	if rootErr != nil && !c.rootWarned {
 		c.log("cgroup collector: root %s is unreadable (%v): no node properties will be produced until it is readable — is a cgroup v2 hierarchy mounted at its config.root?",
 			c.cgroupRoot, rootErr)

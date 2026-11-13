@@ -1482,8 +1482,8 @@ func (m *Map) forgetLocked(p *Property, now time.Time) {
 // SetSourceDown records whether a collector member is down. A property last
 // produced by a down member is Unobservable at the next sweep and is never retired
 // while the member stays down. Idempotent: collector.down and collector.up are
-// journaled only on a transition.
-func (m *Map) SetSourceDown(source string, down bool) {
+// journaled only on a transition; collector.down carries reason when it is not empty.
+func (m *Map) SetSourceDown(source string, down bool, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.downSources[source] == down {
@@ -1497,7 +1497,11 @@ func (m *Map) SetSourceDown(source string, down bool) {
 		delete(m.downSources, source)
 		m.sourceUpMono[source] = m.mono()
 	}
-	m.bump(kind, source, "collector", map[string]any{"member": source}, m.now())
+	detail := map[string]any{"member": source}
+	if down && reason != "" {
+		detail["reason"] = reason
+	}
+	m.bump(kind, source, "collector", detail, m.now())
 }
 
 // recomputeDerivedLocked refreshes derived properties from their members. Caller

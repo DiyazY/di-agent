@@ -249,6 +249,8 @@ func (c blockingCollector) Collect() ([]*types.MetricSample, error) {
 
 func (blockingCollector) SourceID() string { return "test" }
 
+func (blockingCollector) Health() error { return nil }
+
 func (blockingCollector) AvailableMetrics() []types.MetricType {
 	return []types.MetricType{types.MemoryAdmissionHeadroomRatio}
 }

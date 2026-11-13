@@ -23,7 +23,11 @@ without it the agent takes the types in ``samples``. An empty list is "no data
 right now". A sample whose value is NaN or infinite cannot be sent as JSON: it is
 left out of the reply and a line on stderr says so.
 
-Raising in ``setup`` refuses the hello. Raising in ``collect``, or returning
+Raising ``Unhealthy(reason)`` in ``collect`` says the plugin's source did not
+answer (its daemon is down, the device is gone): the reply carries the reason, the
+agent marks the plugin unhealthy and asks again next tick.
+
+Raising in ``setup`` refuses the hello. Raising anything else in ``collect``, or returning
 something that is not a list of samples or a ``(samples, available)`` pair, is that
 tick's error reply, and the agent restarts the plugin with backoff; the plugin
 itself never dies of a bad tick. Leave ``node_id``, ``source`` and ``event_id``
@@ -39,7 +43,11 @@ import sys
 
 PROTOCOL_VERSION = 1
 
-__all__ = ["PROTOCOL_VERSION", "serve"]
+__all__ = ["PROTOCOL_VERSION", "Unhealthy", "serve"]
+
+
+class Unhealthy(Exception):
+    """Raised by collect when its source did not answer; not a fault."""
 
 
 def _encode(msg):
@@ -100,6 +108,8 @@ def _answer(collect, req, err):
         return _encode({"seq": seq, "error": "collect before hello"})
     try:
         return _collect_reply(collect, req, err)
+    except Unhealthy as e:
+        return _encode({"seq": seq, "samples": [], "unhealthy": str(e) or "unhealthy"})
     except Exception as e:  # a bad tick costs that tick, not the process
         return _encode({"seq": seq, "error": str(e) or type(e).__name__})
 

@@ -633,7 +633,7 @@ func TestReliefDoesNotActOnAnUnobservablePressure(t *testing.T) {
 	if err := h.m.Record(statemap.Observation{ID: contention, Value: 0.5, At: h.clock(), Source: "cgroup", Range: &unit}); err != nil {
 		t.Fatal(err)
 	}
-	h.m.SetSourceDown("cgroup", true)
+	h.m.SetSourceDown("cgroup", true, "")
 	h.m.Sweep()
 	if _, _, fresh := h.l.pressure(h.clock()); fresh {
 		t.Fatal("an unobservable pressure reads as fresh")

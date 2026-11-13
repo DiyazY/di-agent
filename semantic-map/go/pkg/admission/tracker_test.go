@@ -291,7 +291,7 @@ func TestUnobservableReadingConfounds(t *testing.T) {
 	if err := r.m.Record(statemap.Observation{ID: "cpu_contention_ratio", Value: 0.02, At: t0, Source: "cgroup", Range: &unit}); err != nil {
 		t.Fatal(err)
 	}
-	r.m.SetSourceDown("cgroup", true)
+	r.m.SetSourceDown("cgroup", true, "")
 	r.m.Sweep()
 	r.tick(time.Minute)
 	o := r.result("confounded")

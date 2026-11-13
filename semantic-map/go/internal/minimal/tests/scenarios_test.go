@@ -1138,7 +1138,7 @@ func TestScenario_OutageIsNotDeparture(t *testing.T) {
 	}
 	before := census("before")
 
-	m.SetSourceDown("netdata", true)
+	m.SetSourceDown("netdata", true, "")
 	for i := 0; i < 8; i++ {
 		step(30 * time.Second)
 		m.Sweep()
@@ -1148,7 +1148,7 @@ func TestScenario_OutageIsNotDeparture(t *testing.T) {
 		t.Fatalf("during the outage: %+v; want 2 unobservable, none retired, relationships unchanged", during)
 	}
 
-	m.SetSourceDown("netdata", false)
+	m.SetSourceDown("netdata", false, "")
 	tick(0.5)
 	m.Sweep()
 	after := census("after")

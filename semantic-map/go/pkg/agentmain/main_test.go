@@ -223,6 +223,7 @@ type countingCollector struct{ n atomic.Int64 }
 func (c *countingCollector) Collect() ([]*types.MetricSample, error) { c.n.Add(1); return nil, nil }
 func (*countingCollector) SourceID() string                          { return "counting" }
 func (*countingCollector) AvailableMetrics() []types.MetricType      { return nil }
+func (*countingCollector) Health() error                             { return nil }
 
 // TestCollectionLoopFollowsThePace: the collection interval is the pace's.
 func TestCollectionLoopFollowsThePace(t *testing.T) {

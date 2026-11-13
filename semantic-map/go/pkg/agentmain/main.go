@@ -297,7 +297,9 @@ func Main() {
 	// by the refresh started once the runtime is built, read by the cgroup collector.
 	requests := &minimal.Requests{}
 	sup, err := collectors.Build(collectors.Env{NodeID: cfg.Node.ID, Interval: cfg.Sources.Interval, Logf: log.Printf,
-		Requests: requests}, cfg.Sources.Collectors)
+		Requests: requests, OnDoctor: func(member string, detail map[string]any) {
+			state.RecordEvent(statemap.EventCollectorDoctor, member, "collector", detail)
+		}}, cfg.Sources.Collectors)
 	if err != nil {
 		log.Fatalf("collectors: %v", err)
 	}
@@ -600,12 +602,13 @@ func runCollectionLoop(
 	}
 }
 
-// syncSources tells the map which collector members are down: one in backoff or
-// stuck cannot be heard from, so what it last produced is unobservable rather than
-// silent. The map journals only transitions.
+// syncSources tells the map which collector members are down: one unhealthy, in
+// backoff or stuck cannot be heard from, so what it last produced is unobservable
+// rather than silent. The map journals only transitions.
 func syncSources(state *statemap.Map, members []collectors.MemberStatus) {
 	for _, ms := range members {
-		state.SetSourceDown(ms.Name, ms.State == "backoff" || ms.State == "stuck")
+		down := ms.State == "unhealthy" || ms.State == "backoff" || ms.State == "stuck"
+		state.SetSourceDown(ms.Name, down, ms.LastError)
 	}
 }
 

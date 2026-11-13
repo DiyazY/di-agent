@@ -739,7 +739,7 @@ func TestStateRouteAcceptsStatusUnobservable(t *testing.T) {
 	if err := sm.Record(statemap.Observation{ID: "q_depth", Value: 1, At: time.Now(), Source: "netdata"}); err != nil {
 		t.Fatal(err)
 	}
-	sm.SetSourceDown("netdata", true)
+	sm.SetSourceDown("netdata", true, "")
 	sm.Sweep()
 
 	var out struct {

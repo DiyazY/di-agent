@@ -1,6 +1,7 @@
 package collectors
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,21 @@ type fakeCollector struct {
 	delay   time.Duration
 	panics  bool
 	avail   []types.MetricType
+	health  error
 	release chan struct{}
 	calls   atomic.Int64
+}
+
+func (f *fakeCollector) Health() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.health
+}
+
+func (f *fakeCollector) setHealth(err error) {
+	f.mu.Lock()
+	f.health = err
+	f.mu.Unlock()
 }
 
 func (f *fakeCollector) Collect() ([]*types.MetricSample, error) {
@@ -208,6 +222,7 @@ func TestSupervisorAvailablePanicIsLogged(t *testing.T) {
 type panickyAvailable struct{ fakeCollector }
 
 func (*panickyAvailable) AvailableMetrics() []types.MetricType { panic("no types yet") }
+func (*panickyAvailable) Health() error                        { return nil }
 
 func TestSupervisorBackoffGrowsAndResets(t *testing.T) {
 	f := &fakeCollector{id: "f", err: errors.New("down")}
@@ -626,5 +641,100 @@ func TestSupervisorStampsTheMemberNameAsSource(t *testing.T) {
 		if smp.Source != want {
 			t.Errorf("%s source %q; want %q", smp.MetricType, smp.Source, want)
 		}
+	}
+}
+
+func TestSupervisorUnhealthyMemberIsDownButPolledEveryTick(t *testing.T) {
+	a := &fakeCollector{id: "a", health: errors.New("connection refused")}
+	s, clk := newTestSupervisor(t, member("a", a))
+
+	s.Collect()
+	st := statusOf(t, s, "a")
+	if st.State != "unhealthy" || st.LastError != "connection refused" || st.BackoffUntilUnix != 0 {
+		t.Fatalf("status = %+v, want unhealthy with the reason and no backoff", st)
+	}
+	// No backoff: the next tick, at the same instant, calls it again.
+	s.Collect()
+	if got := a.calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want 2: an unhealthy source is asked every tick", got)
+	}
+	a.setHealth(nil)
+	clk.Advance(5 * time.Second)
+	s.Collect()
+	if st := statusOf(t, s, "a"); st.State != "ok" {
+		t.Fatalf("state = %q after a healthy collect, want ok", st.State)
+	}
+}
+
+// doctorCollector is a fake member that declares a doctor command.
+type doctorCollector struct {
+	fakeCollector
+	argv []string
+	runs atomic.Int64
+}
+
+func (d *doctorCollector) DoctorCommand() []string { return d.argv }
+
+func (d *doctorCollector) RunDoctor(ctx context.Context) ([]byte, error) {
+	d.runs.Add(1)
+	return []byte("netdata.service: inactive"), errors.New("exit status 3")
+}
+
+func TestSupervisorRunsDoctorOncePerUnhealthyEpisode(t *testing.T) {
+	d := &doctorCollector{fakeCollector: fakeCollector{id: "d", health: errors.New("refused")}, argv: []string{"./doctor.sh"}}
+	plain := &fakeCollector{id: "p", health: errors.New("refused")}
+	var mu sync.Mutex
+	var got []map[string]any
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: t.Logf, OnDoctor: func(member string, detail map[string]any) {
+		mu.Lock()
+		got = append(got, detail)
+		mu.Unlock()
+	}}, []Member{{Name: "d", Kind: "type", Type: "fake", C: d, Timeout: time.Second}, member("p", plain)})
+	s.now = clk.Now
+	reports := func() int {
+		s.doctors.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got)
+	}
+
+	s.Collect()
+	clk.Advance(doctorAfter - time.Second)
+	s.Collect()
+	if n := reports(); n != 0 {
+		t.Fatalf("doctor ran %d times before the member was down %s", n, doctorAfter)
+	}
+	clk.Advance(time.Second)
+	s.Collect()
+	clk.Advance(time.Minute)
+	s.Collect()
+	if n := reports(); n != 1 || d.runs.Load() != 1 {
+		t.Fatalf("doctor reports = %d, runs = %d; want one per episode", n, d.runs.Load())
+	}
+	mu.Lock()
+	r := got[0]
+	mu.Unlock()
+	if r["member"] != "d" || r["output"] != "netdata.service: inactive" || r["error"] != "exit status 3" {
+		t.Fatalf("doctor report = %v", r)
+	}
+	if cmd, _ := r["command"].([]string); len(cmd) != 1 || cmd[0] != "./doctor.sh" {
+		t.Fatalf("doctor report command = %v", r["command"])
+	}
+
+	// A new episode soon after is rate-limited; one after doctorEvery runs again.
+	d.setHealth(nil)
+	s.Collect()
+	d.setHealth(errors.New("refused"))
+	s.Collect()
+	clk.Advance(doctorAfter)
+	s.Collect()
+	if n := reports(); n != 1 {
+		t.Fatalf("doctor ran again within %s of the last run", doctorEvery)
+	}
+	clk.Advance(doctorEvery)
+	s.Collect()
+	if n := reports(); n != 2 {
+		t.Fatalf("doctor reports = %d after %s, want 2", n, doctorEvery)
 	}
 }

@@ -3,6 +3,7 @@
 package collectors
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -42,5 +43,36 @@ func TestExecTimeoutKillsProcessGroup(t *testing.T) {
 			t.Fatalf("grandchild %d survived the fault (kill 0: %v)", pid, err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestExecUnhealthyReplyAndDeclaredDoctor(t *testing.T) {
+	e, _ := fixture(t, "unhealthy", 2*time.Second, nil)
+	if err := e.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := e.Collect(); err != nil {
+		t.Fatalf("Collect of an unhealthy reply = %v, want no fault", err)
+	}
+	if err := e.Health(); err == nil || err.Error() != "fixture source refused" {
+		t.Fatalf("Health = %v, want the plugin's reason", err)
+	}
+	if argv := e.DoctorCommand(); argv != nil {
+		t.Fatalf("DoctorCommand = %v for a plugin that declared none", argv)
+	}
+
+	d, _ := fixture(t, "doctor", 2*time.Second, nil)
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := d.Collect(); err != nil || d.Health() != nil {
+		t.Fatalf("Collect = %v, Health = %v; want a healthy tick", err, d.Health())
+	}
+	if argv := d.DoctorCommand(); len(argv) != 3 || argv[0] != "/bin/sh" {
+		t.Fatalf("DoctorCommand = %v, want the hello's", argv)
+	}
+	out, err := d.RunDoctor(context.Background())
+	if strings.TrimSpace(string(out)) != "checked fx" || err == nil || !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("RunDoctor = %q, %v; want its output and exit status", out, err)
 	}
 }

@@ -72,8 +72,8 @@ import (
 // system.cpu counts time the root cgroup does not (iowait, interrupts), so the two
 // would feed one property two different quantities.
 //
-// HTTP errors and non-200 responses are transient unavailability: Collect returns
-// (nil, nil) and the next tick tries again.
+// HTTP errors and non-200 responses are an unavailable source: Collect returns
+// (nil, nil), Health says why, and the next tick tries again.
 type NetdataCollector struct {
 	nodeID     string
 	baseURL    string
@@ -85,6 +85,7 @@ type NetdataCollector struct {
 	avail    map[types.MetricType]bool        // every type emitted so far
 	declared map[types.MetricType]netdataDecl // unit and range, fixed at a type's first sample
 	warned   bool
+	health   error // why the last fetch failed; nil after a good one
 
 	stacked   map[string]bool   // chart id → whether /api/v1/charts called it stacked
 	counted   map[string]string // chart id → the node chart Netdata sums it into
@@ -166,6 +167,14 @@ func (n *NetdataCollector) log(format string, args ...any) {
 }
 
 func (n *NetdataCollector) SourceID() string { return n.sid }
+
+// Health is why the last Collect could not read Netdata — unreachable, a non-200
+// answer, an unreadable body — or nil when it could.
+func (n *NetdataCollector) Health() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.health
+}
 
 // AvailableMetrics is every type this collector has emitted: what Netdata offers
 // under the include list is known only by asking it, and grows as disks, interfaces
@@ -435,25 +444,34 @@ func (n *NetdataCollector) sampleLocked(mt types.MetricType, value float64, conv
 // fetchAll calls GET <baseURL>/api/v1/allmetrics?format=json: every chart's latest
 // values, context and units in one response.
 func (n *NetdataCollector) fetchAll() (map[string]netdataChart, bool) {
+	charts, err := n.getAll()
+	n.mu.Lock()
+	n.health = err
+	if err == nil {
+		n.warned = false
+	}
+	n.mu.Unlock()
+	if err != nil {
+		n.warnOnce("netdata collector: %v; retrying every tick", err)
+		return nil, false
+	}
+	return charts, true
+}
+
+func (n *NetdataCollector) getAll() (map[string]netdataChart, error) {
 	resp, err := n.httpClient.Get(n.baseURL + "/api/v1/allmetrics?format=json")
 	if err != nil {
-		n.warnOnce("netdata collector: %s is unreachable (%v); retrying every tick", n.baseURL, err)
-		return nil, false
+		return nil, fmt.Errorf("%s is unreachable: %w", n.baseURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		n.warnOnce("netdata collector: %s answered %d; retrying every tick", n.baseURL, resp.StatusCode)
-		return nil, false
+		return nil, fmt.Errorf("%s answered %d", n.baseURL, resp.StatusCode)
 	}
 	var charts map[string]netdataChart
 	if err := json.NewDecoder(resp.Body).Decode(&charts); err != nil {
-		n.warnOnce("netdata collector: %s sent an unreadable response (%v); retrying every tick", n.baseURL, err)
-		return nil, false
+		return nil, fmt.Errorf("%s sent an unreadable response: %w", n.baseURL, err)
 	}
-	n.mu.Lock()
-	n.warned = false
-	n.mu.Unlock()
-	return charts, true
+	return charts, nil
 }
 
 func (n *NetdataCollector) warnOnce(format string, args ...any) {
