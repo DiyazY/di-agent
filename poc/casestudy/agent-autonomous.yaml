@@ -1,0 +1,30 @@
+# The master run (plan 07): agent-relief.yaml with no model and no person. Review decides by
+# rules alone (composition, persistent-correlation); there is no decision model and no
+# reasoning tier, and ollama.service is stopped for the run, so no model's footprint swings
+# node memory. Relief is on: the memory lever is expected to act beside page-hog, the CPU
+# lever to stay calm.
+node: { addr: "0.0.0.0:9090" }
+sources:
+  interval: 5s
+  collectors:
+    # The node's other consumers, beside its pods. di-agent.service is listed so a build
+    # without the constant self subject still observes itself (as unit:di-agent.service).
+    - name: cgroup
+      type: cgroup
+      config: { units: [di-agent.service, k0scontroller.service, containerd.service, netdata.service] }
+    # Netdata feeds node charts the cgroup collector does not; M3 stops it to show an outage
+    # is not a departure.
+    - name: netdata
+      type: netdata
+      config: { url: http://localhost:19999, collapse: false }
+runtime: { kind: kubernetes, kubeconfig: /var/lib/k0s/pki/admin.conf }
+loops:
+  review:
+    level: full
+    rules: [composition, persistent-correlation]
+    decision: { backend: none }
+    reasoning: { backend: none }
+  relief: { enabled: true }
+persist:
+  file: /var/lib/di-agent/state.json
+domain: { path: none }
