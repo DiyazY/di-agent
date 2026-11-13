@@ -381,18 +381,22 @@ func (s *Supervisor) fault(ms *memberState, now time.Time, msg string) {
 // Members are admitted in list order, so within a tick an earlier member claims a
 // type before a later one is checked against it.
 func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSample, out []*types.MetricSample) []*types.MetricSample {
-	kept := 0
-	for _, smp := range samples {
-		if kept == maxSamplesPerTick {
-			// The first maxSamplesPerTick are kept; one producer cannot make the
-			// tick's admission, and the lock it holds, unbounded.
-			mt := types.MetricType("")
-			if smp != nil {
-				mt = smp.MetricType
-			}
-			s.violate(ms, "flood", mt)
-			continue
+	if over := len(samples) - maxSamplesPerTick; over > 0 {
+		// Only the first maxSamplesPerTick are inspected, valid or not; one producer
+		// cannot make the tick's admission, and the lock it holds, unbounded. The
+		// rest are counted in one step and logged once per member.
+		ms.violations += int64(over)
+		if ms.violationKinds == nil {
+			ms.violationKinds = map[string]int64{}
 		}
+		ms.violationKinds["flood"] += int64(over)
+		if k := (violationKey{"flood", ""}); !ms.loggedViol[k] {
+			ms.loggedViol[k] = true
+			s.logf("collector[%s]: dropped %d samples over the per-tick cap of %d: flood (further floods are counted, not logged)", ms.m.Name, over, maxSamplesPerTick)
+		}
+		samples = samples[:maxSamplesPerTick]
+	}
+	for _, smp := range samples {
 		if kind := s.violation(ms, smp); kind != "" {
 			mt := types.MetricType("")
 			if smp != nil {
@@ -410,7 +414,6 @@ func (s *Supervisor) admit(idx int, ms *memberState, samples []*types.MetricSamp
 			continue
 		}
 		ms.samples++
-		kept++
 		out = append(out, smp)
 	}
 	return out
