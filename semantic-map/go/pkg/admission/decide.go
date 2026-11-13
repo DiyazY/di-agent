@@ -76,13 +76,6 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	if len(domains) == 0 {
 		return answer(Decline, "no admission domains")
 	}
-	// Headroom created by throttling is not spare capacity, and a phase this
-	// package does not know is not calm. "calm" is relief.Calm.
-	for _, d := range domains {
-		if d.Phase != "calm" {
-			return answer(Decline, "relief active on "+d.Relieves)
-		}
-	}
 	for _, d := range domains {
 		dem, ok := o.Demand[d.Resource]
 		if !ok {
@@ -109,6 +102,14 @@ func Decide(m *statemap.Map, o Offer, domains []Domain, self Self, id string) De
 	gate := m.Admit(req)
 	b.Input("gate", gate.DecisionID)
 	b.Cite(gate.DecisionID)
+	// Headroom created by throttling is not spare capacity, and a phase this
+	// package does not know is not calm. "calm" is relief.Calm. Checked after the
+	// gate so a decline cites the headroom it was made beside.
+	for _, d := range domains {
+		if d.Phase != "calm" {
+			return answer(Decline, "relief active on "+d.Relieves)
+		}
+	}
 	if gate.Err != "" {
 		return answer(Decline, gate.Err)
 	}
