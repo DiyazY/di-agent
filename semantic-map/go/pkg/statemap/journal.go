@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -35,6 +36,12 @@ const (
 	// and reading those separately afterwards gives no way to tell a coordinated
 	// adjustment from two unrelated ones that happened to be adjacent in the log.
 	EventOperatorIntent EventKind = "operator.intent"
+
+	// EventClockStepped records a sweep that found the wall clock and the process's
+	// monotonic clock disagreeing by more than the pair window: the wall clock was
+	// stepped, by NTP or an operator. Silence is measured on the monotonic clock, so
+	// nothing is retired by it; the record says why a timestamp jumped.
+	EventClockStepped EventKind = "clock.stepped"
 
 	// EventDecision records an answer the agent gave, with the state it read.
 	EventDecision EventKind = "decision"
@@ -252,12 +259,23 @@ func (d *Decision) clone() *Decision {
 			c.RelationshipsRead[i] = r
 		}
 	}
-	if d.Answer != nil {
-		c.Answer = make(map[string]any, len(d.Answer))
-		for k, v := range d.Answer {
-			c.Answer[k] = v
+	if d.Inputs != nil {
+		c.Inputs = make(map[string]any, len(d.Inputs))
+		for k, v := range d.Inputs {
+			c.Inputs[k] = copyAny(v)
 		}
 	}
+	if d.FactsRead != nil {
+		c.FactsRead = make([]Fact, len(d.FactsRead))
+		for i, f := range d.FactsRead {
+			if f.Number != nil {
+				n := *f.Number
+				f.Number = &n
+			}
+			c.FactsRead[i] = f
+		}
+	}
+	c.Answer = copyAnswer(d.Answer)
 	return &c
 }
 
@@ -434,13 +452,83 @@ func (b *DecisionBuilder) Assume(id string, v float64) {
 // Exclude records a subject or property taken to its floor.
 func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
 
-// Input records something else the decision read, under a name. v must be a value
-// the caller will not change afterwards: a copy, a string, a number.
+// Input records something else the decision read, under a name. v is deep-copied,
+// so a later change by the caller does not reach the record.
 func (b *DecisionBuilder) Input(name string, v any) {
 	if b.inputs == nil {
 		b.inputs = map[string]any{}
 	}
-	b.inputs[name] = v
+	b.inputs[name] = copyAny(v)
+}
+
+// copyAny deep-copies v: maps, slices, pointers, arrays, interfaces and the
+// exported fields of structs, of any element type, are copied rather than shared.
+// Unexported struct fields are assigned. v must not contain a pointer cycle.
+func copyAny(v any) any {
+	if v == nil {
+		return nil
+	}
+	return deepCopy(reflect.ValueOf(v)).Interface()
+}
+
+func copyAnswer(a map[string]any) map[string]any {
+	if a == nil {
+		return nil
+	}
+	return copyAny(a).(map[string]any)
+}
+
+func deepCopy(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for it := v.MapRange(); it.Next(); {
+			c.SetMapIndex(it.Key(), deepCopy(it.Value()))
+		}
+		return c
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type().Elem())
+		c.Elem().Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type()).Elem()
+		c.Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Array:
+		c := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Struct:
+		c := reflect.New(v.Type()).Elem()
+		c.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			if c.Field(i).CanSet() {
+				c.Field(i).Set(deepCopy(v.Field(i)))
+			}
+		}
+		return c
+	}
+	return v
 }
 
 // Commit records the decision in the journal and returns it.
@@ -470,7 +558,7 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		At:                b.at,
 		Revision:          b.revision,
 		Question:          b.question,
-		Answer:            answer,
+		Answer:            copyAnswer(answer),
 		PropertiesRead:    b.props,
 		RelationshipsRead: b.rels,
 		Assumptions:       assumptions,

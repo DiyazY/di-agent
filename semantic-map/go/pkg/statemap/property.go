@@ -150,6 +150,11 @@ type Property struct {
 	LastObserved  time.Time `json:"last_observed,omitzero"`
 	RetiredReason string    `json:"retired_reason,omitempty"`
 
+	// lastSeen is the process-monotonic time of the last accepted observation, the
+	// clock silence is measured on so a wall-clock step cannot read as silence. Not
+	// serialised; zero means not observed in this process (just restored).
+	lastSeen time.Duration
+
 	// OutOfRange counts readings outside Range. Non-zero means the collector and
 	// the declared range disagree, which is a configuration fault worth surfacing
 	// rather than absorbing.
@@ -527,6 +532,10 @@ type Map struct {
 	seenEvents map[string]struct{}
 	seenOrder  []string
 
+	// readingsOutOfOrder and readingsFuture count readings Record refused. They are
+	// not persisted: they describe this process's ingest, not the system's state.
+	readingsOutOfOrder, readingsFuture int
+
 	// revision advances on every mutation. A decision records the revision it read
 	// so its inputs can be identified later even though the map has moved on.
 	revision uint64
@@ -535,6 +544,18 @@ type Map struct {
 
 	// now is injectable so lifecycle transitions can be tested without sleeping.
 	now func() time.Time
+
+	// mono is the process's monotonic reading, which silence is measured on. epoch
+	// anchors it; the sweep compares wall and monotonic deltas between sweeps to
+	// notice a wall-clock step (prevSweepMono zero means no previous sweep).
+	epoch         time.Time
+	mono          func() time.Duration
+	prevSweepWall time.Time
+	prevSweepMono time.Duration
+
+	// graceUntil is the monotonic time before which nothing retires, set by Load:
+	// a snapshot's last observations are hours old by definition. Zero means no grace.
+	graceUntil time.Duration
 
 	// onRetire is called, outside the lock, with the id of every property that
 	// retires — by an operator or by silence. See SetRetireHook.
@@ -547,7 +568,7 @@ func New(cfg Config, journal *Journal) *Map {
 	if journal == nil {
 		journal = NewJournal(0)
 	}
-	return &Map{
+	m := &Map{
 		cfg:           c,
 		owner:         c.Owner,
 		properties:    make(map[string]*Property),
@@ -559,7 +580,27 @@ func New(cfg Config, journal *Journal) *Map {
 		learn:         c.LearnConfig.withDefaults(),
 		journal:       journal,
 		now:           time.Now,
+		epoch:         time.Now(),
 	}
+	m.mono = func() time.Duration { return time.Since(m.epoch) }
+	return m
+}
+
+// baselineSweepLocked records the wall and monotonic readings the first sweep
+// compares against, so a step before the first sweep is noticed too. Caller holds
+// the write lock.
+func (m *Map) baselineSweepLocked() {
+	if m.prevSweepMono == 0 {
+		m.prevSweepWall, m.prevSweepMono = m.now().Round(0), m.mono()
+	}
+}
+
+// SetMonotonic overrides the monotonic reading silence is measured on. For tests.
+// The hook must return a value > 0: zero means "no baseline" to the sweep.
+func (m *Map) SetMonotonic(f func() time.Duration) {
+	m.mu.Lock()
+	m.mono = f
+	m.mu.Unlock()
 }
 
 // SetClock overrides the map's clock. For tests.
@@ -738,16 +779,24 @@ func (m *Map) ObserveEvent(id string, value float64, at time.Time, eventID strin
 // refused, because two producers describing one id differently is a fault worth
 // seeing rather than a value worth averaging.
 func (m *Map) Record(o Observation) error {
+	_, err := m.RecordAccepted(o)
+	return err
+}
+
+// RecordAccepted is Record that also says whether the reading was folded in: false
+// with no error for one refused as from the future, out of order or a duplicate
+// event, so a caller can keep it from anything else that learns from readings.
+func (m *Map) RecordAccepted(o Observation) (bool, error) {
 	id, value, at, eventID := o.ID, o.Value, o.At, o.EventID
 	if id == "" {
-		return fmt.Errorf("observation needs a property id")
+		return false, fmt.Errorf("observation needs a property id")
 	}
 	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return fmt.Errorf("property %q observed with non-finite value", id)
+		return false, fmt.Errorf("property %q observed with non-finite value", id)
 	}
 	if o.Range != nil {
 		if err := validRange(*o.Range); err != nil {
-			return fmt.Errorf("property %q: %w", id, err)
+			return false, fmt.Errorf("property %q: %w", id, err)
 		}
 	}
 	if at.IsZero() {
@@ -757,20 +806,44 @@ func (m *Map) Record(o Observation) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// A reading is refused, not folded in, when it is from the future or older than
+	// the property's last: it would enter the EMA as the newest value and make
+	// silence negative. Order is judged on the monotonic anchor silence runs on — the
+	// reading's age at receipt subtracted from process time — so a wall-clock step
+	// cannot make every correct reading look old. A property this process has not
+	// seen (restored, lastSeen 0) accepts. Both checks run before the event id is
+	// recorded, so a refused reading does not consume the identity a correct
+	// delivery of it will carry.
+	if at.After(m.now().Add(time.Duration(m.learn.PairWindowSeconds) * time.Second)) {
+		m.readingsFuture++
+		return false, nil
+	}
+	// Zero means unseen, so nudge off it. Older means by a whole stamp: stamps are
+	// Unix seconds, and the wall and monotonic clocks are read one after the other,
+	// so a repeated stamp's anchor can land a hair before the last one's.
+	anchor := m.mono() - max(0, m.now().Sub(at))
+	if anchor == 0 {
+		anchor--
+	}
+	if p, ok := m.properties[id]; ok && p.lastSeen != 0 && p.lastSeen-anchor >= time.Second {
+		m.readingsOutOfOrder++
+		return false, nil
+	}
+
 	// Keyed by property as well as event, because an event identity is only unique
 	// within the reading it names: one collector tick can carry several metrics, and
 	// some collectors number them from a shared counter.
 	if eventID != "" && !m.admitEventLocked(id+"@"+eventID) {
-		return nil
+		return false, nil
 	}
 
 	p, ok := m.properties[id]
 	if !ok {
 		if !m.cfg.AdmitUnknown {
-			return fmt.Errorf("property %q is not declared and admission is disabled", id)
+			return false, fmt.Errorf("property %q is not declared and admission is disabled", id)
 		}
 		if err := validScope(id, o.Subject); err != nil {
-			return err
+			return false, err
 		}
 		p = &Property{
 			ID: id, Kind: Observed, Status: Active,
@@ -798,11 +871,11 @@ func (m *Map) Record(o Observation) error {
 		// reconciling first would journal a conflict and advance the revision for an
 		// observation that is about to be refused anyway.
 		if p.Kind == Derived {
-			return fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
+			return false, fmt.Errorf("property %q is derived: it is computed from %v, not observed directly",
 				id, p.Members)
 		}
 		if err := m.reconcileDeclarationLocked(p, o, at); err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -817,6 +890,14 @@ func (m *Map) Record(o Observation) error {
 	}
 	p.NObservations++
 	p.LastObserved = at
+	// Anchor silence to the data's age at receipt, not to the receipt: an old-stamped
+	// reading, or a producer re-sending one stamp, must not read as fresh. Monotonic
+	// time since then is immune to wall steps. A reading under a second older is
+	// accepted but does not move the anchor back.
+	if p.lastSeen == 0 || anchor > p.lastSeen {
+		p.lastSeen = anchor
+	}
+	m.baselineSweepLocked()
 	p.Confidence = clamp01(float64(p.NObservations) / float64(m.cfg.ConvergenceObservations))
 	if p.Status == Retired {
 		// The system is exhibiting it again, which is exactly the event retirement
@@ -850,7 +931,7 @@ func (m *Map) Record(o Observation) error {
 		m.latest[d.ID] = dobs
 		m.learnFromObservationLocked(d.ID, dobs)
 	}
-	return nil
+	return true, nil
 }
 
 // reconcileDeclarationLocked merges what a later observation says about a property
@@ -1094,13 +1175,32 @@ func (m *Map) sweepLocked() (stale, retired []string) {
 	defer m.mu.Unlock()
 
 	now := m.now()
+	mono := m.mono()
+	if m.prevSweepMono > 0 {
+		wallDelta := now.Round(0).Sub(m.prevSweepWall)
+		monoDelta := mono - m.prevSweepMono
+		tol := time.Duration(m.learn.PairWindowSeconds) * time.Second
+		if d := wallDelta - monoDelta; d > tol || -d > tol {
+			m.bump(EventClockStepped, "", "sweep", map[string]any{
+				"wall_delta_seconds":      wallDelta.Seconds(),
+				"monotonic_delta_seconds": monoDelta.Seconds(),
+			}, now)
+		}
+	}
+	m.prevSweepWall, m.prevSweepMono = now.Round(0), mono
 	for _, p := range m.properties {
 		if p.Kind == Derived || p.Status == Retired || p.NObservations == 0 {
 			continue
 		}
+		// Silence is process time where this process has seen the property; right
+		// after a restore it is the snapshot's wall gap, which the grace covers.
 		silence := now.Sub(p.LastObserved)
+		if p.lastSeen != 0 {
+			silence = mono - p.lastSeen
+		}
 		switch {
-		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter:
+		case m.cfg.RetireAfter > 0 && silence > m.cfg.RetireAfter &&
+			(m.graceUntil == 0 || mono >= m.graceUntil):
 			m.retireLocked(p, fmt.Sprintf("no observation for %s", silence.Round(time.Second)), "sweep", now)
 			retired = append(retired, p.ID)
 		case silence > m.cfg.StaleAfter && p.Status != Stale:

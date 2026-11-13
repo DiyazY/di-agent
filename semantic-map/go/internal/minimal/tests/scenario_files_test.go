@@ -65,6 +65,7 @@ func driveScenario(t *testing.T, sc *scripted.Scenario, narrate func(tick int64,
 		LearnConfig: statemap.LearnConfig{PairWindowSeconds: 2 * sc.TickSeconds, MinSupport: 8, Window: 60},
 	}, statemap.NewJournal(0))
 	state.SetClock(func() time.Time { return now })
+	state.SetMonotonic(func() time.Duration { return now.Sub(start) + time.Second })
 	spec := mustSpec()
 	if _, err := profiles.SeedStateMap(state, spec, "", ""); err != nil {
 		t.Fatal(err)

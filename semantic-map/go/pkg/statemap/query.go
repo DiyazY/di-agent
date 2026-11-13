@@ -87,6 +87,12 @@ type StateCounts struct {
 	// system" wherever it is summarised. A non-zero count here says the graph carries
 	// a claim the machine keeps refuting.
 	RelationshipsSignSuspect int `json:"relationships_sign_suspect"`
+
+	// ReadingsOutOfOrder counts readings of an existing property stamped older than
+	// its last, and ReadingsFuture those stamped more than the pair window ahead of
+	// the agent's clock. Both were refused and changed nothing.
+	ReadingsOutOfOrder int `json:"readings_out_of_order"`
+	ReadingsFuture     int `json:"readings_future"`
 }
 
 // State answers a Query.
@@ -248,7 +254,7 @@ func (m *Map) Census() StateCounts {
 }
 
 func (m *Map) censusLocked() StateCounts {
-	var c StateCounts
+	c := StateCounts{ReadingsOutOfOrder: m.readingsOutOfOrder, ReadingsFuture: m.readingsFuture}
 	subjects := map[string]struct{}{}
 	for _, p := range m.properties {
 		c.PropertiesTotal++

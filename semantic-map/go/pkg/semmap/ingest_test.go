@@ -754,3 +754,41 @@ func TestConfirmCandidate_NegativeCorrelationDeclaresSignMinusOne(t *testing.T) 
 		t.Error("the confirmed negative edge is not covered, so it would be proposed again")
 	}
 }
+
+// spyProposer records which readings reached the proposer.
+type spyProposer struct {
+	*minimal.DisabledProposer
+	seen []types.PropertyReading
+}
+
+func (s *spyProposer) ObserveProperty(r types.PropertyReading) error {
+	s.seen = append(s.seen, r)
+	return nil
+}
+
+// TestIngestSample_ARefusedReadingDoesNotReachTheProposer: the map refused it, so
+// discovery must not learn from it either — a future-stamped reading would otherwise
+// hold the proposer's view of that property in the future.
+func TestIngestSample_ARefusedReadingDoesNotReachTheProposer(t *testing.T) {
+	state := statemap.New(statemap.Config{AdmitUnknown: true}, statemap.NewJournal(0))
+	now := time.Unix(1_700_000_000, 0)
+	state.SetClock(func() time.Time { return now })
+	spy := &spyProposer{DisabledProposer: minimal.NewDisabledProposer()}
+	sm := semmap.New(minimal.NewOntologyFromSpec(mustSpec()), minimal.NewRuleEngineReasoner(mustSpec(), 0.5, nil, nil),
+		spy, minimal.NewDisabledTuner())
+	sm.AttachState(state)
+
+	for _, s := range []types.MetricSample{
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Unix(), EventID: "a"},
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Add(time.Hour).Unix(), EventID: "b"},    // future
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Add(-time.Minute).Unix(), EventID: "c"}, // older
+		{MetricType: "gpu", Value: 0.5, TimestampUnix: now.Unix(), EventID: "a"},                   // duplicate
+	} {
+		if err := sm.IngestSample(&s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(spy.seen) != 1 {
+		t.Errorf("%d readings reached the proposer; want 1, the accepted one", len(spy.seen))
+	}
+}

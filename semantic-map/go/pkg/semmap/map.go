@@ -197,7 +197,8 @@ func (m *SemanticMap) SimulateOutcome(ctx *types.OffloadContext, targetNodeID st
 // samples into a different structure — one structure too many, and it has since
 // been removed.
 //
-// Every property, routed or not, scoped or not, is recorded and reaches the proposer.
+// Every property, routed or not, scoped or not, is recorded and reaches the proposer;
+// a reading the map refuses (future, out of order, duplicate event) reaches neither.
 // The routing table decides only the polarity in which an unscoped reading is expressed —
 // before it is stored or learned from. A metric nobody routed is still recorded as an
 // unrouted property; the HTTP layer reports such an admission with a 202 status code.
@@ -235,11 +236,14 @@ func (m *SemanticMap) IngestSample(sample *types.MetricSample) error {
 		value = router.NormalizeForConstruct(string(sample.MetricType), value)
 	}
 
-	if err := m.state.Record(statemap.Observation{
+	accepted, err := m.state.RecordAccepted(statemap.Observation{
 		ID: id, Value: value, At: time.Unix(sample.TimestampUnix, 0), EventID: sample.EventID,
 		Subject: sample.Subject, Unit: sample.Unit, Range: sample.Range,
 		Source: sample.Source, Labels: sample.Labels,
-	}); err != nil {
+	})
+	if err != nil || !accepted {
+		// A reading the map refused is not learned from either: a future-stamped
+		// one would hold the proposer's view of this property in the future.
 		return err
 	}
 

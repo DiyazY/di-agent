@@ -575,11 +575,28 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		var req MetricSampleRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// The body must be one value and nothing after it, read to EOF, so the cap
+		// covers the whole request rather than only the first value.
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIngestBody))
+		err := dec.Decode(&req)
+		if err == nil {
+			if derr := dec.Decode(&struct{}{}); derr != io.EOF {
+				err = derr
+				if err == nil {
+					err = errors.New("request body must hold a single JSON value")
+				}
+			}
+		}
+		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+				return
+			}
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		sample, err := sampleRequestToTypes(&req, sm)
+		sample, err := sampleRequestToTypes(&req, sm, time.Now())
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -791,6 +808,8 @@ func peerToDTO(d *peers.Descriptor) PeerDTO {
 		NObserved: d.NObserved,
 		LastSeen:  d.LastSeen,
 		Note:      d.Note,
+
+		LastPenalised: d.LastPenalised,
 	}
 }
 
@@ -947,3 +966,7 @@ func knownPeers(sm *semmap.SemanticMap) []*peers.Descriptor {
 	}
 	return list
 }
+
+// maxIngestBody bounds a POST /ingest-sample body, in bytes. A sample is a few hundred
+// bytes; a megabyte is far past any honest producer.
+const maxIngestBody = 1 << 20

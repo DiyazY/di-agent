@@ -130,7 +130,7 @@ func (m *Map) Save(path string) error {
 		}
 		snap.Discovery = raw
 	}
-	blob, err := json.MarshalIndent(snap, "", "  ")
+	blob, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("encoding snapshot: %w", err)
 	}
@@ -276,6 +276,10 @@ func (m *Map) Load(path string) (bool, error) {
 		m.interventions[k] = &iv
 	}
 	m.revision = snap.Revision
+	if m.cfg.RetireAfter > 0 {
+		m.graceUntil = m.mono() + m.cfg.RetireAfter
+	}
+	m.baselineSweepLocked() // a restore is a first reading of both clocks, so a step before the first sweep is seen
 	m.savedDiscovery = append(json.RawMessage(nil), snap.Discovery...)
 	m.journal.restore(snap.Events, snap.JournalDropped)
 

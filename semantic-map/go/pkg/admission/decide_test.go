@@ -32,6 +32,7 @@ func newMap(t *testing.T) (*statemap.Map, *statemap.Journal) {
 	j := statemap.NewJournal(0)
 	m := statemap.New(statemap.Config{AdmitUnknown: true, Alpha: 1}, j)
 	m.SetClock(func() time.Time { return t0 })
+	m.SetMonotonic(func() time.Duration { return time.Second })
 	return m, j
 }
 
@@ -337,6 +338,7 @@ func TestUnavailableMemoryHeadroomIsNamedAndFallsBack(t *testing.T) {
 		{name: "expired", status: "stale", setup: func(t *testing.T, m *statemap.Map) {
 			record(t, m, "memory_admission_headroom_ratio", "", 0.005)
 			m.SetClock(func() time.Time { return t0.Add(m.StaleAfter() + time.Second) })
+			m.SetMonotonic(func() time.Duration { return 2*time.Second + m.StaleAfter() })
 		}},
 		{name: "retired", status: "retired", setup: func(t *testing.T, m *statemap.Map) {
 			record(t, m, "memory_admission_headroom_ratio", "", 0.005)

@@ -2,6 +2,8 @@ package collectors
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -556,5 +558,79 @@ func TestSupervisorHandBuiltMemberTimeoutFollowsInterval(t *testing.T) {
 	}
 	if w := s.members[1].wait; w != time.Second+outOfProcessGrace {
 		t.Errorf("exec member waits %s, want 1s plus the grace", w)
+	}
+}
+
+func manySamples(n int) []*types.MetricSample {
+	out := make([]*types.MetricSample, n)
+	for i := range out {
+		out[i] = sample("cpu_utilization", "ratio")
+	}
+	return out
+}
+
+// TestSupervisorCapsSamplesPerTick: one producer cannot make a tick's admission
+// unbounded; the excess is a counted "flood" violation.
+func TestSupervisorCapsSamplesPerTick(t *testing.T) {
+	f := &fakeCollector{id: "f", samples: manySamples(20000)}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	if len(out) != 16384 {
+		t.Fatalf("len(out) = %d; want 16384", len(out))
+	}
+	st := statusOf(t, s, "f")
+	if st.Samples != 16384 || st.Violations != 3616 || st.ViolationKinds["flood"] != 3616 {
+		t.Errorf("samples %d, violations %d, kinds %v; want 16384, 3616, flood 3616", st.Samples, st.Violations, st.ViolationKinds)
+	}
+}
+
+// TestSupervisorCapIsInclusive: the 16384th sample passes; the 16385th is the flood.
+func TestSupervisorCapIsInclusive(t *testing.T) {
+	f := &fakeCollector{id: "f", samples: manySamples(16384)}
+	s, _ := newTestSupervisor(t, member("f", f))
+	out, _ := s.Collect()
+	st := statusOf(t, s, "f")
+	if len(out) != 16384 || st.Violations != 0 {
+		t.Errorf("16384 samples: kept %d, violations %d; want 16384, 0", len(out), st.Violations)
+	}
+	if _, ok := st.ViolationKinds["flood"]; ok {
+		t.Error("flood key present at exactly the cap")
+	}
+
+	f = &fakeCollector{id: "g", samples: manySamples(16385)}
+	s, _ = newTestSupervisor(t, member("g", f))
+	out, _ = s.Collect()
+	st = statusOf(t, s, "g")
+	if len(out) != 16384 || st.Violations != 1 {
+		t.Errorf("16385 samples: kept %d, violations %d; want 16384, 1", len(out), st.Violations)
+	}
+}
+
+// TestSupervisorCapBoundsInspectionNotKept: the cap bounds the samples inspected,
+// not those kept, so a flood of invalid samples is cut at the cap too, and the
+// overflow is counted in one step and logged once, whatever its metric types.
+func TestSupervisorCapBoundsInspectionNotKept(t *testing.T) {
+	samples := make([]*types.MetricSample, 0, 16384+1000)
+	for i := 0; i < 16384; i++ {
+		samples = append(samples, sample("a", "")) // missing unit
+	}
+	for i := 0; i < 1000; i++ {
+		samples = append(samples, sample(fmt.Sprintf("t%d", i), "ratio"))
+	}
+	sink := &logSink{}
+	s := NewSupervisor(Env{NodeID: testNode, Logf: sink.logf}, []Member{member("f", &fakeCollector{id: "f", samples: samples})})
+	out, _ := s.Collect()
+	st := statusOf(t, s, "f")
+	if len(out) != 0 || st.ViolationKinds["flood"] != 1000 || st.ViolationKinds["missing unit"] != 16384 {
+		t.Errorf("kept %d, kinds %v; want 0, flood 1000, missing unit 16384", len(out), st.ViolationKinds)
+	}
+	n := 0
+	for _, l := range sink.lines {
+		if strings.Contains(l, "flood") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("flood logged %d times, want 1: one line per tick-overflow, not per type", n)
 	}
 }

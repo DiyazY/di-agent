@@ -367,7 +367,7 @@ func Main() {
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 	registerConsole(mux, cfg.Node.UI)
 
-	srv := &http.Server{Addr: cfg.Node.Addr, Handler: mux}
+	srv := newServer(cfg.Node.Addr, mux)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -771,7 +771,43 @@ func startSweepLoop(ctx context.Context, state *statemap.Map, every time.Duratio
 	}()
 }
 
-// startSaveLoop snapshots the map on a ticker and once more when the context ends.
+// newServer bounds how long a client may take to send its request, so a connection
+// that opens and says nothing cannot be held forever. There is no WriteTimeout: the
+// explain endpoints stream answers from a model that may think for minutes.
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr: addr, Handler: h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+	}
+}
+
+// saveMark is what the last successful save covered: the map's revision and the
+// journal's total entries ever appended. A decision is journalled without moving the
+// revision, so the revision alone would skip it.
+type saveMark struct {
+	rev, entries uint64
+	done         bool
+}
+
+// saveIfChanged saves the map unless neither its revision nor its journal moved since
+// the last successful save. A zero mark has saved nothing, so the first tick saves once.
+// The mark is read before the save, so a change landing mid-save leaves the next tick
+// to save it.
+func saveIfChanged(state *statemap.Map, path string, last *saveMark) (saved bool, err error) {
+	held, dropped, _ := state.Journal().Stats()
+	now := saveMark{rev: state.Revision(), entries: uint64(held) + dropped, done: true}
+	if now == *last {
+		return false, nil
+	}
+	if err := state.Save(path); err != nil {
+		return false, err
+	}
+	*last = now
+	return true, nil
+}
+
+// startSaveLoop snapshots the map on a ticker when its revision moved, and once more when the context ends.
 //
 // This loop only does the periodic saves, which bound what an UNCLEAN exit costs. The
 // save that makes a clean restart lossless is done synchronously by main after the
@@ -790,6 +826,7 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
+		var lastSaved saveMark
 		for {
 			select {
 			case <-ctx.Done():
@@ -797,11 +834,14 @@ func startSaveLoop(ctx context.Context, state *statemap.Map, path string, every 
 				// cannot exit before it lands.
 				return
 			case <-t.C:
-				if err := state.Save(path); err != nil {
+				saved, err := saveIfChanged(state, path, &lastSaved)
+				if err != nil {
 					log.Printf("state model: periodic save failed: %v", err)
 					continue
 				}
-				log.Printf("state model: saved at revision %d (periodic)", state.Revision())
+				if saved {
+					log.Printf("state model: saved at revision %d (periodic)", lastSaved.rev)
+				}
 			}
 		}
 	}()

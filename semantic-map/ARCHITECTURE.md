@@ -700,6 +700,8 @@ Each `MetricSample` carries:
 
 **`available_metrics()` may change.** It is at least every type the last `collect()` emitted. A fixed collector (cgroup) returns one set throughout; one driven by include patterns (Netdata) learns what exists only by asking its source, and that grows as disks, interfaces and workloads appear. It used to be static for the instance's lifetime, which a pattern-driven collector cannot promise.
 
+At most 16384 samples per member per tick are admitted; the excess is a counted violation, so one producer cannot make the tick's lock hold unbounded.
+
 ### MetricType catalogue
 
 Routing is declared in `domain_spec.json`, not in code, and every *routed* type is a
@@ -818,6 +820,12 @@ Retiring a property cascades to the relationships referencing it, since an edge 
 something absent cannot be evaluated. Retirement is soft: an earlier decision has to
 stay reconstructible.
 
+`Record` refuses a reading older than the property's last reading, judged on the agent's monotonic clock (the anchor silence runs on, so a wall-clock step cannot make every correct reading look old; a property restored from a snapshot and not yet seen by this process accepts), or stamped more than the pair window ahead of the agent's clock, counts it (`readings_out_of_order`, `readings_future`) and changes nothing, not even the event-id record; `RecordAccepted` reports the refusal so ingestion keeps the reading from the proposer too. A replayed or future-stamped reading would fold into the EMA as the newest and make silence negative. A reading at the same instant is accepted: stamps are Unix seconds, so a sub-second producer legitimately repeats one, and true duplicates are caught by event-id dedup. So "older" means by a whole second, which also absorbs the two clocks being read one after the other; such a reading does not move the silence anchor back.
+
+Silence is the reading's age at receipt (receipt time minus its stamp) plus the monotonic time since then, never a wall-clock difference taken later, so an NTP step after boot does not read as a week of silence; a step larger than the pair window is journalled as `clock.stepped`.
+
+After a restore nothing retires until `retire_after` of this process's time has passed: a snapshot's last observations are hours old by definition, and retiring on that would cascade every relationship away on the first sweep.
+
 The ordering in `IngestSample` matters: the state model records a sample BEFORE the
 routing table is consulted. The table says what the agent knows how to summarise, not
 what the system is allowed to exhibit.
@@ -836,6 +844,8 @@ system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
 evidence that nothing happened, and a decision evicted by that bound answers 410
 rather than 404.
+A sweep that finds the wall clock stepped against the monotonic one records
+`clock.stepped` with both deltas, so a timestamp that jumped is explained.
 
 **The Reasoner answers from it, and only from it.** A reasoner without a state model
 returns `ErrNoStateModel`; the construct-graph cost path was deleted rather than kept
@@ -1636,11 +1646,14 @@ The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. T
 
 ### Trust mechanics
 
-`Descriptor.Trust` is a float in `[0, 1]`. Three forces move it:
+`Descriptor.Trust` is a float in `[0, 1]`. Four forces move it:
 
 1. **Default at registration** = `0.5`. We neither blanket-trust nor pre-distrust an operator-supplied URL.
 2. **Manual override** via `POST /peers/{id}/trust` — operator console + test fixtures.
-3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `−0.05` per failed `/cost` query, clamped at 0. Persistently-down peers drain out of the eligible set over ~20 attempts without being hard-banned on a single transient blip.
+3. **Automatic soft-penalty** on outbound HTTP failure inside `RecommendPeer` — `Registry.Penalise` takes `−0.05` per failed `/cost` query, clamped at 0, and stamps `LastPenalised`.
+4. **Reward** on a successful `/cost` query — `Registry.Reward` adds `+0.05`, capped at 1. Without it trust could only fall, and a peer that had a bad minute would never recover.
+
+The trust floor expires for the agent's own penalty only. A peer under `min_trust` with a `LastPenalised` stamp is queried again after `trustRetryAfter` (10 minutes), so a recovered peer climbs back by rewards — and is ranked only once its trust after the reward is back at the floor, since a re-probe tests reachability, not trust; a peer whose trust an operator set under the floor has no stamp and stays excluded until the operator says otherwise (the PoC's `trust 0.15` exclusion relies on this).
 
 Outcome-driven trust updates (boost on an accepted offer, penalty on a declined one) are designed but not wired. The hook exists — `Registry.UpdateTrust(id, delta)` — and the scenario test demonstrates a `+0.10` bump after an accepted offer, but `peers.Client.Offer` never touches trust and neither does an admission outcome: an answer moves trust only when its caller applies `UpdateTrust`. Admission does not read trust either; a submission walks peers in registry-id order.
 
@@ -2351,11 +2364,11 @@ Candidate review is the one place the map waits on a person, and the first decis
 agent takes on its own authority. How much authority is an operator setting
 (`loops.review.level`); what the agent does with it is always a decision record.
 
-**Tiers, cheapest first.** A candidate goes up only as far as it has to.
+**Tiers, cheapest first.** A candidate goes up only as far as it has to. Tiers 1 and 2 are off by default (`backend: none`); a model is something an operator adds, and a default naming a model the node does not run would retry every cycle with no record.
 
 | Tier | Decider | Why it is the right tool |
 | ---- | ------- | ------------------------ |
-| 0 | rules in the daemon | `composition` confirms a directed part against its whole. Optional `persistent-correlation` approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
+| 0 | rules in the daemon | `composition` confirms a directed part against its whole. `persistent-correlation` (on by default) approves a symmetric association after three full non-overlapping qualifying windows, for directed or undirected candidates alike. Associations have no effective causal strength and are excluded from estimates and intervention learning; the rule never invents an orientation. |
 | 1 | decision model | Acting without a person needs a calibrated signal, and a chat model's self-reported confidence is not one. A decision model (Ollama's `/v1/systemone`: a state and typed questions in, a probability per option out, in one forward pass) answers confirm/reject/defer as a distribution, so the threshold an action needs is a probability, not a word. |
 | 2 | reasoning model with tools | When the decision model is unsure, the question is usually one the evidence summary cannot answer: is this metric following load, does the workload exist, what else does the source correlate with. A tool-calling model reads the map (read-only) and writes an analysis. Its own suggested action is recorded and *not* acted on: the decision model scores the candidate again with the analysis in its state, so the number compared with the threshold is still a decision model's. |
 | — | undecided | What no tier was sure of stays pending with its review, and is reviewed again when its evidence moves. No tier is a person: a fleet of machines with different topologies cannot be checked one candidate at a time, so an operator who wants to decide sets a lower level. |
@@ -2378,7 +2391,7 @@ reviewed again, which is what keeps the models from being asked the same questio
 cycle. A candidate with a stale end waits: its window is not moving, so a decision now
 would be on frozen evidence.
 
-**Persistent correlation (opt-in).** The proposer tracks fresh paired observations,
+**Persistent correlation (default).** The proposer tracks fresh paired observations,
 checkpointing only after a full buffer has been replaced. Every intervening update
 must meet its correlation threshold, evidence-count and variation gates, have no
 missing-range caveats, and pass both a Fisher p-value limit of 0.05 and the configured
@@ -2409,7 +2422,7 @@ starting. Pending reviews survive restart, and restore reconciles a candidate ag
 an association already present in the map because the two are captured under separate
 locks. The state estimator's own raw windows remain cold after restart. There is no new
 probation or retirement policy. See the
-[rules-only configuration](README.md#rules-only-persistent-correlation).
+[default review](README.md#the-default-review-rules-only).
 
 **Rules first.** Each cycle applies tier 0 to every due candidate before any model is asked: a rule
 costs nothing and a model call a minute or more on a node, so a candidate a rule settles never waits

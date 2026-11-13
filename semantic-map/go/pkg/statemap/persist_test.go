@@ -1,6 +1,7 @@
 package statemap
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -99,5 +100,31 @@ func TestSaveLeavesOnlyTheSnapshot(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "state.json" {
 		t.Fatalf("directory holds %v; want only state.json", entries)
+	}
+}
+
+// TestSnapshotIsCompact: the snapshot is one line of JSON; indentation is bytes a
+// periodic write pays for and nobody reads.
+func TestSnapshotIsCompact(t *testing.T) {
+	m := New(Config{AdmitUnknown: true}, NewJournal(0))
+	now := time.Now()
+	for _, id := range []string{"cpu", "ram"} {
+		if err := m.Observe(id, 0.5, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := m.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := bytes.Count(blob, []byte("\n")); n != 0 {
+		t.Errorf("snapshot has %d newlines; want compact JSON", n)
+	}
+	if !json.Valid(blob) {
+		t.Error("snapshot is not valid JSON")
 	}
 }

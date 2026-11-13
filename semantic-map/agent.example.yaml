@@ -98,13 +98,14 @@ loops:
         per_cycle: 10
         rules:
             - composition
+            - persistent-correlation
         renderer: text
         thresholds:
             confirm: 0.85
             reject: 0.95
             defer: 0.7
         decision:
-            backend: systemone
+            backend: none
             url: http://localhost:11434
             model: tev1:4b
             keep_alive: ""
@@ -112,7 +113,7 @@ loops:
             api_key: ""
             timeout: 5m0s
         reasoning:
-            backend: openai-tools
+            backend: none
             url: http://localhost:11434/v1
             model: qwen3.8:27b-nvfp4
             keep_alive: 10m

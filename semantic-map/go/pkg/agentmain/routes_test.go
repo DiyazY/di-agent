@@ -1089,3 +1089,114 @@ func TestIngestSample_ScopedReadingOfARoutedTypeIs202(t *testing.T) {
 		t.Errorf("202 body %v; want routed:false with a note about scoped readings", ack)
 	}
 }
+
+func TestIngestSample_WithoutTimestampIsRecordedNow(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
+		NodeID: "master", MetricType: "cpu_utilization", Value: 0.7, EventID: "ingest-no-ts",
+	})
+	if resp.StatusCode != 204 {
+		t.Fatalf("POST /ingest-sample: %s", body(resp))
+	}
+	resp.Body.Close()
+
+	p, ok := sm.State().Property("cpu_utilization")
+	if !ok {
+		t.Fatal("no property for cpu_utilization")
+	}
+	if p.LastObserved.Year() < 2025 || time.Since(p.LastObserved) > 2*time.Second {
+		t.Errorf("LastObserved = %v, want about now", p.LastObserved)
+	}
+}
+
+func TestIngestSample_OldReadingIsCountedNotRecorded(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	for i, ts := range []int64{time.Now().Unix(), 1700000000} {
+		v := []float64{0.7, 0.1}[i]
+		resp := postJSON(t, base+"/ingest-sample", MetricSampleRequest{
+			NodeID: "master", MetricType: "cpu_utilization", Value: v,
+			TimestampUnix: ts, EventID: fmt.Sprintf("old-reading-%d", i),
+		})
+		if resp.StatusCode != 204 {
+			t.Fatalf("POST %d: %s", i, body(resp))
+		}
+		resp.Body.Close()
+	}
+
+	p, ok := sm.State().Property("cpu_utilization")
+	if !ok || p.Value != 0.7 || p.NObservations != 1 {
+		t.Errorf("cpu_utilization = %+v; want 0.7 from 1 observation", p)
+	}
+	// The test agent mounts the ingest routes only; /state is read through the
+	// state routes over the same map.
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, sm.State(), nil, nil)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	var view statemap.StateView
+	if code := getState(t, srv.URL+"/state", &view); code != 200 {
+		t.Fatalf("GET /state returned %d", code)
+	}
+	if got := view.Counts.ReadingsOutOfOrder; got != 1 {
+		t.Errorf("counts.readings_out_of_order = %d; want 1", got)
+	}
+}
+
+// TestIngestSample_TrailingDataIsRefused: the cap covers the whole body, so a small
+// sample followed by more than 1 MiB of padding is 413, and a second value is 400.
+func TestIngestSample_TrailingDataIsRefused(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	sample := `{"node_id":"master","metric_type":"cpu_utilization","value":1}`
+	for _, c := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"padding past the cap", sample + strings.Repeat(" ", 1<<20+1), http.StatusRequestEntityTooLarge},
+		{"a second value", sample + sample, http.StatusBadRequest},
+	} {
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(c.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s answered %d; want %d", c.name, resp.StatusCode, c.want)
+		}
+	}
+}
+
+// TestIngestSample_OversizedBodyIs413: a body over 1 MiB is refused with 413, and an
+// ordinary one is still accepted.
+func TestIngestSample_OversizedBodyIs413(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	big := `{"node_id":"master","metric_type":"cpu_utilization","value":1,"labels":{"pad":"` +
+		strings.Repeat("a", 1<<20) + `"}}`
+	resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(big))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body answered %d; want 413", resp.StatusCode)
+	}
+
+	small := `{"node_id":"master","metric_type":"cpu_utilization","value":1,"labels":{"pad":"` +
+		strings.Repeat("a", 1000) + `"}}`
+	resp, err = http.Post(base+"/ingest-sample", "application/json", strings.NewReader(small))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 204 && resp.StatusCode != 202 {
+		t.Errorf("small body answered %d; want 204 or 202", resp.StatusCode)
+	}
+}

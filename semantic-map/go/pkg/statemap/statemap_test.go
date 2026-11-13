@@ -13,10 +13,18 @@ import (
 
 // clock is a controllable time source: lifecycle transitions depend on elapsed
 // time, and a test that slept for them would be slow and flaky.
-type clock struct{ t time.Time }
+//
+// t is the wall clock and m the process's monotonic reading. advance moves both, as
+// time passing does; stepWall moves only the wall clock, as an NTP step does.
+type clock struct {
+	t time.Time
+	m time.Duration
+}
 
-func (c *clock) now() time.Time          { return c.t }
-func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *clock) now() time.Time           { return c.t }
+func (c *clock) mono() time.Duration      { return c.m }
+func (c *clock) advance(d time.Duration)  { c.t = c.t.Add(d); c.m += d }
+func (c *clock) stepWall(d time.Duration) { c.t = c.t.Add(d) }
 
 // near compares floats that arrive via EMA arithmetic, where an exact literal is
 // not reachable: 0.2*0.8 + 0.8*0.8 is 0.8000000000000001.
@@ -27,9 +35,10 @@ func near(got, want float64) bool {
 
 func newTestMap(t *testing.T, cfg Config) (*Map, *clock) {
 	t.Helper()
-	c := &clock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
+	c := &clock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), m: time.Second}
 	m := New(cfg, NewJournal(0))
 	m.SetClock(c.now)
+	m.SetMonotonic(c.mono)
 	return m, c
 }
 
@@ -1601,6 +1610,7 @@ func TestSweepReleasesTheLockWhenItPanics(t *testing.T) {
 		}
 		return at
 	})
+	m.SetMonotonic(func() time.Duration { return c.m + time.Minute })
 
 	m.Sweep() // first call: x falls silent past RetireAfter, so this runs retireLocked
 	if p, ok := m.Property("x"); !ok || p.Status != Retired {
@@ -2111,5 +2121,469 @@ func TestStaleAfterIsTheConfiguredSilence(t *testing.T) {
 	}
 	if got := New(Config{StaleAfter: 30 * time.Second}, nil).StaleAfter(); got != 30*time.Second {
 		t.Errorf("configured %s; want 30s", got)
+	}
+}
+
+func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: time.Minute})
+	_ = c
+	if err := m.RecordFacts("test", []Fact{NumberFact("cpu_cores", 4, "cores")}); err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]any{"nested": map[string]any{"k": 1.0}, "list": []any{1.0}}
+	b := m.Decide("dec-copy", "q")
+	b.Input("evidence", in)
+	b.Facts()
+	b.Commit(map[string]any{"ok": true})
+
+	in["nested"].(map[string]any)["k"] = 2.0
+	in["list"].([]any)[0] = 9.0
+
+	d, ok := m.Journal().Decision("dec-copy")
+	if !ok {
+		t.Fatal("decision not found")
+	}
+	ev := d.Inputs["evidence"].(map[string]any)
+	if ev["nested"].(map[string]any)["k"] != 1.0 || ev["list"].([]any)[0] != 1.0 {
+		t.Fatalf("caller's later write reached the journal: %v", ev)
+	}
+	if len(d.FactsRead) == 0 || d.FactsRead[0].Number == nil {
+		t.Fatalf("facts not read: %+v", d.FactsRead)
+	}
+	*d.FactsRead[0].Number = 99
+	ev["nested"].(map[string]any)["k"] = 3.0
+
+	again, _ := m.Journal().Decision("dec-copy")
+	if *again.FactsRead[0].Number != 4 {
+		t.Fatalf("returned fact aliased: %v", *again.FactsRead[0].Number)
+	}
+	if again.Inputs["evidence"].(map[string]any)["nested"].(map[string]any)["k"] != 1.0 {
+		t.Fatal("returned input aliased")
+	}
+}
+
+func TestDecisionTypedInputsAreCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	type offer struct {
+		Lines  []string
+		Limits map[string]float64
+	}
+	labels := map[string]string{"k": "a"}
+	lines := []string{"a"}
+	o := offer{Lines: []string{"a"}, Limits: map[string]float64{"cpu": 1}}
+	b := m.Decide("dec-typed", "q")
+	b.Input("labels", labels)
+	b.Input("wrapped", map[string]any{"lines": lines})
+	b.Input("offer", o)
+	b.Commit(map[string]any{"ok": true})
+
+	labels["k"] = "b"
+	lines[0] = "b"
+	o.Lines[0] = "b"
+	o.Limits["cpu"] = 2
+
+	d, _ := m.Journal().Decision("dec-typed")
+	if d.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("typed map aliased: %v", d.Inputs["labels"])
+	}
+	if d.Inputs["wrapped"].(map[string]any)["lines"].([]string)[0] != "a" {
+		t.Errorf("typed slice nested in a map aliased: %v", d.Inputs["wrapped"])
+	}
+	got := d.Inputs["offer"].(offer)
+	if got.Lines[0] != "a" || got.Limits["cpu"] != 1 {
+		t.Errorf("struct fields aliased: %+v", got)
+	}
+	d.Inputs["labels"].(map[string]string)["k"] = "c"
+	again, _ := m.Journal().Decision("dec-typed")
+	if again.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("returned typed map aliased: %v", again.Inputs["labels"])
+	}
+}
+
+func TestDecisionAnswerIsCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	answer := map[string]any{"verdict": "accept", "detail": map[string]any{"k": 1.0}, "ids": []string{"a"}}
+	b := m.Decide("dec-answer", "q")
+	b.Commit(answer)
+
+	answer["verdict"] = "refuse"
+	answer["detail"].(map[string]any)["k"] = 2.0
+	answer["ids"].([]string)[0] = "b"
+
+	d, _ := m.Journal().Decision("dec-answer")
+	if d.Answer["verdict"] != "accept" || d.Answer["detail"].(map[string]any)["k"] != 1.0 || d.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("caller's later write reached the journal: %v", d.Answer)
+	}
+	d.Answer["detail"].(map[string]any)["k"] = 3.0
+	d.Answer["ids"].([]string)[0] = "c"
+	again, _ := m.Journal().Decision("dec-answer")
+	if again.Answer["detail"].(map[string]any)["k"] != 1.0 || again.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("returned answer aliased: %v", again.Answer)
+	}
+}
+
+// ── A reading must be newer than the last, and not from the future ─────────────
+
+func TestAReadingOlderThanTheLastIsRefusedAndCounted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	counter := func() int { return m.State(Query{}).Counts.ReadingsOutOfOrder }
+
+	if err := m.Observe("cpu", 0.1, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	rev := m.Revision()
+	// Unix-second stamps: a sub-second producer legitimately repeats an instant.
+	if err := m.Observe("cpu", 0.9, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("cpu")
+	if p.NObservations != 2 || counter() != 0 || m.Revision() == rev {
+		t.Errorf("equal-instant reading: n=%d counter=%d; want 2 and 0, revision advanced", p.NObservations, counter())
+	}
+
+	rev = m.Revision()
+	if err := m.Observe("cpu", 0.5, c.now().Add(-time.Second)); err != nil {
+		t.Fatalf("a refused reading is not an error: %v", err)
+	}
+	q, _ := m.Property("cpu")
+	if q.NObservations != 2 || q.Value != p.Value || !q.LastObserved.Equal(c.now()) || counter() != 1 {
+		t.Errorf("older reading changed the property or was not counted: %+v counter=%d", q, counter())
+	}
+	if m.Revision() != rev {
+		t.Error("a refused reading advanced the revision")
+	}
+
+	c.advance(time.Second)
+	if err := m.Observe("cpu", 0.9, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	q, _ = m.Property("cpu")
+	if q.NObservations != 3 || counter() != 1 || m.Revision() == rev {
+		t.Errorf("newer reading: n=%d counter=%d; want 3 and 1", q.NObservations, counter())
+	}
+}
+
+func TestAFutureReadingIsRefusedAndCounted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+
+	if err := m.Observe("gpu", 0.5, c.now().Add(16*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Property("gpu"); ok {
+		t.Error("a future-stamped reading admitted a property")
+	}
+	if got := m.State(Query{}).Counts.ReadingsFuture; got != 1 {
+		t.Errorf("ReadingsFuture = %d; want 1", got)
+	}
+
+	if err := m.Observe("gpu", 0.5, c.now().Add(15*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := m.Property("gpu")
+	if !ok || p.NObservations != 1 {
+		t.Errorf("a reading at the tolerance edge was not admitted: %+v ok=%v", p, ok)
+	}
+	if got := m.State(Query{}).Counts.ReadingsFuture; got != 1 {
+		t.Errorf("ReadingsFuture = %d; want still 1", got)
+	}
+}
+
+func TestARefusedReadingDoesNotConsumeItsEventID(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	t0 := c.now()
+
+	if err := m.ObserveEvent("cpu", 0.1, t0, "e1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ObserveEvent("cpu", 0.5, t0.Add(-time.Second), "e2"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(time.Second)
+	if err := m.ObserveEvent("cpu", 0.5, c.now(), "e2"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := m.Property("cpu")
+	if p.NObservations != 2 {
+		t.Errorf("n = %d; want 2: the refused reading consumed event id e2", p.NObservations)
+	}
+}
+
+// ── Silence runs on the process's monotonic clock ─────────────────────────────
+
+func clockSteps(m *Map) []Event {
+	var out []Event
+	for _, e := range m.Journal().Events(0, 0) {
+		if e.Kind == EventClockStepped {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func observedDiskIO(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	if err := m.DeclareProperty(Property{ID: "disk_io"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("disk_io", 0.1, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	return m, c
+}
+
+func TestAWallClockStepForwardRetiresNothing(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(5 * time.Second)
+	c.stepWall(2 * time.Hour)
+
+	stale, retired := m.Sweep()
+	if len(stale) != 0 || len(retired) != 0 {
+		t.Fatalf("a 2h wall step made stale=%v retired=%v; 5s of real silence is neither", stale, retired)
+	}
+	if p, _ := m.Property("disk_io"); p.Status != Active {
+		t.Errorf("status %s after a wall step, want active", p.Status)
+	}
+	steps := clockSteps(m)
+	if len(steps) != 1 {
+		t.Fatalf("%d clock.stepped events, want 1", len(steps))
+	}
+	if w, _ := steps[0].Detail["wall_delta_seconds"].(float64); math.Abs(w-7205) > 1 {
+		t.Errorf("wall_delta_seconds %v, want about 7205", steps[0].Detail["wall_delta_seconds"])
+	}
+
+	c.advance(time.Second)
+	m.Sweep()
+	if n := len(clockSteps(m)); n != 1 {
+		t.Errorf("%d clock.stepped events after a quiet sweep, want still 1: one event per step", n)
+	}
+}
+
+func TestAWallClockStepBackwardRetiresNothing(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(5 * time.Second)
+	c.stepWall(-time.Hour)
+
+	stale, retired := m.Sweep()
+	if len(stale) != 0 || len(retired) != 0 {
+		t.Fatalf("a backward wall step made stale=%v retired=%v", stale, retired)
+	}
+	steps := clockSteps(m)
+	if len(steps) != 1 {
+		t.Fatalf("%d clock.stepped events, want 1", len(steps))
+	}
+	if w, _ := steps[0].Detail["wall_delta_seconds"].(float64); w >= 0 {
+		t.Errorf("wall_delta_seconds %v, want negative", w)
+	}
+}
+
+func TestAnOldStampedReadingIsAlreadyStale(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	if err := m.DeclareProperty(Property{ID: "disk_io"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Observe("disk_io", 0.1, c.now().Add(-31*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stale, retired := m.Sweep()
+	if len(stale) != 1 || len(retired) != 0 {
+		t.Fatalf("stale=%v retired=%v; a reading stamped 31s ago is stale on arrival", stale, retired)
+	}
+	// A wall step does not change that, nor un-stale it.
+	c.stepWall(time.Hour)
+	if _, retired = m.Sweep(); len(retired) != 0 {
+		t.Errorf("retired=%v after a wall step", retired)
+	}
+}
+
+func TestOrdinarySilenceStillRetires(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(3 * time.Minute)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "disk_io" {
+		t.Fatalf("retired=%v after 3m of silence, want disk_io", retired)
+	}
+	if n := len(clockSteps(m)); n != 0 {
+		t.Errorf("%d clock.stepped events with both clocks agreeing, want 0", n)
+	}
+}
+
+func TestRelationshipsSurviveAClockStep(t *testing.T) {
+	m, c := newTestMap(t, Config{StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute})
+	for _, id := range []string{"a", "b"} {
+		if err := m.DeclareProperty(Property{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Observe(id, 0.5, c.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.DeclareRelationship(Relationship{From: "a", To: "b", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(5 * time.Second)
+	c.stepWall(48 * time.Hour)
+	m.Sweep()
+	r, _ := m.Relationship(RelationshipID("a", "b", ""))
+	if r.Status == Retired {
+		t.Errorf("relationship retired by a wall-clock step: %s", r.RetiredReason)
+	}
+}
+
+// ── A restored map gets retire_after of grace ─────────────────────────────────
+
+// restoredMap saves a map holding two observed properties and a relationship, and
+// loads it into a second map whose clock is three days later.
+func restoredMap(t *testing.T) (*Map, *clock) {
+	t.Helper()
+	cfg := Config{Owner: "n", StaleAfter: 30 * time.Second, RetireAfter: 2 * time.Minute}
+	a, cA := newTestMap(t, cfg)
+	for _, id := range []string{"cpu", "mem"} {
+		if err := a.DeclareProperty(Property{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Observe(id, 0.5, cA.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.DeclareRelationship(Relationship{From: "cpu", To: "mem", Sign: 1}); err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/state.json"
+	if err := a.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	b, cB := newTestMap(t, cfg)
+	cB.t = cA.t.Add(72 * time.Hour)
+	cB.m = time.Second
+	if ok, err := b.Load(path); err != nil || !ok {
+		t.Fatalf("load: %v %v", ok, err)
+	}
+	return b, cB
+}
+
+func TestRestoreGraceMarksStaleButDoesNotRetire(t *testing.T) {
+	m, _ := restoredMap(t)
+	stale, retired := m.Sweep()
+	if len(stale) != 2 || stale[0] != "cpu" || stale[1] != "mem" || len(retired) != 0 {
+		t.Fatalf("stale=%v retired=%v; want both stale, none retired during grace", stale, retired)
+	}
+	r, _ := m.Relationship(RelationshipID("cpu", "mem", ""))
+	if r.Status == Retired {
+		t.Errorf("relationship retired during grace: %s", r.RetiredReason)
+	}
+	if n := m.State(Query{}).Counts.RelationshipsLive; n != 1 {
+		t.Errorf("RelationshipsLive %d, want 1", n)
+	}
+}
+
+func TestRestoreGraceEndsAfterRetireAfter(t *testing.T) {
+	m, c := restoredMap(t)
+	m.Sweep()
+	c.advance(2*time.Minute + time.Second)
+	_, retired := m.Sweep()
+	if len(retired) != 2 || retired[0] != "cpu" || retired[1] != "mem" {
+		t.Fatalf("retired=%v after grace, want cpu and mem", retired)
+	}
+	if r, _ := m.Relationship(RelationshipID("cpu", "mem", "")); r.Status != Retired {
+		t.Errorf("relationship %s after grace, want retired", r.Status)
+	}
+}
+
+func TestAnObservationDuringGraceRevivesNormally(t *testing.T) {
+	m, c := restoredMap(t)
+	m.Sweep()
+	c.advance(10 * time.Second)
+	if err := m.Observe("cpu", 0.6, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.Status != Active {
+		t.Fatalf("cpu %s after an observation, want active", p.Status)
+	}
+	c.advance(2 * time.Minute)
+	_, retired := m.Sweep()
+	if len(retired) != 1 || retired[0] != "mem" {
+		t.Fatalf("retired=%v, want mem only", retired)
+	}
+	if p, _ := m.Property("cpu"); p.Status != Stale {
+		t.Errorf("cpu %s, want stale", p.Status)
+	}
+}
+
+func TestAClockStepDuringGraceRetiresNothing(t *testing.T) {
+	m, c := restoredMap(t)
+	c.advance(5 * time.Second)
+	c.stepWall(6 * time.Hour)
+	_, retired := m.Sweep()
+	if len(retired) != 0 {
+		t.Fatalf("retired=%v after a wall step during grace", retired)
+	}
+	if n := len(clockSteps(m)); n != 1 {
+		t.Errorf("%d clock.stepped events, want 1", n)
+	}
+	c.advance(2 * time.Minute)
+	if _, retired = m.Sweep(); len(retired) != 2 {
+		t.Errorf("retired=%v once grace elapsed, want both", retired)
+	}
+}
+
+// ── Reading order is judged on the monotonic clock ────────────────────────────
+
+func TestReadingsAfterABackwardWallStepKeepThePropertyLive(t *testing.T) {
+	m, c := observedDiskIO(t)
+	c.advance(10 * time.Second)
+	c.stepWall(-time.Hour)
+	// The producer stamps with the stepped clock: every reading is an hour older
+	// than LastObserved by wall time, yet each is newer than the last.
+	for i := 0; i < 20; i++ { // 200 s, past retire_after
+		if err := m.Observe("disk_io", 0.2, c.now()); err != nil {
+			t.Fatal(err)
+		}
+		m.Sweep()
+		c.advance(10 * time.Second)
+	}
+	if p, _ := m.Property("disk_io"); p.Status != Active || p.NObservations != 21 {
+		t.Errorf("after a backward step: status %s, n=%d; want active and 21", p.Status, p.NObservations)
+	}
+	if n := m.State(Query{}).Counts.ReadingsOutOfOrder; n != 0 {
+		t.Errorf("readings_out_of_order = %d; want 0", n)
+	}
+}
+
+func TestARestoredPropertyAcceptsReadingsStampedBeforeItsLastObserved(t *testing.T) {
+	m, c := restoredMap(t)
+	// A board whose RTC came up in 1970: its readings predate the snapshot.
+	c.t = time.Unix(1000, 0).UTC()
+	if err := m.Observe("cpu", 0.7, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(10 * time.Second)
+	c.stepWall(56 * 365 * 24 * time.Hour) // NTP fixes the clock
+	if err := m.Observe("cpu", 0.8, c.now()); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.NObservations != 3 || p.Status != Active {
+		t.Errorf("cpu n=%d status %s; want 3 and active", p.NObservations, p.Status)
+	}
+	if n := m.State(Query{}).Counts.ReadingsOutOfOrder; n != 0 {
+		t.Errorf("readings_out_of_order = %d; want 0", n)
+	}
+}
+
+// Two clocks read one after the other never agree to the nanosecond, so a repeated
+// stamp lands a hair before the last anchor; it is still the same instant.
+func TestARepeatedStampAcrossClockReadJitterIsAccepted(t *testing.T) {
+	m, c := newTestMap(t, Config{AdmitUnknown: true})
+	at := c.now()
+	if err := m.Observe("cpu", 0.1, at); err != nil {
+		t.Fatal(err)
+	}
+	c.stepWall(time.Millisecond) // wall read later than mono, relative to the last record
+	if err := m.Observe("cpu", 0.2, at); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := m.Property("cpu"); p.NObservations != 2 {
+		t.Errorf("n=%d; a repeated stamp was refused as out of order", p.NObservations)
 	}
 }
