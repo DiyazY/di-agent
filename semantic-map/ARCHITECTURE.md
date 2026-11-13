@@ -696,6 +696,8 @@ Each `MetricSample` carries:
 | `chart`          | `str`        | The series the producer computes together from one reading (a Netdata chart, one `/proc/stat` line); optional. Discovery groups a chart's series that stay perfectly correlated (§6) |
 | `labels`         | `dict`       | Source metadata (cgroup path, Netdata chart, …); opaque  |
 
+**Health is part of the contract.** Every collector answers `Health()` after each `Collect`: nil when its source answered, or why it did not (`http://localhost:19999 is unreachable: … connection refused`). A source that is down is not a fault of the collector — `Collect` still returns `([], nil)` — so it is not backed off: the Supervisor shows the member `unhealthy` with the reason, asks it again every tick, and the loop marks it down like one in backoff or stuck, so `collector.down`/`collector.up` are journalled and what it last produced is `unobservable`. Without this a refused connection read as an empty success and an outage looked like silence. On the wire, a collect reply's `unhealthy` field carries the reason. A plugin MAY declare a `doctor` command in its hello reply; when its member stays down (unhealthy, backoff or stuck) for one minute the agent runs it once for that episode — never twice within ten minutes, 30 s at most, in the plugin's directory and environment — and journals what ran and how it ended as `collector.doctor`. Only an exec plugin's doctor runs: the agent already runs that plugin's command, and an http endpoint does not name commands for this node. No doctor declared, nothing runs; nothing in the agent knows which collector is which.
+
 **`event_id` determinism** is the collector's responsibility. A stable recipe: `sha256(source_id + node_id + subject + metric_type + str(timestamp_unix))[:16]`. This carries the map's idempotency guarantee end-to-end: replaying the same telemetry batch has no effect on the model, because the map recognises an observation it has already applied.
 
 **`available_metrics()` may change.** It is at least every type the last `collect()` emitted. A fixed collector (cgroup) returns one set throughout; one driven by include patterns (Netdata) learns what exists only by asking its source, and that grows as disks, interfaces and workloads appear. It used to be static for the instance's lifetime, which a pattern-driven collector cannot promise.
@@ -830,7 +832,7 @@ the machine as it was when it was written.
 journals the admission, so the map follows a system that changes rather than a schema
 someone wrote down. Silence marks a property stale and can retire it, because a model
 that keeps reporting a departed metric's last value asserts what it cannot support.
-A property whose collector is down (backoff or stuck) is `unobservable`, not stale,
+A property whose collector is down (unhealthy, backoff or stuck) is `unobservable`, not stale,
 and is never retired while the collector stays down: silence with a known cause is not
 evidence of departure, and retiring on it would cascade away every relationship the
 outage touched. The Supervisor stamps each admitted sample with its member's name, the
@@ -876,8 +878,9 @@ every decision's `inputs.pace` says which attention level it was taken at.
 `GET /state/decisions/{id}/explain` renders a decision and its cites as prose by a pure function of the records, so a node with no model can still say "capped X because contention stayed above 0.25 for 1m; predicted 0.08 from the intervened relationship, measured 0.6; observed 0.05; kept".
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
-A collector member entering or leaving backoff or stuck records `collector.down` or
-`collector.up`, once per transition, with the member as target.
+A collector member going down (unhealthy, backoff or stuck) or coming back records
+`collector.down` (detail `reason`) or `collector.up`, once per transition, with the
+member as target; a doctor run for a member that stayed down records `collector.doctor`.
 The sweep deleting a property retired for 24 hours records `property.forgotten` (target
 the id; detail `retired_at`, the `relationships` removed, and `kept` for any live edge
 left in place).
