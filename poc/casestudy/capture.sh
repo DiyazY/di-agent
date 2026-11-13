@@ -16,7 +16,8 @@ API="${API:-http://localhost:9090}"
 mkdir -p "$OUT"
 FILE="$OUT/capture.jsonl"
 
-EVERY_TICK=(/state "/candidates?status=all" /state/relationships /relief /relief/actions /state/journal)
+# JOURNAL and EXTRA let a longer run poll the journal's tail and more endpoints (master.sh).
+EVERY_TICK=(/state "/candidates?status=all" /state/relationships /relief /relief/actions "${JOURNAL:-/state/journal}" ${EXTRA:-})
 EVERY_TENTH=(/state/decisions)
 # Which binary and which spec answered: polled until both answer, and again after any
 # failed /state poll, since an agent that went away may come back as another build or

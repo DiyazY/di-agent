@@ -1,0 +1,14 @@
+# The M7 probe of the master run (master.sh substitutes __NAME__): offered to the agent with a
+# declared 100m / 256Mi, applied only when accepted. It holds 200 MB in a memory-backed volume
+# and runs a busy loop 30 s in every 60, so its arrival moves both admission domains.
+apiVersion: v1
+kind: Pod
+metadata: { name: __NAME__, labels: { check: casestudy, di-agent/group: compute } }
+spec:
+  containers:
+  - name: w
+    image: busybox:1.36
+    command: ["sh", "-c", "dd if=/dev/zero of=/shm/f bs=1M count=200 2>/dev/null; while true; do timeout 30 sh -c 'while :; do :; done'; sleep 30; done"]
+    resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { cpu: 500m, memory: 384Mi } }
+    volumeMounts: [{ name: shm, mountPath: /shm }]
+  volumes: [{ name: shm, emptyDir: { medium: Memory, sizeLimit: 256Mi } }]
