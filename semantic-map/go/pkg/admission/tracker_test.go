@@ -514,6 +514,32 @@ func TestRestoreKeepsOutcomesAndClosesPendingAccepts(t *testing.T) {
 	}
 }
 
+// A snapshot older than the restart that closed an accept (state.json.prev) brings
+// the accept back as pending; it is closed once, by the outcome already recorded.
+func TestAnAcceptIsClosedByARestartOnce(t *testing.T) {
+	r := newRig(t)
+	d := r.accept("web")
+	mem := r.tr.Memory()
+
+	r2 := newRig(t)
+	r2.tr.Restore(mem)
+	first := r2.tr.Outcomes()[0].OutcomeID
+	r2.tr.Restore(mem) // the same map, restored again from the older generation
+	out := r2.tr.Outcomes()
+	if len(out) != 1 || out[0].OutcomeID != first {
+		t.Fatalf("outcomes %+v; want the one restart outcome %s", out, first)
+	}
+	n := 0
+	for _, rec := range r2.j.Decisions(0, "admission.outcome") {
+		if len(rec.Cites) == 1 && rec.Cites[0] == d.ID {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d outcome decisions cite %s; want 1", n, d.ID)
+	}
+}
+
 func TestHeldFeedsBothBases(t *testing.T) {
 	r := arrived(t)
 	record(t, r.m, "cpu_contention_ratio", "", 0.07)
