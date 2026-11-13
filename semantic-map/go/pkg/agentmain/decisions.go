@@ -2,6 +2,7 @@ package agentmain
 
 import (
 	"log"
+	"slices"
 
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
@@ -24,30 +25,22 @@ func resolveDecision(j *statemap.Journal, id string) (d *statemap.Decision, from
 	return d, "log", true
 }
 
-// resolveChain is Journal.Chain with the log behind it. A held decision's chain
-// comes from the journal, each link it marks evicted filled from the log when the
-// log has it (its own ancestors are not walked further). One only the log holds is walked depth-first in cite
-// order, each id once, every hop through resolveDecision; an id neither holds is
-// marked evicted. CitedBy is nil: the log has no reverse index.
+// resolveChain is Journal.Chain with the log behind it: the chain is walked hop
+// by hop through resolveDecision (memory first, then the log), depth-first in cite
+// order, each id once; an id neither holds is marked evicted. CitedBy comes from
+// the journal when the root is held in memory, and is nil otherwise: the log has
+// no reverse index.
 func resolveChain(j *statemap.Journal, id string) (statemap.Chain, string, bool) {
-	if c, ok := j.Chain(id); ok {
-		for i, l := range c.Cites {
-			if !l.Evicted {
-				continue
-			}
-			if d, _, held := resolveDecision(j, l.ID); held {
-				c.Cites[i] = statemap.ChainLink{ID: l.ID, Decision: d}
-			}
-		}
-		return c, "journal", true
-	}
 	d, from, ok := resolveDecision(j, id)
 	if !ok {
 		return statemap.Chain{}, "", false
 	}
 	c := statemap.Chain{Decision: d, Cites: []statemap.ChainLink{}}
+	if held, ok := j.Chain(id); ok {
+		c.CitedBy = held.CitedBy
+	}
 	seen := map[string]bool{id: true}
-	stack := slicesReversed(d.Cites)
+	stack := reversed(d.Cites) // an explicit stack: a chain can be long
 	for len(stack) > 0 {
 		next := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -61,15 +54,13 @@ func resolveChain(j *statemap.Journal, id string) (statemap.Chain, string, bool)
 			continue
 		}
 		c.Cites = append(c.Cites, statemap.ChainLink{ID: next, Decision: a})
-		stack = append(stack, slicesReversed(a.Cites)...)
+		stack = append(stack, reversed(a.Cites)...)
 	}
 	return c, from, true
 }
 
-func slicesReversed(ids []string) []string {
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[len(ids)-1-i] = id
-	}
+func reversed(ids []string) []string {
+	out := slices.Clone(ids)
+	slices.Reverse(out)
 	return out
 }

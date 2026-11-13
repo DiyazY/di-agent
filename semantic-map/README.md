@@ -961,7 +961,7 @@ agent reasons with, and `basis` naming which layer that came from — assertion,
 measured, then established, then recent. Read `effective`: `recent` is the fastest-moving
 layer and answers only when none of the others exists. `effective` and the pointer layers are **absent rather than
 zero** when they do not exist, because zero is the claim that a relationship is worth
-nothing and absence is not that claim. `strength_se` is the point ± one Fisher-z standard error of the learned strength at its window size (whole range under 4 pairs; none for an assertion).
+nothing and absence is not that claim. `strength_se` is a half-width: one Fisher-z standard error of the learned strength at its window size, mapped back to the strength scale (1, the whole range, under 4 pairs; none for an assertion); the interval is the point ± `strength_se`.
 
 ```bash
 # what each relationship is worth, and on what basis

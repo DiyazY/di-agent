@@ -104,3 +104,47 @@ func TestResolveChainFillsAnEvictedAncestorFromTheLog(t *testing.T) {
 		t.Fatalf("ghost link = %+v, want evicted", l)
 	}
 }
+
+// A held root's evicted ancestors are walked through the log hop by hop: an act
+// filled from the log brings the estimate it cites, also from the log.
+func TestResolveChainWalksAnEvictedAncestorsOwnCites(t *testing.T) {
+	m := statemap.New(statemap.Config{Owner: "n1"}, statemap.NewJournal(3))
+	if err := m.OpenLog(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.CloseLog() })
+	est := m.NewDecisionID("est")
+	m.Decide(est, "estimate", "q").Commit(nil)
+	act := m.NewDecisionID("act")
+	b := m.Decide(act, "relief.act", "q")
+	b.Cite(est)
+	b.Commit(nil)
+	verify := m.NewDecisionID("verify")
+	b = m.Decide(verify, "relief.verify", "q")
+	b.Cite(act)
+	b.Commit(nil)
+	for i := 0; i < 2; i++ {
+		m.Decide(m.NewDecisionID("est"), "estimate", "q").Commit(nil)
+	}
+	j := m.Journal()
+	if _, held := j.Decision(act); held {
+		t.Fatal("act should be evicted")
+	}
+	if _, held := j.Decision(verify); !held {
+		t.Fatal("verify should be held")
+	}
+	c, from, ok := resolveChain(j, verify)
+	if !ok || from != "journal" || c.CitedBy == nil {
+		t.Fatalf("resolveChain = %+v, from %q, ok %v; want a held root with cited_by", c, from, ok)
+	}
+	var got []string
+	for _, l := range c.Cites {
+		if l.Evicted || l.Decision == nil || l.Decision.ID != l.ID {
+			t.Fatalf("link %+v should carry its decision from the log", l)
+		}
+		got = append(got, l.ID)
+	}
+	if want := []string{act, est}; !slices.Equal(got, want) {
+		t.Fatalf("cites = %v, want %v", got, want)
+	}
+}

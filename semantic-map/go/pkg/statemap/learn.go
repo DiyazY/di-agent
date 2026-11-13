@@ -190,13 +190,13 @@ func fisherSE(n int) float64 {
 }
 
 // strengthSE maps one z-SE above r back to the r scale:
-// tanh(atanh(min(r, 0.9999)) + fisherSE(n)) − r. Under 4 pairs it is 1, the whole
-// range: no interval can be stated.
+// max(0, tanh(atanh(min(r, 0.9999)) + fisherSE(n)) − r), never negative at r → 1.
+// Under 4 pairs it is 1, the whole range: no interval can be stated.
 func strengthSE(r float64, n int) float64 {
 	if n < 4 {
 		return 1
 	}
-	return math.Tanh(math.Atanh(math.Min(r, 0.9999))+fisherSE(n)) - r
+	return max(0, math.Tanh(math.Atanh(math.Min(r, 0.9999))+fisherSE(n))-r)
 }
 
 // regimeBand is two standard errors of Fisher's z, the bar Outdated uses, at the

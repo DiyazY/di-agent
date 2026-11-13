@@ -901,7 +901,8 @@ after, never a repeat). A redeclared group's `property.redeclared` carries
 Every event carries `(incarnation, seq)`; a decision id is `<prefix>-<incarnation>.<n>`
 with `n` drawn from the same counter, so no crash and no restart can reissue an id,
 and order is total across restarts. The incarnation advances on every restore and is
-written back at once. A commit under an id already recorded is not recorded; it is
+written back at once; opening the journal log also counts the log's highest incarnation
+for this owner, so a cold start over a surviving log takes the one after it. A commit under an id already recorded is not recorded; it is
 journalled as `decision.refused`. The loops' learned state survives a restart with the
 map (§ Persistence), and an accept left pending by the restart is closed by an
 `admission.outcome` citing it, so its chain is never left open.

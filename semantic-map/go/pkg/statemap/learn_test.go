@@ -24,8 +24,8 @@ func TestStrengthSEIsTheWholeRangeUnderFourPairs(t *testing.T) {
 	if got := strengthSE(0.5, 120); math.Abs(got-0.0660) > 1e-3 {
 		t.Errorf("strengthSE(0.5, 120) = %.4f, want 0.0660", got)
 	}
-	if got := strengthSE(1, 120); math.IsNaN(got) || math.IsInf(got, 0) || got > 1 {
-		t.Errorf("strengthSE(1, 120) = %v, want finite and <= 1", got)
+	if got := strengthSE(1, 120); math.IsNaN(got) || math.IsInf(got, 0) || got > 1 || got < 0 {
+		t.Errorf("strengthSE(1, 120) = %v, want finite and in [0, 1]", got)
 	}
 }
 

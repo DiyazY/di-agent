@@ -66,6 +66,7 @@ type journalFile struct {
 	path     string
 	owner    string
 	inc      uint64
+	maxInc   uint64 // highest incarnation among this owner's verified lines at open
 	w        logWriter
 	size     int64
 	buf      []byte
@@ -196,8 +197,11 @@ func (f *journalFile) scan(gen uint8) (int64, error) {
 			f.stats.CorruptLines++
 		case l.Owner != f.owner:
 			f.stats.ForeignLines++
-		case l.Kind == EventDecision && l.Target != "":
-			f.index[l.Target] = logOffset{gen: gen, off: start}
+		default:
+			f.maxInc = max(f.maxInc, l.Inc)
+			if l.Kind == EventDecision && l.Target != "" {
+				f.index[l.Target] = logOffset{gen: gen, off: start}
+			}
 		}
 	}
 }
@@ -239,12 +243,12 @@ func (f *journalFile) flusher() {
 // the next flush.
 func (f *journalFile) Append(e Event) {
 	line, err := encodeLine(f.owner, f.inc, e)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err != nil {
-		f.fail(err)
+	if err != nil { // this event only: the buffer and the file are untouched
+		f.logf("journal log: encoding %s %s: %v", e.Kind, e.Target, err)
 		return
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.closed {
 		return
 	}
@@ -383,13 +387,12 @@ func (f *journalFile) Close() error {
 	<-f.done
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.w == nil {
-		return nil
+	_, err := f.flush(true) // reopens the file when a failed rotation left none
+	if f.w != nil {
+		if cerr := f.w.Close(); err == nil {
+			err = cerr
+		}
+		f.w = nil
 	}
-	_, err := f.flush(true)
-	if cerr := f.w.Close(); err == nil {
-		err = cerr
-	}
-	f.w = nil
 	return err
 }

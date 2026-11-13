@@ -548,3 +548,69 @@ func TestLogFromAnEarlierIncarnationWithHigherSeqIsIndexed(t *testing.T) {
 		t.Fatalf("last line = %+v, %v; want %s from incarnation 2", l, ok, id)
 	}
 }
+
+// A cold start (no snapshot) over a surviving log must not reissue the earlier
+// life's ids: OpenLog takes the incarnation after the highest the log holds.
+func TestColdStartOverAnExistingLogTakesTheNextIncarnation(t *testing.T) {
+	dir := t.TempDir()
+	a := New(Config{Owner: "n1"}, NewJournal(0))
+	if err := a.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	old := a.NewDecisionID("est")
+	if a.Decide(old, "estimate", "life 1").Commit(nil) == nil {
+		t.Fatalf("commit %s refused", old)
+	}
+	if err := a.CloseLog(); err != nil { // no Save: state.json never written
+		t.Fatal(err)
+	}
+
+	b := New(Config{Owner: "n1"}, NewJournal(0))
+	if err := b.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { b.CloseLog() })
+	if b.Incarnation() != 2 {
+		t.Fatalf("incarnation = %d, want 2", b.Incarnation())
+	}
+	id := b.NewDecisionID("est")
+	if !strings.HasPrefix(id, "est-2.") || id == old {
+		t.Fatalf("new id %q, want prefix est-2. and not %s", id, old)
+	}
+	if d, ok, _ := b.Journal().DecisionFromLog(id); ok {
+		t.Fatalf("uncommitted %s resolves from the log as %+v", id, d)
+	}
+	if d, ok, err := b.Journal().DecisionFromLog(old); err != nil || !ok || d.Question != "life 1" {
+		t.Fatalf("DecisionFromLog(%s) = %+v, %v, %v", old, d, ok, err)
+	}
+	b.Decide(id, "estimate", "life 2").Commit(nil)
+	lines := fileLines(t, filepath.Join(dir, JournalFileName))
+	if l, ok := decodeLine(lines[len(lines)-1]); !ok || l.Target != id || l.Inc != 2 {
+		t.Fatalf("last line = %+v, %v; want %s from incarnation 2", l, ok, id)
+	}
+}
+
+// A failed rotation leaves no open file; Close still flushes what is buffered.
+func TestCloseFlushesAfterAFailedRotationLeftNoFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, JournalFileName)
+	f, err := openJournalFile(path, "n1", 1, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Append(observationEvent(1))
+	f.mu.Lock()
+	f.w.Close()
+	f.w = nil
+	f.mu.Unlock()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lines := fileLines(t, path)
+	if len(lines) != 1 {
+		t.Fatalf("lines = %q, want the buffered event", lines)
+	}
+	if l, ok := decodeLine(lines[0]); !ok || l.Seq != 1 {
+		t.Fatalf("line = %+v, %v", l, ok)
+	}
+}

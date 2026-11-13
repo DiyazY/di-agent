@@ -702,8 +702,11 @@ func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
 
 // OpenLog opens the journal log, filepath.Join(dir, JournalFileName), under this
 // map's owner and incarnation, and from then on writes every journal event to it.
-// Open it after Load, so the lines carry the restored life's incarnation; events
-// restored from a snapshot are not rewritten. A second call is refused.
+// Open it after Load and before any id is issued: when the log already holds this
+// owner's lines from an incarnation at or above the current one (a cold start
+// over a surviving log), the journal moves to the incarnation after the highest,
+// so no earlier life's id is reissued. Events restored from a snapshot are not
+// rewritten. A second call is refused.
 func (m *Map) OpenLog(dir string) error {
 	j := m.journal
 	j.mu.RLock()
@@ -722,6 +725,10 @@ func (m *Map) OpenLog(dir string) error {
 		f.Close()
 		return fmt.Errorf("journal log already open")
 	}
+	if j.incarnation <= f.maxInc {
+		j.incarnation = f.maxInc + 1
+	}
+	f.inc = j.incarnation
 	j.log = f
 	j.mu.Unlock()
 	return nil
