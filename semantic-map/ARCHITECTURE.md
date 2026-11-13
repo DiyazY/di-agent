@@ -873,6 +873,7 @@ journal is bounded and reports what it dropped, so an absence is never mistaken 
 evidence that nothing happened; beside it an append-only log (`journal.ndjson`, digested per line, fsync'd per decision, size-rotated with one previous generation) keeps every decision past that bound, so `GET /state/decisions/{id}` answers from the log once the journal has evicted it and 410 means neither holds it. A line that does not verify, or belongs to another node, is skipped and counted, never read as knowledge.
 `pace.changed` records every change of the agent's attention with its reason, and
 every decision's `inputs.pace` says which attention level it was taken at.
+`GET /state/decisions/{id}/explain` renders a decision and its cites as prose by a pure function of the records, so a node with no model can still say "capped X because contention stayed above 0.25 for 1m; predicted 0.08 from the intervened relationship, measured 0.6; observed 0.05; kept".
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
 A collector member entering or leaving backoff or stuck records `collector.down` or
@@ -1555,6 +1556,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| GET  | `/state/decisions/{id}/explain`   | path only | text/plain | A decision and the chain it cites as prose, from the records alone; `410`/`404` as `GET /state/decisions/{id}`; a log hit ends with `source: log` |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
@@ -2198,6 +2200,8 @@ make -C poc teardown                   # delete VMs and purge
 `pkg/explain` adds an operator-facing surface that lets a human ask questions in natural language and get a grounded, cited answer. It exists to make the semantic map talk-to-able: *"Why is my ResourceCost higher than my peers?"*, *"Which propositions are driving the recommendation?"*, *"Should I deprecate P7?"*
 
 The design follows the framing in §8: our graph is the **world model** for an LLM operator agent, and every anchor property (real-world outcomes, frozen rules, human judgment) is preserved because the LLM is a **consumer** of the graph, never a mutator.
+
+The narrative route `GET /state/decisions/{id}/explain` is not this layer: it is `explain.Narrate`, a pure function of a decision's records, needs no model and answers on a node with none.
 
 ### Position in the architecture
 

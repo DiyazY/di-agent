@@ -917,3 +917,70 @@ func TestEstimateReportsBoundsOverHTTP(t *testing.T) {
 		}
 	}
 }
+
+func getText(t *testing.T, url string) (int, string, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header.Get("Content-Type"), string(b)
+}
+
+func TestExplainDecisionIsReadableInATerminal(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.Decide("act", "relief.act", "cap?").Commit(nil)
+	v := sm.Decide("verify", "relief.verify", "did it help?")
+	v.Cite("act")
+	v.Commit(nil)
+	r := sm.Decide("revert", "relief.revert", "give it back?")
+	r.Cite("verify")
+	r.Cite("act")
+	r.Commit(nil)
+
+	code, ct, body := getText(t, srv.URL+"/state/decisions/revert/explain")
+	if code != 200 || !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("status %d, content-type %q", code, ct)
+	}
+	if first := strings.SplitN(body, "\n", 2)[0]; !strings.HasPrefix(first, "revert [relief.revert]") {
+		t.Errorf("first line %q", first)
+	}
+	for _, want := range []string{"  rests on verify", "  rests on act"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "source: log") {
+		t.Errorf("a journal hit claims the log:\n%s", body)
+	}
+}
+
+func TestExplainDecisionMissesLikeTheJSONRoute(t *testing.T) {
+	_, srv := stateFixture(t)
+	if code, _, _ := getText(t, srv.URL+"/state/decisions/never/explain"); code != http.StatusNotFound {
+		t.Errorf("never-dropped journal: %d, want 404", code)
+	}
+	sm, small := stateFixtureWith(t, statemap.NewJournal(2), false)
+	for i := 0; i < 3; i++ {
+		sm.Decide(sm.NewDecisionID("est"), "estimate", "q").Commit(nil)
+	}
+	if code, _, _ := getText(t, small.URL+"/state/decisions/never/explain"); code != http.StatusGone {
+		t.Errorf("after eviction: %d, want 410", code)
+	}
+}
+
+func TestExplainDecisionFromTheLogSaysSo(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(nil)
+		ids = append(ids, id)
+	}
+	code, _, body := getText(t, srv.URL+"/state/decisions/"+ids[0]+"/explain")
+	if code != 200 || !strings.HasSuffix(strings.TrimRight(body, "\n"), "source: log") {
+		t.Fatalf("status %d, body:\n%s", code, body)
+	}
+}

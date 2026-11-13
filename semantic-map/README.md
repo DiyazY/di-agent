@@ -752,6 +752,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq`; carries `log: {file, bytes, indexed, corrupt_lines, foreign_lines}` when `persist.file` is set | State model |
 | GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
 | GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` only when neither the journal nor the log holds it; a log hit carries `from: "log"` (and `cited_by: null` on a chain: the log has no reverse index). `inputs.pace` is the pace the decision was taken at | State model |
+| GET  | `/state/decisions/{id}/explain`     | path only — the decision and the chain it cites as plain text, rendered from the records alone (no model); `410`/`404` as the JSON route; a log hit ends with `source: log` | State model |
 | POST | `/state/sweep`                      | —                                                        | State model |
 | GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
 | GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
@@ -934,6 +935,9 @@ curl -s -H 'Accept: text/plain' localhost:8080/state/properties/RC
 curl -s 'localhost:8080/cost?task=placement' | jq '.ResourceCost, .DecisionID, .Caveats'
 curl -s localhost:8080/state/decisions/$(curl -s 'localhost:8080/cost?task=placement' | jq -r .DecisionID) \
   | jq '.revision, .properties_read, .relationships_read'
+
+# the same decision and the chain it rests on, as prose (no model)
+curl -s localhost:8080/state/decisions/<id>/explain
 
 # or ask about any property
 curl -s 'localhost:8080/state/estimate?target=PS&id=why-slow' | jq '.answer, .influences, .caveats'
