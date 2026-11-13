@@ -30,7 +30,7 @@ The rows not listed above kept their verdict. These include the M5 `.prev` resto
 
 The pace did slow under rules only in this run (`base → slow: calm for 10m0s` at 14:30; run 1 had no `pace.changed` at all). It did not slow in M8, because of the M4 clock step. Netdata keeps the `last_updated` of the forward-stepped clock until the wall clock catches up, which took 2 h, from 15:22:30 to 17:22:30. Until then the agent refused its readings as future: `readings_future` was 0 through M3, then rose to 191,329. The 97 cold start had given the agent a new map, so at 17:22:30, 3 min into M8, 143 Netdata properties (mostly the per-core `cpu.cpu.*@cpu:cpuN`) were admitted all at once at 17:22:30, 3 min into M8. Each admission woke the pace. Then rule-answerable composition candidates made review due: `disk.io.writes@disk:sda → system.io.out` at 17:26:38, and `k0scontroller.service` cpu → node at 17:29:38. So the 10 min calm never accrued before noise arrived at 17:33.
 
-`master.sh` now restarts Netdata right after the backward step. That is part of undoing the fault, not agent logic. A full run with that change has not been done.
+`master.sh` now restarts Netdata right after the backward step. That is part of undoing the fault, not agent logic, and it removes the mass admission at 17:22. It does not remove the 17:29 review: that is real work, a cgroup-unit composition the rules settle. Since 175 + 10 min is tight against such work, M8 may still miss its exact slot. A full run with the restart has not been done.
 
 ## Not exercised, and why
 
