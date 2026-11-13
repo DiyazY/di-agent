@@ -1146,6 +1146,32 @@ func TestIngestSample_OldReadingIsCountedNotRecorded(t *testing.T) {
 	}
 }
 
+// TestIngestSample_TrailingDataIsRefused: the cap covers the whole body, so a small
+// sample followed by more than 1 MiB of padding is 413, and a second value is 400.
+func TestIngestSample_TrailingDataIsRefused(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+
+	sample := `{"node_id":"master","metric_type":"cpu_utilization","value":1}`
+	for _, c := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"padding past the cap", sample + strings.Repeat(" ", 1<<20+1), http.StatusRequestEntityTooLarge},
+		{"a second value", sample + sample, http.StatusBadRequest},
+	} {
+		resp, err := http.Post(base+"/ingest-sample", "application/json", strings.NewReader(c.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s answered %d; want %d", c.name, resp.StatusCode, c.want)
+		}
+	}
+}
+
 // TestIngestSample_OversizedBodyIs413: a body over 1 MiB is refused with 413, and an
 // ordinary one is still accepted.
 func TestIngestSample_OversizedBodyIs413(t *testing.T) {

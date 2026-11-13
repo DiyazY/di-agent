@@ -575,7 +575,19 @@ func registerMutationRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 			return
 		}
 		var req MetricSampleRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIngestBody)).Decode(&req); err != nil {
+		// The body must be one value and nothing after it, read to EOF, so the cap
+		// covers the whole request rather than only the first value.
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIngestBody))
+		err := dec.Decode(&req)
+		if err == nil {
+			if derr := dec.Decode(&struct{}{}); derr != io.EOF {
+				err = derr
+				if err == nil {
+					err = errors.New("request body must hold a single JSON value")
+				}
+			}
+		}
+		if err != nil {
 			var mbe *http.MaxBytesError
 			if errors.As(err, &mbe) {
 				writeError(w, http.StatusRequestEntityTooLarge, err.Error())
