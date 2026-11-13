@@ -199,6 +199,10 @@ m4() {
     at 84
     run M4 date -s "-2 hours"
     run M4 timedatectl set-ntp true
+    # Netdata keeps stamping its charts with the forward-stepped clock until the wall
+    # clock catches up (2 h): the agent refuses those readings as future, then admits
+    # them all at once mid-M8, which wakes the pace. Restarting it undoes the fault.
+    run M4 systemctl restart netdata.service
     sleep 20; mark M4 "node ready after backward step" --arg ready "$(ready)"
     at 86
     local uid; uid=$(uid_of noise)

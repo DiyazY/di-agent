@@ -274,12 +274,12 @@ r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" --slurpfile ev "$W/ev.json" '.
 echo "$r" >"$W/m7.json"
 row M7 02 "each accept has an outcome citing it, admission.arrived between" \
     "$(jq -r 'if length == 0 then "not exercised" elif all(.ordered) then "pass" else "fail" end' <<<"$r")" "accepts: $(jq -c 'map({name, outcome: .outcome.result, ordered})' <<<"$r"); probe verdicts: $(jq -c --argjson a "$M7s" '[.[] | select(.kind == "admission" and .k >= $a and ((.inputs.offer.name // "") | startswith("probe-"))) | "\(.inputs.offer.name) \(.answer.verdict): \(.answer.reason)"]' "$W/dec.json")"
-r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b) | .answer.lines[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
-row M7 03 "both bases recorded: usage_rise always, map_rise when a measured effect exists" \
+r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b and (.answer.outcome == "held" or .answer.outcome == "breached")) | (.inputs.lines // .answer.lines)[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
+row M7 03 "both bases recorded on scored outcomes: usage_rise always, map_rise when a measured effect exists" \
     "$(jq -r 'if length == 0 then "not exercised" elif (all(.usage_rise) | not) then "fail" elif any(.map_rise) then "pass" else "not exercised" end' <<<"$r")" \
     "$(jq -c 'group_by(.domain) | map({domain: .[0].domain, lines: length, with_map_rise: (map(select(.map_rise)) | length)})' <<<"$r") (JSON names map_rise/usage_rise)"
 r=$(jq -c '[.[]? | select(.kind | startswith("admission."))]' <<<"$cal")
-sc=$(jq -c '[.[] | select(.kind == "admission.outcome") | .answer.lines[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
+sc=$(jq -c '[.[] | select(.kind == "admission.outcome" and (.answer.outcome == "held" or .answer.outcome == "breached")) | (.inputs.lines // .answer.lines)[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
 row M7 03 "calibration per domain: admission.memory/cpu_contention_ratio entries, n = scored outcomes" \
     "$(verdict "$(jq -nr --argjson c "$r" --argjson s "${sc:-null}" 'if $s == null and ($c | length) == 0 then "not-exercised" else ($c | map(.kind) | index("admission.memory_contention_ratio")) != null and ($c | map(.kind) | index("admission.cpu_contention_ratio")) != null and all($c[] | select(.basis == "usage"); .n == ($s[(.kind | sub("admission."; ""))] // 0)) end')")" "entries: $r; scored outcome lines by domain: $sc"
 r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission" and .k >= $a and .k <= $b and (.inputs.offer.name | startswith("probe-")))] | last | {name: .inputs.offer.name, basis_chosen_by: .inputs.basis_chosen_by,
