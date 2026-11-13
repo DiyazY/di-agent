@@ -39,7 +39,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DiyazY/di-agent/pkg/types"
+	"log"
 	"math"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -229,6 +231,10 @@ type Relationship struct {
 	// assertion or the established layer when there is one.
 	Recent     float64 `json:"recent"`
 	Confidence float64 `json:"confidence"`
+	// StrengthSE is one Fisher-z standard error of Recent at the window size of the
+	// last fold, mapped back to the r scale (see strengthSE). 1 means the window was
+	// too short to bound it; it is meaningful only once NObservations > 0.
+	StrengthSE float64 `json:"strength_se"`
 
 	// Established is the long-run estimate: what this machine has shown across
 	// regimes, accumulated from the same pairs on a slower time constant than
@@ -693,6 +699,54 @@ func (m *Map) Journal() *Journal { return m.journal }
 
 // Incarnation counts this map's lives: 1 when new, one more on each restore.
 func (m *Map) Incarnation() uint64 { return m.journal.Incarnation() }
+
+// OpenLog opens the journal log, filepath.Join(dir, JournalFileName), under this
+// map's owner and incarnation, and from then on writes every journal event to it.
+// Open it after Load and before any id is issued: when the log already holds this
+// owner's lines from an incarnation at or above the current one (a cold start
+// over a surviving log), the journal moves to the incarnation after the highest,
+// so no earlier life's id is reissued. Events restored from a snapshot are not
+// rewritten. A second call is refused.
+func (m *Map) OpenLog(dir string) error {
+	j := m.journal
+	j.mu.RLock()
+	open := j.log != nil
+	j.mu.RUnlock()
+	if open {
+		return fmt.Errorf("journal log already open")
+	}
+	f, err := openJournalFile(filepath.Join(dir, JournalFileName), m.owner, m.Incarnation(), log.Printf)
+	if err != nil {
+		return err
+	}
+	j.mu.Lock()
+	if j.log != nil {
+		j.mu.Unlock()
+		f.Close()
+		return fmt.Errorf("journal log already open")
+	}
+	if j.incarnation <= f.maxInc {
+		j.incarnation = f.maxInc + 1
+	}
+	f.inc = j.incarnation
+	j.log = f
+	j.mu.Unlock()
+	return nil
+}
+
+// CloseLog stops writing to the journal log and closes it, flushing what is
+// buffered. Nil when none is open.
+func (m *Map) CloseLog() error {
+	j := m.journal
+	j.mu.Lock()
+	f := j.log
+	j.log = nil
+	j.mu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f.Close()
+}
 
 // NewDecisionID issues a decision id no other in this map's history has had:
 // "<prefix>-<incarnation>.<n>", followed by "-"-joined suffix parts when given, n a

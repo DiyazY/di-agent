@@ -30,6 +30,8 @@ type Influence struct {
 	Strength     float64 `json:"effective_strength"`
 	Sign         int     `json:"sign"`
 	Contribution float64 `json:"contribution"`
+	Low          float64 `json:"contribution_low"`
+	High         float64 `json:"contribution_high"`
 	Provenance   string  `json:"provenance"`
 	Basis        string  `json:"basis"`
 	Known        bool    `json:"known"`
@@ -40,12 +42,16 @@ type Influence struct {
 
 // EstimateAnswer is the part of the result the journal records as the answer.
 type EstimateAnswer struct {
-	Target        string  `json:"target"`
-	Level         float64 `json:"level"`
-	Confidence    float64 `json:"confidence"`
-	Status        Status  `json:"status"`
-	Sensitivity   float64 `json:"sensitivity"`
-	Contributions float64 `json:"contributions"`
+	Target      string  `json:"target"`
+	Level       float64 `json:"level"`
+	Confidence  float64 `json:"confidence"`
+	Status      Status  `json:"status"`
+	Sensitivity float64 `json:"sensitivity"`
+	// SensitivityLow and High are the sensitivity with each learned strength moved
+	// one Fisher-z standard error down and up; equal to it for assertions.
+	SensitivityLow  float64 `json:"sensitivity_low"`
+	SensitivityHigh float64 `json:"sensitivity_high"`
+	Contributions   float64 `json:"contributions"`
 }
 
 // Hypothetical is what the answer becomes under the request's assumptions.
@@ -217,7 +223,7 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 	}
 
 	var influences []Influence
-	var sensitivity, contributions, hypContributions, delta float64
+	var sensitivity, sensLow, sensHigh, contributions, hypContributions, delta float64
 	var unknown int
 	assumedSeen := map[string]bool{}
 	// unknownAssumed tracks sources whose assumption reached the target only through
@@ -275,6 +281,20 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		sensitivity += eff * float64(rel.Sign)
 		contributions += contribution
 		inf.Strength, inf.Contribution = eff, contribution
+		// An assertion is a statement, not an estimate; a known strength with no
+		// folded pair has no window to bound it.
+		se := rel.StrengthSE
+		if rel.Basis() == "asserted" {
+			se = 0
+		} else if rel.NObservations == 0 {
+			se = 1
+		}
+		lo, hi := clamp01(eff-se), clamp01(eff+se)
+		sg := float64(rel.Sign)
+		a, bb := lo*sg*vhat, hi*sg*vhat
+		inf.Low, inf.High = math.Min(a, bb), math.Max(a, bb)
+		sensLow += math.Min(lo*sg, hi*sg)
+		sensHigh += math.Max(lo*sg, hi*sg)
 		hyp := contribution
 		if a, assumed := assume[rel.From]; assumed {
 			assumedSeen[rel.From] = true
@@ -310,16 +330,17 @@ func (m *Map) Estimate(req EstimateRequest) EstimateResult {
 		b.Caveat("%d influences have no strength yet and are omitted from the sensitivity and the projection", unknown)
 	}
 	b.Note("level of %s is %.4f at confidence %.3f from %d observations", target, p.Value, p.Confidence, p.NObservations)
-	b.Note("%d influences: sensitivity %+.4f per normalised unit, contributing %+.4f at current values",
-		len(influences), sensitivity, contributions)
+	b.Note("%d influences: sensitivity %+.4f [%+.4f, %+.4f] per normalised unit, contributing %+.4f at current values",
+		len(influences), sensitivity, sensLow, sensHigh, contributions)
 	if len(influences) == 0 {
 		b.Caveat("nothing relates to %s, so the level is all the map can offer about it", target)
 	}
 
 	answer := EstimateAnswer{Target: target, Level: p.Value, Confidence: p.Confidence, Status: p.Status,
-		Sensitivity: sensitivity, Contributions: contributions}
+		Sensitivity: sensitivity, SensitivityLow: sensLow, SensitivityHigh: sensHigh, Contributions: contributions}
 	commit := map[string]any{"target": target, "level": p.Value, "confidence": p.Confidence,
-		"status": string(p.Status), "sensitivity": sensitivity, "contributions": contributions}
+		"status": string(p.Status), "sensitivity": sensitivity, "sensitivity_low": sensLow,
+		"sensitivity_high": sensHigh, "contributions": contributions}
 
 	var hypothetical *Hypothetical
 	if len(assume) > 0 {

@@ -870,10 +870,10 @@ state a decision reads *as it reads it*, so the record cannot drift from the rea
 and inputs are copied so a decision cannot silently become a description of a later
 system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
-evidence that nothing happened, and a decision evicted by that bound answers 410
-rather than 404.
+evidence that nothing happened; beside it an append-only log (`journal.ndjson`, digested per line, fsync'd per decision, size-rotated with one previous generation) keeps every decision past that bound, so `GET /state/decisions/{id}` answers from the log once the journal has evicted it and 410 means neither holds it. A line that does not verify, or belongs to another node, is skipped and counted, never read as knowledge.
 `pace.changed` records every change of the agent's attention with its reason, and
 every decision's `inputs.pace` says which attention level it was taken at.
+`GET /state/decisions/{id}/explain` renders a decision and its cites as prose by a pure function of the records, so a node with no model can still say "capped X because contention stayed above 0.25 for 1m; predicted 0.08 from the intervened relationship, measured 0.6; observed 0.05; kept".
 A sweep that finds the wall clock stepped against the monotonic one records
 `clock.stepped` with both deltas, so a timestamp that jumped is explained.
 A collector member entering or leaving backoff or stuck records `collector.down` or
@@ -901,7 +901,8 @@ after, never a repeat). A redeclared group's `property.redeclared` carries
 Every event carries `(incarnation, seq)`; a decision id is `<prefix>-<incarnation>.<n>`
 with `n` drawn from the same counter, so no crash and no restart can reissue an id,
 and order is total across restarts. The incarnation advances on every restore and is
-written back at once. A commit under an id already recorded is not recorded; it is
+written back at once; opening the journal log also counts the log's highest incarnation
+for this owner, so a cold start over a surviving log takes the one after it. A commit under an id already recorded is not recorded; it is
 journalled as `decision.refused`. The loops' learned state survives a restart with the
 map (§ Persistence), and an accept left pending by the restart is closed by an
 `admission.outcome` citing it, so its chain is never left open.
@@ -965,7 +966,7 @@ telemetry arrived. Note what this no longer buys: with no seeded magnitudes the 
 *empty* on a fresh agent rather than approximate, so a cold-start agent cannot answer a
 counterfactual at all — which is an honest report, and the gap §"What the artefact
 contains" accepts in exchange for never reporting an unmeasured number.
-`/state/estimate` reports both, and calls the value-weighted one a contribution.
+`/state/estimate` reports both, and calls the value-weighted one a contribution. It also reports the sensitivity and each contribution as an interval; admission still decides on the point.
 
 **Details.** `CostOfAction` reads the cost constructs' levels and
 their incoming relationships through a DecisionBuilder, so the properties that reach
@@ -996,7 +997,10 @@ already watched for a week, and "why did you do that yesterday" stays answerable
 without this the audit trail is an artefact of one process lifetime rather than of the
 agent. The shutdown save is synchronous in `main` rather than in the save goroutine:
 cancelling the context and returning let the process exit mid-write, so a clean restart
-silently dropped everything since the last periodic save.
+silently dropped everything since the last periodic save. The journal log (`journal.ndjson`)
+is the second file in `persist.file`'s directory, opened after the restore so its lines
+carry the new incarnation; a write failure there is logged at most once a minute and
+never stops the agent, since the journal and the snapshot still hold the events.
 
 The snapshot also holds `loops`, what the acting loops learned: each relief lever's
 effect EMAs and its tally (acts, kept, reverted, refused), the admission outcomes, and
@@ -1082,6 +1086,11 @@ recent estimate at `α = 0.20` (memory ≈ 5 pairs) and an established baseline 
 not spend its first thousand pairs reporting the zero it started from. The pairing is what
 makes the two comparable; nothing interpolates between them, because `Effective()` chooses
 by authority rather than by arithmetic.
+
+The window's Fisher-z standard error is carried on the relationship as `strength_se`,
+mapped to the r scale as `tanh(atanh(r) + 1/√(n−3)) − r` (the whole range `1` under 4
+pairs, where z has no standard error). It is the same arithmetic `CandidateReview.Outdated`
+uses to decide whether evidence moved.
 
 Two properties follow:
 
@@ -1548,6 +1557,7 @@ Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 en
 | POST | `/candidates/{id}/reject`         | path only                                                              | `204 No Content`              | Permanently suppress a candidate within the session (an operator's review)                             |
 | POST | `/candidates/{id}/defer`          | path only                                                              | `204 No Content`              | Out of the pending list for the session (an operator's review)                                         |
 | POST | `/ingest-sample`                  | `MetricSampleRequest`: `node_id`, `metric_type`, `value`, `timestamp_unix`, `event_id`, plus optional `subject`, `unit`, `range`, `chart` | `204 No Content` (routed, unscoped) or `202` `{"routed":false,...}` (unrouted, or any scoped sample) | Feed the facade's `IngestSample`; see §5 |
+| GET  | `/state/decisions/{id}/explain`   | path only | text/plain | A decision and the chain it cites as prose, from the records alone; `410`/`404` as `GET /state/decisions/{id}`; a log hit ends with `source: log` |
 | GET  | `/state/estimate`                 | `?target=` (required) `[&id=][&assume=<property>=<value>]*[&without=<subject\|property>]*` | `EstimateResult`              | Counterfactual answer from the map under `assume`/`without` hypotheses; `id` names the decision (default `est-<incarnation>.<n>-<target>`, plus a hypothesis digest when `assume`/`without` are given; an explicit id already used is refused), reproduced later via `GET /state/decisions/{id}` |
 | GET  | `/ui/...`                         | —                                                                      | static assets                 | Embedded HTML/CSS/ES modules for the console; served by `http.FileServer` over an `embed.FS` sub-tree, and registered only when the spec sets `node.ui` |
 
@@ -2191,6 +2201,8 @@ make -C poc teardown                   # delete VMs and purge
 `pkg/explain` adds an operator-facing surface that lets a human ask questions in natural language and get a grounded, cited answer. It exists to make the semantic map talk-to-able: *"Why is my ResourceCost higher than my peers?"*, *"Which propositions are driving the recommendation?"*, *"Should I deprecate P7?"*
 
 The design follows the framing in §8: our graph is the **world model** for an LLM operator agent, and every anchor property (real-world outcomes, frozen rules, human judgment) is preserved because the LLM is a **consumer** of the graph, never a mutator.
+
+The narrative route `GET /state/decisions/{id}/explain` is not this layer: it is `explain.Narrate`, a pure function of a decision's records, needs no model and answers on a node with none.
 
 ### Position in the architecture
 

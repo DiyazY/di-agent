@@ -165,6 +165,7 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 	} else {
 		r.Recent = m.cfg.Alpha*strength + (1-m.cfg.Alpha)*r.Recent
 	}
+	r.StrengthSE = strengthSE(r.Recent, w.Len())
 	r.NObservations++
 	foldEstablished(r, strength, m.cfg.AlphaSlow)
 	r.LastObserved = at
@@ -177,6 +178,25 @@ func (m *Map) foldPairLocked(r *Relationship, x, y float64, identity string, at 
 	}
 	m.updateRegimeLocked(r, w.Len(), at)
 	m.revision++
+}
+
+// fisherSE is one standard error of Fisher's z over n pairs, 1/sqrt(n−3) — the same
+// quantity pkg/types/types.go Outdated compares against (2/sqrt(n−3) there, two SEs).
+func fisherSE(n int) float64 {
+	if n < 4 {
+		return math.Inf(1)
+	}
+	return 1 / math.Sqrt(float64(n-3))
+}
+
+// strengthSE maps one z-SE above r back to the r scale:
+// max(0, tanh(atanh(min(r, 0.9999)) + fisherSE(n)) − r), never negative at r → 1.
+// Under 4 pairs it is 1, the whole range: no interval can be stated.
+func strengthSE(r float64, n int) float64 {
+	if n < 4 {
+		return 1
+	}
+	return max(0, math.Tanh(math.Atanh(math.Min(r, 0.9999))+fisherSE(n))-r)
 }
 
 // regimeBand is two standard errors of Fisher's z, the bar Outdated uses, at the

@@ -2759,3 +2759,17 @@ func TestPauseAndResumeAreJournalled(t *testing.T) {
 		t.Errorf("events %+v %+v; want actor operator on cpu.limit", p[0], r[0])
 	}
 }
+
+func TestActRecordsWhatItWasRelievingAndTheThreshold(t *testing.T) {
+	h := newHarness(t, fixture{shares: map[string]float64{"pod:a": 0.4}})
+	h.act("pod:a")
+	a := h.action("pod:a")
+	act, ok := h.m.Journal().Decision(a.DecisionID)
+	if !ok {
+		t.Fatalf("no decision %s", a.DecisionID)
+	}
+	notice, _ := act.Inputs["notice"].(map[string]any)
+	if notice["relieves"] != h.l.d.Relieves || notice["enter"] != h.l.c.Enter || notice["enter_for"] != h.l.c.EnterFor.String() {
+		t.Fatalf("notice %v; want relieves %q, enter %v, enter_for %q", notice, h.l.d.Relieves, h.l.c.Enter, h.l.c.EnterFor)
+	}
+}

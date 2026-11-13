@@ -1012,7 +1012,8 @@ func (l *Loop) relieve(ctx context.Context, now time.Time, pressure float64, wor
 		return
 	}
 
-	b.Input("notice", map[string]any{"pressure": pressure, "phase": string(Relieving), "since": since})
+	b.Input("notice", map[string]any{"pressure": pressure, "phase": string(Relieving), "since": since,
+		"relieves": l.d.Relieves, "enter": l.c.Enter, "enter_for": l.c.EnterFor.String()})
 	b.Input("attribution", cands)
 	b.Input("plan", plan)
 	b.Input("policy", eff)

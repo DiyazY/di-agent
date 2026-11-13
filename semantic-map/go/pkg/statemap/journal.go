@@ -186,6 +186,12 @@ type Journal struct {
 	// a check of decisions alone leaves the window between choosing an id and
 	// recording it, in which a concurrent request can choose the same one.
 	reserved map[string]bool
+
+	// log is the append-only file beside the snapshot, set by Map.OpenLog. Every
+	// appended event is handed to it after mu is released, so a disk write never
+	// holds the journal; a decision is never mutated after commit, so encoding it
+	// outside the lock is safe.
+	log *journalFile
 }
 
 // DefaultJournalCapacity bounds the in-memory record.
@@ -207,11 +213,16 @@ func NewJournal(capacity int) *Journal {
 
 func (j *Journal) append(e Event) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.appendLocked(e)
+	e, log := j.appendLocked(e)
+	j.mu.Unlock()
+	if log != nil {
+		log.Append(e)
+	}
 }
 
-func (j *Journal) appendLocked(e Event) {
+// appendLocked stamps and holds e, and returns the stamped event and the log it
+// is to be written to, which the caller does after releasing j.mu.
+func (j *Journal) appendLocked(e Event) (Event, *journalFile) {
 	j.seq++
 	e.Seq = j.seq
 	j.events = append(j.events, e)
@@ -234,6 +245,7 @@ func (j *Journal) appendLocked(e Event) {
 		delete(j.reserved, e.Decision.ID)
 		j.indexCitesLocked(e.Decision)
 	}
+	return e, j.log
 }
 
 // indexCitesLocked adds d to the citedBy lists of the decisions it cites.
@@ -306,11 +318,11 @@ func (j *Journal) RecordDecision(d *Decision) (*Decision, error) {
 		return nil, nil
 	}
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	if _, used := j.decisions[d.ID]; used {
+		j.mu.Unlock()
 		return nil, ErrDuplicateDecision
 	}
-	j.appendLocked(Event{
+	e, log := j.appendLocked(Event{
 		Revision: d.Revision,
 		At:       d.At,
 		Kind:     EventDecision,
@@ -319,6 +331,10 @@ func (j *Journal) RecordDecision(d *Decision) (*Decision, error) {
 		Detail:   map[string]any{"kind": d.Kind},
 		Decision: d,
 	})
+	j.mu.Unlock()
+	if log != nil {
+		log.Append(e)
+	}
 	return d, nil
 }
 
@@ -426,6 +442,31 @@ func (j *Journal) Decisions(limit int, kind string) []*Decision {
 		}
 	}
 	return out
+}
+
+// DecisionFromLog reads a decision back from the journal log by id: (nil, false,
+// nil) when no log is open or the log does not index id, an error when the line
+// it indexes does not verify or cannot be read.
+func (j *Journal) DecisionFromLog(id string) (*Decision, bool, error) {
+	j.mu.RLock()
+	log := j.log
+	j.mu.RUnlock()
+	if log == nil {
+		return nil, false, nil
+	}
+	return log.Decision(id)
+}
+
+// LogStats reports the journal log's file, size, index and skipped lines; false
+// when no log is open.
+func (j *Journal) LogStats() (LogStats, bool) {
+	j.mu.RLock()
+	log := j.log
+	j.mu.RUnlock()
+	if log == nil {
+		return LogStats{}, false
+	}
+	return log.Stats(), true
 }
 
 // ChainLink is one ancestor in a chain: the decision when it is still held, or

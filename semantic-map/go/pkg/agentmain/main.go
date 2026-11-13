@@ -253,6 +253,15 @@ func Main() {
 		default:
 			log.Printf("state model: no snapshot at %s, starting cold", cfg.Persist.File)
 		}
+		// After Load, so its lines carry this life's incarnation. The log is on
+		// whenever persist.file is set: it keeps the decisions the journal evicts.
+		dir := filepath.Dir(cfg.Persist.File)
+		if err := state.OpenLog(dir); err != nil {
+			log.Fatalf("journal log at %s: %v", dir, err)
+		}
+		stats, _ := state.Journal().LogStats()
+		log.Printf("journal log: %s (%d decisions indexed, %d corrupt, %d foreign lines)",
+			stats.File, stats.Indexed, stats.CorruptLines, stats.ForeignLines)
 	}
 
 	if err := checkCanRecord(dom != nil, !cfg.Map.Admit, state.Census().PropertiesTotal); err != nil {
@@ -484,13 +493,18 @@ func Main() {
 	// write, so the shutdown snapshot was usually lost and a clean restart silently
 	// dropped everything since the last periodic save.
 	if cfg.Persist.File != "" {
-		if err := state.Save(cfg.Persist.File); err != nil {
+		err := state.Save(cfg.Persist.File)
+		// The log closes either way: decisions are already synced, and closing
+		// flushes the last second of other events.
+		if cerr := state.CloseLog(); cerr != nil {
+			log.Printf("journal log: closing: %v", cerr)
+		}
+		if err != nil {
 			// Exits non-zero, so a supervisor sees what the log says: what changed
 			// since the last periodic save may be lost.
 			log.Fatalf("state model: shutdown save failed: %v", err)
-		} else {
-			log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
 		}
+		log.Printf("state model: saved at revision %d (shutdown)", state.Revision())
 	}
 }
 

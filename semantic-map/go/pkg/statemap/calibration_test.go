@@ -79,9 +79,9 @@ func TestCalibrationSurvivesRestart(t *testing.T) {
 	}
 
 	blob, _ := os.ReadFile(path)
-	old := strings.Replace(string(blob), `"version":9`, `"version":7`, 1)
+	old := strings.Replace(string(blob), `"version":10`, `"version":7`, 1)
 	if old == string(blob) {
-		t.Fatal("snapshot does not carry version 9")
+		t.Fatal("snapshot does not carry version 10")
 	}
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
 		t.Fatal(err)

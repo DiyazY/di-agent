@@ -21,11 +21,29 @@ import (
 // rather than the package API underneath it.
 func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 	t.Helper()
+	return stateFixtureWith(t, statemap.NewJournal(0), false)
+}
+
+// stateFixtureWithLog is stateFixture with a journal of two and a journal log,
+// so a decision is evicted from memory after two more and answered from the log.
+func stateFixtureWithLog(t *testing.T) (*statemap.Map, *httptest.Server) {
+	t.Helper()
+	return stateFixtureWith(t, statemap.NewJournal(2), true)
+}
+
+func stateFixtureWith(t *testing.T, j *statemap.Journal, withLog bool) (*statemap.Map, *httptest.Server) {
+	t.Helper()
 	spec := mustSpec(t)
 	sm := statemap.New(statemap.Config{
 		ConvergenceObservations: 4,
 		AdmitUnknown:            true,
-	}, statemap.NewJournal(0))
+	}, j)
+	if withLog {
+		if err := sm.OpenLog(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sm.CloseLog() })
+	}
 	// Seeded without a calibration file: relationships take the neutral placeholder,
 	// which is what these tests are about. The calibrated path is covered in
 	// pkg/profiles, where the priors live.
@@ -812,5 +830,157 @@ func TestStateCarriesThePace(t *testing.T) {
 	}
 	if code := getState(t, srv.URL+"/state/decisions/"+res.DecisionID, &d); code != 200 || d.Inputs["pace"] != "slow" {
 		t.Fatalf("decision %s: code=%d inputs.pace=%v, want slow", res.DecisionID, code, d.Inputs["pace"])
+	}
+}
+
+// GET /state/decisions/{id} falls through to the log once the bounded journal has
+// evicted a decision; 410 still means neither holds it.
+func TestDecisionFallsThroughToTheLogOverHTTP(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(map[string]any{"i": i})
+		ids = append(ids, id)
+	}
+	var first map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[0], &first); code != http.StatusOK {
+		t.Fatalf("evicted decision: status %d", code)
+	}
+	if first["from"] != "log" || first["id"] != ids[0] {
+		t.Fatalf("evicted decision body: from %v, id %v", first["from"], first["id"])
+	}
+	var third map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[2], &third); code != http.StatusOK {
+		t.Fatalf("held decision: status %d", code)
+	}
+	if _, has := third["from"]; has || third["id"] != ids[2] {
+		t.Fatalf("held decision body: %v", third)
+	}
+	var chain map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[0]+"?chain=1", &chain); code != http.StatusOK {
+		t.Fatalf("evicted chain: status %d", code)
+	}
+	if d, _ := chain["decision"].(map[string]any); chain["from"] != "log" || d["id"] != ids[0] {
+		t.Fatalf("evicted chain body: %v", chain)
+	}
+	if code := getState(t, srv.URL+"/state/decisions/never", nil); code != http.StatusGone {
+		t.Fatalf("unknown id: status %d, want 410", code)
+	}
+	var journal struct {
+		Log *statemap.LogStats `json:"log"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != http.StatusOK {
+		t.Fatalf("journal: status %d", code)
+	}
+	if journal.Log == nil || journal.Log.Indexed != 3 || !strings.HasSuffix(journal.Log.File, "journal.ndjson") {
+		t.Fatalf("journal log = %+v", journal.Log)
+	}
+
+	// Without a log the journal route carries no "log" key.
+	_, plain := stateFixture(t)
+	var body map[string]any
+	getState(t, plain.URL+"/state/journal", &body)
+	if _, has := body["log"]; has {
+		t.Fatal("journal without a log reports one")
+	}
+}
+
+func TestEstimateReportsBoundsOverHTTP(t *testing.T) {
+	sm, srv := stateFixture(t)
+	rng := [2]float64{0, 100}
+	_ = sm.Record(statemap.Observation{ID: "queue@pod:a", Value: 50, At: time.Now(), Subject: "pod:a", Range: &rng})
+	_ = sm.Observe("cpu_pressure_ratio", 0.3, time.Now())
+	_ = sm.DeclareRelationship(statemap.Relationship{From: "queue@pod:a", To: "cpu_pressure_ratio", Sign: 1, Label: "discovered"})
+	_ = sm.AssertRelationshipStrength(statemap.RelationshipID("queue@pod:a", "cpu_pressure_ratio", "discovered"), 0.8, "op", "t")
+
+	var body struct {
+		Answer     map[string]any   `json:"answer"`
+		Influences []map[string]any `json:"influences"`
+	}
+	if code := getState(t, srv.URL+"/state/estimate?target=cpu_pressure_ratio", &body); code != 200 {
+		t.Fatalf("code %d", code)
+	}
+	for _, k := range []string{"sensitivity_low", "sensitivity_high"} {
+		if _, ok := body.Answer[k]; !ok {
+			t.Errorf("answer lacks %s: %v", k, body.Answer)
+		}
+	}
+	if len(body.Influences) == 0 {
+		t.Fatal("no influences")
+	}
+	for _, inf := range body.Influences {
+		for _, k := range []string{"contribution_low", "contribution_high"} {
+			if _, ok := inf[k]; !ok {
+				t.Errorf("influence lacks %s: %v", k, inf)
+			}
+		}
+	}
+}
+
+func getText(t *testing.T, url string) (int, string, string) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header.Get("Content-Type"), string(b)
+}
+
+func TestExplainDecisionIsReadableInATerminal(t *testing.T) {
+	sm, srv := stateFixture(t)
+	sm.Decide("act", "relief.act", "cap?").Commit(nil)
+	v := sm.Decide("verify", "relief.verify", "did it help?")
+	v.Cite("act")
+	v.Commit(nil)
+	r := sm.Decide("revert", "relief.revert", "give it back?")
+	r.Cite("verify")
+	r.Cite("act")
+	r.Commit(nil)
+
+	code, ct, body := getText(t, srv.URL+"/state/decisions/revert/explain")
+	if code != 200 || !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("status %d, content-type %q", code, ct)
+	}
+	if first := strings.SplitN(body, "\n", 2)[0]; !strings.HasPrefix(first, "revert [relief.revert]") {
+		t.Errorf("first line %q", first)
+	}
+	for _, want := range []string{"  rests on verify", "  rests on act"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lacks %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "source: log") {
+		t.Errorf("a journal hit claims the log:\n%s", body)
+	}
+}
+
+func TestExplainDecisionMissesLikeTheJSONRoute(t *testing.T) {
+	_, srv := stateFixture(t)
+	if code, _, _ := getText(t, srv.URL+"/state/decisions/never/explain"); code != http.StatusNotFound {
+		t.Errorf("never-dropped journal: %d, want 404", code)
+	}
+	sm, small := stateFixtureWith(t, statemap.NewJournal(2), false)
+	for i := 0; i < 3; i++ {
+		sm.Decide(sm.NewDecisionID("est"), "estimate", "q").Commit(nil)
+	}
+	if code, _, _ := getText(t, small.URL+"/state/decisions/never/explain"); code != http.StatusGone {
+		t.Errorf("after eviction: %d, want 410", code)
+	}
+}
+
+func TestExplainDecisionFromTheLogSaysSo(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(nil)
+		ids = append(ids, id)
+	}
+	code, _, body := getText(t, srv.URL+"/state/decisions/"+ids[0]+"/explain")
+	if code != 200 || !strings.HasSuffix(strings.TrimRight(body, "\n"), "source: log") {
+		t.Fatalf("status %d, body:\n%s", code, body)
 	}
 }

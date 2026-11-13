@@ -461,6 +461,7 @@ func (t *Tracker) record(e *entry, result, reason string, lines []OutcomeLine, i
 	o := Outcome{Name: e.name, AcceptID: e.acceptID, OutcomeID: t.c.Map.NewDecisionID("admit"), Subject: e.subject,
 		Result: result, Reason: reason, Lines: lines, At: now}
 	b := t.c.Map.Decide(o.OutcomeID, "admission.outcome", "outcome of "+e.name+"?")
+	b.Input("name", e.name)
 	b.Input("accept", e.acceptID)
 	b.Cite(e.acceptID)
 	b.Input("subject", e.subject)

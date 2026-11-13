@@ -3,6 +3,7 @@ package agentmain
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/DiyazY/di-agent/pkg/autonomy"
+	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 	"github.com/DiyazY/di-agent/pkg/types"
 )
@@ -266,7 +268,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 		since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		held, dropped, oldest := sm.Journal().Stats()
-		writeJSON(w, map[string]any{
+		body := map[string]any{
 			"events":      sm.Journal().Events(since, limit),
 			"revision":    sm.Revision(),
 			"incarnation": sm.Journal().Incarnation(),
@@ -276,7 +278,11 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 			"held":            held,
 			"dropped":         dropped,
 			"oldest_revision": oldest,
-		})
+		}
+		if stats, ok := sm.Journal().LogStats(); ok {
+			body["log"] = stats
+		}
+		writeJSON(w, body)
 	})
 
 	// GET /state/decisions?kind=&limit=N and GET /state/decisions/{id}[?chain=1] — the trace.
@@ -293,28 +299,48 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 
 	mux.HandleFunc("GET /state/decisions/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var body any
+		var from string
 		var ok bool
 		if r.URL.Query().Get("chain") == "1" {
-			body, ok = sm.Journal().Chain(r.PathValue("id"))
+			body, from, ok = resolveChain(sm.Journal(), r.PathValue("id"))
 		} else {
-			body, ok = sm.Journal().Decision(r.PathValue("id"))
+			body, from, ok = resolveDecision(sm.Journal(), r.PathValue("id"))
 		}
 		if !ok {
-			// 410 rather than 404: the decision may well have happened and been
-			// evicted by the journal bound, and a caller has to be able to tell that
-			// from a decision that never existed.
-			held, dropped, oldest := sm.Journal().Stats()
-			if dropped > 0 {
-				writeError(w, http.StatusGone, "decision "+r.PathValue("id")+
-					" is not held; the journal holds "+strconv.Itoa(held)+
-					" entries from revision "+strconv.FormatUint(oldest, 10)+
-					" and has dropped "+strconv.FormatUint(dropped, 10))
-				return
-			}
-			writeError(w, http.StatusNotFound, "no decision "+r.PathValue("id"))
+			writeDecisionMiss(w, sm, r.PathValue("id"))
 			return
 		}
+		if from == "log" {
+			// Say where the answer came from: a log hit was evicted from memory.
+			raw, err := json.Marshal(body)
+			var m map[string]any
+			if err == nil {
+				err = json.Unmarshal(raw, &m)
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			m["from"] = "log"
+			body = m
+		}
 		writeJSON(w, body)
+	})
+
+	// GET /state/decisions/{id}/explain — the decision and its chain as plain text,
+	// rendered from the records alone, so a node with no model can still say why.
+	mux.HandleFunc("GET /state/decisions/{id}/explain", func(w http.ResponseWriter, r *http.Request) {
+		chain, from, ok := resolveChain(sm.Journal(), r.PathValue("id"))
+		if !ok {
+			writeDecisionMiss(w, sm, r.PathValue("id"))
+			return
+		}
+		text := explain.Narrate(*chain.Decision, chain.Cites)
+		if from == "log" {
+			text = strings.TrimRight(text, "\n") + "\nsource: log\n"
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, text)
 	})
 
 	// GET /state/estimate?target=<property>[&id=…][&assume=<property>=<value>]*[&without=<subject|property>]*
@@ -408,4 +434,20 @@ func enumParam[T ~string](r *http.Request, name string, allowed ...T) ([]T, erro
 		}
 	}
 	return out, nil
+}
+
+// writeDecisionMiss answers a decision neither the journal nor its log holds. 410
+// rather than 404 when the journal has dropped entries: the decision may well have
+// happened and been evicted by the bound before the log existed or past what it
+// keeps, and a caller has to be able to tell that from one that never existed.
+func writeDecisionMiss(w http.ResponseWriter, sm *statemap.Map, id string) {
+	held, dropped, oldest := sm.Journal().Stats()
+	if dropped > 0 {
+		writeError(w, http.StatusGone, "decision "+id+
+			" is not held; the journal holds "+strconv.Itoa(held)+
+			" entries from revision "+strconv.FormatUint(oldest, 10)+
+			" and has dropped "+strconv.FormatUint(dropped, 10))
+		return
+	}
+	writeError(w, http.StatusNotFound, "no decision "+id)
 }
