@@ -244,7 +244,7 @@ func Main() {
 			}
 			c := state.Census()
 			log.Printf("state model: restored %d properties and %d relationships from %s "+
-				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, cfg.Persist.File,
+				"at revision %d", c.PropertiesTotal, c.RelationshipsTotal, r.From,
 				state.Revision())
 		case r.CurrentError != "":
 			log.Printf("state model: %s unreadable (%s) and %s unreadable (%s): starting cold, "+
