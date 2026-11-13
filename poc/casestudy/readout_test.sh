@@ -33,14 +33,14 @@ journal "$TMP/pass" \
     "$(ev 1 2 $T property.declared cpu_pressure_ratio)" \
     "$(ev 1 3 $((T + 10)) property.admitted cpu_utilization@unit:di-agent)" \
     "$(ev 1 4 $((T + 60)) decision review-1.4 null '{"id":"review-1.4","kind":"review","answer":{"by":"rules","action":"confirm"}}')" \
-    "$(ev 1 6 $((T + 4830)) clock.stepped "" '{"wall_delta_seconds":7205}')" \
-    "$(ev 1 7 $((T + 5070)) clock.stepped "" '{"wall_delta_seconds":-7190}')"
+    "$(ev 1 6 $((T + 4830)) clock.stepped "" '{"wall_delta_seconds":7265,"monotonic_delta_seconds":60}')" \
+    "$(ev 1 7 $((T + 5070)) clock.stepped "" '{"wall_delta_seconds":-7130,"monotonic_delta_seconds":60}')"
 journal "$TMP/fail" \
     "$(ev 1 1 $T fact.recorded hostname)" \
     "$(ev 1 2 $T restore.failed /var/lib/di-agent/state.json)" \
     "$(ev 1 3 $((T + 300)) property.admitted cpu_utilization@unit:di-agent)" \
     "$(ev 1 4 $((T + 60)) decision review-1.4 null '{"id":"review-1.4","kind":"review","answer":{"by":"systemone","action":"confirm"}}')" \
-    "$(ev 1 6 $((T + 4830)) clock.stepped "" '{"wall_delta_seconds":7205}')"
+    "$(ev 1 6 $((T + 4830)) clock.stepped "" '{"wall_delta_seconds":7265,"monotonic_delta_seconds":60}')"
 
 fails=0
 expect() { # expect <case> <criterion-substring> <verdict>

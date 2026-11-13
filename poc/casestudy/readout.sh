@@ -60,7 +60,7 @@ row() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$verdict" "$(tr '\n\t' '  ' <<<"$5")" >>"$ROWS"
 }
 # verdict <jq-boolean>: pass/fail, or unverifiable when the expression did not yield a boolean.
-verdict() { case "$1" in true) echo pass ;; false) echo fail ;; *) echo unverifiable ;; esac; }
+verdict() { case "$1" in true) echo pass ;; false) echo fail ;; not-exercised) echo "not exercised" ;; *) echo unverifiable ;; esac; }
 # k <phase> <event-regex>: the journal position of the first mark matching, or null.
 k() { jq --arg p "$1" --arg e "$2" '[.[] | select(.phase == $p and (.event | test($e)) and .seq != null)][0].k // null' "$W/phases.json"; }
 t() { jq --arg p "$1" --arg e "$2" '[.[] | select(.phase == $p and (.event | test($e)))][0].t // null' "$W/phases.json"; }
@@ -167,9 +167,9 @@ row M3 04 "Netdata properties active again within 2 ticks (10 s) of netdata star
     "$(verdict "$(jq -n --argjson r "$r" '$r != null and $r.collector_up_after_start_s <= 10')")" "$r; $act"
 
 # ---- M4 clock step ----
-r=$(jq -c --argjson a "$M4s" --argjson b "$M5s" '[.[] | select(.kind == "clock.stepped" and .k >= $a and .k <= $b) | .detail.wall_delta_seconds]' "$W/ev.json")
-row M4 01 "two clock.stepped, wall_delta ~ +7200 then ~ -7200" \
-    "$(verdict "$(jq 'length == 2 and (.[0] - 7200 | fabs) <= 30 and (.[1] + 7200 | fabs) <= 30' <<<"$r")")" "wall_delta_seconds: $r"
+r=$(jq -c --argjson a "$M4s" --argjson b "$M5s" '[.[] | select(.kind == "clock.stepped" and .k >= $a and .k <= $b) | .detail | (.wall_delta_seconds - (.monotonic_delta_seconds // 0))]' "$W/ev.json")
+row M4 01 "two clock.stepped, step (wall_delta - monotonic_delta) ~ +7200 then ~ -7200" \
+    "$(verdict "$(jq 'length == 2 and (.[0] - 7200 | fabs) <= 30 and (.[1] + 7200 | fabs) <= 30' <<<"$r")")" "step seconds (wall_delta_seconds less the sweep interval's monotonic_delta_seconds): $r"
 r=$(jq -c --argjson a "$M4s" --argjson b "$M4e" '{retired: ([.[] | select(.kind == "property.retired" and .k >= $a and .k <= $b)] | length),
     cascade: ([.[] | select(.kind == "relationship.retired" and .k >= $a and .k <= $b and .detail.reason == "cascade")] | length)}' "$W/ev.json")
 row M4 01 "nothing retires across the steps (80-86)" "$(verdict "$(jq '.retired == 0 and .cascade == 0' <<<"$r")")" "$r"
@@ -188,7 +188,7 @@ r=$(jq -c --argjson s "$M5s" '([.[] | select(.inc == 1)] | {last: (map(.seq) | m
 dr=$(jq -c '[.[] | select(.endpoint | startswith("/state/journal")) | select(.status == 200) | .body.dropped] | unique' "$W/cap.json")
 row M5 02 "at most one save interval lost at kill -9" \
     "$(verdict "$(jq '.first_inc2 != null and .lost <= .events_last_60s' <<<"$r")")" "$r; journal dropped values seen: $dr"
-r=$(jq -c '{incs: (map(.inc) | unique), bad: [.[] | select(.inc >= 2) | select(.inc as $i | .id | test("-\($i)\\.") | not) | .id][0:5],
+r=$(jq -c --slurpfile ev "$W/ev.json" '{incs: (map(.inc) + ($ev[0] | map(.inc)) | unique), bad: [.[] | select(.inc >= 2) | select(.inc as $i | .id | test("-\($i)\\.") | not) | .id][0:5],
     dups: ([group_by(.id)[] | select(length > 1) | .[0].id][0:5])}' "$W/dec.json")
 row M5 02 "incarnation advances 2, 3, 4 and decision ids never collide" \
     "$(verdict "$(jq '.incs == [1,2,3,4] and (.bad | length) == 0 and (.dups | length) == 0' <<<"$r")")" "$r"
@@ -222,7 +222,7 @@ row M5 02 "a cap in force at the kill is resumed, not duplicated" "$([ "${r:-0}"
 
 # ---- M6 memory relief ----
 acts=$(jq -c '[.[] | select(.kind == "relief.act") | {id, cites}]' "$W/dec.json")
-r=$(jq -c --argjson acts "$acts" '[$acts[] | .id as $a | {act: $a, verify: ([.[] | select(.kind == "relief.verify" and ((.cites // []) | index($a)))] | map(.id))}]' "$W/dec.json")
+r=$(jq -c --argjson acts "$acts" '. as $d | [$acts[] | .id as $a | {act: $a, verify: ([$d[] | select(.kind == "relief.verify" and ((.cites // []) | index($a)))] | map(.id))}]' "$W/dec.json")
 row M6 02 "relief acts and verifies: >= 1 act, each with a later verify citing it" \
     "$(jq -r 'if length == 0 then "fail" elif all((.verify | length) > 0) then "pass" else "fail" end' <<<"$r")" "$r"
 r=$(jq -c '[.[] | select(.kind == "relief.phase") | {k, d: "\(.detail.from)->\(.detail.to)", target}]' "$W/ev.json")
@@ -230,8 +230,8 @@ fa=$(jq '[.[] | select(.kind == "relief.act")][0].k // null' "$W/dec.json")
 row M6 02 "relief.phase calm->relieving before the first act; relieving->releasing after" \
     "$(verdict "$(jq --argjson fa "$fa" '$fa != null and any(.d == "calm->relieving" and .k < $fa) and any(.d == "relieving->releasing" and .k > $fa)' <<<"$r")")" "$(jq -c 'map(.d)' <<<"$r")"
 if [ -s "$OUT/m9-verify-chain.json" ]; then
-    r=$(jq -c '{verify: .id, cites0: .cites[0].id?, act_cites: .cites[0].cites?}' "$OUT/m9-verify-chain.json" 2>/dev/null || echo null)
-    row M6 02 "chain resolves: ?chain=1 on the last verify, cites[0] is its act" "$(verdict "$(jq '.cites0 != null' <<<"$r" 2>/dev/null)")" "$r"
+    r=$(jq -c '{verify: .decision.id, cites0: .cites[0].id, act_cites: .cites[0].decision.cites}' "$OUT/m9-verify-chain.json" 2>/dev/null || echo null)
+    row M6 02 "chain resolves: ?chain=1 on the last verify, cites[0] is its act" "$(verdict "$(jq '.cites0 != null and (.cites0 | test("relief-act"))' <<<"$r" 2>/dev/null)")" "$r"
 else row M6 02 "chain resolves (?chain=1)" "$([ "$(jq length <<<"$acts")" = 0 ] && echo "not exercised" || echo unverifiable)" "no verify chain read at M9"; fi
 cal=$(jq -c '.calibration' "$OUT/final-state.json" 2>/dev/null || echo null)
 lv=$(jq -c '[.[] | select(.kind == "relief.verify")] | last | .inputs.calibration // null' "$W/dec.json")
@@ -247,10 +247,13 @@ row M6 03 "intervention learning: page-hog memory -> memory_contention_ratio pro
     "$r; relationship: ${rel:-none}; reviews of the pair: $rv"
 if [ -s "$OUT/m9-verify-explain.txt" ]; then
     ct=$(grep -i '^content-type' "$OUT/m9-verify-explain.headers" | tr -d '\r')
-    vid=$(jq -r '.id' "$OUT/m9-verify-chain.json" 2>/dev/null)
-    sub=$(jq -r --arg v "$vid" '[.[] | select(.id == $v)][0] | (.answer.subject // .inputs.subject // .answer.target // "") | tostring' "$W/dec.json")
-    row M6 06 "narrative: explain is text/plain and names the subject" \
-        "$(verdict "$( [[ "$ct" == *text/plain* ]] && grep -qF "${sub:-@@none@@}" "$OUT/m9-verify-explain.txt" && echo true || echo false)")" "$ct; subject ${sub:-unknown}; $(head -c 300 "$OUT/m9-verify-explain.txt")"
+    vid=$(jq -r '.decision.id' "$OUT/m9-verify-chain.json" 2>/dev/null)
+    pv=$(jq -r '"\(.decision.answer.predicted * 1000 | round / 1000) \(.decision.answer.observed * 1000 | round / 1000)"' "$OUT/m9-verify-chain.json" 2>/dev/null)
+    sub=$(grep -o 'pod:[0-9a-f-]*' "$OUT/m9-verify-explain.txt" | head -1)
+    ok=false
+    [[ "$ct" == *text/plain* ]] && [ -n "$sub" ] && grep -qF "$hog" "$OUT/m9-verify-explain.txt" && grep -qF "${pv% *}" "$OUT/m9-verify-explain.txt" && grep -qF "${pv#* }" "$OUT/m9-verify-explain.txt" && ok=true
+    row M6 06 "narrative: explain is text/plain, names the subject and the record's predicted and observed numbers" \
+        "$(verdict "$ok")" "$ct; verify $vid on ${sub:-no subject} (page-hog $hog); predicted/observed rounded: $pv; $(head -c 300 "$OUT/m9-verify-explain.txt")"
 else row M6 06 "narrative (explain)" "$([ "$(jq length <<<"$acts")" = 0 ] && echo "not exercised" || echo unverifiable)" "no explain read at M9"; fi
 ids=$(jq -r 'select(.status == 200) | (.body.decisions[]?.id // empty), (.body.decision_id? // empty)' "$OUT/capture.jsonl" 2>/dev/null | sort -u)
 ids2=$(jq -r '.. | .decision_id? // empty' "$OUT/phases.jsonl" | sort -u)
@@ -263,22 +266,22 @@ row M6 01 "no operator: zero relief.paused, zero relationship.asserted by operat
 
 # ---- M7 admission ----
 # Accepts are the admission decisions of the M7 offers; their outcome cites them.
-r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" --slurpfile ev "$W/ev.json" '. as $d | [.[] | select(.kind == "admission" and .k >= $a and .k <= $b and (.inputs.offer.name | startswith("probe-")))] | map(. as $x | {
+r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" --slurpfile ev "$W/ev.json" '. as $d | [.[] | select(.kind == "admission" and .k >= $a and .k <= $b and (.inputs.offer.name | startswith("probe-")) and .answer.verdict == "accept")] | map(. as $x | {
         name: .inputs.offer.name, id,
         outcome: ([$d[] | select(.kind == "admission.outcome" and ((.cites // []) | index($x.id)))][0] | if . == null then null else {id, k, result: .answer.outcome} end),
         arrived: ([$ev[0][] | select(.kind == "admission.arrived" and .detail.accept == $x.id)][0].k // null), k})
     | map(. + {ordered: (.outcome != null and .arrived != null and .k < .arrived and .arrived < .outcome.k)})' "$W/dec.json")
 echo "$r" >"$W/m7.json"
 row M7 02 "each accept has an outcome citing it, admission.arrived between" \
-    "$(jq -r 'if length == 0 then "unverifiable" elif all(.ordered) then "pass" else "fail" end' <<<"$r")" "$(jq -c 'map({name, outcome: .outcome.result, ordered})' <<<"$r")"
+    "$(jq -r 'if length == 0 then "not exercised" elif all(.ordered) then "pass" else "fail" end' <<<"$r")" "accepts: $(jq -c 'map({name, outcome: .outcome.result, ordered})' <<<"$r"); probe verdicts: $(jq -c --argjson a "$M7s" '[.[] | select(.kind == "admission" and .k >= $a and ((.inputs.offer.name // "") | startswith("probe-"))) | "\(.inputs.offer.name) \(.answer.verdict): \(.answer.reason)"]' "$W/dec.json")"
 r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission.outcome" and .k >= $a and .k <= $b) | .answer.lines[]? | {domain, map_rise: (.map_rise != null), usage_rise: (.usage_rise != null)}]' "$W/dec.json")
 row M7 03 "both bases recorded: usage_rise always, map_rise when a measured effect exists" \
-    "$(jq -r 'if length == 0 then "unverifiable" elif (all(.usage_rise) | not) then "fail" elif any(.map_rise) then "pass" else "not exercised" end' <<<"$r")" \
+    "$(jq -r 'if length == 0 then "not exercised" elif (all(.usage_rise) | not) then "fail" elif any(.map_rise) then "pass" else "not exercised" end' <<<"$r")" \
     "$(jq -c 'group_by(.domain) | map({domain: .[0].domain, lines: length, with_map_rise: (map(select(.map_rise)) | length)})' <<<"$r") (JSON names map_rise/usage_rise)"
 r=$(jq -c '[.[]? | select(.kind | startswith("admission."))]' <<<"$cal")
 sc=$(jq -c '[.[] | select(.kind == "admission.outcome") | .answer.lines[]? | select(.usage_err != null) | .domain] | group_by(.) | map({(.[0]): length}) | add' "$W/dec.json")
 row M7 03 "calibration per domain: admission.memory/cpu_contention_ratio entries, n = scored outcomes" \
-    "$(verdict "$(jq -n --argjson c "$r" --argjson s "${sc:-null}" '($c | map(.kind) | index("admission.memory_contention_ratio")) != null and ($c | map(.kind) | index("admission.cpu_contention_ratio")) != null and all($c[] | select(.basis == "usage"); .n == ($s[(.kind | sub("admission."; ""))] // 0))')")" "entries: $r; scored outcome lines by domain: $sc"
+    "$(verdict "$(jq -nr --argjson c "$r" --argjson s "${sc:-null}" 'if $s == null and ($c | length) == 0 then "not-exercised" else ($c | map(.kind) | index("admission.memory_contention_ratio")) != null and ($c | map(.kind) | index("admission.cpu_contention_ratio")) != null and all($c[] | select(.basis == "usage"); .n == ($s[(.kind | sub("admission."; ""))] // 0)) end')")" "entries: $r; scored outcome lines by domain: $sc"
 r=$(jq -c --argjson a "$M7s" --argjson b "${M8s}" '[.[] | select(.kind == "admission" and .k >= $a and .k <= $b and (.inputs.offer.name | startswith("probe-")))] | last | {name: .inputs.offer.name, basis_chosen_by: .inputs.basis_chosen_by,
     n: (.inputs.calibration | if type == "object" then with_entries(.value |= (if type == "object" then .n else . end)) else . end)}' "$W/dec.json")
 row M7 03 "6th accept: basis_chosen_by calibration once both bases have n >= 5, else default" reported "$r"
