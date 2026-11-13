@@ -2,6 +2,7 @@ package statemap
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -274,12 +275,7 @@ func (d *Decision) clone() *Decision {
 			c.FactsRead[i] = f
 		}
 	}
-	if d.Answer != nil {
-		c.Answer = make(map[string]any, len(d.Answer))
-		for k, v := range d.Answer {
-			c.Answer[k] = v
-		}
-	}
+	c.Answer = copyAnswer(d.Answer)
 	return &c
 }
 
@@ -456,8 +452,8 @@ func (b *DecisionBuilder) Assume(id string, v float64) {
 // Exclude records a subject or property taken to its floor.
 func (b *DecisionBuilder) Exclude(x string) { b.excluded = append(b.excluded, x) }
 
-// Input records something else the decision read, under a name. v must be a value
-// the caller will not change afterwards: a copy, a string, a number.
+// Input records something else the decision read, under a name. v is deep-copied,
+// so a later change by the caller does not reach the record.
 func (b *DecisionBuilder) Input(name string, v any) {
 	if b.inputs == nil {
 		b.inputs = map[string]any{}
@@ -465,19 +461,70 @@ func (b *DecisionBuilder) Input(name string, v any) {
 	b.inputs[name] = copyAny(v)
 }
 
-// copyAny copies the maps and slices nested in v; every other value is assigned.
+// copyAny deep-copies v: maps, slices, pointers, arrays, interfaces and the
+// exported fields of structs, of any element type, are copied rather than shared.
+// Unexported struct fields are assigned. v must not contain a pointer cycle.
 func copyAny(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		c := make(map[string]any, len(x))
-		for k, e := range x {
-			c[k] = copyAny(e)
+	if v == nil {
+		return nil
+	}
+	return deepCopy(reflect.ValueOf(v)).Interface()
+}
+
+func copyAnswer(a map[string]any) map[string]any {
+	if a == nil {
+		return nil
+	}
+	return copyAny(a).(map[string]any)
+}
+
+func deepCopy(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for it := v.MapRange(); it.Next(); {
+			c.SetMapIndex(it.Key(), deepCopy(it.Value()))
 		}
 		return c
-	case []any:
-		c := make([]any, len(x))
-		for i, e := range x {
-			c[i] = copyAny(e)
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type().Elem())
+		c.Elem().Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		c := reflect.New(v.Type()).Elem()
+		c.Set(deepCopy(v.Elem()))
+		return c
+	case reflect.Array:
+		c := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			c.Index(i).Set(deepCopy(v.Index(i)))
+		}
+		return c
+	case reflect.Struct:
+		c := reflect.New(v.Type()).Elem()
+		c.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			if c.Field(i).CanSet() {
+				c.Field(i).Set(deepCopy(v.Field(i)))
+			}
 		}
 		return c
 	}
@@ -511,7 +558,7 @@ func (b *DecisionBuilder) Commit(answer map[string]any) *Decision {
 		At:                b.at,
 		Revision:          b.revision,
 		Question:          b.question,
-		Answer:            answer,
+		Answer:            copyAnswer(answer),
 		PropertiesRead:    b.props,
 		RelationshipsRead: b.rels,
 		Assumptions:       assumptions,

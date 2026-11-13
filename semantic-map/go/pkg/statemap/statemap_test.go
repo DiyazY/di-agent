@@ -2162,6 +2162,66 @@ func TestDecisionInputsAndFactsAreCopiedNotAliased(t *testing.T) {
 	}
 }
 
+func TestDecisionTypedInputsAreCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	type offer struct {
+		Lines  []string
+		Limits map[string]float64
+	}
+	labels := map[string]string{"k": "a"}
+	lines := []string{"a"}
+	o := offer{Lines: []string{"a"}, Limits: map[string]float64{"cpu": 1}}
+	b := m.Decide("dec-typed", "q")
+	b.Input("labels", labels)
+	b.Input("wrapped", map[string]any{"lines": lines})
+	b.Input("offer", o)
+	b.Commit(map[string]any{"ok": true})
+
+	labels["k"] = "b"
+	lines[0] = "b"
+	o.Lines[0] = "b"
+	o.Limits["cpu"] = 2
+
+	d, _ := m.Journal().Decision("dec-typed")
+	if d.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("typed map aliased: %v", d.Inputs["labels"])
+	}
+	if d.Inputs["wrapped"].(map[string]any)["lines"].([]string)[0] != "a" {
+		t.Errorf("typed slice nested in a map aliased: %v", d.Inputs["wrapped"])
+	}
+	got := d.Inputs["offer"].(offer)
+	if got.Lines[0] != "a" || got.Limits["cpu"] != 1 {
+		t.Errorf("struct fields aliased: %+v", got)
+	}
+	d.Inputs["labels"].(map[string]string)["k"] = "c"
+	again, _ := m.Journal().Decision("dec-typed")
+	if again.Inputs["labels"].(map[string]string)["k"] != "a" {
+		t.Errorf("returned typed map aliased: %v", again.Inputs["labels"])
+	}
+}
+
+func TestDecisionAnswerIsCopiedNotAliased(t *testing.T) {
+	m, _ := newTestMap(t, Config{StaleAfter: time.Minute})
+	answer := map[string]any{"verdict": "accept", "detail": map[string]any{"k": 1.0}, "ids": []string{"a"}}
+	b := m.Decide("dec-answer", "q")
+	b.Commit(answer)
+
+	answer["verdict"] = "refuse"
+	answer["detail"].(map[string]any)["k"] = 2.0
+	answer["ids"].([]string)[0] = "b"
+
+	d, _ := m.Journal().Decision("dec-answer")
+	if d.Answer["verdict"] != "accept" || d.Answer["detail"].(map[string]any)["k"] != 1.0 || d.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("caller's later write reached the journal: %v", d.Answer)
+	}
+	d.Answer["detail"].(map[string]any)["k"] = 3.0
+	d.Answer["ids"].([]string)[0] = "c"
+	again, _ := m.Journal().Decision("dec-answer")
+	if again.Answer["detail"].(map[string]any)["k"] != 1.0 || again.Answer["ids"].([]string)[0] != "a" {
+		t.Fatalf("returned answer aliased: %v", again.Answer)
+	}
+}
+
 // ── A reading must be newer than the last, and not from the future ─────────────
 
 func TestAReadingOlderThanTheLastIsRefusedAndCounted(t *testing.T) {
