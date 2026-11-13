@@ -356,6 +356,26 @@ func TestClockStepBackwardRestartsCalm(t *testing.T) {
 	f.wantPace(paceSlow)
 }
 
+// TestAdmissionAheadOfABackwardStepDoesNotDelayCalm: an admission stamped before a
+// backward clock step lies in the future of the new clock; it already woke the pace,
+// so the calm restarted at the step still completes ten minutes later.
+func TestAdmissionAheadOfABackwardStepDoesNotDelayCalm(t *testing.T) {
+	f := newPaceFixture(t)
+	f.minutes(5)
+	if err := f.m.Observe("late", 1, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if !f.m.LastAdmitted().Equal(f.now) {
+		t.Fatalf("LastAdmitted = %s, want %s", f.m.LastAdmitted(), f.now)
+	}
+	f.now = f.now.Add(-time.Hour)
+	f.p.Tick()
+	f.minutes(9)
+	f.wantPace(paceBase)
+	f.minutes(1)
+	f.wantPace(paceSlow)
+}
+
 func TestPaceAllowed(t *testing.T) {
 	for _, c := range []struct {
 		interval, stale time.Duration

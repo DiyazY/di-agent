@@ -154,9 +154,11 @@ func (p *Pace) Tick() {
 	if p.calmFrom.IsZero() || now.Before(p.calmFrom) {
 		p.calmFrom = now // counted from the tick that observes it; a backward step restarts it
 	}
-	if last.After(p.calmFrom) {
+	if last.After(p.calmFrom) && !last.After(now) {
 		p.calmFrom = last // calm began no earlier than the last admission
 	}
+	// An admission stamped after now (a backward clock step since) already woke the
+	// pace; the calm restarted at the step stands.
 	if p.pace == paceBase && p.pinned == "" && now.Sub(p.calmFrom) >= paceCalmFor {
 		p.set(paceSlow, "calm for "+paceCalmFor.String())
 	}

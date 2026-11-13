@@ -449,12 +449,12 @@ func Main() {
 	}
 	startSweepLoop(ctx, state, sweepEvery(cfg.Map.SweepInterval, cfg.Map.StaleAfter))
 	if paceOK {
-		log.Printf("pace: base; slow after %s of calm (×%d on collection, review, persist, peer poll, groups)",
+		log.Printf("pace: base; slow after %s of calm (×%d on collection, review, persist, groups)",
 			paceCalmFor, paceSlowFactor)
 	}
 	go pace.Run(ctx)
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval, pace)
-	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll, pace)
+	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
 	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
 	// A nil *Supervisor in the interface would not compare equal to nil, and the loop
