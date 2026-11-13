@@ -496,8 +496,20 @@ func TestStatusDueCountsActiveDueCandidates(t *testing.T) {
 	if err := m.st.RetireProperty("cpu_utilization@pod:gone", "test", "test"); err != nil {
 		t.Fatal(err)
 	}
-	r := run(t, m, autonomy.Config{Level: autonomy.Suggest})
+	r := run(t, m, autonomy.Config{Level: autonomy.Suggest, Decider: &fixed{actions: map[string]float64{types.ReviewConfirm: 0.6, types.ReviewReject: 0.3, types.ReviewDefer: 0.1}}})
 	if s := r.Status(); s.Due != 2 || s.Waiting != 1 {
 		t.Errorf("status due=%d waiting=%d; want 2 due and 1 waiting", s.Due, s.Waiting)
+	}
+}
+
+// TestRulesOnlyDueIsWhatARuleCanSettle: with no model tier, a candidate no rule
+// answers cannot be settled by reviewing it again, so it is neither due nor
+// reviewed; only what a rule answers is.
+func TestRulesOnlyDueIsWhatARuleCanSettle(t *testing.T) {
+	const comp, plain = "cpu_utilization@pod:a->cpu_utilization", "cpu_utilization@pod:b->cpu_pressure"
+	m := newFakeMap(t, directed(comp, types.CandidateKindComposition), directed(plain, ""))
+	r := run(t, m, autonomy.Config{Level: autonomy.Full})
+	if s := r.Status(); s.Due != 1 || s.Reviewed != 1 || s.Undecided != 0 {
+		t.Errorf("status due=%d reviewed=%d undecided=%d; want the composition only", s.Due, s.Reviewed, s.Undecided)
 	}
 }

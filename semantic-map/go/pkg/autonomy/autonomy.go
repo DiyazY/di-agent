@@ -212,7 +212,8 @@ type Status struct {
 	// was sure of. Waiting is the last cycle's count of due candidates passed over
 	// because an end is not active, so the evidence is not moving. Due is the last
 	// cycle's count of due candidates whose ends are active (due less Waiting): work a
-	// cycle could act on, which is what the review pace follows.
+	// cycle could act on, which is what the review pace follows. With no decision
+	// model a candidate is due only when a rule answers it now.
 	Reviewed  int    `json:"reviewed"`
 	Applied   int    `json:"applied"`
 	Suggested int    `json:"suggested"`
@@ -294,11 +295,20 @@ func (r *Reviewer) Cycle(ctx context.Context) {
 		r.failed(err)
 		return
 	}
+	// Due is what the configured tiers could settle. With no model tier only a rule
+	// can, so a candidate no rule answers is not due however its evidence moves:
+	// reviewing it again would record another undecided and keep the pace from calm.
 	var due []*types.CandidateEdge
 	for _, c := range pending {
-		if c.Review.Outdated(c) {
-			due = append(due, c)
+		if !c.Review.Outdated(c) {
+			continue
 		}
+		if r.cfg.Decider == nil {
+			if _, ok := r.rules(Evidence{Candidate: *c}); !ok {
+				continue
+			}
+		}
+		due = append(due, c)
 	}
 	sort.SliceStable(due, func(i, j int) bool {
 		return due[i].MIScore*float64(due[i].NObservations) > due[j].MIScore*float64(due[j].NObservations)
