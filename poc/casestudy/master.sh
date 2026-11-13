@@ -2,7 +2,8 @@
 # master.sh — the master scenario (plan 07): one node, no model, no person, phases M0–M9.
 # Runs on the node, as root, from this directory, next to an `agent` (or `agent.new`).
 #
-# Usage: sudo ./master.sh <out-dir>              the whole run, about 3 h 20 min
+# Usage: sudo ./master.sh <out-dir>              the whole run, about 3 h 20 min, up to 40 min more
+#                                                 when M7 waits for relief to calm
 #        sudo ./master.sh <out-dir> --phase M3   one phase, against the running agent
 #
 # The agent starts on a fresh map from agent-autonomous.yaml (ledger in <out-dir>); the
@@ -49,10 +50,17 @@ run() {
     return $rc
 }
 
+# SHIFT is how many (scaled) minutes the timetable after M7's calm wait runs late: M7's
+# probes wait for relief to report calm, and everything after moves with them.
+SHIFT=0
+
+# minute <m>: the uptime second of timetable minute m (shifted), scaled.
+minute() { awk -v t0="$T0" -v m="$1" -v d="$SHIFT" -v s="$SCALE" 'BEGIN { printf "%d", t0 + (m + d) * 60 * s }'; }
+
 # at <minutes>: sleep until that many (scaled) minutes after the agent started, on uptime.
 at() {
     local target now
-    target=$(awk -v t0="$T0" -v m="$1" -v s="$SCALE" 'BEGIN { printf "%d", t0 + m * 60 * s }')
+    target=$(minute "$1")
     now=$(awk '{printf "%d", $1}' /proc/uptime)
     [ "$target" -gt "$now" ] && sleep $((target - now))
     return 0
@@ -103,7 +111,7 @@ safe() {
 # kill criteria checked; an unsafe node deletes the relief workloads and ends the run.
 watch_until() {
     local target u name
-    target=$(awk -v t0="$T0" -v m="$1" -v s="$SCALE" 'BEGIN { printf "%d", t0 + m * 60 * s }')
+    target=$(minute "$1")
     while [ "$(awk '{printf "%d", $1}' /proc/uptime)" -lt "$target" ]; do
         for name in mem-victim page-hog; do
             u=$(uid_of "$name"); [ -z "$u" ] && continue
@@ -245,9 +253,29 @@ offer() {
         -d "{\"name\":\"$1\",\"demand\":{\"cpu\":{\"value\":0.1,\"source\":\"declared\"},\"memory\":{\"value\":268435456,\"source\":\"declared\"}}}"
 }
 
+# calm_wait <max minutes>: after page-hog is deleted, wait (bounded) until every relief
+# lever reports calm, since admission declines while relief is active; the probes and
+# the rest of the timetable then run SHIFT minutes late.
+CALM_WAIT=40
+calm_wait() {
+    local deadline phases event
+    deadline=$(( $(awk '{printf "%d", $1}' /proc/uptime) + $(awk -v m="$1" -v s="$SCALE" 'BEGIN { printf "%d", m * 60 * s }') ))
+    while :; do
+        phases=$(get /relief | jq -c '[.levers[].phase]' 2>/dev/null)
+        jq -e 'length > 0 and all(. == "calm")' <<<"${phases:-null}" >/dev/null 2>&1 && { event="relief calm"; break; }
+        [ "$(awk '{printf "%d", $1}' /proc/uptime)" -ge "$deadline" ] && { event="relief not calm after the wait; probing anyway"; break; }
+        sleep 15
+    done
+    # Minutes late against the first probe's slot (146), rounded up, never negative.
+    SHIFT=$(awk -v now="$(awk '{print $1}' /proc/uptime)" -v t0="$T0" -v s="$SCALE" \
+        'BEGIN { late = (now - t0) / (60 * s) - 146; d = int(late); if (late > d) d++; if (d < 0) d = 0; print d }')
+    mark M7 "$event" --argjson phases "${phases:-null}" --argjson shift_min "$SHIFT"
+}
+
 m7() {
     at 145; mark M7 start
     remove page-hog; mark M7 "deleted page-hog"
+    calm_wait "$CALM_WAIT"
     local n name body accept slot
     for n in 1 2 3 4 5 6; do
         slot=$((145 + 4 * (n - 1) + 1))
@@ -261,7 +289,7 @@ m7() {
         mark M7 "applied $name" --arg subject "pod:$(uid_of "$name")" --arg accept "$accept"
         # Wait for the outcome citing the accept, up to the next slot (or M8 for the last).
         local last=$((slot + 4)); [ "$n" -eq 6 ] && last=175
-        local target; target=$(awk -v t0="$T0" -v m="$last" -v s="$SCALE" 'BEGIN { printf "%d", t0 + m * 60 * s - 10 }')
+        local target; target=$(( $(minute "$last") - 10 ))
         local outcome=""
         while [ "$(awk '{printf "%d", $1}' /proc/uptime)" -lt "$target" ]; do
             outcome=$(get "/state/decisions?kind=admission.outcome&limit=50" |
