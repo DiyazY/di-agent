@@ -21,11 +21,29 @@ import (
 // rather than the package API underneath it.
 func stateFixture(t *testing.T) (*statemap.Map, *httptest.Server) {
 	t.Helper()
+	return stateFixtureWith(t, statemap.NewJournal(0), false)
+}
+
+// stateFixtureWithLog is stateFixture with a journal of two and a journal log,
+// so a decision is evicted from memory after two more and answered from the log.
+func stateFixtureWithLog(t *testing.T) (*statemap.Map, *httptest.Server) {
+	t.Helper()
+	return stateFixtureWith(t, statemap.NewJournal(2), true)
+}
+
+func stateFixtureWith(t *testing.T, j *statemap.Journal, withLog bool) (*statemap.Map, *httptest.Server) {
+	t.Helper()
 	spec := mustSpec(t)
 	sm := statemap.New(statemap.Config{
 		ConvergenceObservations: 4,
 		AdmitUnknown:            true,
-	}, statemap.NewJournal(0))
+	}, j)
+	if withLog {
+		if err := sm.OpenLog(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sm.CloseLog() })
+	}
 	// Seeded without a calibration file: relationships take the neutral placeholder,
 	// which is what these tests are about. The calibrated path is covered in
 	// pkg/profiles, where the priors live.
@@ -812,5 +830,58 @@ func TestStateCarriesThePace(t *testing.T) {
 	}
 	if code := getState(t, srv.URL+"/state/decisions/"+res.DecisionID, &d); code != 200 || d.Inputs["pace"] != "slow" {
 		t.Fatalf("decision %s: code=%d inputs.pace=%v, want slow", res.DecisionID, code, d.Inputs["pace"])
+	}
+}
+
+// GET /state/decisions/{id} falls through to the log once the bounded journal has
+// evicted a decision; 410 still means neither holds it.
+func TestDecisionFallsThroughToTheLogOverHTTP(t *testing.T) {
+	sm, srv := stateFixtureWithLog(t)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id := sm.NewDecisionID("est")
+		sm.Decide(id, "estimate", "q").Commit(map[string]any{"i": i})
+		ids = append(ids, id)
+	}
+	var first map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[0], &first); code != http.StatusOK {
+		t.Fatalf("evicted decision: status %d", code)
+	}
+	if first["from"] != "log" || first["id"] != ids[0] {
+		t.Fatalf("evicted decision body: from %v, id %v", first["from"], first["id"])
+	}
+	var third map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[2], &third); code != http.StatusOK {
+		t.Fatalf("held decision: status %d", code)
+	}
+	if _, has := third["from"]; has || third["id"] != ids[2] {
+		t.Fatalf("held decision body: %v", third)
+	}
+	var chain map[string]any
+	if code := getState(t, srv.URL+"/state/decisions/"+ids[0]+"?chain=1", &chain); code != http.StatusOK {
+		t.Fatalf("evicted chain: status %d", code)
+	}
+	if d, _ := chain["decision"].(map[string]any); chain["from"] != "log" || d["id"] != ids[0] {
+		t.Fatalf("evicted chain body: %v", chain)
+	}
+	if code := getState(t, srv.URL+"/state/decisions/never", nil); code != http.StatusGone {
+		t.Fatalf("unknown id: status %d, want 410", code)
+	}
+	var journal struct {
+		Log *statemap.LogStats `json:"log"`
+	}
+	if code := getState(t, srv.URL+"/state/journal", &journal); code != http.StatusOK {
+		t.Fatalf("journal: status %d", code)
+	}
+	if journal.Log == nil || journal.Log.Indexed != 3 || !strings.HasSuffix(journal.Log.File, "journal.ndjson") {
+		t.Fatalf("journal log = %+v", journal.Log)
+	}
+
+	// Without a log the journal route carries no "log" key.
+	_, plain := stateFixture(t)
+	var body map[string]any
+	getState(t, plain.URL+"/state/journal", &body)
+	if _, has := body["log"]; has {
+		t.Fatal("journal without a log reports one")
 	}
 }

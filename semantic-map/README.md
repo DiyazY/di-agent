@@ -749,9 +749,9 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | DELETE | `/state/relationships/{id}`       | `?reason=&actor=`                                        | State model |
 | POST | `/state/relationships/{id}/strength` | `{strength, actor?, reason}` — `reason` required        | State model |
 | GET  | `/state/estimate`                   | `?target=[&id=][&assume=<property>=<value>]*[&without=<subject|property>]*` — answer from the map, optionally under hypotheses (`without=group:<name>` takes every member away); `id` names the decision (default `est-<incarnation>.<n>-<target>`); returns a decision id | State model |
-| GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq` | State model |
+| GET  | `/state/journal`                    | `?since=&limit=` — events, each with its `seq`, plus `incarnation` and `seq`: the journal's high-water, the last number handed out to an event or a decision-id ticket, so it may exceed the last returned event's `seq`; carries `log: {file, bytes, indexed, corrupt_lines, foreign_lines}` when `persist.file` is set | State model |
 | GET  | `/state/decisions`                  | `?kind=&limit=` — `kind` keeps one decision kind          | State model |
-| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` when the journal has dropped it. `inputs.pace` is the pace the decision was taken at | State model |
+| GET  | `/state/decisions/{id}`             | `?chain=1` → `{decision, cites, cited_by}`; `410` only when neither the journal nor the log holds it; a log hit carries `from: "log"` (and `cited_by: null` on a chain: the log has no reverse index). `inputs.pace` is the pace the decision was taken at | State model |
 | POST | `/state/sweep`                      | —                                                        | State model |
 | GET  | `/state/cluster`                    | — this node and every peer, unmerged                     | Peer state |
 | GET  | `/state/peers`                      | — per-peer owner, age, census, last error                | Peer state |
@@ -989,6 +989,8 @@ relationship with `retired_reason` `sign-contradicted`; an asserted one is only 
 Investigate a flagged relationship as a defect in the specification —
 usually a direction inherited from a framework that phrased its outcome in the opposite
 polarity to the construct it is now attached to (see ARCHITECTURE §5 on polarity).
+
+Beside `persist.file` the agent keeps `journal.ndjson`: one line per journal event, each with the node id, incarnation, sequence and a sha256 digest; decisions are flushed to disk as they are recorded, everything else within a second; it rotates at 64 MiB keeping one previous generation. A decision the bounded journal has evicted is still answered from it.
 
 `counts.readings_out_of_order` and `counts.readings_future` count readings the map refused: one older than the property's last reading, judged on the agent's monotonic clock, and one more than `map.pair_window` ahead of the agent's clock. A refused reading changes nothing, does not reach discovery, and is not an error to the producer.
 

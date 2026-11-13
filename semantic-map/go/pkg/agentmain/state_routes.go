@@ -266,7 +266,7 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 		since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		held, dropped, oldest := sm.Journal().Stats()
-		writeJSON(w, map[string]any{
+		body := map[string]any{
 			"events":      sm.Journal().Events(since, limit),
 			"revision":    sm.Revision(),
 			"incarnation": sm.Journal().Incarnation(),
@@ -276,7 +276,11 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 			"held":            held,
 			"dropped":         dropped,
 			"oldest_revision": oldest,
-		})
+		}
+		if stats, ok := sm.Journal().LogStats(); ok {
+			body["log"] = stats
+		}
+		writeJSON(w, body)
 	})
 
 	// GET /state/decisions?kind=&limit=N and GET /state/decisions/{id}[?chain=1] — the trace.
@@ -293,16 +297,18 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 
 	mux.HandleFunc("GET /state/decisions/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var body any
+		var from string
 		var ok bool
 		if r.URL.Query().Get("chain") == "1" {
-			body, ok = sm.Journal().Chain(r.PathValue("id"))
+			body, from, ok = resolveChain(sm.Journal(), r.PathValue("id"))
 		} else {
-			body, ok = sm.Journal().Decision(r.PathValue("id"))
+			body, from, ok = resolveDecision(sm.Journal(), r.PathValue("id"))
 		}
 		if !ok {
 			// 410 rather than 404: the decision may well have happened and been
-			// evicted by the journal bound, and a caller has to be able to tell that
-			// from a decision that never existed.
+			// evicted by the journal bound before the log existed or past what it
+			// keeps, and a caller has to be able to tell that from a decision that
+			// never existed.
 			held, dropped, oldest := sm.Journal().Stats()
 			if dropped > 0 {
 				writeError(w, http.StatusGone, "decision "+r.PathValue("id")+
@@ -313,6 +319,20 @@ func registerStateRoutes(mux *http.ServeMux, sm *statemap.Map, discovery func() 
 			}
 			writeError(w, http.StatusNotFound, "no decision "+r.PathValue("id"))
 			return
+		}
+		if from == "log" {
+			// Say where the answer came from: a log hit was evicted from memory.
+			raw, err := json.Marshal(body)
+			var m map[string]any
+			if err == nil {
+				err = json.Unmarshal(raw, &m)
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			m["from"] = "log"
+			body = m
 		}
 		writeJSON(w, body)
 	})

@@ -870,8 +870,7 @@ state a decision reads *as it reads it*, so the record cannot drift from the rea
 and inputs are copied so a decision cannot silently become a description of a later
 system. Caveats name stale inputs, unobserved values and absent properties. The
 journal is bounded and reports what it dropped, so an absence is never mistaken for
-evidence that nothing happened, and a decision evicted by that bound answers 410
-rather than 404.
+evidence that nothing happened; beside it an append-only log (`journal.ndjson`, digested per line, fsync'd per decision, size-rotated with one previous generation) keeps every decision past that bound, so `GET /state/decisions/{id}` answers from the log once the journal has evicted it and 410 means neither holds it. A line that does not verify, or belongs to another node, is skipped and counted, never read as knowledge.
 `pace.changed` records every change of the agent's attention with its reason, and
 every decision's `inputs.pace` says which attention level it was taken at.
 A sweep that finds the wall clock stepped against the monotonic one records
@@ -996,7 +995,10 @@ already watched for a week, and "why did you do that yesterday" stays answerable
 without this the audit trail is an artefact of one process lifetime rather than of the
 agent. The shutdown save is synchronous in `main` rather than in the save goroutine:
 cancelling the context and returning let the process exit mid-write, so a clean restart
-silently dropped everything since the last periodic save.
+silently dropped everything since the last periodic save. The journal log (`journal.ndjson`)
+is the second file in `persist.file`'s directory, opened after the restore so its lines
+carry the new incarnation; a write failure there is logged at most once a minute and
+never stops the agent, since the journal and the snapshot still hold the events.
 
 The snapshot also holds `loops`, what the acting loops learned: each relief lever's
 effect EMAs and its tally (acts, kept, reverted, refused), the admission outcomes, and

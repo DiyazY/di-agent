@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -417,5 +418,133 @@ func TestConcurrentAppendsAreRaceClean(t *testing.T) {
 	}
 	if st := r.Stats(); st.CorruptLines != 0 || st.Indexed != 200 {
 		t.Fatalf("stats = %+v", st)
+	}
+}
+
+func TestADecisionEvictedFromMemoryIsResolvedFromTheLog(t *testing.T) {
+	m := New(Config{Owner: "n1"}, NewJournal(3))
+	if err := m.OpenLog(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i := 0; i < 5; i++ {
+		id := m.NewDecisionID("est")
+		if m.Decide(id, "estimate", "q").Commit(map[string]any{"i": i}) == nil {
+			t.Fatalf("commit %s refused", id)
+		}
+		ids = append(ids, id)
+	}
+	if _, ok := m.Journal().Decision(ids[0]); ok {
+		t.Fatalf("%s should be evicted from a journal of 3", ids[0])
+	}
+	d, ok, err := m.Journal().DecisionFromLog(ids[0])
+	if err != nil || !ok {
+		t.Fatalf("DecisionFromLog(%s) = %v, %v", ids[0], ok, err)
+	}
+	if d.ID != ids[0] || d.Kind != "estimate" {
+		t.Fatalf("log returned %+v", d)
+	}
+	if err := m.CloseLog(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenLogTwiceIsRefusedAndCloseIsIdempotent(t *testing.T) {
+	m := New(Config{Owner: "n1"}, NewJournal(0))
+	if _, ok := m.Journal().LogStats(); ok {
+		t.Fatal("LogStats reports a log before OpenLog")
+	}
+	if d, ok, err := m.Journal().DecisionFromLog("x"); d != nil || ok || err != nil {
+		t.Fatalf("DecisionFromLog without a log = %v, %v, %v", d, ok, err)
+	}
+	dir := t.TempDir()
+	if err := m.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.OpenLog(dir); err == nil {
+		t.Fatal("a second OpenLog was accepted")
+	}
+	if s, ok := m.Journal().LogStats(); !ok || s.File != filepath.Join(dir, JournalFileName) {
+		t.Fatalf("LogStats = %+v, %v", s, ok)
+	}
+	if err := m.CloseLog(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CloseLog(); err != nil {
+		t.Fatalf("second CloseLog: %v", err)
+	}
+	if _, ok := m.Journal().LogStats(); ok {
+		t.Fatal("LogStats reports a log after CloseLog")
+	}
+	// Appending after close does not panic or write.
+	m.Decide(m.NewDecisionID("est"), "estimate", "q").Commit(nil)
+}
+
+// A crash after a save leaves a log whose tail carries seqs above what the
+// snapshot restores. Those lines are history, not a conflict: indexed and
+// resolvable, and the next life appends after them under its own ids.
+func TestLogFromAnEarlierIncarnationWithHigherSeqIsIndexed(t *testing.T) {
+	dir := t.TempDir()
+	snap := filepath.Join(dir, "state.json")
+	a := New(Config{Owner: "n1"}, NewJournal(0))
+	if err := a.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i := 1; i <= 20; i++ {
+		id := a.NewDecisionID("est")
+		a.Decide(id, "estimate", "q").Commit(nil)
+		ids = append(ids, id)
+		if i == 10 {
+			if err := a.Save(snap); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := a.CloseLog(); err != nil { // no save: the simulated crash
+		t.Fatal(err)
+	}
+
+	b := New(Config{Owner: "n1"}, NewJournal(0))
+	r, err := b.Load(snap)
+	if err != nil || !r.Loaded {
+		t.Fatalf("Load = %+v, %v", r, err)
+	}
+	if b.Incarnation() != 2 {
+		t.Fatalf("incarnation = %d, want 2", b.Incarnation())
+	}
+	if hw := b.Journal().Seq(); hw >= a.Journal().Seq() {
+		t.Fatalf("restored high-water %d is not below the crashed life's %d", hw, a.Journal().Seq())
+	}
+	if err := b.OpenLog(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { b.CloseLog() })
+	s, _ := b.Journal().LogStats()
+	if s.Indexed != 20 || s.CorruptLines != 0 || s.ForeignLines != 0 {
+		t.Fatalf("stats = %+v, want 20 indexed, nothing skipped", s)
+	}
+	if _, held := b.Journal().Decision(ids[19]); held {
+		t.Fatalf("%s should not be in the restored journal", ids[19])
+	}
+	d, ok, err := b.Journal().DecisionFromLog(ids[19])
+	if err != nil || !ok || d.ID != ids[19] {
+		t.Fatalf("DecisionFromLog(%s) = %+v, %v, %v", ids[19], d, ok, err)
+	}
+	id := b.NewDecisionID("est")
+	if !strings.HasPrefix(id, "est-2.") {
+		t.Fatalf("new id %q, want prefix est-2.", id)
+	}
+	b.Decide(id, "estimate", "q").Commit(nil)
+	s, _ = b.Journal().LogStats()
+	if s.Indexed != 21 || s.CorruptLines != 0 {
+		t.Fatalf("after a new decision stats = %+v", s)
+	}
+	if d, ok, err := b.Journal().DecisionFromLog(id); err != nil || !ok || d.ID != id {
+		t.Fatalf("DecisionFromLog(%s) = %+v, %v, %v", id, d, ok, err)
+	}
+	lines := fileLines(t, filepath.Join(dir, JournalFileName))
+	if l, ok := decodeLine(lines[len(lines)-1]); !ok || l.Target != id || l.Inc != 2 {
+		t.Fatalf("last line = %+v, %v; want %s from incarnation 2", l, ok, id)
 	}
 }
