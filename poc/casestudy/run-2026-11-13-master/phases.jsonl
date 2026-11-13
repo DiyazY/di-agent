@@ -1,0 +1,69 @@
+{"t":1794554384.825856554,"mono":1160.0,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/state.json.pre-master-20261113T091944"}
+{"t":1794554384.837972879,"mono":1160.0,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/state.json.prev.pre-master-20261113T091944"}
+{"t":1794554384.845230997,"mono":1160.0,"phase":"prep","event":"moved aside","inc":null,"seq":null,"path":"/var/lib/di-agent/journal.ndjson.pre-master-20261113T091944"}
+{"t":1794554384.858719414,"mono":1160.0,"phase":"prep","event":"ran: systemctl stop ollama.service","inc":null,"seq":null,"exit":0}
+{"t":1794554384.865916020,"mono":1160.1,"phase":"prep","event":"ready","inc":null,"seq":null}
+{"t":1794554386.034423663,"mono":1161.2,"phase":"M0","event":"start","inc":1,"seq":12,"version":{"agent_version":"0.1.0","go_version":"go1.26.5","build_commit":"a301441","semmap_constructs":0,"semmap_propositions":0}}
+{"t":1794554986.062738284,"mono":1761.3,"phase":"M0","event":"end","inc":1,"seq":104,"snapshot_bytes":200927}
+{"t":1794554986.072772084,"mono":1761.3,"phase":"M1","event":"start","inc":1,"seq":104}
+{"t":1794554986.239945013,"mono":1761.4,"phase":"M1","event":"applied cycler","inc":1,"seq":104,"subject":"pod:ad304056-0b6e-4dbd-bebf-56b85926776b"}
+{"t":1794555028.422543370,"mono":1803.6,"phase":"M1","event":"applied mem-wave","inc":1,"seq":119,"subject":"pod:47a96d13-a1b4-489a-89e2-c41b3d737cc4"}
+{"t":1794555070.688653674,"mono":1845.9,"phase":"M1","event":"applied mem-squeeze","inc":1,"seq":136,"subject":"pod:5e7f0e59-7fdf-48f0-9e57-0b288284e6f4"}
+{"t":1794555112.946366084,"mono":1888.1,"phase":"M1","event":"applied io-wave","inc":1,"seq":151,"subject":"pod:d6785ded-1fca-4b45-825a-c1c5c735064a"}
+{"t":1794555155.232624449,"mono":1930.4,"phase":"M1","event":"applied twin-a","inc":1,"seq":166,"subject":"pod:d830ee19-5b2c-45f7-b72f-a9d701166d67"}
+{"t":1794555197.582290617,"mono":1972.8,"phase":"M1","event":"applied twin-b","inc":1,"seq":183,"subject":"pod:674a76f6-8940-4f9a-9d3e-60deeaee4cf8"}
+{"t":1794555239.796877641,"mono":2015.0,"phase":"M1","event":"applied noise","inc":1,"seq":201,"subject":"pod:1322a8a8-ad30-40b0-91dd-2793fdd0dcad"}
+{"t":1794557385.816880240,"mono":4161.0,"phase":"M1","event":"end","inc":1,"seq":430}
+{"t":1794557385.833206223,"mono":4161.0,"phase":"M2","event":"start","inc":1,"seq":430}
+{"t":1794557386.429771665,"mono":4161.6,"phase":"M2","event":"estimate without mem-wave","inc":1,"seq":432,"subject":"pod:47a96d13-a1b4-489a-89e2-c41b3d737cc4","estimate":{"decision_id":"est-1.431-memory_utilization-19987e6a","excluded":["pod:47a96d13-a1b4-489a-89e2-c41b3d737cc4"],"answer":{"target":"memory_utilization","level":0.08504138513484802,"confidence":1,"status":"active","sensitivity":0.9680468995813775,"sensitivity_low":0.9646860541168634,"sensitivity_high":0.9714077450458916,"contributions":0.001617867883241525}}}
+{"t":1794557417.678596213,"mono":4192.9,"phase":"M2","event":"deleted mem-wave","inc":1,"seq":434,"subject":"pod:47a96d13-a1b4-489a-89e2-c41b3d737cc4"}
+{"t":1794558286.737983333,"mono":5061.9,"phase":"M2","event":"end","inc":1,"seq":495}
+{"t":1794558286.748179702,"mono":5061.9,"phase":"M3","event":"start","inc":1,"seq":495}
+{"t":1794558296.857323954,"mono":5072.1,"phase":"M3","event":"ran: systemctl stop netdata.service","inc":1,"seq":495,"exit":0}
+{"t":1794558706.343415989,"mono":5481.5,"phase":"M3","event":"offered offer-m3 (not applied)","inc":1,"seq":537,"response":{"at":"2026-11-13T10:31:45.873156378+02:00","name":"offer-m3","accepted_by":{"node":"di-node","url":""},"decision_id":"admit-1.535","chain":[{"node":"di-node","url":"","decision_id":"admit-1.535","verdict":"accept","reason":"every domain stays at or below its exit level"}]}}
+{"t":1794559066.402636571,"mono":5841.6,"phase":"M3","event":"ran: systemctl start netdata.service","inc":1,"seq":569,"exit":0}
+{"t":1794559186.452732003,"mono":5961.6,"phase":"M3","event":"end","inc":1,"seq":747}
+{"t":1794559186.462879186,"mono":5961.7,"phase":"M4","event":"start","inc":1,"seq":747}
+{"t":1794559186.680804443,"mono":5961.9,"phase":"M4","event":"ran: timedatectl set-ntp false","inc":1,"seq":747,"exit":0}
+{"t":1794566386.689884182,"mono":5961.9,"phase":"M4","event":"ran: date -s +2 hours","inc":1,"seq":747,"exit":0}
+{"t":1794566406.830076162,"mono":5982.0,"phase":"M4","event":"node ready after forward step","inc":1,"seq":751,"ready":"True"}
+{"t":1794559425.859093415,"mono":6201.1,"phase":"M4","event":"ran: date -s -2 hours","inc":1,"seq":804,"exit":0}
+{"t":1794559426.272485667,"mono":6201.5,"phase":"M4","event":"ran: timedatectl set-ntp true","inc":1,"seq":804,"exit":0}
+{"t":1794559446.504346629,"mono":6221.7,"phase":"M4","event":"node ready after backward step","inc":1,"seq":808,"ready":"True"}
+{"t":1794559578.641584452,"mono":6353.9,"phase":"M4","event":"deleted noise","inc":1,"seq":964,"subject":"pod:1322a8a8-ad30-40b0-91dd-2793fdd0dcad"}
+{"t":1794559578.659151459,"mono":6353.9,"phase":"M4","event":"end","inc":1,"seq":964}
+{"t":1794559606.714357814,"mono":6381.9,"phase":"M5","event":"start","inc":1,"seq":964}
+{"t":1794559606.778190134,"mono":6382.0,"phase":"M5","event":"learned state saved","inc":1,"seq":964,"file":"before-kill.json"}
+{"t":1794559606.813614576,"mono":6382.0,"phase":"M5","event":"ran: pkill -KILL -x agent","inc":null,"seq":null,"exit":0}
+{"t":1794559607.940368899,"mono":6383.2,"phase":"M5","event":"restarted after kill -9","inc":2,"seq":978}
+{"t":1794560027.115066032,"mono":6802.3,"phase":"M5","event":"stopped","inc":null,"seq":null}
+{"t":1794560027.126410187,"mono":6802.3,"phase":"M5","event":"ran: truncate -s 764433 /var/lib/di-agent/state.json","inc":null,"seq":null,"exit":0}
+{"t":1794560028.188482852,"mono":6803.4,"phase":"M5","event":"restarted on a truncated state.json","inc":3,"seq":1013}
+{"t":1794560207.322709924,"mono":6982.5,"phase":"M5","event":"stopped","inc":null,"seq":null}
+{"t":1794560207.337219977,"mono":6982.6,"phase":"M5","event":"ran: truncate -s 784166 /var/lib/di-agent/state.json","inc":null,"seq":null,"exit":0}
+{"t":1794560207.350149557,"mono":6982.6,"phase":"M5","event":"ran: truncate -s 774774 /var/lib/di-agent/state.json.prev","inc":null,"seq":null,"exit":0}
+{"t":1794560208.439936369,"mono":6983.7,"phase":"M5","event":"restarted on truncated state.json and state.json.prev","inc":4,"seq":19}
+{"t":1794560386.466617837,"mono":7161.7,"phase":"M5","event":"end","inc":4,"seq":166}
+{"t":1794560386.493578022,"mono":7161.7,"phase":"M6","event":"start","inc":4,"seq":166}
+{"t":1794560387.148623637,"mono":7162.4,"phase":"M6","event":"applied mem-victim","inc":4,"seq":166,"subject":"pod:aa508d14-cc2c-4d97-9748-b5fe9fe0a684"}
+{"t":1794560453.822385935,"mono":7229.0,"phase":"M6","event":"applied page-hog","inc":4,"seq":211,"subject":"pod:87e798a8-73a1-4107-ac5e-386821f35024"}
+{"t":1794563104.044845391,"mono":9879.3,"phase":"M6","event":"end","inc":4,"seq":577}
+{"t":1794563104.088527082,"mono":9879.3,"phase":"M7","event":"start","inc":4,"seq":577}
+{"t":1794563140.286895046,"mono":9915.5,"phase":"M7","event":"deleted page-hog","inc":4,"seq":579}
+{"t":1794563147.146445810,"mono":9922.4,"phase":"M7","event":"offered probe-1","inc":4,"seq":581,"response":{"at":"2026-11-13T11:45:46.348076272+02:00","name":"probe-1","accepted_by":null,"chain":[{"node":"di-node","url":"","decision_id":"admit-4.580","verdict":"decline","reason":"relief active on memory_contention_ratio"}]}}
+{"t":1794563387.015329694,"mono":10162.2,"phase":"M7","event":"offered probe-2","inc":4,"seq":618,"response":{"at":"2026-11-13T11:49:46.165167009+02:00","name":"probe-2","accepted_by":null,"chain":[{"node":"di-node","url":"","decision_id":"admit-4.617","verdict":"decline","reason":"relief active on memory_contention_ratio"}]}}
+{"t":1794563626.064956771,"mono":10401.3,"phase":"M7","event":"offered probe-3","inc":4,"seq":628,"response":{"at":"2026-11-13T11:53:46.036103701+02:00","name":"probe-3","accepted_by":null,"chain":[{"node":"di-node","url":"","decision_id":"admit-4.627","verdict":"decline","reason":"relief active on memory_contention_ratio"}]}}
+{"t":1794563866.123086984,"mono":10641.3,"phase":"M7","event":"offered probe-4","inc":4,"seq":659,"response":{"at":"2026-11-13T11:57:46.09453075+02:00","name":"probe-4","accepted_by":null,"chain":[{"node":"di-node","url":"","decision_id":"admit-4.658","verdict":"decline","reason":"relief active on memory_contention_ratio"}]}}
+{"t":1794564107.099933129,"mono":10882.3,"phase":"M7","event":"offered probe-5","inc":4,"seq":661,"response":{"at":"2026-11-13T12:01:46.18074156+02:00","name":"probe-5","accepted_by":null,"chain":[{"node":"di-node","url":"","decision_id":"admit-4.660","verdict":"decline","reason":"relief active on memory_contention_ratio"}]}}
+{"t":1794564346.972283183,"mono":11122.2,"phase":"M7","event":"offered probe-6","inc":4,"seq":667,"response":{"at":"2026-11-13T12:05:46.140696887+02:00","name":"probe-6","accepted_by":null,"chain":[{"node":"di-node","url":"","decision_id":"admit-4.666","verdict":"decline","reason":"relief active on memory_contention_ratio"}]}}
+{"t":1794564346.984459204,"mono":11122.2,"phase":"M7","event":"end","inc":4,"seq":667}
+{"t":1794564886.133473706,"mono":11661.4,"phase":"M8","event":"start","inc":4,"seq":675}
+{"t":1794564918.913230766,"mono":11694.1,"phase":"M8","event":"deleted every planted pod","inc":4,"seq":675}
+{"t":1794565665.973682189,"mono":12441.2,"phase":"M8","event":"estimate at 188","inc":4,"seq":927,"decision_id":"est-4.926-memory_utilization","pace":"base"}
+{"t":1794565786.199558725,"mono":12561.4,"phase":"M8","event":"applied noise","inc":4,"seq":927,"subject":"pod:0c20cede-f80b-4c6d-a41f-60acb77a35fb"}
+{"t":1794566086.322405687,"mono":12861.5,"phase":"M8","event":"end","inc":4,"seq":962}
+{"t":1794566086.334270013,"mono":12861.5,"phase":"M9","event":"start","inc":4,"seq":962}
+{"t":1794566086.403960526,"mono":12861.6,"phase":"M9","event":"read for the readout","inc":4,"seq":962,"verify":"relief-verify-memory.high-4.315","first":"review-1.131-321d88f2"}
+{"t":1794566386.416281694,"mono":13161.6,"phase":"M9","event":"end","inc":4,"seq":962,"snapshot_bytes":2275920}
+{"t":1794566386.429963774,"mono":13161.6,"phase":"teardown","event":"start","inc":4,"seq":962}
+{"t":1794566418.688579602,"mono":13193.9,"phase":"teardown","event":"end","inc":null,"seq":null}
