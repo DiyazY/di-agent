@@ -6,6 +6,7 @@ import SwitchboardPanel from "./components/SwitchboardPanel";
 import ShorePowerPanel from "./components/ShorePowerPanel";
 import ConditionsPanel from "./components/ConditionsPanel";
 import VoyagePanel from "./components/VoyagePanel";
+import DatasetPanel from "./components/DatasetPanel";
 
 export default function App() {
   // Which genset/propulsion/battery/auxload instances are deployed,
@@ -26,7 +27,7 @@ export default function App() {
     <div className="app">
       <h1>di-agent Playground</h1>
       <p className="subtitle">
-        Live control panel for the genset, battery, propulsion and auxiliary-load simulators.
+        Explore the available ship simulators and engine dataset demo.
       </p>
       {configError && (
         <p className="config-error" role="alert">
@@ -34,6 +35,8 @@ export default function App() {
         </p>
       )}
       <div className="panels">
+        {config?.dataset?.enabled && <DatasetPanel config={config.dataset} />}
+        {(config?.shipEnabled ?? true) && config && <>
         {/* ?? [] guards against a stale config.json (e.g. an old playground
             image) that predates the battery/auxload fields. */}
         {(config?.gensetIds ?? []).map((id) => (
@@ -55,6 +58,7 @@ export default function App() {
         {(config?.auxloadIds ?? []).map((id) => (
           <SystemPanel key={id} system="auxload" id={id} />
         ))}
+        </>}
       </div>
     </div>
   );

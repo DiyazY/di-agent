@@ -282,7 +282,7 @@ sys.exit(1 if count == 1 else 0)
 
         baseline = render()
         self.assertIn("mountPath: /var/lib/di-agent", baseline)
-        self.assertIn('path: "/var/lib/di-agent"', baseline)
+        self.assertIn('path: "/var/lib/di-agent-v6"', baseline)
         self.assertIn("type: DirectoryOrCreate", baseline)
         self.assertNotIn("diagent.io/restartedAt:", baseline)
         self.assertNotIn("diagent.io/config-checksum:", baseline)

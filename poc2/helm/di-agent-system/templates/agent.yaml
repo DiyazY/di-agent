@@ -126,7 +126,7 @@ spec:
       volumes:
         - name: agent-state
           hostPath:
-            path: {{ dig "persistence" "hostPath" "/var/lib/di-agent" .Values.agent | quote }}
+            path: {{ dig "persistence" "hostPath" "/var/lib/di-agent-v6" .Values.agent | quote }}
             type: DirectoryOrCreate
         - name: host-cgroup
           hostPath:

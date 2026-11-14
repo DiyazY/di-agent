@@ -6,6 +6,36 @@ export interface PlaygroundConfig {
   batteryIds: string[];
   auxloadIds: string[];
   shorePower: boolean;
+  shipEnabled?: boolean;
+  dataset?: {
+    enabled: boolean;
+    collectorEnabled: boolean;
+    agentNodeName: string;
+    grafanaDashboardUrl: string;
+  };
+}
+
+export interface DatasetConfig {
+  mode: "real" | "synthetic";
+  run_id: string;
+  interval_ms: number;
+  points_per_interval: number;
+  loop: boolean;
+  random_seed: number;
+}
+
+export interface DatasetStatus {
+  config: DatasetConfig;
+  state: "starting" | "running" | "complete" | "error";
+  published: number;
+  last_error: string | null;
+}
+
+export interface DatasetCollectorStatus {
+  connected: boolean;
+  received: number;
+  dropped: number;
+  last_error: string | null;
 }
 
 export interface SystemStatus {
@@ -91,6 +121,25 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // AUXLOAD_COUNT (see nginx.conf.template and scripts/09-playground.sh).
 export function fetchConfig(): Promise<PlaygroundConfig> {
   return apiFetch(`/config.json`);
+}
+
+export function fetchDatasetStatus(): Promise<DatasetStatus> {
+  return apiFetch("/api/dataset/status");
+}
+
+export async function fetchDatasetCollectorStatus(): Promise<DatasetCollectorStatus> {
+  const res = await fetch("/api/dataset/collector/ready");
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`Collector readiness -> ${res.status} ${await res.text()}`);
+  }
+  return res.json() as Promise<DatasetCollectorStatus>;
+}
+
+export function updateDatasetConfig(config: Omit<DatasetConfig, "run_id">): Promise<DatasetConfig> {
+  return apiFetch("/api/dataset/config", {
+    method: "PUT",
+    body: JSON.stringify(config),
+  });
 }
 
 export function fetchHealth(system: SystemName, id: string): Promise<{ status: string }> {

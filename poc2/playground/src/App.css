@@ -110,6 +110,38 @@
   text-transform: capitalize;
 }
 
+.dataset-panel {
+  grid-column: 1 / -1;
+}
+
+.dataset-panel p {
+  font-size: 0.9rem;
+}
+
+.dataset-controls {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 24rem;
+}
+
+.dataset-controls input[type="number"] {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.dataset-controls label:not(:first-child) {
+  margin-top: 0.5rem;
+}
+
+.dataset-controls button {
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  cursor: pointer;
+}
+
 .panel .slider-row {
   display: flex;
   align-items: center;

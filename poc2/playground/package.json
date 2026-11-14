@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "cy:open": "cypress open",
-    "cy:run": "cypress run --spec cypress/e2e/playground.cy.ts",
+    "cy:run": "cypress run --spec 'cypress/e2e/{playground,dataset}.cy.ts'",
     "cy:run:live": "cypress run --spec cypress/e2e/playground.live.cy.ts"
   },
   "dependencies": {

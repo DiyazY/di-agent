@@ -65,7 +65,7 @@ agent:
     reasoningBackend: none
   # Node-local: survives pod replacement, never shared between workers.
   persistence:
-    hostPath: /var/lib/di-agent
+    hostPath: /var/lib/di-agent-v6
   # Only this worker polls the shared dataset collector. Empty disables ingestion.
   datasetNodeName: ""
   nodeSelector: {}
@@ -320,6 +320,10 @@ playground:
     tag: ""
   nodePort: 30080
   switchboardUpstream: "switchboard:8000"
+  dataset:
+    enabled: false
+    # Browser-accessible URL, e.g. http://localhost:3000/d/engine-dataset.
+    grafanaDashboardUrl: ""
   nodeSelector: {}
   resources: {}
   # Sidecar that scrapes nginx's stub_status and re-exposes it as

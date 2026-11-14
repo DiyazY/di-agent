@@ -1,4 +1,9 @@
 {{- if .Values.playground.enabled }}
+{{- if .Values.playground.dataset.enabled }}
+{{- if not .Values.streamer.enabled }}
+{{- fail "playground.dataset.enabled requires streamer.enabled=true" }}
+{{- end }}
+{{- end }}
 # React/Vite frontend, served via nginx which proxies /api/* to each
 # genset/propulsion/battery/auxload/switchboard Service by in-cluster DNS
 # name (see poc2/playground/nginx.conf.template — the nginx entrypoint
@@ -7,6 +12,8 @@
 {{- $locations := dict "genset" "" "propulsion" "" "battery" "" "auxload" "" }}
 {{- $ids := dict "genset" (list) "propulsion" (list) "battery" (list) "auxload" (list) }}
 {{- range $svc, $count := (dict "genset" .Values.genset.count "propulsion" .Values.propulsion.count "battery" .Values.battery.count "auxload" .Values.auxload.count) }}
+{{- $enabled := index (dict "genset" $.Values.genset.enabled "propulsion" $.Values.propulsion.enabled "battery" $.Values.battery.enabled "auxload" $.Values.auxload.enabled) $svc }}
+{{- if $enabled }}
 {{- range $i := until ($count | int) }}
 {{- $n := add1 $i }}
 {{- $id := printf "%s-%d" $svc $n }}
@@ -14,7 +21,16 @@
 {{- $_ := set $ids $svc (append (index $ids $svc) $id) }}
 {{- end }}
 {{- end }}
-{{- $configJson := printf "{\"gensetIds\":%s,\"propulsionIds\":%s,\"batteryIds\":%s,\"auxloadIds\":%s,\"shorePower\":true}" ((index $ids "genset") | toJson) ((index $ids "propulsion") | toJson) ((index $ids "battery") | toJson) ((index $ids "auxload") | toJson) }}
+{{- end }}
+{{- $shipEnabled := or .Values.genset.enabled .Values.propulsion.enabled .Values.battery.enabled .Values.auxload.enabled .Values.shorePower.enabled .Values.switchboard.enabled }}
+{{- $configJson := dict "gensetIds" (index $ids "genset") "propulsionIds" (index $ids "propulsion") "batteryIds" (index $ids "battery") "auxloadIds" (index $ids "auxload") "shorePower" .Values.shorePower.enabled "shipEnabled" $shipEnabled "dataset" (dict "enabled" .Values.playground.dataset.enabled "collectorEnabled" .Values.datasetCollector.enabled "agentNodeName" .Values.agent.datasetNodeName "grafanaDashboardUrl" .Values.playground.dataset.grafanaDashboardUrl) | toJson | replace "'" "\\u0027" }}
+{{- $datasetLocations := "" }}
+{{- if .Values.playground.dataset.enabled }}
+{{- $datasetLocations = "location = /api/dataset/status { proxy_pass http://replay-streamer:8000/status; } location = /api/dataset/config { limit_except PUT { deny all; } proxy_set_header Authorization \"\"; proxy_pass http://replay-streamer:8000/config; }" }}
+{{- if .Values.datasetCollector.enabled }}
+{{- $datasetLocations = printf "%s location = /api/dataset/collector/ready { proxy_pass http://dataset-collector:8000/ready; }" $datasetLocations }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,10 +68,12 @@ spec:
               value: {{ index $locations "battery" | quote }}
             - name: AUXLOAD_LOCATIONS
               value: {{ index $locations "auxload" | quote }}
-            - name: SWITCHBOARD_UPSTREAM
-              value: {{ .Values.playground.switchboardUpstream | quote }}
-            - name: SHORE_POWER_UPSTREAM
-              value: "shore-power:8000"
+            - name: SWITCHBOARD_LOCATION
+              value: {{ if .Values.switchboard.enabled }}{{ printf "location /api/switchboard/ { proxy_pass http://%s/; proxy_set_header Host $host; }" .Values.playground.switchboardUpstream | quote }}{{ else }}""{{ end }}
+            - name: SHORE_POWER_LOCATION
+              value: {{ if .Values.shorePower.enabled }}"location /api/shore-power/ { proxy_pass http://shore-power:8000/; proxy_set_header Host $host; }"{{ else }}""{{ end }}
+            - name: DATASET_LOCATIONS
+              value: {{ $datasetLocations | quote }}
             - name: CONFIG_JSON
               value: {{ $configJson | quote }}
           resources:
