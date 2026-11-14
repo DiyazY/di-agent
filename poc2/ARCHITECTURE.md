@@ -54,9 +54,10 @@ The chart under `helm/di-agent-system` manages the worker agent DaemonSet and sh
 - Grafana
 - replay-streamer (real or synthetic data mode)
 - dataset-collector (Kafka to di-agent HTTP collector protocol)
+- simulation-collector (optional legacy device snapshots to the same HTTP protocol)
 - telemetry-writer
 
-Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and playground deployments are disabled by default and can be enabled individually through Helm values.
+Genset, battery, propulsion, auxload, shore-power, switchboard, simulation-collector, and playground deployments are disabled by default and can be enabled individually through Helm values.
 
 The replay-streamer reads every source (`short` and `long_*`) of the selected `run_id` from PostgreSQL, merged by source time `t` (all sources share one time grid; shorter ones end first). In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` (time steps per tick; default 1 step per 1000 ms) control the emission rate.
 
@@ -127,7 +128,6 @@ The services in `system/` model power-system components rather than generic appl
 - `propulsion`: power consumer
 - `auxiliary-load`: another power consumer
 - `switchboard`: central allocation authority
-- `navigation`: vessel navigation sensors (GNSS, heading, wind, depth, attitude) broadcasting NMEA 2000 PGNs on a virtual CAN bus, with a custom TCP CAN-frame debug stream (port 2597; not Actisense/canboat wire format)
 
 These components generate and consume telemetry. The switchboard reads genset and battery supply from Modbus, ignores stale source readings and consumer requests, and allocates available power by descending consumer priority. Higher-priority consumers are served first; if supply is insufficient, lower-priority consumers receive partial or zero allocations (load shedding).
 
@@ -186,7 +186,24 @@ This project has a few hard boundaries that matter in practice:
 
 The scripts support kubeadm (with Flannel), k3s, and a KubeEdge CloudCore/EdgeCore deployment path. These boundaries keep the lab understandable: one step creates the nodes, one step creates the cluster, one step deploys services, and one step deploys the peer agent mesh.
 
-The chart configures each pod with its node identity, regime, collection interval and host cgroup root. The entrypoint enables the dataset HTTP collector only when `NODE_ID` equals `DATASET_NODE_NAME`. The Makefile exposes `DATASET_NODE_NAME` and `AGENT_COLLECT_INTERVAL`; peer registration checks that a nonempty dataset node names a ready agent.
+The chart configures each pod with its node identity, regime, collection interval and host cgroup root. The entrypoint independently enables the dataset and simulation HTTP collectors only on their designated workers (`DATASET_NODE_NAME` and `SIMULATION_NODE_NAME`). The Makefile exposes both names, `SIMULATION_COLLECTOR`, and `AGENT_COLLECT_INTERVAL`; peer registration checks that each nonempty selection names a ready agent.
+
+The optional simulation collector consumes the six legacy telemetry topics in its
+own Kafka group, independently of telemetry-writer. It returns the latest fresh
+snapshot per asset once, preserving the source timestamp in Unix seconds; it
+does not average or re-stamp stale observations. Same-second updates after a poll
+are suppressed to preserve deterministic event identity. Snapshots expire after
+15 seconds by default, and storage is bounded by `maxActiveSeries`. Restarting
+the collector can lose unpolled snapshots: this is a live observation adapter,
+not a durable history store; InfluxDB remains the history path.
+
+Metric types are namespaced (`genset.power_kw`, `battery.soc`), with asset subjects
+such as `genset:genset-1`. Switchboard totals are emitted once per board snapshot,
+while allocations use `allocation:<board-id>:<consumer-id>` subjects. Static
+declarations provide physical units and fixed ranges only for bounded quantities;
+signed battery power is preserved. Curated metric defaults can be replaced with
+`simulationCollector.include` patterns, including `["*"]` for all known fields.
+These properties remain unrouted in the existing host-resource domain model.
 
 ## Execution flow
 

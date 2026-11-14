@@ -193,6 +193,7 @@ jobs:
           declare -A contexts=(
             [telemetry-writer]=poc2/system/telemetry-writer
             [dataset-collector]=poc2/system/dataset-collector
+            [simulation-collector]=poc2/system/simulation-collector
           )
           for service in "${!contexts[@]}"; do
             docker build -t "smoke/${service}:test" "${contexts[$service]}"
@@ -202,7 +203,7 @@ jobs:
       - name: Load images into kind
         run: |
           set -euo pipefail
-          for service in telemetry-writer dataset-collector di-agent; do
+          for service in telemetry-writer dataset-collector simulation-collector di-agent; do
             kind load docker-image "smoke/${service}:test" --name di-agent-smoke
           done
 
@@ -227,6 +228,8 @@ jobs:
             --set postgres.enabled=false \
             --set streamer.enabled=false \
             --set agent.datasetNodeName=di-agent-smoke-worker \
+            --set simulationCollector.enabled=true \
+            --set agent.simulationNodeName=di-agent-smoke-worker2 \
             --set prometheus.persistence.enabled=false \
             --wait --timeout 6m0s
 
@@ -243,32 +246,43 @@ jobs:
           bash poc2/scripts/04-peers.sh
           pods=$(kubectl get pods -l app=di-agent -o jsonpath='{.items[*].metadata.name}')
           dataset_agents=0
+          simulation_agents=0
           for pod in $pods; do
             count=$(kubectl exec "$pod" -c di-agent -- curl -fsS http://localhost:9090/collectors \
               | python3 -c 'import json,sys; print(sum(c["name"] == "dataset" for c in json.load(sys.stdin)["collectors"]))')
             dataset_agents=$((dataset_agents + count))
+            count=$(kubectl exec "$pod" -c di-agent -- curl -fsS http://localhost:9090/collectors \
+              | python3 -c 'import json,sys; print(sum(c["name"] == "simulation" for c in json.load(sys.stdin)["collectors"]))')
+            simulation_agents=$((simulation_agents + count))
           done
           test "$dataset_agents" -eq 1
+          test "$simulation_agents" -eq 1
 
-      - name: Smoke-test default dataset collector
+      - name: Smoke-test both HTTP collectors
         run: |
           set -euo pipefail
           trap 'kubectl delete pod smoke-curl --ignore-not-found --wait=false' EXIT
           kubectl run smoke-curl --image=curlimages/curl --restart=Never \
             --command -- sleep 3600
           kubectl wait --for=condition=Ready pod/smoke-curl --timeout=60s
-          for i in $(seq 1 12); do
-            if kubectl exec smoke-curl -- curl -fsS --max-time 10 http://dataset-collector:8000/ready \
-                | tee /tmp/collector-ready.json \
-                | grep -q '"connected":true'; then
-              cat /tmp/collector-ready.json
-              exit 0
+          for collector in dataset-collector simulation-collector; do
+            ready=false
+            for i in $(seq 1 12); do
+              if kubectl exec smoke-curl -- curl -fsS --max-time 10 "http://${collector}:8000/ready" \
+                  | tee /tmp/collector-ready.json \
+                  | grep -q '"connected":true'; then
+                cat /tmp/collector-ready.json
+                ready=true
+                break
+              fi
+              echo "${collector} not ready yet, retrying (${i}/12)..."
+              sleep 5
+            done
+            if [ "$ready" != true ]; then
+              echo "::error::${collector} never became ready"
+              exit 1
             fi
-            echo "dataset-collector not ready yet, retrying (${i}/12)..."
-            sleep 5
           done
-          echo "::error::default dataset-collector never became ready"
-          exit 1
 
       - name: Dump cluster state on failure
         if: failure()
@@ -276,6 +290,7 @@ jobs:
           kubectl get pods -o wide
           kubectl describe pods
           kubectl logs -l app=dataset-collector --all-containers --tail=200 || true
+          kubectl logs -l app=simulation-collector --all-containers --tail=200 || true
 
   build-push-images:
     name: build + push images (${{ matrix.service }})
@@ -312,8 +327,8 @@ jobs:
             context: poc2/system/dataset-collector
           - service: telemetry-cloud-sync
             context: poc2/system/telemetry-cloud-sync
-          - service: navigation
-            context: poc2/system/navigation
+          - service: simulation-collector
+            context: poc2/system/simulation-collector
           - service: di-agent
             context: semantic-map
 
