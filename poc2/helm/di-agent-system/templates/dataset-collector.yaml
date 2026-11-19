@@ -69,4 +69,24 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+{{- if and .Values.playground.enabled .Values.playground.dataset.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dataset-collector-status
+  labels:
+    app: dataset-collector
+spec:
+  type: ClusterIP
+  # Keep diagnostics reachable while Kafka readiness fails without changing
+  # endpoint selection on the agent's regular collector Service.
+  publishNotReadyAddresses: true
+  selector:
+    app: dataset-collector
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}
 {{- end }}

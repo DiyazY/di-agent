@@ -94,6 +94,17 @@ describe("di-agent playground", () => {
       .and("contain", "Playground configuration could not be loaded");
   });
 
+  it("omits a disabled switchboard even when other ship panels are enabled", () => {
+    cy.intercept("GET", "/config.json", {
+      body: { gensetIds: ["genset-1"], shipEnabled: true, switchboard: false },
+    });
+    cy.intercept("GET", "/api/switchboard/status", { statusCode: 404 }).as("switchboard");
+    cy.visit("/");
+    cy.contains("genset-1").should("be.visible");
+    cy.contains("switchboard").should("not.exist");
+    cy.get("@switchboard.all").should("have.length", 0);
+  });
+
   it("calculates and applies voyage recommendations", () => {
     cy.visit("/");
 

@@ -320,6 +320,10 @@ playground:
     tag: ""
   nodePort: 30080
   switchboardUpstream: "switchboard:8000"
+  dataset:
+    enabled: false
+    # Browser-accessible URL, e.g. http://localhost:3000/d/engine-dataset.
+    grafanaDashboardUrl: ""
   nodeSelector: {}
   resources: {}
   # Sidecar that scrapes nginx's stub_status and re-exposes it as

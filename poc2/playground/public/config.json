@@ -3,5 +3,6 @@
   "propulsionIds": ["propulsion"],
   "batteryIds": ["battery"],
   "auxloadIds": ["auxload"],
-  "shorePower": true
+  "shorePower": true,
+  "switchboard": true
 }

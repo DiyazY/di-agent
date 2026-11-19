@@ -11,6 +11,7 @@ data:
     apiVersion: 1
     datasources:
       - name: InfluxDB
+        uid: di-agent-influxdb
         type: influxdb
         access: proxy
         url: http://influxdb:{{ .Values.influxdb.port }}
@@ -31,6 +32,13 @@ data:
         url: http://prometheus:{{ .Values.prometheus.port }}
         isDefault: false
         editable: false
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: engine-dataset
+        type: file
+        options:
+          path: /etc/grafana/dashboards
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -84,12 +92,30 @@ spec:
               mountPath: /var/lib/grafana
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: engine-dataset-dashboard
+              mountPath: /etc/grafana/dashboards
       volumes:
         - name: grafana-data
           emptyDir: {}
         - name: datasources
           configMap:
             name: grafana-datasources
+            items:
+              - key: influxdb.yaml
+                path: influxdb.yaml
+              - key: prometheus.yaml
+                path: prometheus.yaml
+        - name: dashboard-provider
+          configMap:
+            name: grafana-datasources
+            items:
+              - key: dashboards.yaml
+                path: dashboards.yaml
+        - name: engine-dataset-dashboard
+          configMap:
+            name: grafana-engine-dataset-dashboard
 ---
 apiVersion: v1
 kind: Service

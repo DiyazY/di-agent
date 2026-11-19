@@ -181,6 +181,9 @@ jobs:
       - name: Test agent deployment and peer registration
         run: python3 poc2/scripts/test_agent_deployment.py
 
+      - name: Test playground chart rendering
+        run: python3 poc2/scripts/test_playground_deployment.py
+
       - name: Set up Go for worker agent image
         uses: actions/setup-go@v5
         with:
