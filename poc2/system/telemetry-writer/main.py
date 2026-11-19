@@ -14,7 +14,6 @@ BATTERY_KAFKA_TOPIC = os.environ.get("BATTERY_KAFKA_TOPIC", "battery.telemetry")
 AUXLOAD_KAFKA_TOPIC = os.environ.get("AUXLOAD_KAFKA_TOPIC", "auxload.telemetry")
 SHORE_POWER_KAFKA_TOPIC = os.environ.get("SHORE_POWER_KAFKA_TOPIC", "shore_power.telemetry")
 SWITCHBOARD_KAFKA_TOPIC = os.environ.get("SWITCHBOARD_KAFKA_TOPIC", "switchboard.telemetry")
-NAVIGATION_KAFKA_TOPIC = os.environ.get("NAVIGATION_KAFKA_TOPIC", "navigation.telemetry")
 DATASET_KAFKA_TOPIC = os.environ.get("DATASET_KAFKA_TOPIC", "dataset.telemetry")
 KAFKA_TOPICS = [
     GENSET_KAFKA_TOPIC,
@@ -23,7 +22,6 @@ KAFKA_TOPICS = [
     AUXLOAD_KAFKA_TOPIC,
     SHORE_POWER_KAFKA_TOPIC,
     SWITCHBOARD_KAFKA_TOPIC,
-    NAVIGATION_KAFKA_TOPIC,
     DATASET_KAFKA_TOPIC,
 ]
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "telemetry-writer")
@@ -126,31 +124,6 @@ MESSAGE_SCHEMAS = {
             "requested_power_kw",
             "allocated_power_kw",
         ),
-    },
-    "gnss_id": {
-        "measurement": "navigation_gnss",
-        "fields": ("latitude_deg", "longitude_deg", "cog_deg", "sog_knots"),
-        "tags": ("vessel",),
-    },
-    "heading_id": {
-        "measurement": "navigation_heading",
-        "fields": ("heading_deg", "rot_deg_per_min"),
-        "tags": ("vessel",),
-    },
-    "wind_id": {
-        "measurement": "navigation_wind",
-        "fields": ("wind_speed_m_s", "wind_angle_deg"),
-        "tags": ("vessel", "reference"),
-    },
-    "depth_id": {
-        "measurement": "navigation_depth",
-        "fields": ("depth_m", "offset_m"),
-        "tags": ("vessel",),
-    },
-    "attitude_id": {
-        "measurement": "navigation_attitude",
-        "fields": ("yaw_deg", "pitch_deg", "roll_deg"),
-        "tags": ("vessel",),
     },
 }
 

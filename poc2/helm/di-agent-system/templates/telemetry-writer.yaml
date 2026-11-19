@@ -45,8 +45,6 @@ spec:
               value: {{ .Values.shorePower.kafkaTopic | quote }}
             - name: SWITCHBOARD_KAFKA_TOPIC
               value: {{ .Values.propulsion.allocationKafkaTopic | quote }}
-            - name: NAVIGATION_KAFKA_TOPIC
-              value: {{ .Values.navigation.kafkaTopic | quote }}
             - name: DATASET_KAFKA_TOPIC
               value: {{ .Values.streamer.kafkaTopic | quote }}
             - name: KAFKA_GROUP_ID
