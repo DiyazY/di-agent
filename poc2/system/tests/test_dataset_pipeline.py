@@ -99,3 +99,59 @@ def test_added_engine_signals_reach_writer_and_collector(mode, run_id):
         assert 6 <= sample["value"] <= 32
         assert sample["labels"]["origin"] == mode
     assert collector.status()["dropped"] == 0
+
+
+def test_live_pontos_arrivals_reach_writer_and_windowed_collector(monkeypatch):
+    pontos = load_component_modules("pontos-bridge", ["main"])["main"]
+    writer = load_component_modules("telemetry-writer", ["main"])["main"]
+    collector_module = load_component_modules("dataset-collector", ["main"])["main"]
+    monkeypatch.setattr(collector_module.time, "time", lambda: 1761200001)
+    collector = collector_module.DatasetCollector()
+    collector.hello({"protocol": 1, "name": "dataset", "node_id": "agent-1", "interval_ms": 1000})
+    config = pontos.BridgeConfig()
+    for vessel, index, timestamp, value in [
+        ("imo_9007128", "1", 1761200000, 10),
+        ("imo_9007128", "1", 1761200000.5, 20),
+        ("imo_9007128", "2", 1761200000, 40),
+        ("mmsi_265585310", "1", 1761200000, 80),
+    ]:
+        message = pontos.map_message(
+            config, f"PONTOS_EGRESS/{vessel}/enginemain_power_kw/{index}",
+            json.dumps({"timestamp": timestamp, "value": str(value)}).encode(),
+            1761200001,
+        )
+        assert collector.ingest_json(json.dumps(message))
+        point, = writer._to_points(message, writer.DATASET_KAFKA_TOPIC)
+        line = point.to_line_protocol()
+        assert "origin=live" in line
+        assert f"vessel_id={vessel}" in line
+        assert f"parameter_id=enginemain_power_kw_{index}" in line
+        assert 'data_license="ODbL-1.0 / DbCL-1.0"' in line
+        assert line.endswith(str(message["timestamp_ns"]))
+    samples = collector.collect({"seq": 1, "now_unix": 1761200001})["samples"]
+    assert {(sample["subject"], sample["metric_type"]): sample["value"] for sample in samples} == {
+        ("vessel:imo_9007128", "pontos.enginemain_power_kw.i_1"): 15,
+        ("vessel:imo_9007128", "pontos.enginemain_power_kw.i_2"): 40,
+        ("vessel:mmsi_265585310", "pontos.enginemain_power_kw.i_1"): 80,
+    }
+    assert all(sample["unit"] == "kW" and "range" not in sample for sample in samples)
+    assert all(sample["timestamp_unix"] == 1761200001 for sample in samples)
+    assert collector.collect({"seq": 2, "now_unix": 1761200002})["samples"] == []
+    assert collector.status()["dropped"] == 0
+
+
+def test_live_pontos_percent_retains_declared_range(monkeypatch):
+    pontos = load_component_modules("pontos-bridge", ["main"])["main"]
+    collector_module = load_component_modules("dataset-collector", ["main"])["main"]
+    monkeypatch.setattr(collector_module.time, "time", lambda: 1761200001)
+    collector = collector_module.DatasetCollector()
+    collector.hello({"protocol": 1, "name": "dataset", "node_id": "agent-1"})
+    message = pontos.map_message(
+        pontos.BridgeConfig(), "PONTOS_EGRESS/imo_9007128/battery_soc_pct/1",
+        b'{"timestamp":1761200000,"value":75}', 1761200000,
+    )
+    assert collector.ingest_json(json.dumps(message))
+    sample, = collector.collect({"seq": 1, "now_unix": 1761200001})["samples"]
+    assert sample["value"] == 75
+    assert sample["unit"] == "percent"
+    assert sample["range"] == [0, 100]

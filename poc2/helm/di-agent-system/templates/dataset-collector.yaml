@@ -33,6 +33,10 @@ spec:
               value: {{ .Values.datasetCollector.groupId | quote }}
             - name: MAX_ACTIVE_SERIES
               value: {{ .Values.datasetCollector.maxActiveSeries | quote }}
+            {{- if .Values.pontos.enabled }}
+            - name: LIVE_MAX_SOURCE_AGE_SECONDS
+              value: {{ .Values.pontos.maxSourceAgeSeconds | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8000

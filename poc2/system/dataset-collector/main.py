@@ -6,6 +6,7 @@ import math
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,24 +20,36 @@ KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "kafka:9092").split(",")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "dataset.telemetry")
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "dataset-collector")
 MAX_ACTIVE_SERIES = int(os.environ.get("MAX_ACTIVE_SERIES", "2000"))
+LIVE_MAX_SOURCE_AGE_SECONDS = float(os.environ.get("LIVE_MAX_SOURCE_AGE_SECONDS", "300"))
 MAX_LABEL_SOURCES = 4
 METRIC_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SUBJECT_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 if MAX_ACTIVE_SERIES < 1:
     raise ValueError("MAX_ACTIVE_SERIES must be positive")
+if not math.isfinite(LIVE_MAX_SOURCE_AGE_SECONDS) or LIVE_MAX_SOURCE_AGE_SECONDS <= 0:
+    raise ValueError("LIVE_MAX_SOURCE_AGE_SECONDS must be finite and positive")
 
 
 @dataclass
 class Aggregate:
+    subject: str
     unit: str
-    value_range: tuple[float, float]
+    value_range: tuple[float, float] | None
+    oldest_live_timestamp: float | None = None
     count: int = 0
     mean: float = 0.0
     sources: set[str] = field(default_factory=set)
     origins: set[str] = field(default_factory=set)
     multiple_sources: bool = False
 
-    def add(self, value: float, source: str, origin: str) -> None:
+    def add(
+        self, value: float, source: str, origin: str, live_timestamp: float | None = None
+    ) -> None:
+        if live_timestamp is not None:
+            self.oldest_live_timestamp = (
+                live_timestamp if self.oldest_live_timestamp is None
+                else min(self.oldest_live_timestamp, live_timestamp)
+            )
         self.count += 1
         self.mean += (value - self.mean) / self.count
         if source not in self.sources and len(self.sources) >= MAX_LABEL_SOURCES:
@@ -46,7 +59,9 @@ class Aggregate:
         self.origins.add(origin)
 
 
-def _signal_metadata(metadata: Any, signal: str) -> tuple[str, tuple[float, float]]:
+def _signal_metadata(
+    metadata: Any, signal: str, *, require_range: bool = True
+) -> tuple[str, tuple[float, float] | None]:
     if not isinstance(metadata, dict):
         raise ValueError("run metadata must be an object")
 
@@ -77,6 +92,8 @@ def _signal_metadata(metadata: Any, signal: str) -> tuple[str, tuple[float, floa
             raw_range = json.loads(raw_range)
         except json.JSONDecodeError as exc:
             raise ValueError(f"range metadata for signal {signal!r} must be valid JSON") from exc
+    if raw_range is None and not require_range and isinstance(unit, str) and unit.strip():
+        return unit.strip(), None
     if (
         not isinstance(unit, str)
         or not unit.strip()
@@ -98,6 +115,7 @@ class DatasetCollector:
         self._lock = threading.Lock()
         self._pending: dict[tuple[str, str], Aggregate] = {}
         self._available: set[str] = set()
+        self._live_declarations: dict[str, tuple[str, tuple[float, float] | None]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._connected = False
@@ -160,19 +178,28 @@ class DatasetCollector:
             source = message["source"]
             origin = message["origin"]
             value = float(message["value"])
-            unit, value_range = _signal_metadata(message.get("metadata"), signal)
+            metadata = message.get("metadata")
+            unit, value_range = _signal_metadata(metadata, signal, require_range=origin != "live")
             if not isinstance(run_id, str) or not run_id or len(run_id) > 200:
                 raise ValueError("run_id must be a non-empty string")
             if not isinstance(signal, str) or len(signal) > 200 or not METRIC_RE.fullmatch(signal):
                 raise ValueError("signal is not a valid metric_type")
             if not isinstance(source, str) or not source or len(source) > 100:
                 raise ValueError("source must be a non-empty string")
-            if origin not in ("real", "synthetic"):
-                raise ValueError("origin must be real or synthetic")
+            if origin not in ("real", "synthetic", "live"):
+                raise ValueError("origin must be real, synthetic or live")
             if not math.isfinite(value):
                 raise ValueError("value must be finite")
-            if not SUBJECT_RE.fullmatch(f"engine:{run_id}"):
-                raise ValueError("run_id cannot be represented in an engine subject")
+            if origin == "live":
+                timestamp = message["timestamp"]
+                if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+                    raise ValueError("live timestamp must be Unix seconds")
+                age = time.time() - timestamp
+                if not math.isfinite(age) or age > LIVE_MAX_SOURCE_AGE_SECONDS or age < -30:
+                    raise ValueError("live source timestamp is stale or in the future")
+            subject = metadata.get("subject", f"engine:{run_id}")
+            if not isinstance(subject, str) or not subject or not SUBJECT_RE.fullmatch(subject):
+                raise ValueError("metadata subject must be a valid non-empty subject")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             with self._lock:
                 self._dropped += 1
@@ -181,6 +208,11 @@ class DatasetCollector:
 
         key = (run_id, signal)
         with self._lock:
+            if origin == "live" and signal in self._live_declarations:
+                if self._live_declarations[signal] != (unit, value_range):
+                    self._dropped += 1
+                    logger.warning("Dropping changed live declaration for signal %r", signal)
+                    return False
             aggregate = self._pending.get(key)
             if aggregate is None:
                 if (
@@ -193,14 +225,17 @@ class DatasetCollector:
                     self._dropped += 1
                     logger.warning("Dropping dataset message: active series limit reached")
                     return False
-                aggregate = Aggregate(unit=unit, value_range=value_range)
+                aggregate = Aggregate(subject=subject, unit=unit, value_range=value_range)
                 self._pending[key] = aggregate
-            elif aggregate.unit != unit or aggregate.value_range != value_range:
+            elif (aggregate.subject != subject or aggregate.unit != unit
+                  or aggregate.value_range != value_range):
                 self._dropped += 1
                 logger.warning("Dropping conflicting metadata for signal %r within run %r", signal, run_id)
                 return False
             self._available.add(signal)
-            aggregate.add(value, source, origin)
+            if origin == "live":
+                self._live_declarations[signal] = (unit, value_range)
+            aggregate.add(value, source, origin, timestamp if origin == "live" else None)
             self._received += 1
         return True
 
@@ -228,21 +263,31 @@ class DatasetCollector:
 
         samples = []
         for (run_id, signal), aggregate in sorted(pending.items()):
+            if (
+                aggregate.oldest_live_timestamp is not None
+                and time.time() - aggregate.oldest_live_timestamp > LIVE_MAX_SOURCE_AGE_SECONDS
+            ):
+                with self._lock:
+                    self._dropped += aggregate.count
+                logger.warning("Dropping expired live aggregate for run %r signal %r", run_id, signal)
+                continue
             sources = sorted(aggregate.sources)
             origins = sorted(aggregate.origins)
             labels = {
                 "dataset_source": "multiple" if aggregate.multiple_sources else ",".join(sources),
                 "origin": origins[0] if len(origins) == 1 else "mixed",
             }
-            samples.append({
+            sample = {
                 "metric_type": signal,
                 "value": aggregate.mean,
                 "timestamp_unix": now_unix,
-                "subject": f"engine:{run_id}",
+                "subject": aggregate.subject,
                 "unit": aggregate.unit,
-                "range": list(aggregate.value_range),
                 "labels": labels,
-            })
+            }
+            if aggregate.value_range is not None:
+                sample["range"] = list(aggregate.value_range)
+            samples.append(sample)
         return {"seq": seq, "samples": samples}
 
     def status(self) -> dict[str, Any]:

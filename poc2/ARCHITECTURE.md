@@ -55,12 +55,31 @@ The chart under `helm/di-agent-system` manages the worker agent DaemonSet and sh
 - replay-streamer (real or synthetic data mode)
 - dataset-collector (Kafka to di-agent HTTP collector protocol)
 - telemetry-writer
+- pontos-bridge (optional live MQTT source, replacing engine replay/CSV ingestion)
 
 Genset, battery, propulsion, auxload, shore-power, navigation, switchboard, and playground deployments are disabled by default and can be enabled individually through Helm values.
 
 The replay-streamer reads every source (`short` and `long_*`) of the selected `run_id` from PostgreSQL, merged by source time `t` (all sources share one time grid; shorter ones end first). In `real` mode it streams stored rows; in `synthetic` mode it uses that same run's per-signal min/max/mean/standard deviation to generate reproducible, correlated samples and carries the associated run metadata in each message. Both modes publish to `dataset.telemetry`, which telemetry-writer stores in the InfluxDB `dataset_timeseries` measurement. The HTTP control API at `replay-streamer:8000` exposes `GET /status` and `PUT /config`; `interval_ms` and `points_per_interval` (time steps per tick; default 1 step per 1000 ms) control the emission rate.
 
 The dataset collector consumes `dataset.telemetry` and implements the agent's HTTP collector protocol. `agent.datasetNodeName` designates one worker whose agent polls it; empty disables dataset ingestion. All agents collect local host cgroup metrics. A shared collector drains its aggregates on each poll, so only the designated agent connects to it.
+
+With `pontos.enabled=true`, a single `pontos-bridge` subscribes to selected numeric
+PONTOS vessel/sensor topics over MQTT v5/TLS WebSockets. The access token is mounted
+from an existing Secret, never embedded in values or images. Source measurements
+are forwarded asynchronously to the same Kafka topic with `origin=live`, original
+timestamps, physical units, vessel subjects and distinct sensor-index metric names.
+The bridge exposes bounded queue/drop status and reconnects without claiming
+exactly-once delivery; failed Kafka deliveries are not re-sent by the bridge.
+Engine replay and its CSV ingestion hook are suppressed in this mode, but
+PostgreSQL data is retained. Worker collection uses `agent.collectInterval`,
+default `5s`; empty arrival windows return no observations.
+
+The shared collector accepts optional explicit subjects while retaining the
+engine fallback. Replay metadata still requires ranges; live rates can omit them
+rather than invent operating limits. Conflicting declarations or subjects in a
+pending aggregate are rejected, and stale live Kafka backlog is dropped. Vessel signals remain unrouted
+and do not automatically change host RC/PS or routing. See the
+[live setup and limitations](README.md#continuous-pontos-vessel-data-live-mqtt).
 
 The collector averages all new Kafka values for each `(run_id, signal)` during one agent collection window, returning one sample per key. Its default source polling interval is 5s, independent of the streamer's interval and points-per-tick: faster streams simply contribute more samples to that window, and signals with no new events are omitted. Events provide per-signal units and ranges as `metadata.signals` JSON keyed by signal, for example `{"signals":{"speed":{"unit":"rpm","range":[0,6000]}}}`. Replay-streamer preserves explicit declarations from PostgreSQL; when absent in the supplied dataset, both real and synthetic modes preserve raw values and declare `dataset-native` units with observed min/max ranges pooled across sources. Constant signals receive symmetric padding of 1% (at least 1 unit). Generated metadata records its provenance and is logged, without inventing physical units or changing database rows. The collector forwards those values as `unit` and `range`, with source and origin labels. Since these are engine signals rather than host resource/pressure measurements, they remain unrouted in `semantic-map/domain_spec.json`: the agent records them as scoped properties, but no existing construct summarizes them. Replay-streamer also exposes HTTP instrumentation at `/metrics` for Prometheus.
 

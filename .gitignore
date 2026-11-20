@@ -25,3 +25,4 @@ tfplan
 .env
 poc2/data
 poc2/experiments
+poc2/secrets/pontos-token

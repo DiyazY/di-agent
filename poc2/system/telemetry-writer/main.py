@@ -217,6 +217,14 @@ def _dataset_to_point(message: dict) -> Point:
     )
     if "t_source" in message:
         point = point.field("t_source", float(message["t_source"]))
+    if message.get("origin") == "live":
+        metadata = message["metadata"]
+        point = (
+            point.tag("vessel_id", str(metadata["vessel_id"]))
+            .tag("parameter_id", str(metadata["parameter_id"]))
+            .field("provider", str(metadata["provider"]))
+            .field("data_license", str(metadata["license"]))
+        )
     timestamp = int(message.get("timestamp_ns", float(message["timestamp"]) * 1e9))
     return point.time(timestamp, WritePrecision.NS)
 

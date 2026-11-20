@@ -79,7 +79,7 @@ spec:
   ports:
     - port: {{ .Values.postgres.port }}
       targetPort: {{ .Values.postgres.port }}
-{{- if .Values.postgres.ingest.enabled }}
+{{- if and .Values.postgres.ingest.enabled (not .Values.pontos.enabled) }}
 ---
 # Loads the CSV dataset into PostgreSQL after every install/upgrade. Idempotent:
 # files already loaded (same name + size) are skipped, so re-runs are cheap.

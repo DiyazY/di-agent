@@ -1,4 +1,4 @@
-{{- if .Values.streamer.enabled }}
+{{- if and .Values.streamer.enabled (not .Values.pontos.enabled) }}
 {{- if not .Values.postgres.enabled }}
 {{- fail "streamer.enabled requires postgres.enabled=true" }}
 {{- end }}

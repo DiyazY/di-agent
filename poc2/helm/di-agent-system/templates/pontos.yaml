@@ -1,0 +1,97 @@
+{{- if .Values.pontos.enabled }}
+{{- if or (not .Values.datasetCollector.enabled) (not .Values.agent.enabled) (not .Values.agent.datasetNodeName) }}
+{{- fail "pontos.enabled requires datasetCollector.enabled, agent.enabled and one agent.datasetNodeName" }}
+{{- end }}
+{{- if ne .Values.datasetCollector.kafkaTopic .Values.streamer.kafkaTopic }}
+{{- fail "PONTOS requires datasetCollector.kafkaTopic and streamer.kafkaTopic to match for collector/writer delivery" }}
+{{- end }}
+{{- if not .Values.pontos.existingSecret }}
+{{- fail "pontos.existingSecret must name a Secret containing access-token" }}
+{{- end }}
+{{- $config := dict "vessels" .Values.pontos.vessels "max_active_series" .Values.pontos.maxActiveSeries "queue_size" .Values.pontos.queueSize "max_source_age_seconds" .Values.pontos.maxSourceAgeSeconds }}
+{{- if .Values.pontos.signals }}
+{{- $_ := set $config "signals" .Values.pontos.signals }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pontos-bridge
+  labels:
+    app: pontos-bridge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pontos-bridge
+  template:
+    metadata:
+      labels:
+        app: pontos-bridge
+    spec:
+      {{- include "diagent.nodeSelector" (dict "local" .Values.pontos.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: pontos-bridge
+          image: {{ include "diagent.customImage" (dict "global" .Values.global "image" .Values.pontos.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: KAFKA_BROKERS
+              value: "kafka:{{ .Values.kafka.port }}"
+            - name: KAFKA_TOPIC
+              value: {{ .Values.datasetCollector.kafkaTopic | quote }}
+            - name: PONTOS_CONFIG
+              value: {{ $config | toJson | quote }}
+            - name: PONTOS_TOKEN_FILE
+              value: /var/run/secrets/pontos/access-token
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: pontos-token
+              mountPath: /var/run/secrets/pontos
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.pontos.resources | nindent 12 }}
+      volumes:
+        - name: pontos-token
+          secret:
+            secretName: {{ .Values.pontos.existingSecret }}
+            items:
+              - key: access-token
+                path: access-token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pontos-bridge
+  labels:
+    app: pontos-bridge
+spec:
+  selector:
+    app: pontos-bridge
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}
