@@ -18,6 +18,10 @@ spec:
       labels:
         app: kafka
     spec:
+      {{- with .Values.kafka.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- include "diagent.nodeSelector" (dict "local" .Values.kafka.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -54,7 +58,7 @@ spec:
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
             - name: KAFKA_LOG_DIRS
-              value: "/var/lib/kafka/data"
+              value: {{ .Values.kafka.logDir | quote }}
             - name: KAFKA_DEFAULT_REPLICATION_FACTOR
               value: "1"
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR

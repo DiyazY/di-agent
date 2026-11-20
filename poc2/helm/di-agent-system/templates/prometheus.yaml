@@ -83,6 +83,10 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
+      {{- with .Values.prometheus.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- include "diagent.nodeSelector" (dict "local" .Values.prometheus.nodeSelector "global" .Values.global.nodeSelector) | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

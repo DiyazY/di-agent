@@ -47,6 +47,7 @@ DATASET_NODE_NAME ?=
 AGENT_COLLECT_INTERVAL ?= 5s
 # Any additional helm flags, e.g. HELM_ARGS="--set genset.enabled=true --wait".
 HELM_ARGS ?=
+CLOUD_STORAGE_CLASS ?=
 HELM_STREAMER_SETS = \
 	$(if $(STREAMER_MODE),--set streamer.mode=$(STREAMER_MODE)) \
 	$(if $(STREAMER_RUN_ID),--set streamer.runId=$(STREAMER_RUN_ID)) \
@@ -109,6 +110,20 @@ agent: helm-install
 peers:
 	@HELM_NAMESPACE="$(HELM_NAMESPACE)" HELM_RELEASE="$(HELM_RELEASE)" \
 		bash $(SCRIPTS)/04-peers.sh
+
+provision-eks teardown-eks:
+	@bash "$(SCRIPTS)/$@.sh"
+
+deploy-cloud:
+	@test -n "$$KUBECONFIG" || { echo "Set KUBECONFIG to the cloud cluster's kubeconfig." >&2; exit 1; }
+	@test -n "$(CLOUD_STORAGE_CLASS)" || { echo "Set CLOUD_STORAGE_CLASS to an existing CSI StorageClass." >&2; exit 1; }
+	@kubectl get storageclass "$(CLOUD_STORAGE_CLASS)" >/dev/null
+	@$(MAKE) agent HELM_ARGS='-f cloud/helm-values.yaml --wait \
+		--set-string kafka.persistence.storageClass=$(CLOUD_STORAGE_CLASS) \
+		--set-string influxdb.persistence.storageClass=$(CLOUD_STORAGE_CLASS) \
+		--set-string postgres.persistence.storageClass=$(CLOUD_STORAGE_CLASS) \
+		--set-string prometheus.persistence.storageClass=$(CLOUD_STORAGE_CLASS) $(HELM_ARGS)'
+	@$(MAKE) peers
 
 uncloud:
 	@bash $(SCRIPTS)/uncloud.sh $(VMS)
@@ -183,6 +198,7 @@ get-ip-%:
 
 .PHONY: all provision k8s k3s kubeedge uncloud netdata agent peers images helm-lint helm-template \
         helm-install helm-upgrade helm-uninstall helm-status start-vms stop-vms deploy demo \
+	provision-eks teardown-eks deploy-cloud \
 	workload-heavy workload-light workload-stop teardown status list-vms get-ip-%
 
 # Help target
@@ -195,10 +211,14 @@ help:
 	@echo "                 (telemetry-writer-cloud reuses the telemetry-writer image)"
 	@echo "  k3s          - Install k3s server on VM1 and agents on remaining VMs"
 	@echo "  kubeedge     - Install KubeEdge CloudCore on VM1 and EdgeCore on remaining VMs"
-	@echo "  helm-install - helm upgrade --install the di-agent-system chart (requires external credentials)"
+	@echo "  helm-install - helm upgrade --install the di-agent-system chart"
+	@echo "                 Demo credentials are enabled by default; disable for external credentials"
 	@echo "                 Streamer options: STREAMER_MODE=real|synthetic STREAMER_RUN_ID"
 	@echo "                 STREAMER_INTERVAL_MS STREAMER_POINTS STREAMER_LOOP; extra flags via HELM_ARGS"
 	@echo "  helm-upgrade - Alias for helm-install"
+	@echo "  provision-eks - Create an EKS cluster and fetch kubeconfig"
+	@echo "  deploy-cloud - Deploy via Helm and register peers (requires KUBECONFIG and CLOUD_STORAGE_CLASS)"
+	@echo "  teardown-eks - Destroy the EKS Terraform resources"
 	@echo "  helm-uninstall - helm uninstall the di-agent-system release"
 	@echo "  helm-status  - helm status of the di-agent-system release"
 	@echo "  helm-lint    - helm lint the chart"

@@ -1,0 +1,12 @@
+demoSecrets:
+  enabled: false
+
+kafka:
+  # Keep broker files separate from filesystem metadata (e.g. lost+found).
+  logDir: /var/lib/kafka/data/logs
+  podSecurityContext:
+    fsGroup: 1000
+
+prometheus:
+  podSecurityContext:
+    fsGroup: 65534

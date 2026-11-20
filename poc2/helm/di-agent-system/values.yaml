@@ -17,6 +17,11 @@ global:
   nodeSelector: {}
   namespace: default
 
+# Public, fixed credentials for disposable local demos only.
+# Disable when using externally managed Secrets.
+demoSecrets:
+  enabled: true
+
 kafka:
   image:
     repository: apache/kafka
@@ -24,6 +29,8 @@ kafka:
   port: 9092
   controllerPort: 9093
   clusterId: ZGlhZ2VudC1rYWZrYS0
+  logDir: /var/lib/kafka/data
+  podSecurityContext: {}
   logRetentionHours: "168"
   logRetentionBytes: "1073741824"
   persistence:
@@ -182,8 +189,8 @@ influxdb:
     enabled: true
     size: 10Gi
     storageClass: local-path
-  # Pre-create this Secret in the release namespace. Required keys are
-  # admin-user, admin-password, and admin-token.
+  # Pre-create this Secret in the release namespace unless demoSecrets is enabled.
+  # Required keys: admin-user, admin-password, and admin-token.
   existingSecret: influxdb-credentials
   nodeSelector: {}
   resources: {}
@@ -199,8 +206,8 @@ postgres:
     enabled: true
     size: 20Gi
     storageClass: local-path
-  # Pre-create this Secret in the release namespace. Required keys are
-  # username and password.
+  # Pre-create this Secret in the release namespace unless demoSecrets is enabled.
+  # Required keys: username and password.
   existingSecret: postgres-credentials
   ingest:
     # Post-install/upgrade Job that downloads the CSVs and COPYs them in.
@@ -293,13 +300,14 @@ grafana:
     repository: grafana/grafana
     tag: latest
   port: 3000
-  # Pre-create this Secret in the release namespace. Required keys are
-  # admin-user and admin-password.
+  # Pre-create this Secret in the release namespace unless demoSecrets is enabled.
+  # Required keys: admin-user and admin-password.
   existingSecret: grafana-credentials
   nodeSelector: {}
   resources: {}
 
 prometheus:
+  podSecurityContext: {}
   image:
     repository: prom/prometheus
     tag: latest

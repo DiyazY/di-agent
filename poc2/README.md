@@ -50,7 +50,7 @@ working share link changes. Never commit or print private share links.
 The deployment consists of two separate layers:
 
 1. Infrastructure and cluster layer
-   - VM creation via Terraform in `main.tf`
+   - VM creation via Terraform in [infra/libvirt/](infra/libvirt/)
    - Kubernetes bootstrap via `scripts/02-k8s.sh`
    - one cluster for the VM fleet
 
@@ -64,9 +64,60 @@ The default `make all` workflow deploys the entire stack through Helm, including
 
 When migrating, remove the old Helm Deployment `di-agent`, if present, and the script-created Deployments named `di-agent-<worker>` before installing the DaemonSet. List them with `kubectl get deployments -l app=di-agent`, then delete only those legacy Deployments by name. Do not run the old deployment script alongside the DaemonSet: both would claim the same node identity and host port.
 
+### Moving an existing libvirt lab to `infra/libvirt/`
+
+The libvirt Terraform root moved from `poc2/` to `poc2/infra/libvirt/`.
+Fresh labs need no migration. For an existing lab, stop any Terraform runs,
+back up the local state securely, and move `terraform.tfstate` and
+`terraform.tfstate.backup` (if present) to the new root. Move
+`terraform.tfstate.d/` if you use named workspaces, along with any local
+`.tfvars` files and `.terraform.lock.hcl`. Do not overwrite state already
+present at the destination, commit state, or reuse old saved plans.
+
+From `poc2/`, verify the migration before applying:
+
+```bash
+terraform -chdir=infra/libvirt init
+terraform -chdir=infra/libvirt state list
+terraform -chdir=infra/libvirt plan
+```
+
+Make sure Terraform sees the existing lab and does not propose unexpected
+creations or replacements. `make provision` and `make teardown` use the new
+root automatically.
+
 ## Required secrets and configuration
 
-Before the chart is installed, the chart expects a namespace and credentials for the telemetry services.
+By default, the chart creates demo credentials for InfluxDB, Grafana and
+PostgreSQL. These credentials are public and fixed; **do not use them outside a
+disposable demo**. Install with:
+
+```bash
+helm upgrade --install di-agent-system poc2/helm/di-agent-system \
+  --namespace default --create-namespace \
+  --wait --timeout 30m
+```
+
+From `poc2/`, use `make helm-install` or `make all`.
+The demo Secrets use the names configured by `influxdb.existingSecret`,
+`grafana.existingSecret` and `postgres.existingSecret`; PostgreSQL's is created
+only when PostgreSQL is enabled. The credentials are listed in
+`helm/di-agent-system/templates/secrets.yaml`.
+
+The default PostgreSQL ingestion job still requires the separate `data-url`
+Secret described below. Create it after the cluster is available and before
+installing the chart. Cloud connection strings and tokens also remain external.
+
+Demo Secrets are Helm-managed and are removed when the release is uninstalled
+or the option is disabled. Do not use the default setting over existing
+externally managed Secrets with the same names: Helm will reject ownership
+conflicts. Set `demoSecrets.enabled=false` when installing or upgrading an
+existing deployment that uses external Secrets.
+Existing PostgreSQL and InfluxDB persistent data retain their initialized
+credentials; switching Secrets does not change those database credentials.
+
+Alternatively, set `demoSecrets.enabled=false` and pre-create your own
+credentials in the release namespace:
 
 ```bash
 kubectl create namespace default --dry-run=client -o yaml | kubectl apply -f -
@@ -77,12 +128,16 @@ kubectl -n default create secret generic influxdb-credentials \
 kubectl -n default create secret generic grafana-credentials \
   --from-literal=admin-user="$GRAFANA_ADMIN_USER" \
   --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD"
+kubectl -n default create secret generic postgres-credentials \
+  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
 ```
 
-This is required because `helm/di-agent-system/values.yaml` references:
+For example, add `--set demoSecrets.enabled=false` to the Helm command above,
+or run `make helm-install HELM_ARGS="--set demoSecrets.enabled=false"` from
+`poc2/`.
 
-- `influxdb.existingSecret: influxdb-credentials`
-- `grafana.existingSecret: grafana-credentials`
+Kubernetes Secrets are not encrypted merely by being base64-encoded. Follow
+your cluster's secret-management and encryption practices for real credentials.
 
 ### PostgreSQL engine dataset
 
@@ -110,13 +165,13 @@ remain unchanged; no changes to `semantic-map/` are required.
 The chart runs a stock `postgres` StatefulSet and a `postgres-ingest` Helm hook Job (image `data-ingest`, built from `poc2/data-ingest`) that downloads the CSVs from SharePoint and `COPY`s them into tables `runs`, `run_metadata` and `timeseries` (long format: `run_id, source, signal, t, value`). Re-running is idempotent (files already loaded are skipped). The CSVs are not stored in git or in any image.
 
 ```bash
-kubectl -n default create secret generic postgres-credentials \
-  --from-literal=username=di --from-literal=password="$POSTGRES_PASSWORD"
 kubectl -n default create secret generic data-url --from-literal=data-url="$DATA_URL"
-helm upgrade --install di-agent-system poc2/helm/di-agent-system --wait --timeout 30m
 ```
 
-Connect in-cluster at `postgres:5432`, database `engine`. Set `postgres.enabled=false` to skip it.
+Create this Secret before running the Helm command above. Connect in-cluster at
+`postgres:5432`, database `engine`. Set `postgres.ingest.enabled=false` to skip
+the ingestion job and its `data-url` requirement, or `postgres.enabled=false`
+and `streamer.enabled=false` to skip PostgreSQL and the dependent streamer.
 
 ### PostgreSQL replay and simulation modes
 
@@ -206,6 +261,51 @@ make helm-install REGISTRY=ghcr.io/your-org TAG=v1
 ```
 
 The chart also expects the enabled service build contexts under `system/` and `playground/` to exist and to be buildable with Docker.
+
+## Manual deployment on EKS
+
+EKS is an alternative to the libvirt lab. Run these commands from `poc2/`.
+You need Terraform, Helm, kubectl and the AWS CLI. Provisioning creates
+billable resources. Authenticate with the AWS CLI and set `TF_VAR_api_access_cidrs`
+to a JSON list of the public IPv4 CIDRs your operators or VPN use:
+
+```bash
+# Example only: replace with your reachable operator/VPN CIDR.
+export TF_VAR_api_access_cidrs='["203.0.113.42/32"]'
+make provision-eks
+export KUBECONFIG="$HOME/.kube/config-poc2-eks"
+kubectl apply -f cloud/eks/storage-class.yaml
+export CLOUD_STORAGE_CLASS=di-agent-gp3
+```
+
+The provisioning script accepts Terraform overrides through `TF_VAR_*` (for
+example, `TF_VAR_node_count`), and `LOCAL_KUBECONFIG` to change the output path.
+EKS selects its default Kubernetes version unless `TF_VAR_kubernetes_version`
+is set to a version supported in your region. Terraform uses local state in
+`cloud/eks/`. Keep that state safe: teardown needs it. Do not commit it.
+
+Confirm the selected cluster with `kubectl config current-context`. In the
+release namespace, create the external InfluxDB, Grafana and PostgreSQL
+Secrets from [Required secrets and configuration](#required-secrets-and-configuration),
+plus `data-url` if ingestion is enabled. The cloud deployment disables demo
+credentials by default. For private images, pre-create a registry pull Secret
+and pass its name via `global.imagePullSecrets` in `HELM_ARGS`.
+
+```bash
+# Use the registry and tag of your published images. Run make images first if needed.
+make deploy-cloud REGISTRY=ghcr.io/your-org TAG=v1
+```
+
+This uses the current Helm chart, waits for the worker DaemonSet, and registers
+peers with the same script as the local lab. Use the same target for upgrades
+so the CSI storage settings stay applied. Use a fresh release for the cloud
+storage profile; existing PVC storage classes cannot be changed in place.
+
+To clean up, uninstall the chart with `make helm-uninstall` and remove its
+PVCs only after backing up any data you want to keep. Then run
+`make teardown-eks` with the same local state and Terraform variables used
+to provision the cluster. Review the destroy plan
+before approving it.
 
 ## End-to-end workflow
 
@@ -310,7 +410,7 @@ The demo is the proof-of-value. It does the following:
 
 The files that matter for understanding or running the PoC are:
 
-- `main.tf`: libvirt VM definition and disk layout
+- [infra/libvirt/main.tf](infra/libvirt/main.tf): libvirt VM definition and disk layout
 - `variables.tf`: VM and image configuration
 - `providers.tf`: libvirt provider setup
 - `scripts/01-provision.sh`: creates the VM fleet

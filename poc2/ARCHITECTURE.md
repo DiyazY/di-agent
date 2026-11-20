@@ -79,7 +79,7 @@ The agent mesh and telemetry services now share one Helm lifecycle. Three agents
 
 ## Infrastructure architecture
 
-`main.tf` creates the VM fleet. The important responsibilities are:
+[infra/libvirt/main.tf](infra/libvirt/main.tf) creates the VM fleet. The important responsibilities are:
 
 - create a libvirt storage pool
 - download the Ubuntu 22.04 cloud image
@@ -141,7 +141,14 @@ The writer commits Kafka offsets only after a successful InfluxDB write. Malform
 
 The chart provisions InfluxDB and Grafana and preconfigures Grafana datasources for InfluxDB telemetry and Prometheus application metrics. This allows the operator to observe system health and telemetry without separate manual config.
 
-The practical requirement is simple: the InfluxDB credentials must exist before `helm install` or the chart will fail to initialize the datasource.
+Grafana starts one replacement pod during a rolling update and keeps the old
+pod available until the replacement passes its health check. Grafana's local
+data still uses `emptyDir` and does not survive pod replacement.
+
+The chart creates fixed, public InfluxDB and Grafana demo credentials by
+default. These are suitable only for disposable local labs; set
+`demoSecrets.enabled=false` to use external Secrets instead. See the README for
+installation, the separately required dataset URL, and lifecycle considerations.
 
 ## Agent and trust architecture
 
@@ -218,7 +225,7 @@ That makes this PoC valuable as a local testbed for distributed trust-aware rout
 
 ## Key files to understand the architecture
 
-- `main.tf`: VM lifecycle and node shape
+- [infra/libvirt/](infra/libvirt/): Terraform root for VM lifecycle and node shape
 - `scripts/02-k8s.sh`: cluster construction
 - `helm/di-agent-system/templates/agent.yaml`: per-worker agent deployment
 - `scripts/04-peers.sh`: peer + trust registration

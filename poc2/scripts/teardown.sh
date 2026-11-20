@@ -6,6 +6,13 @@
 
 set -euo pipefail
 
+POC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TF_DIR="$POC_DIR/infra/libvirt"
+if [[ -e "$POC_DIR/terraform.tfstate" || -d "$POC_DIR/terraform.tfstate.d" ]]; then
+    echo "Libvirt state still exists in $POC_DIR. See the PoC2 README before teardown." >&2
+    exit 1
+fi
+
 # ── colours ─────────────────────────────────────────────────────────────────
 GREEN=$(tput setaf 2 2>/dev/null || echo "")
 YELLOW=$(tput setaf 3 2>/dev/null || echo "")
@@ -26,7 +33,7 @@ if ! command -v terraform &> /dev/null; then
 fi
 
 # Run terraform destroy with auto-approve to skip confirmation
-terraform destroy -auto-approve
+terraform -chdir="$TF_DIR" destroy -auto-approve
 
 ok "Terraform destroy complete"
 

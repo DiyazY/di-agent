@@ -41,7 +41,10 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: grafana
@@ -60,8 +63,15 @@ spec:
           image: {{ include "diagent.publicImage" .Values.grafana.image }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           ports:
-            - containerPort: {{ .Values.grafana.port }}
+            - name: http
+              containerPort: {{ .Values.grafana.port }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
           env:
+            - name: GF_SERVER_HTTP_PORT
+              value: {{ .Values.grafana.port | quote }}
             - name: GF_SECURITY_ADMIN_USER
               valueFrom:
                 secretKeyRef:

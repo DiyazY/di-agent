@@ -162,8 +162,12 @@ jobs:
           exit 1
 
   kind-smoke-test:
-    name: kind Helm smoke test (di-agent-system chart)
+    name: kind Helm smoke test (di-agent-system chart, ${{ matrix.credentials }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        credentials: [demo, external]
 
     steps:
       - name: Checkout
@@ -206,7 +210,8 @@ jobs:
             kind load docker-image "smoke/${service}:test" --name di-agent-smoke
           done
 
-      - name: Create required secrets
+      - name: Create external smoke-test Secrets
+        if: matrix.credentials == 'external'
         run: |
           kubectl create secret generic influxdb-credentials \
             --from-literal=admin-user=admin \
@@ -217,8 +222,14 @@ jobs:
             --from-literal=admin-password=smoke-test-password
 
       - name: Helm install (values pointed at locally-loaded images)
+        env:
+          CREDENTIALS: ${{ matrix.credentials }}
         run: |
-          helm upgrade --install di-agent-system poc2/helm/di-agent-system \
+          values=()
+          if [[ "$CREDENTIALS" == external ]]; then
+            values=(-f poc2/cloud/helm-values.yaml)
+          fi
+          helm upgrade --install di-agent-system poc2/helm/di-agent-system "${values[@]}" \
             --set global.imageRegistry=smoke \
             --set global.imageTag=test \
             --set global.imagePullPolicy=IfNotPresent \

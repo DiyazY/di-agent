@@ -1,9 +1,17 @@
 #!/bin/bash
 
 # Simple Terraform automation script
-# Usage: ./terraform-auto.sh
+# Usage: ./01-provision.sh
 
 set -e  # Exit on any error
+
+POC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TF_DIR="$POC_DIR/infra/libvirt"
+if [[ -e "$POC_DIR/terraform.tfstate" || -d "$POC_DIR/terraform.tfstate.d" ]]; then
+    echo "Libvirt state still exists in $POC_DIR. See the PoC2 README before provisioning." >&2
+    exit 1
+fi
+cd "$TF_DIR"
 
 # ============================================
 # 1. Disable AppArmor for libvirt (if needed)
