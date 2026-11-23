@@ -189,11 +189,11 @@ func (r *RuleEngineReasoner) costConstructs() (resource, pressure string, err er
 //     a. Success → Reward and MarkSeen on the registry; compute savings as
 //     (myEnergy − peerEnergy); compute trust-weighted savings as
 //     savings × peer.Trust.
-//     b. Failure → log via log.Printf and Penalise the peer (trust − 0.05,
-//     stamped with the time). Skip this peer; do not abort the run. The reasoner
-//     must remain useful when one peer is down.
+//     b. Failure → log and skip the peer. Penalise transport, server and decode
+//     failures, but not a peer's 4xx response to our request.
 //  4. Pick the peer with the highest trust-weighted savings. If no peer
-//     beats local cost (savings ≤ 0 everywhere) → ErrInsufficientTrust.
+//     beats local cost → ErrPeerCostQuery if a query failed, otherwise
+//     ErrInsufficientTrust.
 //  5. Build a PeerRecommendation citing the peer ID, the trust score we
 //     weighted by, and the peer's reported GraphPathUsed.
 //
@@ -247,14 +247,14 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 			skippedHTTPError++
 			continue
 		}
-		// An empty node asks the peer for its own cost, not the source's.
-		peerCost, err := r.peerc.Cost(ctx, p.URL, octx.TaskType, "")
+		peerCost, err := r.peerc.Cost(ctx, p.URL, octx.TaskType)
 		if err != nil {
 			log.Printf("reasoner.RecommendPeer: peer %s (%s) cost query failed: %v", p.ID, p.URL, err)
-			// Soft trust penalty so persistently-down peers drain out of the
-			// eligible set without hard-banning them on first failure.
-			if perr := r.peers.Penalise(p.ID, now); perr != nil {
-				log.Printf("reasoner.RecommendPeer: penalty update failed: %v", perr)
+			var statusErr *peers.CostStatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode < 400 || statusErr.StatusCode >= 500 {
+				if perr := r.peers.Penalise(p.ID, now); perr != nil {
+					log.Printf("reasoner.RecommendPeer: penalty update failed: %v", perr)
+				}
 			}
 			skippedHTTPError++
 			continue
@@ -289,8 +289,12 @@ func (r *RuleEngineReasoner) RecommendPeer(octx *types.OffloadContext) (*types.P
 	}
 
 	if !bestSet {
+		reason := contracts.ErrInsufficientTrust
+		if skippedHTTPError > 0 {
+			reason = contracts.ErrPeerCostQuery
+		}
 		return nil, fmt.Errorf("%w: %d peers below trust floor, %d http errors, %d had no savings (myResourceCost=%.3f)",
-			contracts.ErrInsufficientTrust,
+			reason,
 			skippedBelowTrust, skippedHTTPError, skippedNoSavings, myCost.ResourceCost)
 	}
 

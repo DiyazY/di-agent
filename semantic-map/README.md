@@ -702,7 +702,7 @@ The five summaries above are the original control-plane queries. Phase 1 of the 
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |
 | POST | `/ingest-sample`                    | `MetricSampleRequest`                                    | replay   |
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
-| POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered — an ordinary state, not a fault |
+| POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered; `502` if no peer qualifies and a peer cost query failed |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
 | GET  | `/candidates`                       | `?status=all\|pending\|confirmed\|rejected\|deferred` (default pending) | existing |
 | GET  | `/graph`                            | —                                                        | Phase 1  |
@@ -1573,11 +1573,11 @@ For every call, the reasoner:
 
 1. Lists peers from the registry. Empty → `ErrInsufficientTrust` ("no peers registered").
 2. Skips any peer below `--min-trust` (default `0.5`), unless the agent itself penalised it under the floor 10 or more minutes ago; a peer an operator set under the floor is not queried again.
-3. For each survivor: `GET /cost` on the peer URL; on success `Reward` (+0.05, capped 1.0) and `MarkSeen`, and record `savings = my ResourceCost − peer ResourceCost`; on failure log and `Penalise` (−0.05, clamped at 0), stamped with the time.
+3. For each survivor: `GET /cost` on the peer URL; on success `Reward` (+0.05, capped 1.0) and `MarkSeen`, and record `savings = my ResourceCost − peer ResourceCost`; on failure log and skip it. Penalise transport, server and decode failures (−0.05, clamped at 0), but not 4xx responses.
 4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
-5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
+5. If no peer beats local cost → `ErrPeerCostQuery` if a query failed, otherwise `ErrInsufficientTrust`, with rationale.
 
-Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, and recommended only once its reward lifts it back to the floor; one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on transport, server or decode failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, and recommended only once its reward lifts it back to the floor; one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
 
 ### Demo scenario
 
