@@ -46,7 +46,8 @@ def main(binary):
                 log = (root / f"{name}.log").open("w+")
                 logs.append(log)
                 process = subprocess.Popen(
-                    [binary, "-config", str(config)], stdout=log, stderr=subprocess.STDOUT
+                    [binary, "-config", str(config)], stdout=log, stderr=subprocess.STDOUT,
+                    cwd=Path(__file__).resolve().parent,
                 )
                 processes.append(process)
                 url = f"http://127.0.0.1:{port}"
@@ -94,6 +95,10 @@ def main(binary):
             except urllib.error.HTTPError as error:
                 if error.code != 409:
                     raise
+                body = json.load(error)
+                if ("2 peers below trust floor" not in body["error"]
+                        or "0 http errors" not in body["error"]):
+                    raise AssertionError(f"unexpected recommendation failure: {body}")
             else:
                 raise AssertionError("recommendation succeeded with no trusted peers")
             print("Real agent peer recommendation and trust rerouting passed")
