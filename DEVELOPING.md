@@ -315,6 +315,11 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push to `main` and every PR: `go.mod` tidy, `go build ./...`, `go vet ./...`, and `go test -race ./...`. Run `go test -race ./...` locally first; it is the slowest gate and the one that catches real bugs.
 
+CI caches Go, pip and npm dependencies, as well as the Cypress binary used by
+the stubbed playground suite. The Cypress key includes the lockfile hash and
+runner OS and architecture. Cold or evicted caches still run normal installs
+and tests; any savings require measurement in Actions.
+
 ### Public/private boundary
 
 This repository is **public**. The `mega-research` repository is **private**. Implementation code, compliance suites, and artifacts a reader needs to reproduce or extend published work belong here. Raw experimental data, analysis scripts, manuscript drafts, reviewer correspondence, and intermediate results stay private.

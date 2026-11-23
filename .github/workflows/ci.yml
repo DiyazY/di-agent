@@ -140,6 +140,12 @@ jobs:
           cache: npm
           cache-dependency-path: poc2/playground/package-lock.json
 
+      - name: Cache Cypress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: cypress-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('poc2/playground/package-lock.json') }}
+
       - name: Install dependencies
         working-directory: poc2/playground
         run: npm ci
