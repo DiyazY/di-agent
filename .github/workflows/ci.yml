@@ -22,6 +22,7 @@ jobs:
   test:
     name: build + test + vet
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     defaults:
       run:
@@ -79,6 +80,7 @@ jobs:
   demo:
     name: dev.sh demo (smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: test
 
     defaults:
@@ -102,6 +104,7 @@ jobs:
   system-tests:
     name: poc2/system pytest suite
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -128,6 +131,7 @@ jobs:
   playground-tests:
     name: poc2/playground Cypress suite
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -183,6 +187,7 @@ jobs:
   kind-smoke-test:
     name: kind Helm smoke test (di-agent-system chart, ${{ matrix.credentials }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -424,6 +429,7 @@ jobs:
   build-push-images:
     name: build + push images (${{ matrix.service }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [test, system-tests, kind-smoke-test, playground-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
