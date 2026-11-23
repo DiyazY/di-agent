@@ -320,6 +320,11 @@ the stubbed playground suite. The Cypress key includes the lockfile hash and
 runner OS and architecture. Cold or evicted caches still run normal installs
 and tests; any savings require measurement in Actions.
 
+Kind smoke builds use Buildx layer caches scoped by service and credential
+matrix entry, and load images locally before importing them into Kind. Cache
+exports are best effort; GitHub's branch cache visibility and eviction rules
+still apply. Cache transfers and extra setup can outweigh the savings.
+
 ### Public/private boundary
 
 This repository is **public**. The `mega-research` repository is **private**. Implementation code, compliance suites, and artifacts a reader needs to reproduce or extend published work belong here. Raw experimental data, analysis scripts, manuscript drafts, reviewer correspondence, and intermediate results stay private.
