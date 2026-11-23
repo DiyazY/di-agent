@@ -8,6 +8,9 @@ the panel, restricting access, and accessing its Grafana dashboard.
 
 ## Local development
 
+Use Node.js 24 and run `npm ci` in this directory to install dependencies.
+The container build uses Node.js 24; its final runtime image uses nginx.
+
 Run the services locally or port-forward them from the cluster, then start:
 
 ```bash
