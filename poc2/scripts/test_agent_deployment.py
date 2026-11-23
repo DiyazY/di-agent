@@ -60,6 +60,17 @@ state_file.write_text(json.dumps(state))
 
 
 class AgentDeploymentTests(unittest.TestCase):
+    def test_postgres_readiness_uses_tcp_not_initialization_socket(self):
+        rendered = subprocess.run(
+            ["helm", "template", "test", str(CHART), "--set", "postgres.enabled=true"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        postgres = next(
+            doc for doc in rendered.split("\n---\n")
+            if "kind: StatefulSet\nmetadata:\n  name: postgres\n" in doc
+        )
+        self.assertIn('pg_isready -h 127.0.0.1 -U', postgres)
+
     def test_live_pontos_render_replaces_replay_and_uses_secret_file(self):
         rendered = subprocess.run(
             ["helm", "template", "test", str(CHART),
