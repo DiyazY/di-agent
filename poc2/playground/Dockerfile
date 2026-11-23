@@ -6,7 +6,6 @@ COPY package*.json ./
 # local development, but do not download its browser binary into the build
 # stage; it is not copied into the final nginx image.
 RUN CYPRESS_INSTALL_BINARY=0 npm install
-RUN CYPRESS_INSTALL_BINARY=0 npm install --save-dev @types/node
 COPY . .
 RUN npm run build
 
