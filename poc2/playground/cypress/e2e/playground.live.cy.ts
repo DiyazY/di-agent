@@ -38,7 +38,7 @@ describe("di-agent playground (live cluster)", () => {
       SYSTEMS.forEach(({ configKey }) => {
         expect(config[configKey], configKey).to.be.an("array").and.not.be.empty;
         (config[configKey] as string[]).forEach((id) => {
-          cy.contains(id).should("be.visible");
+          cy.contains("h2", id).should("be.visible");
         });
       });
     });
@@ -81,7 +81,7 @@ describe("di-agent playground (live cluster)", () => {
     });
   });
 
-  it("toggling anomaly mode on a live genset instance flips anomaly_enabled and can be reverted", () => {
+  it("toggling anomaly mode on a live genset instance flips anomaly_enabled", () => {
     cy.request("/config.json").then(({ body: config }) => {
       const id = (config.gensetIds as string[])[0];
       expect(id, "a deployed genset").to.be.a("string").and.not.be.empty;
@@ -90,8 +90,8 @@ describe("di-agent playground (live cluster)", () => {
         restore = { url: `/api/genset/${id}/anomaly`, body: { enabled: original } };
         cy.intercept("POST", `/api/genset/${id}/anomaly`).as("anomaly");
         cy.visit("/");
-        cy.contains(id)
-          .parents(".panel")
+        cy.contains("h2", id)
+          .closest(".panel")
           .within(() => {
             cy.contains("button", original ? "Disable" : "Enable").click();
           });
@@ -116,18 +116,22 @@ describe("di-agent playground (live cluster)", () => {
         cy.then(() => waitForDemand(id, (value) => value < 1, Date.now() + 45000));
         cy.intercept("POST", `/api/propulsion/${id}/load`).as("load");
         cy.visit("/");
-        cy.contains(id)
-          .parents(".panel")
+        cy.contains("h2", id)
+          .closest(".panel")
           .within(() => {
-            cy.get("input[type=range]")
-              .invoke("val", target * 100)
-              .trigger("input")
-              .trigger("change");
+            cy.get("input[type=range]").should("not.be.disabled").then(($input) => {
+              const input = $input[0] as HTMLInputElement;
+              const win = input.ownerDocument.defaultView!;
+              const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+              if (!setValue) throw new Error("Cannot set the range input value");
+              setValue.call(input, String(target * 100));
+              input.dispatchEvent(new win.Event("input", { bubbles: true }));
+            });
             cy.contains("button", "Apply").click();
           });
 
-        cy.contains(id)
-          .parents(".panel")
+        cy.contains("h2", id)
+          .closest(".panel")
           .within(() => {
             cy.contains("Target load").parent().should("contain", `${(target * 100).toFixed(1)}%`);
           });

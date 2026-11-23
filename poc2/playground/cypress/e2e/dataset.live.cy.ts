@@ -4,7 +4,7 @@ describe("engine dataset playground (live cluster)", () => {
     cy.visit("/");
     cy.contains("h2", "Engine dataset").should("be.visible");
     cy.contains("ci-replay").should("be.visible");
-    cy.contains("Connected").should("be.visible");
+    cy.contains(".metric-row", "Collector").should("contain", "Connected");
     cy.get("#dataset-interval").clear().type("750");
     cy.on("window:confirm", () => true);
     cy.contains("button", "Apply settings").click();
