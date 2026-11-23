@@ -313,6 +313,14 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push to `main` and every PR: `go.mod` tidy, `go build ./...`, `go vet ./...`, and `go test -race ./...`. Run `go test -race ./...` locally first; it is the slowest gate and the one that catches real bugs.
 
+The infrastructure job checks Terraform formatting and runs
+`terraform init -backend=false` and `terraform validate` for the EKS and
+libvirt roots. It lints and renders the PoC2 Helm chart with default and cloud
+values. These checks do not use cloud credentials or replace a target-specific
+plan or deployment test. The separate kind job exercises the chart in a
+temporary Kubernetes cluster. Branch protection determines whether the checks
+are required for merge.
+
 ### Public/private boundary
 
 This repository is **public**. The `mega-research` repository is **private**. Implementation code, compliance suites, and artifacts a reader needs to reproduce or extend published work belong here. Raw experimental data, analysis scripts, manuscript drafts, reviewer correspondence, and intermediate results stay private.
