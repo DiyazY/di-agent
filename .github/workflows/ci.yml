@@ -201,6 +201,9 @@ jobs:
       - name: Test playground chart rendering
         run: python3 poc2/scripts/test_playground_deployment.py
 
+      - name: Test telemetry E2E retry and isolation checks
+        run: python3 -m unittest discover -s poc2/scripts -p test_e2e_telemetry.py
+
       - name: Set up Go for worker agent image
         uses: actions/setup-go@v5
         with:
@@ -369,8 +372,8 @@ jobs:
       - name: Dump cluster state on failure
         if: failure()
         run: |
-          kubectl get pods -o wide
-          kubectl describe pods
+          kubectl get pods -o wide || true
+          kubectl describe pods || true
           kubectl logs -l app=dataset-collector --all-containers --tail=200 || true
           kubectl logs -l app=telemetry-writer --all-containers --tail=200 || true
           kubectl logs -l app=di-agent -c di-agent --tail=200 --max-log-requests=10 || true

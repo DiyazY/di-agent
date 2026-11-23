@@ -12,4 +12,4 @@ INSERT INTO run_metadata VALUES
     ('ci-replay', 'signals', '{"ci_replay":{"unit":"rpm","range":[0,100]}}');
 INSERT INTO timeseries VALUES
     ('ci-replay', 'short', 'ci_replay', 0, 42),
-    ('ci-replay', 'short', 'ci_replay', 1, 42);
+    ('ci-replay', 'short', 'ci_replay', 1, 58);

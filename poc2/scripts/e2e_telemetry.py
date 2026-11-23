@@ -53,17 +53,21 @@ producer.close(timeout=10)
         'from(bucket: "telemetry") |> range(start: -10m) '
         f'|> filter(fn: (r) => r._measurement == "dataset_timeseries" '
         f'and r.run_id == "{run_id}" and r.signal == "{metric}" '
-        'and r.origin == "real" and r.source == "short" and r._field == "value")'
+        'and r.origin == "real" and r.source == "short" '
+        'and (r._field == "value" or r._field == "t_source")) '
+        '|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value") '
+        '|> sort(columns: ["_time"])'
     )
     deadline = time.monotonic() + 120
     last_error = "no observations yet"
+    first_verified = None
     while time.monotonic() < deadline:
-        if not replay:
-            kubectl(
-                "exec", "-i", "deploy/dataset-collector", "--", "python", "-c", producer,
-                input_text=message,
-            )
         try:
+            if not replay:
+                kubectl(
+                    "exec", "-i", "deploy/dataset-collector", "--", "python", "-c", producer,
+                    input_text=message,
+                )
             state = agent_request(agents[designated], f"/state?subject={subject}")
             properties = state.get("properties") or []
             sample = next((p for p in properties if p["id"] == f"{metric}@{subject}"), None)
@@ -74,9 +78,14 @@ producer.close(timeout=10)
                 "sh", flux,
             )
             rows = list(csv.DictReader(line for line in io.StringIO(output) if not line.startswith("#")))
-            points = [row for row in rows if row.get("_value") and float(row["_value"]) == 42]
-            if sample and points:
-                if (sample["subject"] != subject or sample["value"] != 42
+            points = [(float(row["t_source"]), float(row["value"]))
+                      for row in rows if row.get("t_source") and row.get("value")]
+            expected = [(0.0, 42.0), (1.0, 58.0)] if replay else [(1.0, 42.0)]
+            matched = any(points[i:i + len(expected)] == expected
+                          for i in range(len(points) - len(expected) + 1))
+            if sample and matched:
+                value_ok = 42 <= sample["value"] <= 58 if replay else sample["value"] == 42
+                if (sample["subject"] != subject or not value_ok
                         or sample["unit"] != "rpm" or sample["range"] != [0, 100]
                         or not sample.get("range_declared")
                         or sample.get("labels", {}).get("origin") != "real"
@@ -87,12 +96,21 @@ producer.close(timeout=10)
                         other = agent_request(pod, f"/state?subject={subject}")
                         if other.get("properties"):
                             raise AssertionError(f"{node} incorrectly collected {subject}")
-                origin = "PostgreSQL -> replay -> Kafka" if replay else "Kafka"
-                print(f"{origin} -> collector -> {designated} and InfluxDB: {subject}")
-                return
-            last_error = f"agent property={sample}, InfluxDB matching points={len(points)}"
-        except subprocess.CalledProcessError as exc:
-            last_error = f"kubectl failed: {exc.stderr}"
+                if first_verified is None:
+                    first_verified = time.monotonic()
+                    last_error = "waiting for another collector polling cycle"
+                elif time.monotonic() - first_verified >= 5:
+                    origin = "PostgreSQL -> replay -> Kafka" if replay else "Kafka"
+                    print(f"{origin} -> collector -> {designated} and InfluxDB: {subject}")
+                    return
+            else:
+                first_verified = None
+                last_error = f"agent property={sample}, recent InfluxDB points={points[-10:]}"
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, KeyError) as exc:
+            first_verified = None
+            last_error = f"telemetry check failed: {exc}"
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                last_error += f": {exc.stderr}"
         time.sleep(5)
     raise TimeoutError(f"telemetry did not reach both destinations: {last_error}")
 
