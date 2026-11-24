@@ -20,7 +20,7 @@ type ReasonerFactory func(t *testing.T) contracts.ReasonerContract
 //   - Traceable rationale: CostOfAction returns a non-empty Rationale.
 //   - Graph path populated: CostOfAction returns at least one GraphPathUsed entry.
 //   - Confidence in [0, 1] for all queries.
-//   - RecommendPeer returns either a rationale or ErrInsufficientTrust.
+//   - RecommendPeer returns either a rationale, ErrInsufficientTrust, or ErrPeerCostQuery.
 //   - SimulateOutcome is pure: calling it twice yields identical results and
 //     does not affect subsequent CostOfAction queries.
 //   - SimulateOutcome P95 (when set) is ≥ ExpectedLatency.
@@ -94,8 +94,8 @@ func RunReasonerCompliance(t *testing.T, factory ReasonerFactory) {
 		r := factory(t)
 		rec, err := r.RecommendPeer(defaultCtx())
 		if err != nil {
-			if !errors.Is(err, contracts.ErrInsufficientTrust) {
-				t.Fatalf("expected nil or ErrInsufficientTrust; got %v", err)
+			if !errors.Is(err, contracts.ErrInsufficientTrust) && !errors.Is(err, contracts.ErrPeerCostQuery) {
+				t.Fatalf("expected nil, ErrInsufficientTrust or ErrPeerCostQuery; got %v", err)
 			}
 			return // acceptable: no peers meet the trust threshold
 		}

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "cy:open": "cypress open",
     "cy:run": "cypress run --spec 'cypress/e2e/{playground,dataset}.cy.ts'",
-    "cy:run:live": "cypress run --spec cypress/e2e/playground.live.cy.ts"
+    "cy:run:live": "cypress run --spec cypress/e2e/playground.live.cy.ts",
+    "cy:run:live:dataset": "cypress run --spec cypress/e2e/dataset.live.cy.ts"
   },
   "dependencies": {
     "react": "^18.3.1",

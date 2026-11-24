@@ -11,12 +11,41 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/explain"
 	"github.com/DiyazY/di-agent/pkg/profiles"
 	"github.com/DiyazY/di-agent/pkg/semmap"
 	"github.com/DiyazY/di-agent/pkg/spec"
 	"github.com/DiyazY/di-agent/pkg/statemap"
 )
+
+func TestPeerCostQueryErrorReturnsBadGateway(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeReasonerError(w, fmt.Errorf("query: %w", contracts.ErrPeerCostQuery))
+	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "peer cost query failed") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestCostRejectsForeignNode(t *testing.T) {
+	base, sm, cleanup := newTestAgent(t)
+	defer cleanup()
+	sm.SetIdentity("node-self", false)
+	for _, query := range []string{"node=node-other", "node_id=node-other"} {
+		resp, err := http.Get(base + "/cost?task=pod-scheduling&" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "cannot answer for") {
+			t.Fatalf("%s: status=%d body=%s", query, resp.StatusCode, body)
+		}
+	}
+}
 
 // newTestAgent wires a SemanticMap via the edge-minimal profile and returns
 // the base URL of an httptest server bound to that map. Tests use it to

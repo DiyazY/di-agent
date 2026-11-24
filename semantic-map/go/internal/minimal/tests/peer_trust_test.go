@@ -17,20 +17,29 @@ import (
 )
 
 type trustFixture struct {
-	reg  *peers.Registry
-	d    *peers.Descriptor
-	fail *atomic.Bool
-	hits *atomic.Int64
-	now  *time.Time
-	ask  func() error
-	last *types.PeerRecommendation
+	reg       *peers.Registry
+	d         *peers.Descriptor
+	fail      *atomic.Bool
+	hits      *atomic.Int64
+	status    *atomic.Int64
+	nodeQuery *atomic.Bool
+	now       *time.Time
+	ask       func() error
+	last      *types.PeerRecommendation
 }
 
 func newTrustFixture(t *testing.T) *trustFixture {
 	t.Helper()
-	f := &trustFixture{fail: &atomic.Bool{}, hits: &atomic.Int64{}}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := &trustFixture{fail: &atomic.Bool{}, hits: &atomic.Int64{}, status: &atomic.Int64{}, nodeQuery: &atomic.Bool{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
+		if _, ok := r.URL.Query()["node"]; ok {
+			f.nodeQuery.Store(true)
+		}
+		if status := f.status.Load(); status != 0 {
+			http.Error(w, "peer error", int(status))
+			return
+		}
 		if f.fail.Load() {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
@@ -71,6 +80,66 @@ func (f *trustFixture) peer(t *testing.T) *peers.Descriptor {
 }
 
 func near(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
+func TestPeerCostUsesLocalNode(t *testing.T) {
+	f := newTrustFixture(t)
+	if err := f.ask(); err != nil {
+		t.Fatal(err)
+	}
+	if f.nodeQuery.Load() {
+		t.Fatal("peer cost request included a node parameter")
+	}
+}
+
+func TestPeerCostFailuresAreDistinctAndClientErrorsDoNotPenalise(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		trust  float64
+	}{
+		{http.StatusConflict, 0.5},
+		{http.StatusBadRequest, 0.5},
+		{http.StatusInternalServerError, 0.45},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			f := newTrustFixture(t)
+			f.status.Store(int64(tc.status))
+			err := f.ask()
+			if !errors.Is(err, contracts.ErrPeerCostQuery) || errors.Is(err, contracts.ErrInsufficientTrust) {
+				t.Fatalf("error = %v, want peer cost query failure", err)
+			}
+			if d := f.peer(t); !near(d.Trust, tc.trust) {
+				t.Fatalf("trust = %v, want %v", d.Trust, tc.trust)
+			}
+		})
+	}
+}
+
+func TestPeerCostTransportFailurePenalises(t *testing.T) {
+	f := newTrustFixture(t)
+	f.reg.Remove(f.d.ID)
+	f.d, _ = f.reg.Add("http://127.0.0.1:1", "")
+	err := f.ask()
+	if !errors.Is(err, contracts.ErrPeerCostQuery) {
+		t.Fatalf("error = %v, want peer cost query failure", err)
+	}
+	if d := f.peer(t); !near(d.Trust, 0.45) {
+		t.Fatalf("trust = %v, want 0.45", d.Trust)
+	}
+}
+
+func TestPeerCostFailureDoesNotHideAnotherEligiblePeer(t *testing.T) {
+	f := newTrustFixture(t)
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer bad.Close()
+	if _, err := f.reg.Add(bad.URL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ask(); err != nil || f.last.PeerID != f.d.ID {
+		t.Fatalf("recommendation = %+v, error = %v", f.last, err)
+	}
+}
 
 func TestAPenalisedPeerIsReprobedAfterTenMinutes(t *testing.T) {
 	f := newTrustFixture(t)
