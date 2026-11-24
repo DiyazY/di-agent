@@ -11,7 +11,7 @@ import (
 )
 
 // startGossipLoop returns a completion signal so shutdown can wait for the last
-// in-flight exchange. Zero interval preserves milestone one's manual-only mode.
+// in-flight exchange. Zero interval preserves manual-only mode.
 func startGossipLoop(ctx context.Context, exchange *gossip.Exchange, registry *peers.Registry,
 	every time.Duration) <-chan struct{} {
 	if exchange == nil || every <= 0 {

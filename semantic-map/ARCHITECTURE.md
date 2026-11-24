@@ -1806,7 +1806,7 @@ jitter, reports failures/recovery, and is cancelled and awaited at shutdown.
 This is pull-based object dissemination, not a gossip membership protocol:
 no discovery, locality policy, durability, authenticated origin, or
 version-ordering of mutable state exists here. See
-[the operational examples](README.md#experimental-gossip-objects-memory-only-milestone).
+[the object exchange reference](README.md#experimental-gossip-objects).
 
 ### Trust mechanics
 

@@ -83,7 +83,7 @@ func TestGossipOptInSurvivesConfigurationRoundTrip(t *testing.T) {
 func TestGossipIntervalIsExplicitAndBounded(t *testing.T) {
 	manual, err := Parse([]byte("gossip: {enabled: true}"))
 	if err != nil || manual.Gossip.Interval != 0 {
-		t.Fatalf("milestone-one configuration no longer manual-only: err=%v", err)
+		t.Fatalf("default gossip interval no longer manual-only: err=%v", err)
 	}
 	for _, doc := range []string{
 		"gossip: {enabled: true, interval: -1s}",
