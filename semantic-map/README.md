@@ -1299,7 +1299,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
-| `gossip.enabled`         | `false` | Expose experimental manual content-addressed object exchange. Memory only; no discovery or periodic gossip. See [gossip objects](#experimental-gossip-objects-memory-only-milestone). |
+| `gossip.enabled`         | `false` | Expose experimental manual content-addressed object exchange. Memory only; no discovery or periodic gossip. See [gossip objects](#experimental-gossip-objects). |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `explain.provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
@@ -1552,11 +1552,11 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 
 These endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
 
-### Experimental gossip objects: memory-only milestone
+### Experimental gossip objects
 
 Set `gossip.enabled: true` on each participating agent to expose the object
-exchange below. It is off by default. This milestone provides manual publication
-and pull from registered peers, **not** discovery, periodic gossip, failure
+exchange below. It is off by default. It provides manual publication and pull
+from registered peers, **not** discovery, periodic gossip, failure
 detection, disk storage, or automatic semantic-state replication.
 
 An object is an immutable JSON envelope:
@@ -1596,67 +1596,6 @@ oversized remote content, returns 502 without storing it. Fetches have a five
 second timeout, bound response reads, and refuse redirects. Fetch accepts a
 registered peer ID, never a caller-supplied URL. Peer registration and these
 endpoints are unauthenticated: use only an isolated trusted network.
-
-For a two-agent example, run A on `127.0.0.1:8080` and B on
-`127.0.0.1:8081`, with distinct `node.id` values and `gossip.enabled: true`.
-For an object-only experiment, set `peers.state_poll: 0s` to disable the
-independent semantic-state polling loop. Save this complete configuration as
-`/tmp/di-agent-gossip-a.yaml`:
-
-```yaml
-node:
-  id: node-a
-  addr: 127.0.0.1:8080
-sources:
-  collectors: []
-persist:
-  file: ""
-peers:
-  state_poll: 0s
-map:
-  proposer:
-    enabled: false
-gossip:
-  enabled: true
-```
-
-Copy the **entire configuration** to `/tmp/di-agent-gossip-b.yaml`, changing
-only `node.id` to `node-b` and `node.addr` to `127.0.0.1:8081`. Keep every other
-section: a file containing only `node` inherits the default persistence path
-`/var/lib/di-agent/state.json` and leaves gossip disabled.
-
-Build from `semantic-map/go`, then run each agent in its own terminal, also
-from that directory:
-
-```bash
-go build -o /tmp/di-agent-gossip ./cmd/agent
-# Terminal 1
-/tmp/di-agent-gossip -config /tmp/di-agent-gossip-a.yaml
-# Terminal 2
-/tmp/di-agent-gossip -config /tmp/di-agent-gossip-b.yaml
-```
-
-In a third terminal, publish on A, register A on B, then
-request the hash on B (`jq` is used only for this example):
-
-```bash
-HASH=$(curl -fsS http://127.0.0.1:8080/gossip/objects \
-  -H 'Content-Type: application/json' \
-  -d '{"payload_type":"announcement","payload":{"capability":"compute"}}' | jq -r .hash)
-PEER_ID=$(curl -fsS http://127.0.0.1:8081/peers \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"http://127.0.0.1:8080"}' | jq -r .id)
-curl -fsS "http://127.0.0.1:8081/gossip/objects/$HASH/fetch" \
-  -H 'Content-Type: application/json' -d "{\"peer_id\":\"$PEER_ID\"}"
-curl -fsS "http://127.0.0.1:8081/gossip/objects/$HASH"
-```
-
-Repeating the fetch returns `added: false`. To run the object and HTTP integration
-tests from `semantic-map/go`:
-
-```bash
-go test ./pkg/gossip ./pkg/agentmain ./pkg/spec
-```
 
 ### `mapctl peers`
 

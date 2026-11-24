@@ -1791,9 +1791,9 @@ origin; manual pulls use registered peer IDs and verify hashes before admission.
 Duplicate receipt is idempotent; full stores refuse admission rather than evict.
 The origin is unauthenticated. Nothing is applied to `statemap.Map` or
 `statemap.PeerStore`, and no trust updates are inferred from receipt.
-This is the objects-and-memory milestone, not a gossip membership protocol:
+This is object exchange, not a gossip membership protocol:
 no discovery, periodic dissemination, durability, or version-ordering of mutable
-state exists here. See [the operational example](README.md#experimental-gossip-objects-memory-only-milestone).
+state exists here. See [the object exchange reference](README.md#experimental-gossip-objects).
 
 ### Trust mechanics
 
