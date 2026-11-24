@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -100,6 +102,65 @@ func TestGossipTwoAgentsExchangeObjectsWithoutChangingLocalState(t *testing.T) {
 	if !reflect.DeepEqual(beforeA, a.state.State(statemap.Query{})) ||
 		!reflect.DeepEqual(beforeB, b.state.State(statemap.Query{})) {
 		t.Fatal("object exchange changed local semantic state")
+	}
+}
+
+func TestGossipRoutesReportPersistenceFailuresAndRestoreObjects(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "objects")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := gossip.NewPersistent(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registry := peers.NewRegistry()
+	registerGossipRoutes(mux, "node-a", registry, store, gossip.NewClient())
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	body := `{"payload_type":"announcement","payload":{"test":"durable"}}`
+	code, response := gossipRequest(t, "POST", server.URL+"/gossip/objects", body)
+	var published struct {
+		Hash  string `json:"hash"`
+		Added bool   `json:"added"`
+	}
+	if err := json.Unmarshal(response, &published); err != nil || code != http.StatusOK || !published.Added {
+		t.Fatalf("publish: status=%d body=%s err=%v", code, response, err)
+	}
+	restarted, err := gossip.NewPersistent(dir)
+	if err != nil || !restarted.Has(published.Hash) {
+		t.Fatalf("published object not restored: err=%v", err)
+	}
+	remote := newGossipNode(t, "node-b")
+	remoteData, err := gossip.Encode("node-b", "announcement", json.RawMessage(`{"test":"remote"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteHash := gossip.Hash(remoteData)
+	if _, err := remote.store.Put(remoteHash, remoteData); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := registry.Add(remote.url, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, dir+"-offline"); err != nil {
+		t.Fatal(err)
+	}
+	code, response = gossipRequest(t, "POST", server.URL+"/gossip/objects",
+		`{"payload_type":"announcement","payload":{"test":"failed"}}`)
+	if code != http.StatusInternalServerError || !strings.Contains(string(response), "gossip persistence failed") {
+		t.Fatalf("failed write acknowledged: status=%d body=%s", code, response)
+	}
+	code, response = gossipRequest(t, "POST", server.URL+"/gossip/objects/"+remoteHash+"/fetch",
+		`{"peer_id":"`+peer.ID+`"}`)
+	if code != http.StatusInternalServerError || !strings.Contains(string(response), "gossip persistence failed") {
+		t.Fatalf("failed fetch write acknowledged: status=%d body=%s", code, response)
+	}
+	if len(store.Inventory().Hashes) != 1 {
+		t.Fatal("failed write was added to inventory")
 	}
 }
 

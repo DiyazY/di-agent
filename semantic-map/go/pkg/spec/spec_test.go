@@ -60,11 +60,11 @@ func TestAFileOverlaysTheDefaults(t *testing.T) {
 }
 
 func TestGossipOptInSurvivesConfigurationRoundTrip(t *testing.T) {
-	got, err := Parse([]byte("gossip: {enabled: true, interval: 1s}"))
+	got, err := Parse([]byte("gossip: {enabled: true, interval: 1s, storage_dir: /tmp/gossip}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Gossip.Enabled || got.Gossip.Interval != time.Second {
+	if !got.Gossip.Enabled || got.Gossip.Interval != time.Second || got.Gossip.StorageDir != "/tmp/gossip" {
 		t.Fatal("gossip opt-in ignored")
 	}
 	doc, err := got.YAML()
@@ -72,7 +72,7 @@ func TestGossipOptInSurvivesConfigurationRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	reloaded, err := Parse(doc)
-	if err != nil || !reloaded.Gossip.Enabled || reloaded.Gossip.Interval != time.Second {
+	if err != nil || !reloaded.Gossip.Enabled || reloaded.Gossip.Interval != time.Second || reloaded.Gossip.StorageDir != "/tmp/gossip" {
 		t.Fatalf("gossip opt-in lost on round trip: err=%v", err)
 	}
 	if _, err := Parse([]byte("gossip: {enable: true}")); err == nil {
@@ -89,6 +89,8 @@ func TestGossipIntervalIsExplicitAndBounded(t *testing.T) {
 		"gossip: {enabled: true, interval: -1s}",
 		"gossip: {enabled: true, interval: 100ms}",
 		"gossip: {enabled: false, interval: 1s}",
+		"gossip: {enabled: false, storage_dir: /tmp/gossip}",
+		"gossip: {enabled: true, storage_dir: '   '}",
 	} {
 		if _, err := Parse([]byte(doc)); err == nil {
 			t.Fatalf("invalid interval accepted: %s", doc)

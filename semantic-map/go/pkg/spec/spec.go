@@ -49,11 +49,12 @@ type Spec struct {
 	Groups    Groups       `yaml:"groups"`
 }
 
-// Gossip enables the experimental memory-only object exchange. A zero interval
-// leaves it manual-only. Discovery and semantic-state replication remain absent.
+// Gossip enables experimental object exchange. A zero interval leaves it
+// manual-only; an empty storage directory keeps objects in memory.
 type Gossip struct {
-	Enabled  bool          `yaml:"enabled"`
-	Interval time.Duration `yaml:"interval"`
+	Enabled    bool          `yaml:"enabled"`
+	Interval   time.Duration `yaml:"interval"`
+	StorageDir string        `yaml:"storage_dir"`
 }
 
 // Groups says how the node's subjects are grouped: pods by a label an operator sets,
@@ -877,6 +878,12 @@ func (s Spec) Validate() error {
 	}
 	if s.Gossip.Interval > 0 && !s.Gossip.Enabled {
 		errs = append(errs, errors.New("gossip.interval requires gossip.enabled: true"))
+	}
+	if s.Gossip.StorageDir != "" && !s.Gossip.Enabled {
+		errs = append(errs, errors.New("gossip.storage_dir requires gossip.enabled: true"))
+	}
+	if s.Gossip.StorageDir != "" && strings.TrimSpace(s.Gossip.StorageDir) == "" {
+		errs = append(errs, errors.New("gossip.storage_dir must not contain only whitespace"))
 	}
 
 	if !slices.Contains([]string{"off", "suggest", "rules", "bounded", "full"}, s.Loops.Review.Level) {

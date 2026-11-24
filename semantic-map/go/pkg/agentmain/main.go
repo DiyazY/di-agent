@@ -395,10 +395,20 @@ func Main() {
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 	var gossipExchange *gossip.Exchange
 	if cfg.Gossip.Enabled {
-		store, client := gossip.NewMemory(), gossip.NewClient()
+		store := gossip.NewMemory()
+		if cfg.Gossip.StorageDir != "" {
+			store, err = gossip.NewPersistent(cfg.Gossip.StorageDir)
+			if err != nil {
+				log.Fatalf("gossip: %v", err)
+			}
+			log.Printf("gossip: persistent object store at %s", cfg.Gossip.StorageDir)
+		} else {
+			log.Printf("gossip: memory-only object store")
+		}
+		client := gossip.NewClient()
 		registerGossipRoutes(mux, cfg.Node.ID, sm.Peers(), store, client)
 		gossipExchange = gossip.NewExchange(store, client)
-		log.Printf("gossip: memory-only object exchange enabled; interval=%s (0s is manual-only)", cfg.Gossip.Interval)
+		log.Printf("gossip: object exchange enabled; interval=%s (0s is manual-only)", cfg.Gossip.Interval)
 	}
 	registerConsole(mux, cfg.Node.UI)
 

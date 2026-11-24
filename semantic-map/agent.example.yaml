@@ -72,6 +72,10 @@ peers:
     urls: []
     state_poll: 30s
     state_stale: 1m30s
+gossip:
+    enabled: false
+    interval: 0s
+    storage_dir: ""
 domain:
     path: ""
 explain:

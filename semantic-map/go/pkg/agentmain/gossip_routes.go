@@ -37,6 +37,8 @@ func gossipError(w http.ResponseWriter, err error) {
 		status = http.StatusRequestEntityTooLarge
 	} else if errors.Is(err, gossip.ErrFull) {
 		status = http.StatusInsufficientStorage
+	} else if errors.Is(err, gossip.ErrPersistence) {
+		status = http.StatusInternalServerError
 	}
 	writeError(w, status, err.Error())
 }
