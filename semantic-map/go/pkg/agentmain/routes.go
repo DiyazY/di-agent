@@ -153,7 +153,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	})
 
 	// POST /recommend  {"task_type":"...","source_node_id":"...","data_size_bytes":1024,"latency_budget_ms":500}
-	// Not a read: every peer it queries is rewarded or penalised, so it takes the
+	// Not a read: the peers it queries are rewarded or penalised, so it takes the
 	// same CSRF guard as the mutations below.
 	mux.HandleFunc("POST /recommend", func(w http.ResponseWriter, r *http.Request) {
 		if err := requireJSON(r); err != nil {

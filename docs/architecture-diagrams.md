@@ -64,7 +64,7 @@ flowchart LR
 
 **S4 · Networking and coordination.** A static registry (`peers.urls`, or `POST /peers`) of peer URLs. Agents query each other's `/cost`, forward `/offers`, and poll each other's `/state` into a `PeerStore` that is held apart from local state and never merged. *Open:* no discovery (mDNS/gossip is planned only); plain HTTP; one registry implementation, not yet a contract.
 
-**S5 · Trust and security.** Trust is a number per peer in `[0, 1]`, moved by reachability (±0.05 per `/cost` query) and by an operator. `RecommendPeer` ranks by `savings × trust` and skips peers under `min_trust`. Security is a scope decision: **no authentication on any endpoint**; the defences are a JSON content-type check against browser CSRF, node-local ingest (foreign samples rejected) and owner checks on peer state. *Open:* outcome-driven trust (accepted/declined offers, broken predictions) is not wired; admission does not read trust; no TLS, no peer identity, no authorisation.
+**S5 · Trust and security.** Trust is a number per peer in `[0, 1]`, moved by reachability (+0.05 when a peer answers `/cost`, −0.05 when the query fails other than by a 4xx) and by an operator. `RecommendPeer` ranks by `savings × trust` and skips peers under `min_trust`. Security is a scope decision: **no authentication on any endpoint**; the defences are a JSON content-type check against browser CSRF, node-local ingest (foreign samples rejected) and owner checks on peer state. *Open:* outcome-driven trust (accepted/declined offers, broken predictions) is not wired; admission does not read trust; no TLS, no peer identity, no authorisation.
 
 **S6 · Autonomy and governance.** The autonomy reviewer decides on the proposer's candidates in tiers — rules, then a decision model, then a tool-using reasoner — bounded by `loops.review.level`. Every estimate, relief step, admission and review is a journalled decision whose inputs can be read back. `/explain` answers questions about the map through read-only tools, checked by a validator and a critic. *Open:* the reviewer governs discovery only, not actions; there is no AgentOps view across nodes.
 
@@ -442,7 +442,7 @@ Every agent exposes the same surface; there is no coordinator role in the agent.
 
 | Call | Direction | Used by | Effect on the caller |
 |---|---|---|---|
-| `GET /cost?task=&node=` | A to B | `RecommendPeer` (S5) | reward or penalise B's trust |
+| `GET /cost?task=` | A to B | `RecommendPeer` (S5) | B answers for itself; reward B, or penalise it unless B answered 4xx |
 | `POST /offers` | A to B | admission walk (S3) | appends B's hop to the chain |
 | `GET /state` | A to B | peer state poll | stored in `PeerStore` under the node id B reports for itself |
 | `GET /healthz` | any | probes | none |
@@ -495,7 +495,8 @@ Peers are a static, operator-built mesh: `peers.urls` at start, or `POST /peers`
 stateDiagram-v2
     [*] --> eligible: registered, trust 0.5
     eligible --> eligible: /cost succeeds, +0.05
-    eligible --> eligible: /cost fails, -0.05, stamp LastPenalised
+    eligible --> eligible: /cost fails (transport, 5xx, bad body), -0.05, stamp LastPenalised
+    eligible --> eligible: /cost answers 4xx, no change
     eligible --> penalised: trust below min_trust after a penalty
     penalised --> reprobed: 10 min since LastPenalised
     reprobed --> eligible: /cost succeeds and trust back at the floor
@@ -528,16 +529,18 @@ sequenceDiagram
         alt trust below floor and not due a re-probe
             R->>R: skip
         else
-            R->>P: GET /cost?task=&node=P
-            alt error
+            R->>P: GET /cost?task= (P answers for itself)
+            alt transport error, 5xx or bad body
                 R->>Reg: Penalise(P), -0.05
+            else 4xx
+                R->>R: skip, trust unchanged
             else ok
                 R->>Reg: Reward(P), +0.05, MarkSeen
                 Note over R: re-read trust, skip if still under the floor<br/>savings = local - peer cost<br/>weighted = savings x trust, skip if savings at or below 0
             end
         end
     end
-    R-->>Cl: best weighted peer, rationale<br/>or ErrInsufficientTrust with skip counts
+    R-->>Cl: best weighted peer, rationale<br/>or 502 if a query failed, else 409, with skip counts
 ```
 
 ### Security boundary
