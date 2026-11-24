@@ -39,6 +39,7 @@ type Spec struct {
 	Map       MapSpec      `yaml:"map"`
 	Persist   Persist      `yaml:"persist"`
 	Peers     Peers        `yaml:"peers"`
+	Gossip    Gossip       `yaml:"gossip"`
 	Domain    Domain       `yaml:"domain"`
 	Explain   Explain      `yaml:"explain"`
 	Runtime   RuntimeSpec  `yaml:"runtime"`
@@ -46,6 +47,12 @@ type Spec struct {
 	Loops     Loops        `yaml:"loops"`
 	Policy    PolicySpec   `yaml:"policy"`
 	Groups    Groups       `yaml:"groups"`
+}
+
+// Gossip enables the experimental memory-only object exchange. It does not
+// enable discovery, periodic gossip, or semantic-state replication.
+type Gossip struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Groups says how the node's subjects are grouped: pods by a label an operator sets,

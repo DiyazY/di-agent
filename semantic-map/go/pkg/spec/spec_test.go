@@ -59,6 +59,27 @@ func TestAFileOverlaysTheDefaults(t *testing.T) {
 	}
 }
 
+func TestGossipOptInSurvivesConfigurationRoundTrip(t *testing.T) {
+	got, err := Parse([]byte("gossip: {enabled: true}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Gossip.Enabled {
+		t.Fatal("gossip opt-in ignored")
+	}
+	doc, err := got.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Parse(doc)
+	if err != nil || !reloaded.Gossip.Enabled {
+		t.Fatalf("gossip opt-in lost on round trip: err=%v", err)
+	}
+	if _, err := Parse([]byte("gossip: {enable: true}")); err == nil {
+		t.Fatal("misspelled gossip option accepted")
+	}
+}
+
 func TestEnvironmentIsExpanded(t *testing.T) {
 	t.Setenv("KEY", "s3cret")
 	got, err := Parse([]byte("explain:\n  api_key: ${KEY}\n"))

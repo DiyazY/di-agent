@@ -48,6 +48,7 @@ import (
 	"github.com/DiyazY/di-agent/pkg/contracts"
 	"github.com/DiyazY/di-agent/pkg/domain"
 	"github.com/DiyazY/di-agent/pkg/explain"
+	"github.com/DiyazY/di-agent/pkg/gossip"
 	"github.com/DiyazY/di-agent/pkg/groups"
 	"github.com/DiyazY/di-agent/pkg/peers"
 	"github.com/DiyazY/di-agent/pkg/policy"
@@ -392,6 +393,10 @@ func Main() {
 		workloads: rt.Workloads, logf: log.Printf}
 	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
+	if cfg.Gossip.Enabled {
+		registerGossipRoutes(mux, cfg.Node.ID, sm.Peers(), gossip.NewMemory(), gossip.NewClient())
+		log.Printf("gossip: memory-only object exchange enabled; no discovery or automatic dissemination")
+	}
 	registerConsole(mux, cfg.Node.UI)
 
 	pace := NewPace(state, PaceInputs{
