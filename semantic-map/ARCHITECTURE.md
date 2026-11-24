@@ -1791,9 +1791,22 @@ origin; manual pulls use registered peer IDs and verify hashes before admission.
 Duplicate receipt is idempotent; full stores refuse admission rather than evict.
 The origin is unauthenticated. Nothing is applied to `statemap.Map` or
 `statemap.PeerStore`, and no trust updates are inferred from receipt.
-This is the objects-and-memory milestone, not a gossip membership protocol:
-no discovery, periodic dissemination, durability, or version-ordering of mutable
-state exists here. See [the operational example](README.md#experimental-gossip-objects-memory-only-milestone).
+`gossip.interval` defaults to zero, preserving manual-only exchange. A positive
+interval (at least one second) runs `pkg/gossip.Exchange` through
+`pkg/agentmain/gossip_loop.go`: it pulls validated inventories from a rotating
+subset of registered URLs and fetches only missing objects. Each sequential round
+checks at most two peers, attempts at most eight object fetches (including failed
+ones), and has a five-second deadline. Inventories are bounded to 16 KiB and 128
+unique valid hashes. Per-peer cursors keep corrupt leading hashes from starving
+later content; removed peers' cursors are discarded. Newly admitted objects are
+advertised by the same inventory endpoint, allowing A -> B -> C propagation
+without C knowing A. The loop reads the live registry, uses positive interval
+jitter, reports failures/recovery, and is cancelled and awaited at shutdown.
+
+This is pull-based object dissemination, not a gossip membership protocol:
+no discovery, locality policy, durability, authenticated origin, or
+version-ordering of mutable state exists here. See
+[the operational examples](README.md#experimental-gossip-objects-memory-only-milestone).
 
 ### Trust mechanics
 

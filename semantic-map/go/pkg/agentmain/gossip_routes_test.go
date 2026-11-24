@@ -35,27 +35,30 @@ func gossipRequest(t *testing.T, method, url, body string) (int, []byte) {
 	return resp.StatusCode, data
 }
 
+type gossipNode struct {
+	url   string
+	state *statemap.Map
+	store *gossip.Memory
+	peers *peers.Registry
+}
+
+func newGossipNode(t *testing.T, id string) gossipNode {
+	t.Helper()
+	state := statemap.New(statemap.Config{Owner: id, AdmitUnknown: true}, statemap.NewJournal(0))
+	if err := state.Observe("cpu_utilization", 0.2, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	store, registry := gossip.NewMemory(), peers.NewRegistry()
+	mux := http.NewServeMux()
+	registerStateRoutes(mux, state, nil, nil)
+	registerGossipRoutes(mux, id, registry, store, gossip.NewClient())
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return gossipNode{srv.URL, state, store, registry}
+}
+
 func TestGossipTwoAgentsExchangeObjectsWithoutChangingLocalState(t *testing.T) {
-	type node struct {
-		url   string
-		state *statemap.Map
-		store *gossip.Memory
-		peers *peers.Registry
-	}
-	newNode := func(id string) node {
-		state := statemap.New(statemap.Config{Owner: id, AdmitUnknown: true}, statemap.NewJournal(0))
-		if err := state.Observe("cpu_utilization", 0.2, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-		store, registry := gossip.NewMemory(), peers.NewRegistry()
-		mux := http.NewServeMux()
-		registerStateRoutes(mux, state, nil, nil)
-		registerGossipRoutes(mux, id, registry, store, gossip.NewClient())
-		srv := httptest.NewServer(mux)
-		t.Cleanup(srv.Close)
-		return node{srv.URL, state, store, registry}
-	}
-	a, b := newNode("node-a"), newNode("node-b")
+	a, b := newGossipNode(t, "node-a"), newGossipNode(t, "node-b")
 	beforeA, beforeB := a.state.State(statemap.Query{}), b.state.State(statemap.Query{})
 	code, response := gossipRequest(t, "POST", a.url+"/gossip/objects",
 		`{"payload_type":"announcement","payload":{"capability":"compute"}}`)

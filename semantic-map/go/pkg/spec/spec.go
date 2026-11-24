@@ -49,10 +49,11 @@ type Spec struct {
 	Groups    Groups       `yaml:"groups"`
 }
 
-// Gossip enables the experimental memory-only object exchange. It does not
-// enable discovery, periodic gossip, or semantic-state replication.
+// Gossip enables the experimental memory-only object exchange. A zero interval
+// leaves it manual-only. Discovery and semantic-state replication remain absent.
 type Gossip struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"`
 }
 
 // Groups says how the node's subjects are grouped: pods by a label an operator sets,
@@ -870,6 +871,13 @@ func (s Spec) Validate() error {
 	notNegative("map.retire_after", s.Map.RetireAfter)
 	notNegative("persist.interval", s.Persist.Interval)
 	notNegative("peers.state_poll", s.Peers.StatePoll)
+	notNegative("gossip.interval", s.Gossip.Interval)
+	if s.Gossip.Interval > 0 && s.Gossip.Interval < time.Second {
+		errs = append(errs, fmt.Errorf("gossip.interval = %v, want 0 (manual-only) or at least 1s", s.Gossip.Interval))
+	}
+	if s.Gossip.Interval > 0 && !s.Gossip.Enabled {
+		errs = append(errs, errors.New("gossip.interval requires gossip.enabled: true"))
+	}
 
 	if !slices.Contains([]string{"off", "suggest", "rules", "bounded", "full"}, s.Loops.Review.Level) {
 		errs = append(errs, fmt.Errorf("loops.review.level = %q, want off, suggest, rules, bounded or full", s.Loops.Review.Level))

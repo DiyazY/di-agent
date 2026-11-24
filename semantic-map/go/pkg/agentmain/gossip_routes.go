@@ -111,7 +111,7 @@ func registerGossipRoutes(mux *http.ServeMux, originID string, registry *peers.R
 			writeError(w, http.StatusNotFound, "no registered peer "+in.PeerID)
 			return
 		}
-		if _, ok := store.Get(hash); ok {
+		if store.Has(hash) {
 			writeJSON(w, map[string]any{"hash": hash, "added": false})
 			return
 		}

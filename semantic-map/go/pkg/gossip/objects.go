@@ -1,6 +1,6 @@
 // Package gossip provides immutable, content-addressed objects kept separately
-// from the agent's local semantic map. It does not yet perform discovery or
-// automatic dissemination.
+// from the agent's local semantic map, with bounded pull-based dissemination
+// over explicitly registered peers. It does not perform discovery.
 package gossip
 
 import (
@@ -149,6 +149,13 @@ func (m *Memory) Get(hash string) ([]byte, bool) {
 	defer m.mu.RUnlock()
 	data, ok := m.objects[hash]
 	return bytes.Clone(data), ok
+}
+
+func (m *Memory) Has(hash string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.objects[hash]
+	return ok
 }
 
 type Inventory struct {

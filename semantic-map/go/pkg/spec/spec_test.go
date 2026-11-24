@@ -60,11 +60,11 @@ func TestAFileOverlaysTheDefaults(t *testing.T) {
 }
 
 func TestGossipOptInSurvivesConfigurationRoundTrip(t *testing.T) {
-	got, err := Parse([]byte("gossip: {enabled: true}"))
+	got, err := Parse([]byte("gossip: {enabled: true, interval: 1s}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Gossip.Enabled {
+	if !got.Gossip.Enabled || got.Gossip.Interval != time.Second {
 		t.Fatal("gossip opt-in ignored")
 	}
 	doc, err := got.YAML()
@@ -72,11 +72,27 @@ func TestGossipOptInSurvivesConfigurationRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	reloaded, err := Parse(doc)
-	if err != nil || !reloaded.Gossip.Enabled {
+	if err != nil || !reloaded.Gossip.Enabled || reloaded.Gossip.Interval != time.Second {
 		t.Fatalf("gossip opt-in lost on round trip: err=%v", err)
 	}
 	if _, err := Parse([]byte("gossip: {enable: true}")); err == nil {
 		t.Fatal("misspelled gossip option accepted")
+	}
+}
+
+func TestGossipIntervalIsExplicitAndBounded(t *testing.T) {
+	manual, err := Parse([]byte("gossip: {enabled: true}"))
+	if err != nil || manual.Gossip.Interval != 0 {
+		t.Fatalf("milestone-one configuration no longer manual-only: err=%v", err)
+	}
+	for _, doc := range []string{
+		"gossip: {enabled: true, interval: -1s}",
+		"gossip: {enabled: true, interval: 100ms}",
+		"gossip: {enabled: false, interval: 1s}",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Fatalf("invalid interval accepted: %s", doc)
+		}
 	}
 }
 

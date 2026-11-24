@@ -393,9 +393,12 @@ func Main() {
 		workloads: rt.Workloads, logf: log.Printf}
 	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
+	var gossipExchange *gossip.Exchange
 	if cfg.Gossip.Enabled {
-		registerGossipRoutes(mux, cfg.Node.ID, sm.Peers(), gossip.NewMemory(), gossip.NewClient())
-		log.Printf("gossip: memory-only object exchange enabled; no discovery or automatic dissemination")
+		store, client := gossip.NewMemory(), gossip.NewClient()
+		registerGossipRoutes(mux, cfg.Node.ID, sm.Peers(), store, client)
+		gossipExchange = gossip.NewExchange(store, client)
+		log.Printf("gossip: memory-only object exchange enabled; interval=%s (0s is manual-only)", cfg.Gossip.Interval)
 	}
 	registerConsole(mux, cfg.Node.UI)
 
@@ -471,6 +474,7 @@ func Main() {
 	go pace.Run(ctx)
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval, pace)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
+	gossipDone := startGossipLoop(ctx, gossipExchange, sm.Peers(), cfg.Gossip.Interval)
 	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
 	// A nil *Supervisor in the interface would not compare equal to nil, and the loop
@@ -494,6 +498,9 @@ func Main() {
 	<-quit
 	log.Println("shutting down")
 	cancel()
+	if gossipDone != nil {
+		<-gossipDone
+	}
 
 	// The final save happens HERE, synchronously, not in the save loop. Cancelling the
 	// context and returning let the process exit while the goroutine was still racing to

@@ -1299,7 +1299,8 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
-| `gossip.enabled`         | `false` | Expose experimental manual content-addressed object exchange. Memory only; no discovery or periodic gossip. See [gossip objects](#experimental-gossip-objects-memory-only-milestone). |
+| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange. Memory only; no discovery. See [gossip objects](#experimental-gossip-objects-memory-only-milestone). |
+| `gossip.interval`        | `0s` | `0s` preserves manual-only exchange. A positive interval (at least `1s`, requiring `gossip.enabled: true`) enables bounded periodic pulls from registered peers. |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `explain.provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
@@ -1555,9 +1556,10 @@ These endpoints decide *where work goes*. What a peer knows about its own system
 ### Experimental gossip objects: memory-only milestone
 
 Set `gossip.enabled: true` on each participating agent to expose the object
-exchange below. It is off by default. This milestone provides manual publication
-and pull from registered peers, **not** discovery, periodic gossip, failure
-detection, disk storage, or automatic semantic-state replication.
+exchange below. It is off by default. With `gossip.interval: 0s` (the default),
+exchange remains manual-only. A positive interval enables periodic pull-based
+gossip over registered peers, **not** discovery, a membership/failure-detection
+protocol, disk storage, or automatic semantic-state replication.
 
 An object is an immutable JSON envelope:
 
@@ -1657,6 +1659,86 @@ tests from `semantic-map/go`:
 ```bash
 go test ./pkg/gossip ./pkg/agentmain ./pkg/spec
 ```
+
+#### Milestone two: automatic A -> B -> C propagation
+
+Set `gossip.interval: 1s` on each participating agent (or use `5s` for less
+frequent traffic). Existing milestone-one configs omit this setting and remain
+manual-only. Every loop performs an immediate round, then waits the configured
+interval plus 0-10% positive jitter after each round. Rounds never overlap.
+
+Each round:
+
+1. Reads the current peer registry, including runtime additions/removals.
+2. Checks at most two peers, sequentially, with a rotating starting peer.
+3. Retrieves each peer's inventory, bounded to 16 KiB and 128 unique valid hashes.
+4. Fetches only missing objects, attempting at most eight downloads in total.
+   Failed downloads count toward the same limit. Per-peer hash cursors rotate
+   so repeated corrupt advertisements cannot block every later object.
+5. Verifies exact bytes before storage. Newly received objects appear in this
+   node's inventory and can be pulled by the next node.
+
+A whole active round has a five-second deadline, including inventory and object
+requests. Failures are logged, and later rounds retry. Identical consecutive
+round errors are not repeatedly logged; a fully successful round after errors
+logs recovery. Successful transfers log `gossip: received ...`. Shutdown cancels
+in-flight requests and waits for the loop to finish. No peer trust or local
+semantic-state updates are made.
+
+To demonstrate a chain, copy the **complete** two-agent configuration above into
+three temporary files, keeping all common sections and changing these settings:
+
+| Agent | `node.id` | `node.addr` | `peers.urls` | `gossip.interval` |
+| --- | --- | --- | --- | --- |
+| A | `node-a` | `127.0.0.1:8080` | `[]` | `1s` |
+| B | `node-b` | `127.0.0.1:8081` | `[http://127.0.0.1:8080]` | `1s` |
+| C | `node-c` | `127.0.0.1:8082` | `[http://127.0.0.1:8081]` | `1s` |
+
+Keep `peers.state_poll: 0s` in all three files. Start each agent in its own
+terminal, using a third configuration at `/tmp/di-agent-gossip-c.yaml` for C.
+If A and B are already running the manual-only example, stop and restart them
+with the updated files. In another terminal, publish **only on A**:
+
+```bash
+HASH=$(curl -fsS http://127.0.0.1:8080/gossip/objects \
+  -H 'Content-Type: application/json' \
+  -d '{"payload_type":"announcement","payload":{"capability":"compute"}}' | jq -r .hash)
+```
+
+Do **not** call either `/fetch` route. After a few seconds:
+
+```bash
+curl -fsS http://127.0.0.1:8081/gossip/objects | jq
+curl -fsS http://127.0.0.1:8082/gossip/objects | jq
+curl -fsS "http://127.0.0.1:8082/gossip/objects/$HASH" | jq
+curl -fsS http://127.0.0.1:8082/peers | jq
+```
+
+B and C should contain the hash, C's object should still name `node-a` as
+origin, and C's registry should contain **only B**. Verify the exact bytes:
+
+```bash
+ACTUAL_HASH=$(curl -fsS "http://127.0.0.1:8082/gossip/objects/$HASH" |
+  sha256sum | cut -d ' ' -f 1)
+test "$ACTUAL_HASH" = "$HASH" && echo "Multi-hop hash verified"
+```
+
+Do not pipe through `jq` before hashing: formatting changes the bytes. Republishing
+the same object returns `added: false`; inventories stay at one object. If C
+restarts, its memory clears, then it automatically refills from B while B retains
+the object. A restarted B can refill from A. These are pull relationships: A
+does not need to register B, and C does not discover or contact A.
+
+For automated multi-hop, bounded-round, corrupt-advertisement, configuration,
+and cancellation checks:
+
+```bash
+go test -race -count=1 ./pkg/gossip ./pkg/agentmain ./pkg/spec
+```
+
+This milestone still has no locality policy, identity authentication, TTL,
+durable storage, or cluster-wide delivery guarantee. Propagation requires
+reachable configured pull paths and available storage capacity.
 
 ### `mapctl peers`
 

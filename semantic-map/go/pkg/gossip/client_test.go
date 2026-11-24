@@ -3,11 +3,53 @@ package gossip
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestClientValidatesBoundedInventories(t *testing.T) {
+	hash := Hash(objectBytes(t, `true`))
+	for name, body := range map[string][]byte{
+		"missing hashes":     []byte(`{"bytes":0}`),
+		"null hashes":        []byte(`{"hashes":null,"bytes":0}`),
+		"invalid hash":       []byte(`{"hashes":["not-a-hash"],"bytes":10}`),
+		"duplicate hashes":   []byte(`{"hashes":["` + hash + `","` + hash + `"],"bytes":10}`),
+		"invalid bytes":      []byte(`{"hashes":[],"bytes":-1}`),
+		"inconsistent bytes": []byte(`{"hashes":["` + hash + `"],"bytes":0}`),
+		"trailing JSON":      []byte(`{"hashes":[],"bytes":0}{}`),
+		"oversized response": bytes.Repeat([]byte(" "), MaxInventoryBytes+1),
+		"too many hashes":    mustJSON(t, Inventory{Hashes: make([]string, MaxObjects+1), Bytes: 10}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(body)
+			}))
+			defer srv.Close()
+			if _, err := NewClient().Inventory(context.Background(), srv.URL); !errors.Is(err, ErrInvalidInventory) {
+				t.Fatalf("err=%v, want invalid inventory", err)
+			}
+		})
+	}
+	store := NewMemory()
+	data := objectBytes(t, `true`)
+	if _, err := store.Put(Hash(data), data); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gossip/objects" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(store.Inventory())
+	}))
+	defer srv.Close()
+	got, err := NewClient().Inventory(context.Background(), srv.URL)
+	if err != nil || len(got.Hashes) != 1 || got.Hashes[0] != hash || got.Bytes != len(data) {
+		t.Fatalf("valid inventory: %+v err=%v", got, err)
+	}
+}
 
 func TestClientPreservesWireBytesAndRejectsBadTransfers(t *testing.T) {
 	valid := objectBytes(t, `{"capability":"compute"}`)
