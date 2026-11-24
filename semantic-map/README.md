@@ -1299,8 +1299,9 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
-| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange. Memory only; no discovery. See [gossip objects](#experimental-gossip-objects). |
+| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange; no discovery. See [gossip objects](#experimental-gossip-objects). |
 | `gossip.interval`        | `0s` | `0s` preserves manual-only exchange. A positive interval (at least `1s`, requiring `gossip.enabled: true`) enables bounded periodic pulls from registered peers. |
+| `gossip.storage_dir`     | `""` | Existing dedicated directory for durable gossip objects; empty keeps them only in memory. Requires `gossip.enabled: true`. |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `explain.provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
@@ -1559,7 +1560,7 @@ Set `gossip.enabled: true` on each participating agent to expose the object
 exchange below. It is off by default. With `gossip.interval: 0s` (the default),
 exchange remains manual-only. A positive interval enables periodic pull-based
 gossip over registered peers, **not** discovery, a membership/failure-detection
-protocol, disk storage, or automatic semantic-state replication.
+protocol, or automatic semantic-state replication.
 
 An object is an immutable JSON envelope:
 
@@ -1585,12 +1586,22 @@ Objects never update the semantic map, peer trust, or workload scheduling.
 Both POST routes require `Content-Type: application/json`, reject unknown fields
 and trailing JSON, and limit request bodies to 64 KiB. Payloads must be non-null
 JSON and `payload_type` must be nonblank. Each complete object is at most 64 KiB.
-The concurrent-safe memory store retains at most 128 objects and 4 MiB of object
+The concurrent-safe store retains at most 128 objects and 4 MiB of object
 bytes (not a total process-memory limit). Duplicate delivery reports
 `added: false` and consumes no additional capacity. A full store rejects new
 objects with HTTP 507; it does not silently evict content. There is no TTL or
-deletion yet, and **all gossip objects disappear on restart**, even when
-`persist.file` keeps the local semantic map.
+deletion yet.
+
+By default, gossip objects disappear on restart, independently of `persist.file`.
+Set `gossip.storage_dir` to an existing, writable, dedicated directory to retain
+them. Use a separate directory for each running agent and do not modify it while
+the agent is running. Objects are stored as files named by their hashes; startup
+verifies their contents and refuses corrupt, unexpected, or over-limit data.
+Temporary files from interrupted writes are ignored. New objects are acknowledged
+only after their file and directory have been synced. A write failure returns
+HTTP 500; if the directory sync fails after a rename, the object may still be
+present on disk even though the request failed. The filesystem must support
+directory syncing for successful durable writes.
 
 Malformed local requests return 400, oversized bodies/objects 413, and absent
 objects or unregistered peer IDs 404. A failed fetch, including corrupt or
@@ -1603,7 +1614,8 @@ With a positive interval, the loop performs an immediate round, then waits the
 configured interval plus 0-10% positive jitter. Rounds do not overlap. Each
 round reads the current peer registry, checks at most two peers, and fetches at
 most eight missing objects, including failed attempts. Inventories are limited
-to 16 KiB and 128 unique hashes, and each round has a five-second deadline.
+to 16 KiB and 128 unique hashes, and network requests share a five-second round
+deadline. Durable filesystem writes may take longer.
 Peers and inventory positions rotate so failures do not indefinitely block
 other content. Failures and subsequent recovery are logged. Shutdown cancels
 in-flight requests and waits for the loop to finish.
