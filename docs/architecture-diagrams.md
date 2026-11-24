@@ -249,8 +249,9 @@ stateDiagram-v2
     end note
     note right of forgotten
         Removed, a tombstone left: its endpoint
-        answers 410 forgotten. An observation
-        admits it again as a new property.
+        answers 410 forgotten, and 404 once the
+        tombstone is dropped, 48 h after retirement.
+        An observation admits it again as a new property.
     end note
 ```
 
@@ -312,12 +313,12 @@ stateDiagram-v2
     in_flight --> kept: further step, smaller drop, earlier cap restored
     in_flight --> in_flight: undo refused, journalled "stuck", retried each tick
     in_flight --> released: workload no longer listed, cap given back
-    in_flight --> gone: workload no longer listed, actuator finds nothing to give back
+    in_flight --> gone: the actuator no longer finds the workload, or reconcile finds the setting changed underneath
     kept --> in_flight: further step on the same workload
     kept --> expired: expiry (1 h) passed, given back
     kept --> floored: floor rose above the cap, given back
     kept --> manual: operator revert
-    kept --> gone: give-back (expiry, floor, manual) finds the workload gone
+    kept --> gone: a give-back finds the workload gone, or reconcile finds it gone or changed underneath
     reverted --> [*]
     not_applied --> [*]
     released --> [*]
@@ -514,6 +515,7 @@ stateDiagram-v2
     reprobed --> eligible: /cost succeeds and trust back at the floor
     reprobed --> reprobed: /cost succeeds, still below the floor, asked on every call
     reprobed --> penalised: /cost fails again, LastPenalised restamped
+    reprobed --> reprobed: /cost answers 4xx, no change
     eligible --> operator_excluded: operator sets trust below the floor
     penalised --> operator_excluded: operator sets trust below the floor
     operator_excluded --> eligible: operator sets trust at or above the floor

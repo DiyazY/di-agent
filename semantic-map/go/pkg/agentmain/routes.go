@@ -48,11 +48,9 @@ package agentmain
 //                                                                          200 x-ndjson (stream:true)
 // /ui/...                           GET     —                              200 (embedded HTML; only with node.ui)
 //
-// Endpoints above the divider are pre-existing and keep their original
-// plain-text http.Error format. Endpoints below were added in the Phase 1
-// HTTP-API expansion and emit JSON errors via writeError; their POST
-// handlers gate on requireJSON for CSRF mitigation (path-only candidate
-// endpoints excepted).
+// Endpoints above the divider are pre-existing; those below were added in the
+// Phase 1 HTTP-API expansion. Error format and the requireJSON guard follow the
+// convention on registerRoutes.
 
 import (
 	"bytes"
@@ -80,9 +78,9 @@ import (
 // Convention: errors are a JSON {"error":"..."} body written by writeError, and
 // every POST that takes a body calls requireJSON at the top as a lightweight CSRF
 // mitigation. /recommend and /simulate take the guard too: /recommend moves peer
-// trust, so a cross-origin form post must not reach it. Two plain-text
-// http.Error responses remain from the v0 daemon: a body that fails to decode on
-// /recommend and /simulate, and GET /candidates.
+// trust, so a cross-origin form post must not reach it. Plain-text http.Error
+// responses remain in three places: a body that fails to decode on /recommend and
+// /simulate, every error of GET /candidates, and GET /config's 500.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
@@ -267,8 +265,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // writeError emits a JSON-encoded error response with the given status code.
-// Used by every new endpoint added in the HTTP expansion; existing endpoints
-// keep plain-text http.Error for diff minimization.
+// It is the error format of every endpoint except the plain-text exceptions
+// listed on registerRoutes.
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

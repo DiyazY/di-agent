@@ -2,8 +2,10 @@
 //
 // A Registry holds Descriptors for known remote agents, each tagged with a
 // trust score in [0,1] that the reasoner uses to weight offload candidates.
-// A Client speaks HTTP to remote agents (their /cost, /state, /healthz and
-// /offers endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
+// A Client speaks HTTP to remote agents through their /cost, /state, /healthz
+// and /offers endpoints: /cost lets RecommendPeer rank live peers by
+// trust-weighted savings, /state feeds the peer state poll, and /offers carries
+// an admission offer.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
 // interfaces. The contract surface stays at seven: the five in pkg/contracts

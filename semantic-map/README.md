@@ -375,7 +375,7 @@ Three stable queries across all profiles:
 
 ### `GET /cost?task=<type>&node=<id>`
 
-Estimates the cost of executing a task on this node. `node` may be omitted; any other node id than this agent's own answers `409`, naming that node's agent when it is a registered peer. The response uses the Go field names, as do `/recommend` and `/simulate`.
+Estimates the cost of executing a task on this node. `node` may be omitted; under the default `ingest-scope=self`, any other node id than this agent's own answers `409`, naming that node's agent when it is a registered peer. The response uses the Go field names, as do `/recommend` and `/simulate`.
 
 ```json
 {
@@ -389,7 +389,7 @@ Estimates the cost of executing a task on this node. `node` may be omitted; any 
   "ResourceSensitivity": 0.58,
   "PressureSensitivity": 0.41,
   "DecisionID": "...",
-  "Caveats": []
+  "Caveats": null
 }
 ```
 
@@ -422,11 +422,11 @@ Pre-flight simulation before committing an offload. Read-only — never modifies
   "GraphPathUsed": ["..."],
   "P95Latency": null,
   "P95ResourceCost": null,
-  "RiskFlags": []
+  "RiskFlags": null
 }
 ```
 
-`P95*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward).
+`P95*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward). An empty `Caveats` or `RiskFlags` is `null`, not `[]`.
 
 ### `POST /tasks` · `POST /offers` · `GET /tasks`
 
