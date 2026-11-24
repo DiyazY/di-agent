@@ -58,6 +58,55 @@ func TestExchangeBoundsRoundsAndEventuallyFetchesMissingObjects(t *testing.T) {
 	}
 }
 
+func TestReconciliationRecoversFromMissedInventoryAndFailedFetch(t *testing.T) {
+	remote := NewMemory()
+	data := objectBytes(t, `{"event":"missed"}`)
+	hash := Hash(data)
+	if _, err := remote.Put(hash, data); err != nil {
+		t.Fatal(err)
+	}
+	var inventories, fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/gossip/objects" {
+			if inventories.Add(1) == 1 {
+				_ = json.NewEncoder(w).Encode(Inventory{Hashes: []string{}, Bytes: 0})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(remote.Inventory())
+			return
+		}
+		if fetches.Add(1) == 1 {
+			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer srv.Close()
+
+	local := NewMemory()
+	exchange := NewExchange(local, NewClient())
+	result, err := exchange.Round(context.Background(), []string{srv.URL})
+	if err != nil || result.Attempted != 0 || local.Has(hash) {
+		t.Fatalf("missed inventory: %+v err=%v", result, err)
+	}
+	result, err = exchange.Round(context.Background(), []string{srv.URL})
+	if err == nil || result.Attempted != 1 || local.Has(hash) {
+		t.Fatalf("failed fetch: %+v err=%v", result, err)
+	}
+	result, err = exchange.Round(context.Background(), []string{srv.URL})
+	if err != nil || result.Added != 1 {
+		t.Fatalf("recovery: %+v err=%v", result, err)
+	}
+	got, ok := local.Get(hash)
+	if !ok || string(got) != string(data) {
+		t.Fatal("recovery did not preserve the object bytes")
+	}
+	result, err = exchange.Round(context.Background(), []string{srv.URL})
+	if err != nil || result.Attempted != 0 || fetches.Load() != 2 {
+		t.Fatalf("reconciliation refetched an existing object: %+v err=%v fetches=%d", result, err, fetches.Load())
+	}
+}
+
 func TestExchangeRotatesPeersAndRetiresRemovedCursors(t *testing.T) {
 	local := NewMemory()
 	exchange := NewExchange(local, NewClient())
