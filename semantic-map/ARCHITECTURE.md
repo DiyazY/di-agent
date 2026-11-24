@@ -1802,11 +1802,14 @@ later content; removed peers' cursors are discarded. Newly admitted objects are
 advertised by the same inventory endpoint, allowing A -> B -> C propagation
 without C knowing A. The loop reads the live registry, uses positive interval
 jitter, reports failures/recovery, and is cancelled and awaited at shutdown.
+Repeated full-inventory pulls also reconcile missed inventories and failed
+fetches after a temporary interruption. Recovery requires reachable configured
+pull paths, available capacity, and at least one surviving in-memory copy.
 
 This is pull-based object dissemination, not a gossip membership protocol:
 no discovery, locality policy, durability, authenticated origin, or
 version-ordering of mutable state exists here. See
-[the operational examples](README.md#experimental-gossip-objects-memory-only-milestone).
+[the object exchange reference](README.md#experimental-gossip-objects).
 
 ### Trust mechanics
 

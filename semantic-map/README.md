@@ -1299,7 +1299,7 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
-| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange. Memory only; no discovery. See [gossip objects](#experimental-gossip-objects-memory-only-milestone). |
+| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange. Memory only; no discovery. See [gossip objects](#experimental-gossip-objects). |
 | `gossip.interval`        | `0s` | `0s` preserves manual-only exchange. A positive interval (at least `1s`, requiring `gossip.enabled: true`) enables bounded periodic pulls from registered peers. |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `explain.provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
@@ -1553,7 +1553,7 @@ Each URL is added to the in-memory peer registry with a default trust of `0.5`. 
 
 These endpoints decide *where work goes*. What a peer knows about its own system travels over `GET /state` and is held apart from local state — see [Asking other nodes](#asking-other-nodes).
 
-### Experimental gossip objects: memory-only milestone
+### Experimental gossip objects
 
 Set `gossip.enabled: true` on each participating agent to expose the object
 exchange below. It is off by default. With `gossip.interval: 0s` (the default),
@@ -1599,146 +1599,17 @@ second timeout, bound response reads, and refuse redirects. Fetch accepts a
 registered peer ID, never a caller-supplied URL. Peer registration and these
 endpoints are unauthenticated: use only an isolated trusted network.
 
-For a two-agent example, run A on `127.0.0.1:8080` and B on
-`127.0.0.1:8081`, with distinct `node.id` values and `gossip.enabled: true`.
-For an object-only experiment, set `peers.state_poll: 0s` to disable the
-independent semantic-state polling loop. Save this complete configuration as
-`/tmp/di-agent-gossip-a.yaml`:
+With a positive interval, the loop performs an immediate round, then waits the
+configured interval plus 0-10% positive jitter. Rounds do not overlap. Each
+round reads the current peer registry, checks at most two peers, and fetches at
+most eight missing objects, including failed attempts. Inventories are limited
+to 16 KiB and 128 unique hashes, and each round has a five-second deadline.
+Peers and inventory positions rotate so failures do not indefinitely block
+other content. Failures and subsequent recovery are logged. Shutdown cancels
+in-flight requests and waits for the loop to finish.
 
-```yaml
-node:
-  id: node-a
-  addr: 127.0.0.1:8080
-sources:
-  collectors: []
-persist:
-  file: ""
-peers:
-  state_poll: 0s
-map:
-  proposer:
-    enabled: false
-gossip:
-  enabled: true
-```
-
-Copy the **entire configuration** to `/tmp/di-agent-gossip-b.yaml`, changing
-only `node.id` to `node-b` and `node.addr` to `127.0.0.1:8081`. Keep every other
-section: a file containing only `node` inherits the default persistence path
-`/var/lib/di-agent/state.json` and leaves gossip disabled.
-
-Build from `semantic-map/go`, then run each agent in its own terminal, also
-from that directory:
-
-```bash
-go build -o /tmp/di-agent-gossip ./cmd/agent
-# Terminal 1
-/tmp/di-agent-gossip -config /tmp/di-agent-gossip-a.yaml
-# Terminal 2
-/tmp/di-agent-gossip -config /tmp/di-agent-gossip-b.yaml
-```
-
-In a third terminal, publish on A, register A on B, then
-request the hash on B (`jq` is used only for this example):
-
-```bash
-HASH=$(curl -fsS http://127.0.0.1:8080/gossip/objects \
-  -H 'Content-Type: application/json' \
-  -d '{"payload_type":"announcement","payload":{"capability":"compute"}}' | jq -r .hash)
-PEER_ID=$(curl -fsS http://127.0.0.1:8081/peers \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"http://127.0.0.1:8080"}' | jq -r .id)
-curl -fsS "http://127.0.0.1:8081/gossip/objects/$HASH/fetch" \
-  -H 'Content-Type: application/json' -d "{\"peer_id\":\"$PEER_ID\"}"
-curl -fsS "http://127.0.0.1:8081/gossip/objects/$HASH"
-```
-
-Repeating the fetch returns `added: false`. To run the object and HTTP integration
-tests from `semantic-map/go`:
-
-```bash
-go test ./pkg/gossip ./pkg/agentmain ./pkg/spec
-```
-
-#### Milestone two: automatic A -> B -> C propagation
-
-Set `gossip.interval: 1s` on each participating agent (or use `5s` for less
-frequent traffic). Existing milestone-one configs omit this setting and remain
-manual-only. Every loop performs an immediate round, then waits the configured
-interval plus 0-10% positive jitter after each round. Rounds never overlap.
-
-Each round:
-
-1. Reads the current peer registry, including runtime additions/removals.
-2. Checks at most two peers, sequentially, with a rotating starting peer.
-3. Retrieves each peer's inventory, bounded to 16 KiB and 128 unique valid hashes.
-4. Fetches only missing objects, attempting at most eight downloads in total.
-   Failed downloads count toward the same limit. Per-peer hash cursors rotate
-   so repeated corrupt advertisements cannot block every later object.
-5. Verifies exact bytes before storage. Newly received objects appear in this
-   node's inventory and can be pulled by the next node.
-
-A whole active round has a five-second deadline, including inventory and object
-requests. Failures are logged, and later rounds retry. Identical consecutive
-round errors are not repeatedly logged; a fully successful round after errors
-logs recovery. Successful transfers log `gossip: received ...`. Shutdown cancels
-in-flight requests and waits for the loop to finish. No peer trust or local
-semantic-state updates are made.
-
-To demonstrate a chain, copy the **complete** two-agent configuration above into
-three temporary files, keeping all common sections and changing these settings:
-
-| Agent | `node.id` | `node.addr` | `peers.urls` | `gossip.interval` |
-| --- | --- | --- | --- | --- |
-| A | `node-a` | `127.0.0.1:8080` | `[]` | `1s` |
-| B | `node-b` | `127.0.0.1:8081` | `[http://127.0.0.1:8080]` | `1s` |
-| C | `node-c` | `127.0.0.1:8082` | `[http://127.0.0.1:8081]` | `1s` |
-
-Keep `peers.state_poll: 0s` in all three files. Start each agent in its own
-terminal, using a third configuration at `/tmp/di-agent-gossip-c.yaml` for C.
-If A and B are already running the manual-only example, stop and restart them
-with the updated files. In another terminal, publish **only on A**:
-
-```bash
-HASH=$(curl -fsS http://127.0.0.1:8080/gossip/objects \
-  -H 'Content-Type: application/json' \
-  -d '{"payload_type":"announcement","payload":{"capability":"compute"}}' | jq -r .hash)
-```
-
-Do **not** call either `/fetch` route. After a few seconds:
-
-```bash
-curl -fsS http://127.0.0.1:8081/gossip/objects | jq
-curl -fsS http://127.0.0.1:8082/gossip/objects | jq
-curl -fsS "http://127.0.0.1:8082/gossip/objects/$HASH" | jq
-curl -fsS http://127.0.0.1:8082/peers | jq
-```
-
-B and C should contain the hash, C's object should still name `node-a` as
-origin, and C's registry should contain **only B**. Verify the exact bytes:
-
-```bash
-ACTUAL_HASH=$(curl -fsS "http://127.0.0.1:8082/gossip/objects/$HASH" |
-  sha256sum | cut -d ' ' -f 1)
-test "$ACTUAL_HASH" = "$HASH" && echo "Multi-hop hash verified"
-```
-
-Do not pipe through `jq` before hashing: formatting changes the bytes. Republishing
-the same object returns `added: false`; inventories stay at one object. If C
-restarts, its memory clears, then it automatically refills from B while B retains
-the object. A restarted B can refill from A. These are pull relationships: A
-does not need to register B, and C does not discover or contact A.
-
-For automated multi-hop, bounded-round, corrupt-advertisement, configuration,
-and cancellation checks:
-
-```bash
-go test -race -count=1 ./pkg/gossip ./pkg/agentmain ./pkg/spec
-```
-
-This milestone still has no locality policy, identity authentication, TTL,
-durable storage, or cluster-wide delivery guarantee. Propagation requires
-reachable configured pull paths and available storage capacity.
+Objects can propagate through intermediate peers. Delivery requires reachable
+configured pull paths and available storage; there is no cluster-wide guarantee.
 
 ### `mapctl peers`
 
