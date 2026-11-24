@@ -2,10 +2,10 @@
 //
 // A Registry holds Descriptors for known remote agents, each tagged with a
 // trust score in [0,1] that the reasoner uses to weight offload candidates.
-// A Client speaks HTTP to remote agents through their /cost, /state, /healthz
-// and /offers endpoints: /cost lets RecommendPeer rank live peers by
-// trust-weighted savings, /state feeds the peer state poll, and /offers carries
-// an admission offer.
+// A Client speaks HTTP to remote agents through their /cost, /state and /offers
+// endpoints: /cost lets RecommendPeer rank live peers by trust-weighted savings,
+// /state feeds the peer state poll, and /offers carries an admission offer. It
+// can also probe /healthz, which the agent does not call yet.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
 // interfaces. The contract surface stays at seven: the five in pkg/contracts
@@ -315,7 +315,8 @@ func (r *Registry) MarkSeen(id string, when time.Time) error {
 
 // Client makes HTTP calls to remote agents. It is intentionally tiny: one
 // http.Client, a default timeout, and four methods that mirror the daemon's
-// /cost, /state, /healthz and /offers endpoints.
+// /cost, /state, /healthz and /offers endpoints; Health is not called by the
+// agent yet.
 type Client struct {
 	http    *http.Client
 	Timeout time.Duration

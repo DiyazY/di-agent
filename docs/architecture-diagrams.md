@@ -96,7 +96,7 @@ flowchart LR
     agent -->|read metrics| nd
     agent -->|list workloads, resize cpu.limit| rt
     agent -->|write memory.high| kern
-    agent <-->|/cost /offers /state /healthz| peers
+    agent <-->|/cost /offers /state| peers
     agent -->|review and explain prompts| llm
     agent --> disk
 ```
@@ -317,6 +317,8 @@ stateDiagram-v2
     kept --> in_flight: further step on the same workload
     kept --> expired: expiry (1 h) passed, given back
     kept --> floored: floor rose above the cap, given back
+    in_flight --> expired: undo still refused at expiry, given back
+    in_flight --> floored: undo still refused, floor rose above the cap, given back
     kept --> manual: operator revert
     kept --> gone: a give-back finds the workload gone, or reconcile finds it gone or changed underneath
     reverted --> [*]

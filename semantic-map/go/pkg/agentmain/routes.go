@@ -75,12 +75,15 @@ import (
 // point for the daemon's URL surface; main only constructs the mux, the
 // SemanticMap, and the http.Server.
 //
-// Convention: errors are a JSON {"error":"..."} body written by writeError, and
-// every POST that takes a body calls requireJSON at the top as a lightweight CSRF
-// mitigation. /recommend and /simulate take the guard too: /recommend moves peer
-// trust, so a cross-origin form post must not reach it. Plain-text http.Error
-// responses remain in three places: a body that fails to decode on /recommend and
-// /simulate, every error of GET /candidates, and GET /config's 500.
+// Convention: an API endpoint's error is a JSON body with an "error" field,
+// usually written by writeError, and every POST that takes a body calls
+// requireJSON at the top as a lightweight CSRF mitigation. /recommend and
+// /simulate take the guard too: /recommend moves peer trust, so a cross-origin
+// form post must not reach it. Plain-text http.Error responses remain in three
+// places: a body that fails to decode on /recommend and /simulate, every error of
+// GET /candidates, and GET /config's 500. One status is not an error body at all:
+// a forgotten property's 410 is its tombstone record {id, retired_at, forgotten}.
+// Outside the API, the console's /ui/ 404s are the mux's plain text.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
@@ -265,8 +268,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // writeError emits a JSON-encoded error response with the given status code.
-// It is the error format of every endpoint except the plain-text exceptions
-// listed on registerRoutes.
+// It is the error format of the API endpoints, apart from the exceptions listed
+// on registerRoutes.
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
