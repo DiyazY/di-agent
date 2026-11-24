@@ -220,52 +220,55 @@ number the agent publishes rather than an inference a reader has to make.
 
 ### The agent at a glance
 
-One daemon, four concentric layers. Everything outside the core is optional; the core is what makes the agent an agent.
+One daemon, four layers. Everything outside sensing and state is optional; those two are what make the agent an agent. The same agent split by subtask — self-knowledge, local adaptation, offloading, networking, trust and security, autonomy — with component, scenario and deployment diagrams, is in [`docs/architecture-diagrams.md`](../docs/architecture-diagrams.md).
 
 ```
-                            ╔═══════════════════════════════════════════════════╗
-   HUMAN / SCRIPT ─────────▶║  LAYER 4 · OPERATOR SURFACE                       ║
-   "why is my cost high?"   ║                                                   ║
-                            ║   HTTP API · mapctl CLI · /ui/ (opt) · /explain   ║
-                            ║   ─────────────────────────────────────────────   ║
-                            ║   pkg/explain: planner → answer → critic          ║
-                            ║   (LLM CONSUMES the graph; never mutates it)      ║
-                            ╚════════════════════════╤══════════════════════════╝
-                                                     │ read-only tools
-                            ╔════════════════════════▼══════════════════════════╗
-   PEER AGENTS ────────────▶║  LAYER 3 · DECISION                               ║
-   GET /cost                ║                                                   ║
-   POST /offers             ║   SemanticMap facade                              ║
-                            ║   CostOfAction · RecommendPeer · SimulateOutcome  ║
-                            ║   ┌──────────┬───────────┬──────────┬──────────┐  ║
-                            ║   │ Reasoner │ Ontology  │ Proposer │  Tuner   │  ║
-                            ║   └──────────┴───────────┴──────────┴──────────┘  ║
-                            ╚════════════════════════╤══════════════════════════╝
-                                                     │ reads / writes
-                            ╔════════════════════════▼══════════════════════════╗
-                            ║  LAYER 2 · STATE                                  ║
-                            ║                                                   ║
-                            ║   Storage (multigraph, keyed by from,to,propID)   ║
-                            ║   ┌─────────────────────────────────────────────┐ ║
-                            ║   │ Backbone: constructs + propositions (spec)  │ ║
-                            ║   │ Evidence: per-edge EMA + confidence + n_obs │ ║
-                            ║   │ Audit:    append-only OntologyEvent log     │ ║
-                            ║   └─────────────────────────────────────────────┘ ║
-                            ╚════════════════════════▲══════════════════════════╝
-                                                     │ update_edge()
-                            ╔════════════════════════╧══════════════════════════╗
-   /sys/fs/cgroup ─────────▶║  LAYER 1 · INGESTION                              ║
-   Netdata :19999           ║                                                   ║
-   parquet replay           ║   Collector ──samples──▶ state model (properties) ║
-                            ║   (typed MetricSample)   (routes    (idempotent   ║
-                            ║                           to        per event_id) ║
-                            ║                           construct)              ║
-                            ╚═══════════════════════════════════════════════════╝
+                        ╔══════════════════════════════════════════════════════════════╗
+HUMAN / SCRIPT ────────▶║ LAYER 4 · OPERATOR SURFACE                                   ║
+mapctl · /ui/ · curl    ║                                                              ║
+                        ║ HTTP API (no auth) · mapctl CLI · /ui/ (opt) · /explain      ║
+                        ║ ──────────────────────────────────────────────────────────   ║
+                        ║ pkg/explain: planner → answer → critic                       ║
+                        ║ (the explain LLM reads through tools; it never writes)       ║
+                        ╚═══════════════════════════════╤══════════════════════════════╝
+                                                        │ reads · operator mutations
+                        ╔═══════════════════════════════▼══════════════════════════════╗
+PEER AGENTS ◀──────────▶║ LAYER 3 · DECIDE AND ACT                                     ║
+/cost /offers /state    ║                                                              ║
+                        ║ semmap facade: CostOfAction · RecommendPeer · Simulate       ║
+                        ║   Reasoner · Ontology · Proposer · Tuner  (internal/minimal) ║
+                        ║ ──────────────────────────────────────────────────────────   ║
+                        ║ autonomy   reviews proposer candidates: rules → models       ║
+                        ║ relief     one loop per lever → actuators, bounded by policy ║
+                        ║ admission  answers offers from relief's domains              ║
+                        ║ peers      registry · trust · client · peer-state poll       ║
+                        ╚═══════════════════════════════╤══════════════════════════════╝
+                                                        │ reads · Decide() → Commit · ConfirmCandidate
+                        ╔═══════════════════════════════▼══════════════════════════════╗
+                        ║ LAYER 2 · STATE  (pkg/statemap — the agent's one model)      ║
+                        ║                                                              ║
+                        ║ properties     observed · derived · metric_type@subject      ║
+                        ║ relationships  declared · discovered · learned strength      ║
+                        ║ journal        decisions · interventions · calibration       ║
+                        ║ PeerStore      each peer's state, held apart, never merged   ║
+                        ║ persist.file   snapshot + journal log                        ║
+                        ╚═══════════════════════════════▲══════════════════════════════╝
+                                                        │ IngestSample → RecordAccepted (admit, EMA, derive, learn)
+                        ╔═══════════════════════════════╧══════════════════════════════╗
+/sys/fs/cgroup ────────▶║ LAYER 1 · SENSING                                            ║
+Netdata :19999          ║                                                              ║
+plugins · kubelet       ║ collectors Supervisor ── typed MetricSample ──▶ facade       ║
+                        ║ facts (CPU, memory, OS) · runtime inventory · groups         ║
+                        ╚══════════════════════════════════════════════════════════════╝
+
+                        Layer 3 also acts on the machine: relief writes memory.high
+                        (cgroup v2) and cpu.limit (Kubernetes in-place resize) through
+                        actuators, write-ahead in a ledger.
 ```
 
-**Read the diagram bottom-up for data, top-down for questions.** Telemetry flows up from Layer 1 and settles into Layer 2. Questions arrive at Layer 4 or Layer 3 and read downward. The two directions meet at Storage, which is the only mutable state in the process.
+**Read the diagram bottom-up for data, top-down for questions.** Telemetry flows up from Layer 1 and settles into Layer 2. Questions arrive at Layer 4 or Layer 3 and read downward. The two directions meet in `pkg/statemap`, the agent's single model: the graph surfaces (`/graph`, `/edges`, `/neighbors`) are projections of it, not a second store (§5).
 
-**The one-way rule.** Layer 4 can read everything and write nothing. The LLM in `pkg/explain` gets six read-only tools; it cannot call `Deprecate`, `Tune`, or `ResetEdge`. When it wants a mutation it emits a *draft proposal* that a human must POST themselves. This is what keeps the human-judgment anchor intact (§8) and what keeps P6's results reproducible without an LLM in the loop (§13).
+**The one-way rule.** The explain LLM in Layer 4 reads everything and writes nothing: its tools are read-only, and it cannot call `Deprecate`, `Tune` or `ResetEdge`. When it wants a mutation it emits a *draft proposal* that a human must POST themselves. This is what keeps the human-judgment anchor intact (§8) and what keeps P6's results reproducible without an LLM in the loop (§13). The one place a model does change the map is the autonomy reviewer in Layer 3, and only on discovery candidates — confirm, reject or defer, within `loops.review.level` — with every review a journalled decision.
 
 ### Component reference
 
@@ -276,7 +279,6 @@ What each piece is for, when it runs, and whether it is required.
 | **Collector** | `pkg/collectors` (built-ins in `internal/minimal`, `internal/scripted`) | Read raw metrics from cgroup / Netdata / a plugin; emit typed `MetricSample`s. The configured list (`sources.collectors`) runs under one Supervisor | Collection loop tick (`sources.interval`) | Optional — `POST /ingest-sample` works without one |
 | **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Yes (a table in the spec) |
 | **State model** | `pkg/statemap` | Hold the properties the system exhibits and the relationships between them; recompute what derives; fold paired observations into learned strengths; journal every change and decision | Every sample, and every answer | Not a contract — one implementation, and the agent's single model |
-| **Storage** | `internal/minimal` | Hold node + edge descriptors as a multigraph | Every read and write | Yes |
 | **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
 | **Proposer** | `internal/minimal` | Mine observation history for candidate new edges (MI correlation) | Background, opt-in (`map.proposer.enabled`) | Optional |
@@ -284,6 +286,12 @@ What each piece is for, when it runs, and whether it is required.
 | **Peers** | `pkg/peers` | Peer registry + trust; HTTP client for remote `/cost` | `/recommend`, `/peers`, `/tasks`, `/offers` | Optional |
 | **Explain** | `pkg/explain` | Natural-language Q&A grounded in the graph; planner + critic + sessions | `POST /explain` | Optional (`explain.provider: none` default) |
 | **Profiles** | `pkg/profiles` | Wire concrete implementations to each contract at startup (not collectors: those are `sources.collectors`) | Once, at boot | Yes |
+| **Facts, runtime, groups** | `pkg/facts`, `pkg/runtime`, `pkg/groups` | What the machine is; which workloads run on it; which belong together | Boot (facts); every 30 s (requests, groups) | Facts yes; runtime defaults to `dry-run` |
+| **Relief** | `pkg/relief` | One loop per lever: detect pressure, cap the workload the map blames, verify, keep or revert, learn the effect | `loops.relief.interval` (15 s) | Optional (`loops.relief.enabled`) |
+| **Actuators** | `pkg/actuators` | Apply, read back and revert a cap (`memory.high`, `cpu.limit`) through a write-ahead ledger | When relief acts | With relief |
+| **Policy** | `pkg/policy` | Which actions a workload allows; floors; freeze rules | Every relief plan | With relief |
+| **Admission** | `pkg/admission` | Answer an offer from the map, forward it to peers when declining, check the prediction once the workload arrives | `POST /tasks`, `/offers`; tracker on the relief interval | Built always; declines every offer without relief |
+| **Autonomy** | `pkg/autonomy` | Review proposer candidates in tiers — rules, decision model, reasoner — within a level | `loops.review.interval` (1 min) | Optional (`loops.review.level`, default `full`) |
 
 ### The four request lifecycles
 
@@ -340,11 +348,13 @@ level cannot — what happens if the source construct changes — which is what
 
 ```
 POST /ontology/deprecate {"proposition_id":"P7","reason":"..."}
-  └─▶ Ontology.Deprecate
-        ├─▶ mark Proposition.Deprecated = true      (soft delete — never removed)
-        ├─▶ sync EdgeDescriptor.Deprecated in Storage
-        └─▶ append OntologyEvent {actor, kind, target, timestamp}
-              └─▶ readable forever via GET /history
+  └─▶ SemanticMap.Deprecate
+        └─▶ for each state relationship labelled P7:
+              statemap.RetireRelationship(id, reason, actor="operator")
+                ├─▶ status retired                  (soft — never removed)
+                └─▶ journalled, readable via GET /state/journal
+                      and projected into GET /history
+        (nothing labelled P7 → ErrNotModelled: nothing to withdraw)
 ```
 *Four operator mutations exist, all on the facade: `SetPropositionStrength`, `Deprecate`, `AddConstruct`, `AddValidatedProposition`. Each reaches the state model, which is what gives it an effect; each is journalled. The declaration layer itself carries only the last two, because only those change the vocabulary. Construct removal and direction reversal are impossible by design.*
 
