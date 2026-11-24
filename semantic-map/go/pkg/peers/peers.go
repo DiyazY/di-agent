@@ -6,8 +6,8 @@
 // endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
-// interfaces. The contract surface stays at five (Storage, Ontology, Updater,
-// Reasoner, Proposer, Collector). When a second implementation arrives — e.g.
+// interfaces. The contract surface stays at five (Ontology, Reasoner,
+// Proposer, Tuner, Collector). When a second implementation arrives — e.g.
 // SQLite-backed peer state for richer profiles, or a gossip-based registry —
 // we promote the surface to pkg/contracts at that point.
 //
@@ -149,7 +149,7 @@ func (r *Registry) Remove(id string) error {
 }
 
 // Get returns a copy of the descriptor with the given ID, or (nil, nil) when
-// the ID is not registered. The nil-on-miss convention matches StorageContract.
+// the ID is not registered: a miss is not an error.
 func (r *Registry) Get(id string) (*Descriptor, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
