@@ -537,6 +537,28 @@ func TestPostWithoutJSONContentType_Returns400(t *testing.T) {
 	}
 }
 
+// /recommend moves peer trust (a reward or a penalty per peer queried), so a
+// cross-origin form post must not reach it any more than it reaches a mutation.
+func TestRecommendAndSimulateRequireJSON(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	for _, path := range []string{"/recommend", "/simulate"} {
+		resp := postRaw(t, base+path, `{"task_type":"pod-scheduling"}`)
+		if resp.StatusCode != 400 {
+			t.Errorf("%s without Content-Type: %s, want 400", path, body(resp))
+			continue
+		}
+		var er ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+			t.Fatalf("%s: decode error body: %v", path, err)
+		}
+		resp.Body.Close()
+		if !strings.Contains(er.Error, "application/json") {
+			t.Errorf("%s: error message %q should mention application/json", path, er.Error)
+		}
+	}
+}
+
 func TestStaticUI_FollowsNodeUI(t *testing.T) {
 	// The console is served exactly when the spec sets node.ui: the default spec
 	// is headless, and node.ui: true serves it.

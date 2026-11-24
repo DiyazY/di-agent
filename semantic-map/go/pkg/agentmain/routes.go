@@ -81,6 +81,8 @@ import (
 // keep their original http.Error plain-text error format to minimize diff. Every NEW endpoint added in this expansion uses
 // writeError to emit a JSON {"error":"..."} body, and every new POST
 // handler calls requireJSON at the top as a lightweight CSRF mitigation.
+// /recommend and /simulate take the guard too (and its JSON error): /recommend
+// moves peer trust, so a cross-origin form post must not reach it.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
@@ -151,7 +153,13 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	})
 
 	// POST /recommend  {"task_type":"...","source_node_id":"...","data_size_bytes":1024,"latency_budget_ms":500}
+	// Not a read: every peer it queries is rewarded or penalised, so it takes the
+	// same CSRF guard as the mutations below.
 	mux.HandleFunc("POST /recommend", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var ctx types.OffloadContext
 		if err := json.NewDecoder(r.Body).Decode(&ctx); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -167,6 +175,10 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 
 	// POST /simulate  {"context":{...},"target_node_id":"node_2"}
 	mux.HandleFunc("POST /simulate", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var req struct {
 			Context      types.OffloadContext `json:"context"`
 			TargetNodeID string               `json:"target_node_id"`
