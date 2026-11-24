@@ -4,8 +4,8 @@ name: CI
 # Validates that the semantic-map Go module builds, vets clean, and that
 # the full test suite (compliance + scenarios + evolution + integration)
 # passes with race detection on. Also runs the poc2/system pytest suite, the
-# stubbed playground Cypress suite, and a kind-based Helm smoke test that
-# deploys the di-agent-system chart to an ephemeral in-runner cluster.
+# stubbed playground Cypress suite, and kind-based deployment and telemetry
+# E2E tests against an ephemeral in-runner cluster.
 
 on:
   push:
@@ -55,6 +55,11 @@ jobs:
 
       - name: Test (race detector, 5m timeout)
         run: go test -race -timeout 5m ./...
+
+      - name: Test real agent peer recommendations
+        run: |
+          go build -o "$RUNNER_TEMP/di-agent-peer-e2e" ./cmd/agent
+          python3 ../tests/peer_e2e.py "$RUNNER_TEMP/di-agent-peer-e2e"
 
       # The example plugin is certified by the same suite every Go collector
       # passes, through the agent's real exec adapter. Linux only: it reads /proc.
@@ -161,6 +166,14 @@ jobs:
           echo "::error::playground preview server did not become ready"
           exit 1
 
+      - name: Upload Cypress screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-cypress-failure
+          path: poc2/playground/cypress/screenshots/
+          if-no-files-found: ignore
+
   kind-smoke-test:
     name: kind Helm smoke test (di-agent-system chart, ${{ matrix.credentials }})
     runs-on: ubuntu-latest
@@ -187,6 +200,9 @@ jobs:
 
       - name: Test playground chart rendering
         run: python3 poc2/scripts/test_playground_deployment.py
+
+      - name: Test telemetry E2E retry and isolation checks
+        run: python3 -m unittest discover -s poc2/scripts -p test_e2e_telemetry.py
 
       - name: Set up Go for worker agent image
         uses: actions/setup-go@v5
@@ -284,12 +300,92 @@ jobs:
           echo "::error::default dataset-collector never became ready"
           exit 1
 
+      - name: Test Kafka telemetry through agent and InfluxDB
+        run: python3 poc2/scripts/e2e_telemetry.py
+
+      - name: Build and load replay and playground images
+        if: matrix.credentials == 'demo'
+        run: |
+          docker build -t smoke/replay-streamer:test poc2/system/replay-streamer
+          docker build -t smoke/playground:test poc2/playground
+          kind load docker-image smoke/replay-streamer:test smoke/playground:test --name di-agent-smoke
+
+      - name: Install PostgreSQL and load the replay fixture
+        if: matrix.credentials == 'demo'
+        run: |
+          helm upgrade di-agent-system poc2/helm/di-agent-system --reuse-values \
+            --set postgres.enabled=true \
+            --set postgres.persistence.enabled=false \
+            --set postgres.ingest.enabled=false \
+            --wait --timeout 6m0s
+          kubectl exec -i postgres-0 -- psql -U di -d engine -v ON_ERROR_STOP=1 \
+            < poc2/scripts/e2e_replay_fixture.sql
+
+      - name: Install replay and playground
+        if: matrix.credentials == 'demo'
+        run: |
+          helm upgrade di-agent-system poc2/helm/di-agent-system --reuse-values \
+            --set streamer.enabled=true \
+            --set streamer.mode=real \
+            --set streamer.runId=ci-replay \
+            --set streamer.intervalMs=500 \
+            --set playground.enabled=true \
+            --set playground.dataset.enabled=true \
+            --wait --timeout 6m0s
+
+      - name: Test replay through agent and InfluxDB
+        if: matrix.credentials == 'demo'
+        run: python3 poc2/scripts/e2e_telemetry.py --replay
+
+      - name: Set up Node.js for live playground test
+        if: matrix.credentials == 'demo'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: poc2/playground/package-lock.json
+
+      - name: Install playground test dependencies
+        if: matrix.credentials == 'demo'
+        working-directory: poc2/playground
+        run: npm ci
+
+      - name: Test playground against live replay
+        if: matrix.credentials == 'demo'
+        working-directory: poc2/playground
+        run: |
+          set -euo pipefail
+          kubectl port-forward svc/playground 4173:80 > "$RUNNER_TEMP/playground-forward.log" 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:4173/ >/dev/null; then
+              CYPRESS_baseUrl=http://127.0.0.1:4173 npm run cy:run:live:dataset
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/playground-forward.log"
+          echo "::error::playground port-forward did not become ready"
+          exit 1
+
       - name: Dump cluster state on failure
         if: failure()
         run: |
-          kubectl get pods -o wide
-          kubectl describe pods
+          kubectl get pods -o wide || true
+          kubectl describe pods || true
           kubectl logs -l app=dataset-collector --all-containers --tail=200 || true
+          kubectl logs -l app=telemetry-writer --all-containers --tail=200 || true
+          kubectl logs -l app=di-agent -c di-agent --tail=200 --max-log-requests=10 || true
+          kubectl logs -l app=replay-streamer --all-containers --tail=200 || true
+
+      - name: Upload live Cypress screenshots on failure
+        if: failure() && matrix.credentials == 'demo'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-live-cypress-failure
+          path: poc2/playground/cypress/screenshots/
+          if-no-files-found: ignore
 
   build-push-images:
     name: build + push images (${{ matrix.service }})

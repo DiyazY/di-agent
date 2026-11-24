@@ -230,10 +230,13 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 // deployment, so 409 (well-formed, but current state cannot satisfy it).
 // ErrNoDomainModel is an agent started without a domain model, for which the
 // operation does not exist, so 501, as /explain answers without an LLM.
+// ErrPeerCostQuery means peer cost queries failed, so 502.
 func writeReasonerError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, contracts.ErrNoDomainModel):
 		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, contracts.ErrPeerCostQuery):
+		writeError(w, http.StatusBadGateway, err.Error())
 	case errors.Is(err, contracts.ErrInsufficientTrust):
 		writeError(w, http.StatusConflict, err.Error())
 	default:

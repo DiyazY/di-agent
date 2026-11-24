@@ -34,8 +34,15 @@ npm run cy:run
 ```
 
 `npm run cy:run:live` uses real ship-simulator APIs and requires the deployed
-services. The dataset tests are stubbed; they do not prove end-to-end Kafka,
-InfluxDB, or agent ingestion.
+services and positive switchboard supply (start a genset before running it).
+It temporarily changes the genset anomaly mode and propulsion load.
+`npm run cy:run:live:dataset` tests the real dataset UI and proxy
+against the CI replay fixture. Both use `CYPRESS_baseUrl` to select the
+deployment. The regular dataset tests remain stubbed.
+
+CI also exercises Kafka through the collector, the designated agent and
+InfluxDB in kind, then loads a small PostgreSQL fixture and repeats the check
+through the replay-streamer. The fixture uses no external dataset or secrets.
 
 The container uses nginx and the Helm chart to expose configured services.
 With dataset controls enabled, the playground Service is ClusterIP. Use

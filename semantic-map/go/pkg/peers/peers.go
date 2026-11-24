@@ -339,11 +339,21 @@ type ActionCost struct {
 	GraphPathUsed   []string `json:"GraphPathUsed"`
 }
 
-// Cost asks the peer at peerURL what it would cost to run taskType for
-// sourceNodeID. Returns the peer's ActionCost on 2xx; otherwise wraps the
-// HTTP status, transport error, or JSON decode failure.
-func (c *Client) Cost(ctx context.Context, peerURL, taskType, sourceNodeID string) (*ActionCost, error) {
-	u := strings.TrimRight(peerURL, "/") + "/cost?task=" + escapeQuery(taskType) + "&node=" + escapeQuery(sourceNodeID)
+// CostStatusError reports a non-success response from a peer's cost endpoint.
+type CostStatusError struct {
+	PeerURL    string
+	StatusCode int
+	Body       string
+}
+
+func (e *CostStatusError) Error() string {
+	return fmt.Sprintf("peers.Client.Cost: peer %s returned %d: %s", e.PeerURL, e.StatusCode, e.Body)
+}
+
+// Cost asks the peer at peerURL what it would cost to run taskType locally.
+// It returns a CostStatusError for a non-2xx response.
+func (c *Client) Cost(ctx context.Context, peerURL, taskType string) (*ActionCost, error) {
+	u := strings.TrimRight(peerURL, "/") + "/cost?task=" + escapeQuery(taskType)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("peers.Client.Cost: %w", err)
@@ -355,7 +365,7 @@ func (c *Client) Cost(ctx context.Context, peerURL, taskType, sourceNodeID strin
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("peers.Client.Cost: peer %s returned %d: %s", peerURL, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &CostStatusError{PeerURL: peerURL, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	var out ActionCost
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
