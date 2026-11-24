@@ -102,7 +102,7 @@ The parquet replay tool (`./dev.sh replay …`) replays the dissertation's Netda
 | [`docs/real-node-run.md`](docs/real-node-run.md) | **What does it look like?** One run on a real Linux node with screenshots: what was admitted, discovered and learned, the counterfactual answers, and the problems the run exposed. |
 | [`OPERATING.md`](OPERATING.md) | **Deploying it?** Security posture (read this first — there is no auth), resource footprint, systemd unit, health checks, monitoring, multi-node setup, upgrades, what it touches on your system. |
 | [`docs/architecture-diagrams.md`](docs/architecture-diagrams.md) | **How does it fit together?** The agent split into six subtasks — self-knowledge, local adaptation, task offloading, networking, trust and security, autonomy — with component, scenario (sequence and state) and deployment diagrams drawn from the code. |
-| [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the five contracts and why, multigraph backbone, coordination, the natural-language layer. |
+| [`semantic-map/ARCHITECTURE.md`](semantic-map/ARCHITECTURE.md) | The design record — layer map, component reference, request lifecycles, the seven contracts and why, multigraph backbone, coordination, the natural-language layer. |
 | [`semantic-map/README.md`](semantic-map/README.md) | Operational reference — project structure, endpoint table, daemon flags, compliance tests, structural initialization, PoC quickstart. |
 
 ## License

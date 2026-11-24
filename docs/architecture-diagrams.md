@@ -50,8 +50,8 @@ flowchart LR
     S4 -->|peer cost, peer state| S1
     S5 -.->|gates which peers count| S4
     S5 -.->|gates who may call| S3
-    S6 -->|confirms or rejects discovered relationships| S1
-    S6 -.->|reads, never writes| S1
+    S6 -->|autonomy: confirms or rejects discovered relationships| S1
+    S6 -.->|explain: reads, never writes| S1
 ```
 
 ### What each subtask is, and what is open
@@ -175,8 +175,8 @@ All started from `agentmain.Main` (`pkg/agentmain/main.go`). "Paced" loops wait 
 | Loop | Subtask | Default tick | Enabled by |
 |---|---|---|---|
 | Collection: `Collect` → `IngestSample` | S1 | 10 s, paced | `sources.collectors` (default `cgroup`), `sources.interval` |
-| Lifecycle sweep: stale and retire | S1 | `stale_after/2`, at least 5 s | always |
-| Groups | S1 | 30 s, paced | always |
+| Lifecycle sweep: stale and retire | S1 | `stale_after/2`, at least 5 s | always; `map.sweep_interval` overrides the tick |
+| Groups | S1 | 30 s, paced | `groups.interval` (0 turns it off) |
 | Requests refresh | S1 | 30 s | a non-dry-run runtime |
 | Relief, one per lever | S2 | 15 s | `loops.relief.enabled` |
 | Admission tracker | S3 | relief interval | always built |
@@ -213,7 +213,7 @@ sequenceDiagram
         M-->>F: accepted
         F->>P: ObserveProperty(reading)
     end
-    L->>M: SetSourceDown(collectors that failed)
+    L->>M: SetSourceDown per collector, up or down
 ```
 
 The same path serves `POST /ingest-sample`, so a sample sent over HTTP is treated exactly like a collected one.
@@ -227,7 +227,17 @@ stateDiagram-v2
     active --> stale: silent longer than stale_after
     stale --> active: observation revives it
     stale --> retired: silent longer than retire_after
+    active --> retired: silent longer than retire_after at one sweep
+    active --> unobservable: its collector is down
+    stale --> unobservable: its collector is down
+    unobservable --> active: observation
+    unobservable --> stale: silent past stale_after, counted from the collector's return
+    unobservable --> retired: silent past retire_after, counted from the collector's return
     retired --> active: observation revives it
+    note right of unobservable
+        Silence with a known cause
+        is not evidence of departure.
+    end note
     note right of retired
         Soft: earlier decisions still resolve.
         Retiring cascades to its relationships
@@ -289,13 +299,16 @@ stateDiagram-v2
     [*] --> in_flight: Apply cap
     in_flight --> not_applied: still reads as before after Settle
     in_flight --> kept: observed drop at least half the prediction
-    in_flight --> reverted: smaller drop, undone, cooldown x4
+    in_flight --> reverted: first step, smaller drop, undone, cooldown x4
+    in_flight --> kept: further step, smaller drop, earlier cap restored
+    in_flight --> in_flight: undo refused, journalled "stuck", retried each tick
     in_flight --> released: workload no longer listed
+    kept --> in_flight: further step on the same workload
     kept --> expired: expiry (1 h) passed, given back
     kept --> floored: floor rose above the cap, given back
     kept --> manual: operator revert
     kept --> gone: workload left
-    reverted --> stuck: actuator refused the undo, retried each tick
+    reverted --> [*]
     not_applied --> [*]
     released --> [*]
     expired --> [*]
@@ -303,6 +316,8 @@ stateDiagram-v2
     manual --> [*]
     gone --> [*]
 ```
+
+A refused give-back of a kept cap (at expiry, floor or a manual revert) is journalled `stuck` the same way and retried each tick; `stuck` is a decision, not an outcome.
 
 ### A relief episode
 
@@ -339,7 +354,7 @@ sequenceDiagram
     Note over T: pressure below Exit for ExitFor: releasing<br/>caps stay until expiry, floor or manual revert<br/>then releasing to calm
 ```
 
-On restart, `Acting.Held` sorts ledger entries and `reconcile` resumes the newest unexpired one as in flight; nothing new is applied until that succeeds. `POST /relief/pause` stops new actions on every lever while the loops keep observing, verifying and expiring.
+On restart, `Acting.Held` reads what the ledger holds and `reconcile` sorts the held entries by expiry: the latest-expiring one resumes as in flight (when nothing already is) and the rest as kept, while expired entries are taken as kept so that `expire` gives them back. Nothing new is applied until reconcile succeeds. `POST /relief/pause` stops new actions on every lever while the loops keep observing, verifying and expiring.
 
 ---
 
@@ -361,7 +376,7 @@ sequenceDiagram
     S->>A: POST /tasks Offer{name, arch, demand cpu, memory}
     A->>A: strict decode, Validate
     A->>MA: decide(offer)
-    Note over A,MA: decline if already in chain, already pending,<br/>already running, arch mismatch, no relief domains,<br/>any domain not calm, or predicted pressure above Exit
+    Note over A,MA: already_asked if already in the chain<br/>decline if already pending, workload list unavailable,<br/>already running, arch mismatch, no relief domains,<br/>headroom gate fails, any domain not calm,<br/>or predicted pressure above Exit
     MA-->>A: Hop{A, decline, decision_id, reason}
     A->>B: POST /offers Offer + chain[A]
     B->>B: same decide on its own map
@@ -377,13 +392,16 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    o[Offer] --> g1{"in chain, pending,<br/>or already running?"}
+    o[Offer] --> g0{"this node already<br/>in the chain?"}
+    g0 -->|yes| asked[already_asked]
+    g0 -->|no| g1{"name pending, workload list<br/>unavailable, or already running?"}
     g1 -->|yes| dec[decline]
     g1 -->|no| g2{"arch matches,<br/>relief domains exist,<br/>demand per domain?"}
     g2 -->|no| dec
-    g2 -->|yes| g3{"every domain calm,<br/>headroom gate passes?"}
+    g2 -->|yes| gate["headroom gate (Admit),<br/>always evaluated and cited"]
+    gate --> g3{"every domain calm<br/>and the gate accepts?"}
     g3 -->|no| dec
-    g3 -->|yes| p["per domain predict<br/>map: pressure + slope x share<br/>usage: pressure x (usage+share)/usage<br/>basis chosen by calibration error"]
+    g3 -->|yes| p["per domain predict<br/>map: pressure + slope x share<br/>usage: pressure x (usage+share)/usage<br/>basis: map until both have 5 outcomes,<br/>then the lower calibration error"]
     p --> g4{"every prediction<br/>at or below Exit?"}
     g4 -->|no| dec
     g4 -->|yes| acc[accept, register pending]
@@ -409,7 +427,7 @@ sequenceDiagram
         Note over Tr: wait max(Settle)
         Tr->>M: judge
         Note over Tr,M: relief acted: breached, not scored<br/>another workload moved, workload silent,<br/>or stale reading: confounded<br/>else above Enter: breached, else held
-        Tr->>M: RecordPrediction(map or usage, predicted, observed)
+        Tr->>M: RecordPrediction for each basis predicted (map, usage)
         Tr->>M: Commit admission.outcome, linked to the accept
     end
 ```
@@ -426,7 +444,7 @@ Every agent exposes the same surface; there is no coordinator role in the agent.
 |---|---|---|---|
 | `GET /cost?task=&node=` | A to B | `RecommendPeer` (S5) | reward or penalise B's trust |
 | `POST /offers` | A to B | admission walk (S3) | appends B's hop to the chain |
-| `GET /state` | A to B | peer state poll | stored in `PeerStore` under B's id |
+| `GET /state` | A to B | peer state poll | stored in `PeerStore` under the node id B reports for itself |
 | `GET /healthz` | any | probes | none |
 
 ### Peer state polling
@@ -443,17 +461,19 @@ sequenceDiagram
     Pl->>Reg: List() (peers added at runtime included)
     loop each peer
         Pl->>B: GET /state
-        alt reachable
-            B-->>Pl: StateView{owner: B, ...}
-            Note over Pl: refused if owner is empty or is this node
-            Pl->>PS: Record(B, view)
+        alt transport error, or a view naming no owner
+            Pl->>PS: RecordFailure(B URL)
+            Pl->>M: EventPeerUnreachable (on change)
+        else view names this node as owner
+            Note over Pl: Record refuses it, logged as a refusal
+            Pl->>M: EventPeerUnreachable (on change)
+        else valid view
+            B-->>Pl: StateView{owner: B node id, ...}
+            Pl->>PS: Record(view), keyed by the owner it names
             Pl->>Reg: MarkSeen(B)
             opt was unreachable
                 Pl->>M: EventPeerRecovered
             end
-        else unreachable
-            Pl->>PS: RecordFailure(B)
-            Pl->>M: EventPeerUnreachable (on change)
         end
     end
     Note over PS: held apart, never merged into local state<br/>read via /state/cluster, /state/peers, /state/where
@@ -502,8 +522,8 @@ sequenceDiagram
     participant P as Peer
 
     Cl->>R: POST /recommend {task, node}
-    R->>R: local CostOfAction
     R->>Reg: List()
+    R->>R: local CostOfAction
     loop each peer, 3 s budget overall
         alt trust below floor and not due a re-probe
             R->>R: skip
@@ -533,7 +553,8 @@ flowchart LR
 
     any -->|GET /state: whole model, journal, decisions| agent
     any -->|POST mutations: ontology, peers, trust, relief, candidates| agent
-    browser -.->|cross-origin form POST<br/>blocked: requireJSON content-type| agent
+    browser -.->|cross-origin form POST with a body<br/>blocked: requireJSON content-type| agent
+    browser -->|path-only POST: candidate review,<br/>/state/sweep, /state/peers/refresh| agent
     peer -->|GET /state of this agent: disclosed| agent
     agent -->|peer /state without owner, or naming this node| refused["refused"]
     any -.->|sample naming another node<br/>refused: ingest-scope=self| agent
@@ -543,12 +564,13 @@ What exists today, and what does not:
 
 | Defence | Where | Protects against |
 |---|---|---|
-| `requireJSON` on body-bearing POSTs | `pkg/agentmain/routes.go` | browser CSRF against a daemon on localhost |
+| `requireJSON` on every POST that takes a body, `/recommend` and `/simulate` included | `pkg/agentmain/routes.go` | browser CSRF against a daemon on localhost |
 | Foreign samples refused | `semmap.IngestSample`, `node.ingest_scope: self` | one node writing another's state |
 | Peer state must name an owner, not this node | `peers.Client.State`, `statemap/peer.go` | a peer's view being mistaken for local state |
-| Strict offer decoding | `admission.readOffer` | a misspelt field read as zero demand |
-| Snapshot owner check | `persist.file` load | restoring another node's state |
+| Strict offer decoding | `readOffer`, `pkg/agentmain/admission.go` | a misspelt field read as zero demand |
+| Snapshot owner check | `statemap/persist.go`, when `persist.file` is loaded | restoring another node's state |
 | `policy` freeze rules, self always frozen | `pkg/policy` | relief acting on system or protected workloads |
+| **Not covered:** path-only POSTs (`/candidates/{id}/{confirm,reject,defer}` without a body, `/state/sweep`, `/state/peers/refresh`) | `pkg/agentmain` | a forged form post can trigger them; candidate ids are unguessable in practice, and the other two only run early what a loop runs anyway |
 | **Missing:** authentication, TLS, peer identity, authorisation | — | everything that can reach the port can read and mutate |
 | **Missing:** outcome-driven trust | `Registry.UpdateTrust` exists, nothing calls it on an offer outcome | a peer that accepts and then breaks its prediction keeps its trust |
 
@@ -621,7 +643,7 @@ sequenceDiagram
     Q->>API: GET /state/decisions/{id}
     API->>J: Journal, else DecisionFromLog
     J-->>Q: inputs as read at the time
-    Note over Q,J: 410 if the journal dropped it, 404 if never seen<br/>/state/decisions/{id}/explain narrates it
+    Note over Q,J: an id in neither: 410 once the journal has dropped entries,<br/>404 otherwise (a dropped id and an unknown one look alike)<br/>/state/decisions/{id}/explain narrates it
 ```
 
 Relief steps (`relief.act`, `relief.verify`, …), admissions (`admission`, `admission.outcome`) and reviews (`review`) are decisions of the same kind, so each can be read back the same way.
@@ -686,13 +708,13 @@ flowchart TB
     a1 <--> a3
 ```
 
-The case study (`poc/casestudy/`) is one VM, `di-node`, running k0s, Netdata, the agent with the Kubernetes runtime and relief on, and Ollama as the tier-1 decision model; `master.sh` submits offers via `POST /tasks`.
+The case study (`poc/casestudy/`) is one VM, `di-node`, running k0s, Netdata, the agent with the Kubernetes runtime, and Ollama as the tier-1 decision model. The config changes by phase: `agent.yaml` has relief off, `agent-relief.yaml` turns it on from phase P3, and `master.sh` runs `agent-autonomous.yaml` and submits offers via `POST /tasks`.
 
 ### `poc2/` — Kubernetes, replayed and live telemetry
 
 ```mermaid
 flowchart LR
-    subgraph infra["libvirt VMs via Terraform, or EKS (3 x t3.medium)"]
+    subgraph infra["libvirt: 4 VMs via Terraform, VM 1 the control plane; or EKS: 3 x t3.medium"]
         subgraph sys["Helm chart di-agent-system"]
             pg[("PostgreSQL")]
             ing["postgres-ingest Job"]
@@ -711,7 +733,7 @@ flowchart LR
             w3["agent worker-3 :9090"]
         end
     end
-    sp(["Dataset CSVs"]) --> ing --> pg --> rs --> kf
+    sp(["Dataset CSVs"]) -->|skipped when PONTOS is on| ing --> pg --> rs --> kf
     pon(["PONTOS MQTT"]) --> pb --> kf
     kf --> tw --> ix --> gf
     kf --> dc
@@ -724,4 +746,4 @@ flowchart LR
     host(["Host: 04-peers.sh, coordinator.sh"]) --> ds
 ```
 
-Every agent also reads the host's `/sys/fs/cgroup` and keeps state under `/var/lib/di-agent`. Only the designated node collects from `dataset-collector`.
+Every agent also reads the host's `/sys/fs/cgroup` and keeps state under `/var/lib/di-agent`. Only the node named by `agent.datasetNodeName` collects from `dataset-collector`; the default is empty, so dataset collection is off until it is set (`04-peers.sh` requires it). The agent DaemonSet runs on the three workers.

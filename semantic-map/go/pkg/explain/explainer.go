@@ -13,9 +13,9 @@
 // Design choice (v1): concrete, not contract, following the pkg/peers
 // precedent. When a second implementation (e.g. hosted API) is required, we
 // promote the surface to pkg/contracts at that point. Keeping the contract
-// set at five ({Ontology, Reasoner, Proposer, Tuner, Collector}) preserves the
-// "no new contract without a second implementation" discipline documented in
-// ARCHITECTURE.md §2.
+// set at seven (the five in pkg/contracts plus runtime.Runtime and
+// actuators.Actuator) preserves the "no new contract without a second
+// implementation" discipline documented in ARCHITECTURE.md §2.
 //
 // Reproducibility stance: the Explainer's outputs are non-deterministic (the
 // LLM is a black box), but its inputs and validation are fully deterministic.

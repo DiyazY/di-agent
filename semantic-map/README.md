@@ -696,7 +696,7 @@ composition candidate withdrawn before a cycle reached it is still confirmed by 
 
 ### Full endpoint table
 
-The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)).
+The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)). `POST /recommend` and `POST /simulate` require it too, and answer `400` with that JSON error without it.
 
 | Verb | Path                                | Body / params                                            | Since    |
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |

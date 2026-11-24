@@ -6,8 +6,9 @@
 // endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
-// interfaces. The contract surface stays at five (Ontology, Reasoner,
-// Proposer, Tuner, Collector). When a second implementation arrives — e.g.
+// interfaces. The contract surface stays at seven: the five in pkg/contracts
+// (Ontology, Reasoner, Proposer, Tuner, Collector) plus runtime.Runtime and
+// actuators.Actuator. When a second implementation arrives — e.g.
 // SQLite-backed peer state for richer profiles, or a gossip-based registry —
 // we promote the surface to pkg/contracts at that point.
 //

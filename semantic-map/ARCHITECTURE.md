@@ -11,9 +11,9 @@ Design rationale and decision record. Update this file when a contract, profile,
   - [Component reference](#component-reference)
   - [The four request lifecycles](#the-four-request-lifecycles)
 - [2. Contract Architecture](#2-contract-architecture)
+  - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [The seven contracts](#the-seven-contracts)
   - [Actuators: a dumb actuator, a smart loop](#actuators-a-dumb-actuator-a-smart-loop)
-  - [What is deliberately not a contract](#what-is-deliberately-not-a-contract)
   - [Behavioral guarantees](#behavioral-guarantees)
   - [End-to-end validation: integration scenarios](#end-to-end-validation-integration-scenarios)
 - [3. Deployment Profiles](#3-deployment-profiles)
@@ -34,21 +34,22 @@ Design rationale and decision record. Update this file when a contract, profile,
 - [13. Natural-Language Explain Layer (`pkg/explain`)](#13-natural-language-explain-layer-pkgexplain)
 - [14. Explain v2 — Planning, Critic, Sessions, Streaming](#14-explain-v2--planning-critic-sessions-streaming)
 - [15. Autonomous Candidate Review (`pkg/autonomy`)](#15-autonomous-candidate-review-pkgautonomy)
-- [16. Acting (`pkg/relief`, `pkg/policy`, `pkg/runtime`)](#16-acting-pkgrelief-pkgpolicy-pkgruntime)
+- [16. Acting (`pkg/relief`, `pkg/policy`, `pkg/actuators`, `pkg/runtime`)](#16-acting-pkgrelief-pkgpolicy-pkgactuators-pkgruntime)
+- [Groups: what belongs to what](#groups-what-belongs-to-what)
 
 ---
 
 ## 1. Core Concept
 
-The Semantic Map has two layers that are always present simultaneously:
+The Semantic Map has two tiers of knowledge that are always present simultaneously — a declared backbone and learned evidence. (They are not the four runtime layers of the diagram below, which are named Sensing, State, Decide and act, and Operator surface.)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  Layer 2 — Evidence (dynamic)                                  │
+│  Learned evidence (dynamic)                                    │
 │  Statistical descriptors updated by live telemetry             │
 │  "In THIS cluster, under THESE workloads, here is reality"     │
 ├────────────────────────────────────────────────────────────────┤
-│  Layer 1 — Backbone (structure only, no magnitudes)            │
+│  Declared backbone (structure only, no magnitudes)             │
 │  Constructs + causal propositions, declared in domain_spec.json │
 │  "What matters and how things relate"                          │
 └────────────────────────────────────────────────────────────────┘
@@ -235,7 +236,7 @@ mapctl · /ui/ · curl    ║                                                   
                         ╔═══════════════════════════════▼══════════════════════════════╗
 PEER AGENTS ◀──────────▶║ LAYER 3 · DECIDE AND ACT                                     ║
 /cost /offers /state    ║                                                              ║
-                        ║ semmap facade: CostOfAction · RecommendPeer · Simulate       ║
+                        ║ semmap: CostOfAction · RecommendPeer · SimulateOutcome       ║
                         ║   Reasoner · Ontology · Proposer · Tuner  (internal/minimal) ║
                         ║ ──────────────────────────────────────────────────────────   ║
                         ║ autonomy   reviews proposer candidates: rules → models       ║
@@ -277,7 +278,7 @@ What each piece is for, when it runs, and whether it is required.
 | Component | Package | Purpose | Runs when | Required? |
 |---|---|---|---|---|
 | **Collector** | `pkg/collectors` (built-ins in `internal/minimal`, `internal/scripted`) | Read raw metrics from cgroup / Netdata / a plugin; emit typed `MetricSample`s. The configured list (`sources.collectors`) runs under one Supervisor | Collection loop tick (`sources.interval`) | Optional — `POST /ingest-sample` works without one |
-| **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Yes (a table in the spec) |
+| **Routing** | `domain_spec.json` | Say which construct summarises a metric — data, not code | Every sample, to tell the Proposer which construct moved | Optional — only with a domain spec (`domain.path`); without one, cost, recommendation and tuning answer `501` |
 | **State model** | `pkg/statemap` | Hold the properties the system exhibits and the relationships between them; recompute what derives; fold paired observations into learned strengths; journal every change and decision | Every sample, and every answer | Not a contract — one implementation, and the agent's single model |
 | **Ontology** | `internal/minimal` | Own the backbone: constructs, propositions, validation, audit log | Reasoning, mutations | Yes |
 | **Reasoner** | `internal/minimal` | Turn graph state into `ActionCost` / `PeerRecommendation` with a rationale | `/cost`, `/recommend`, `/simulate` | Yes |
@@ -1557,7 +1558,7 @@ Every layer talks to the layer above only via HTTP — the CLI does not import `
 
 ### HTTP API
 
-Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 endpoints (`/cost`, `/recommend`, `/simulate`, `/candidates`) keep their original `http.Error` plain-text error format to minimize diff against the v0 daemon. The fifth, `/ingest`, is gone: it named a construct pair and a magnitude directly, which is an assertion about a relation rather than an observation of one. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
+Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 endpoints (`/cost`, `/recommend`, `/simulate`, `/candidates`) keep their original `http.Error` plain-text error format to minimize diff against the v0 daemon, except that `/recommend` and `/simulate` now refuse a non-JSON body with the JSON error of the guard below. The fifth, `/ingest`, is gone: it named a construct pair and a magnitude directly, which is an assertion about a relation rather than an observation of one. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
 
 | Verb | Path                              | Request body / params                                                  | Response (2xx)                | Semantics                                                                                              |
 | ---- | --------------------------------- | ---------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -1593,7 +1594,7 @@ Errors on the new endpoints follow a single shape:
 
 ### CSRF mitigation: `requireJSON`
 
-There is no auth in v1 — the daemon is intended for lab-network localhost. To stop a malicious page in a browser from issuing cross-origin mutations against a daemon on `localhost:8080`, every body-bearing POST handler calls `requireJSON(r)` and rejects requests whose `Content-Type` is not `application/json`. Browsers do not send that header on simple cross-origin form posts, so a CSRF attempt fails the Content-Type check before reaching the facade. The path-only candidate-review endpoints (`/candidates/{id}/{confirm,reject,defer}`) skip the check because they take no body; the candidate ID being unguessable in practice (UUID-shaped) is the mitigation.
+There is no auth in v1 — the daemon is intended for lab-network localhost. To stop a malicious page in a browser from issuing cross-origin mutations against a daemon on `localhost:8080`, every body-bearing POST handler calls `requireJSON(r)` and rejects requests whose `Content-Type` is not `application/json`. Browsers do not send that header on simple cross-origin form posts, so a CSRF attempt fails the Content-Type check before reaching the facade. `/recommend` and `/simulate` take the guard as well: they predate it, but `/recommend` rewards or penalises every peer it queries, so a forged post could drain trust. The path-only POSTs skip the check because they take no body: the candidate-review endpoints (`/candidates/{id}/{confirm,reject,defer}`, where `confirm` checks only when it is sent a body), whose mitigation is that the candidate ID is unguessable in practice (UUID-shaped), and `/state/sweep` and `/state/peers/refresh`, which only run early what a loop runs anyway.
 
 This is sufficient for the v1 threat model. When the agent grows beyond localhost, a token-based auth layer is the next step (tracked in the plan's "Out of scope for v1" section).
 
@@ -1783,7 +1784,7 @@ This section covers the registry and the trust mechanics that decide *where work
 
 ### The peer registry — concrete, not a contract
 
-In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at five (Collector, Ontology, Reasoner, Proposer, Tuner) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
+In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a contract. The contract surface stays at seven (the five in `pkg/contracts` — Collector, Ontology, Reasoner, Proposer, Tuner — plus Runtime and Actuator, §2) — broadening it would force every profile to re-implement a peer table that the edge-minimal profile already provides for free. We promote to a contract when a second implementation arrives:
 
 - SQLite-backed registry for the edge-standard / cloud-full profile, keeping full trust history (today each peer's trust and penalty time survive a restart in the snapshot's `loops`, §5 Persistence, and its observation count starts again);
 - gossip-based discovery (mDNS / dat-style) so peers find each other without a static `peers.urls` list.
