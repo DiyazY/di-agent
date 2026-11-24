@@ -28,7 +28,8 @@ var (
 	ErrInvalidHash   = errors.New("hash must be 64 lowercase hexadecimal characters")
 	ErrHashMismatch  = errors.New("gossip object hash mismatch")
 	ErrTooLarge      = errors.New("gossip object exceeds 64 KiB")
-	ErrFull          = errors.New("gossip memory store is full")
+	ErrFull          = errors.New("gossip object store is full")
+	ErrPersistence   = errors.New("gossip persistence failed")
 )
 
 // Object is the versioned wire envelope. OriginID is a claim, not an
@@ -110,12 +111,14 @@ func Verify(hash string, data []byte) error {
 }
 
 // Memory retains at most MaxObjects objects and MaxStoreBytes wire bytes.
+// When configured by NewPersistent, it also durably stores admitted objects.
 // Full stores reject new content rather than silently evicting existing content.
 // Stored and returned bytes are copied; duplicate delivery consumes no capacity.
 type Memory struct {
 	mu      sync.RWMutex
 	objects map[string][]byte
 	bytes   int
+	dir     string
 }
 
 func NewMemory() *Memory {
@@ -138,6 +141,11 @@ func (m *Memory) Put(hash string, data []byte) (bool, error) {
 	}
 	if len(m.objects) >= MaxObjects || m.bytes+len(owned) > MaxStoreBytes {
 		return false, ErrFull
+	}
+	if m.dir != "" {
+		if err := persistObject(m.dir, hash, owned); err != nil {
+			return false, fmt.Errorf("%w: %w", ErrPersistence, err)
+		}
 	}
 	m.objects[hash] = owned
 	m.bytes += len(owned)
