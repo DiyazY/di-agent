@@ -143,7 +143,7 @@ for round in $(seq 1 "$ROUNDS"); do
     busiest_ip=$(ip_for "$busiest_vm")
     rec_raw=$(curl -sf -X POST \
         -H "Content-Type: application/json" \
-        -d "{\"task_type\":\"pod-scheduling\"}" \
+        -d "{\"TaskType\":\"pod-scheduling\"}" \
         "http://${busiest_ip}:9090/recommend" 2>/dev/null || echo "{}")
 
     peer_id=$(json_get "$rec_raw" "PeerID")

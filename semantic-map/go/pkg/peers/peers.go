@@ -2,8 +2,8 @@
 //
 // A Registry holds Descriptors for known remote agents, each tagged with a
 // trust score in [0,1] that the reasoner uses to weight offload candidates.
-// A Client speaks HTTP to remote agents (their /cost, /healthz, /offers
-// endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
+// A Client speaks HTTP to remote agents (their /cost, /state, /healthz and
+// /offers endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
 // interfaces. The contract surface stays at seven: the five in pkg/contracts
@@ -47,7 +47,8 @@ import (
 // filters peers below the configured minimum and weights savings by trust
 // when ranking candidates.
 //
-// LastSeen is updated by the reasoner whenever a successful HTTP probe lands;
+// LastSeen is updated whenever a successful HTTP probe lands, by the reasoner's
+// /cost query or the peer state poll;
 // it remains zero until first contact. LastPenalised is stamped when the agent
 // itself penalised the peer (Penalise); it stays zero for a trust an operator set,
 // which is how the reasoner tells a penalty that may expire from a floor that stays.
@@ -311,8 +312,8 @@ func (r *Registry) MarkSeen(id string, when time.Time) error {
 // ── Client — outbound HTTP to peers ───────────────────────────────────────────
 
 // Client makes HTTP calls to remote agents. It is intentionally tiny: one
-// http.Client, a default timeout, and three methods that mirror the daemon's
-// /cost, /healthz, and /offers endpoints.
+// http.Client, a default timeout, and four methods that mirror the daemon's
+// /cost, /state, /healthz and /offers endpoints.
 type Client struct {
 	http    *http.Client
 	Timeout time.Duration

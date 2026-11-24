@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -572,7 +573,7 @@ func TestRecommendAndSimulateRequireJSON(t *testing.T) {
 	base, _, cleanup := newTestAgent(t)
 	defer cleanup()
 	for _, path := range []string{"/recommend", "/simulate"} {
-		resp := postRaw(t, base+path, `{"task_type":"pod-scheduling"}`)
+		resp := postRaw(t, base+path, `{"TaskType":"pod-scheduling"}`)
 		if resp.StatusCode != 400 {
 			t.Errorf("%s without Content-Type: %s, want 400", path, body(resp))
 			continue
@@ -585,6 +586,56 @@ func TestRecommendAndSimulateRequireJSON(t *testing.T) {
 		if !strings.Contains(er.Error, "application/json") {
 			t.Errorf("%s: error message %q should mention application/json", path, er.Error)
 		}
+	}
+}
+
+// A forged /recommend must not reach a peer: no /cost query, no trust moved. The
+// same request with the header does reach it, carrying the task named by
+// TaskType, so the zero is the guard's doing and not a missing peer client.
+func TestRecommendWithoutJSONNeverQueriesAPeer(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	var hits atomic.Int64
+	var task atomic.Value
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		task.Store(r.URL.Query().Get("task"))
+		_ = json.NewEncoder(w).Encode(map[string]float64{"ResourceCost": 0.01})
+	}))
+	defer peer.Close()
+	resp := postJSON(t, base+"/peers", AddPeerRequest{URL: peer.URL})
+	resp.Body.Close()
+
+	resp = postRaw(t, base+"/recommend", `{"TaskType":"pod-scheduling"}`)
+	resp.Body.Close()
+	var list []PeerDTO
+	getJSON(t, base+"/peers", &list)
+	if resp.StatusCode != 400 || hits.Load() != 0 || len(list) != 1 || list[0].Trust != 0.5 {
+		t.Fatalf("without JSON: status %d, %d peer queries, peers %+v; want 400, 0, trust 0.5",
+			resp.StatusCode, hits.Load(), list)
+	}
+
+	resp = postJSON(t, base+"/recommend", map[string]string{"TaskType": "pod-scheduling"})
+	resp.Body.Close()
+	if hits.Load() != 1 || task.Load() != "pod-scheduling" {
+		t.Fatalf("with JSON: %d peer queries for task %v; want 1 for pod-scheduling", hits.Load(), task.Load())
+	}
+}
+
+func TestSimulateAnswersAJSONRequest(t *testing.T) {
+	base, _, cleanup := newTestAgent(t)
+	defer cleanup()
+	resp := postJSON(t, base+"/simulate", map[string]any{"context": map[string]string{"TaskType": "pod-scheduling"}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST /simulate: %s", body(resp))
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := out["Confidence"]; !ok {
+		t.Fatalf("response has no Confidence: %v", out)
 	}
 }
 

@@ -83,11 +83,11 @@ flowchart LR
     subgraph node["One machine"]
         agent["di-agent<br/>:8080 or :9090"]
         kern[("Kernel<br/>cgroup v2, /proc")]
-        rt[("Container runtime<br/>kubelet API")]
         nd[("Netdata :19999<br/>optional")]
         disk[("persist.file<br/>snapshot + journal log")]
     end
 
+    rt[("Kubernetes API server<br/>pods list, resize subresource")]
     peers(["Peer agents<br/>one per machine"])
 
     op -->|HTTP API| agent
@@ -211,7 +211,9 @@ sequenceDiagram
         F->>M: RecordAccepted(observation)
         Note over M: reject future, out-of-order, duplicate event_id<br/>admit an unknown property and journal it<br/>EMA, n_obs, confidence<br/>recompute derived (construct) parents<br/>learn on incident relationships
         M-->>F: accepted
-        F->>P: ObserveProperty(reading)
+        opt not the derived admission headroom
+            F->>P: ObserveProperty(reading)
+        end
     end
     L->>M: SetSourceDown per collector, up or down
 ```
@@ -234,6 +236,8 @@ stateDiagram-v2
     unobservable --> stale: silent past stale_after, counted from the collector's return
     unobservable --> retired: silent past retire_after, counted from the collector's return
     retired --> active: observation revives it
+    retired --> forgotten: 24 h retired, observed and no live declared relationship
+    forgotten --> [*]
     note right of unobservable
         Silence with a known cause
         is not evidence of departure.
@@ -242,6 +246,11 @@ stateDiagram-v2
         Soft: earlier decisions still resolve.
         Retiring cascades to its relationships
         and the proposer forgets its pairs.
+    end note
+    note right of forgotten
+        Removed, a tombstone left: its endpoint
+        answers 410 forgotten. An observation
+        admits it again as a new property.
     end note
 ```
 
@@ -302,12 +311,13 @@ stateDiagram-v2
     in_flight --> reverted: first step, smaller drop, undone, cooldown x4
     in_flight --> kept: further step, smaller drop, earlier cap restored
     in_flight --> in_flight: undo refused, journalled "stuck", retried each tick
-    in_flight --> released: workload no longer listed
+    in_flight --> released: workload no longer listed, cap given back
+    in_flight --> gone: workload no longer listed, actuator finds nothing to give back
     kept --> in_flight: further step on the same workload
     kept --> expired: expiry (1 h) passed, given back
     kept --> floored: floor rose above the cap, given back
     kept --> manual: operator revert
-    kept --> gone: workload left
+    kept --> gone: give-back (expiry, floor, manual) finds the workload gone
     reverted --> [*]
     not_applied --> [*]
     released --> [*]
@@ -427,7 +437,9 @@ sequenceDiagram
         Note over Tr: wait max(Settle)
         Tr->>M: judge
         Note over Tr,M: relief acted: breached, not scored<br/>another workload moved, workload silent,<br/>or stale reading: confounded<br/>else above Enter: breached, else held
-        Tr->>M: RecordPrediction for each basis predicted (map, usage)
+        opt held or breached past Enter, not confounded
+            Tr->>M: RecordPrediction for each basis predicted (map, usage)
+        end
         Tr->>M: Commit admission.outcome, linked to the accept
     end
 ```
@@ -500,13 +512,18 @@ stateDiagram-v2
     eligible --> penalised: trust below min_trust after a penalty
     penalised --> reprobed: 10 min since LastPenalised
     reprobed --> eligible: /cost succeeds and trust back at the floor
-    reprobed --> penalised: still below the floor, or fails again
+    reprobed --> reprobed: /cost succeeds, still below the floor, asked on every call
+    reprobed --> penalised: /cost fails again, LastPenalised restamped
     eligible --> operator_excluded: operator sets trust below the floor
     penalised --> operator_excluded: operator sets trust below the floor
     operator_excluded --> eligible: operator sets trust at or above the floor
     note right of operator_excluded
         SetTrust clears LastPenalised,
         so this peer is never re-probed.
+    end note
+    note right of reprobed
+        A reward does not restamp LastPenalised,
+        so only a new failure restarts the 10 min.
     end note
 ```
 

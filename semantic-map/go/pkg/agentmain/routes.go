@@ -77,12 +77,12 @@ import (
 // point for the daemon's URL surface; main only constructs the mux, the
 // SemanticMap, and the http.Server.
 //
-// Convention: the EXISTING endpoints (/cost, /recommend, /simulate, /candidates)
-// keep their original http.Error plain-text error format to minimize diff. Every NEW endpoint added in this expansion uses
-// writeError to emit a JSON {"error":"..."} body, and every new POST
-// handler calls requireJSON at the top as a lightweight CSRF mitigation.
-// /recommend and /simulate take the guard too (and its JSON error): /recommend
-// moves peer trust, so a cross-origin form post must not reach it.
+// Convention: errors are a JSON {"error":"..."} body written by writeError, and
+// every POST that takes a body calls requireJSON at the top as a lightweight CSRF
+// mitigation. /recommend and /simulate take the guard too: /recommend moves peer
+// trust, so a cross-origin form post must not reach it. Two plain-text
+// http.Error responses remain from the v0 daemon: a body that fails to decode on
+// /recommend and /simulate, and GET /candidates.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
@@ -152,7 +152,8 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, result)
 	})
 
-	// POST /recommend  {"task_type":"...","source_node_id":"...","data_size_bytes":1024,"latency_budget_ms":500}
+	// POST /recommend  {"TaskType":"...","SourceNodeID":"...","DataSizeBytes":1024,"LatencyBudgetMs":500}
+	// OffloadContext has no JSON tags, so the keys are its Go field names.
 	// Not a read: the peers it queries are rewarded or penalised, so it takes the
 	// same CSRF guard as the mutations below.
 	mux.HandleFunc("POST /recommend", func(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +174,7 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, result)
 	})
 
-	// POST /simulate  {"context":{...},"target_node_id":"node_2"}
+	// POST /simulate  {"context":{"TaskType":"..."},"target_node_id":"node_2"}
 	mux.HandleFunc("POST /simulate", func(w http.ResponseWriter, r *http.Request) {
 		if err := requireJSON(r); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())

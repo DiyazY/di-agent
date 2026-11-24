@@ -333,7 +333,7 @@ Verify the mesh:
 ```bash
 curl -s http://nodeA:9090/peers | jq -r '.[] | "\(.id) trust=\(.trust) \(.url)"'
 curl -sf -X POST http://nodeA:9090/recommend -H 'Content-Type: application/json' \
-  -d '{"task_type":"pod-scheduling"}' | jq '{PeerID,ExpectedSavings}'
+  -d '{"TaskType":"pod-scheduling"}' | jq '{PeerID,ExpectedSavings}'
 ```
 
 Peers below the `profile.min_trust` floor (default `0.5`) are excluded from recommendations entirely. `poc/scripts/05-peers.sh` is a working full-mesh registration script if you want to copy the pattern.

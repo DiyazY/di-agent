@@ -322,7 +322,7 @@ not the value, not `n_observations`, not the estimator's pair window.*
 **② A decision is requested** — the loop that makes the agent useful.
 
 ```
-GET /cost?task=pod-scheduling&node=master
+GET /cost?task=pod-scheduling          (node omitted: this agent's own cost)
   └─▶ Reasoner.CostOfAction
         ├─▶ cost roles from spec.CostModel — which construct is resource, which pressure
         ├─▶ state.Decide(id) → DecisionBuilder: every read is recorded by the reading
@@ -1558,7 +1558,7 @@ Every layer talks to the layer above only via HTTP — the CLI does not import `
 
 ### HTTP API
 
-Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 endpoints (`/cost`, `/recommend`, `/simulate`, `/candidates`) keep their original `http.Error` plain-text error format to minimize diff against the v0 daemon, except that `/recommend` and `/simulate` now refuse a non-JSON body with the JSON error of the guard below. The fifth, `/ingest`, is gone: it named a construct pair and a magnitude directly, which is an assertion about a relation rather than an observation of one. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
+Two endpoint families coexist on the same mux. The four surviving pre-Phase-1 endpoints (`/cost`, `/recommend`, `/simulate`, `/candidates`) now answer status errors (400, 409, 501, 502) with the same JSON error body as the rest; two plain-text `http.Error` responses remain from the v0 daemon, a body that fails to decode on `/recommend` and `/simulate`, and `GET /candidates`. `/recommend` and `/simulate` take a request with Go field names (`TaskType`, not `task_type`) and answer with them. The fifth, `/ingest`, is gone: it named a construct pair and a magnitude directly, which is an assertion about a relation rather than an observation of one. Every endpoint added in the Phase 1 expansion emits structured JSON errors and gates mutations on `Content-Type: application/json`.
 
 | Verb | Path                              | Request body / params                                                  | Response (2xx)                | Semantics                                                                                              |
 | ---- | --------------------------------- | ---------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------ |
