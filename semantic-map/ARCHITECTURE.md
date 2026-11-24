@@ -1780,6 +1780,21 @@ In v1 the peer registry lives at `pkg/peers/` as a **concrete package**, not a c
 
 The trade-off: callers couple to `peers.Registry` and `peers.Client` directly. That is acceptable inside `internal/minimal/` (the only consumer in v1). When external implementations appear, we lift the surface into `pkg/contracts/PeerCoordinatorContract` and the existing concrete types become its first implementation.
 
+### Experimental object exchange
+
+`gossip.enabled` (off by default) wires
+`pkg/gossip.Memory` and its bounded HTTP client through
+`pkg/agentmain/gossip_routes.go`. The separate store holds immutable version-1
+JSON envelopes addressed by SHA-256 of their exact bytes, at most 128 objects
+and 4 MiB of content, with a 64 KiB per-object limit. Publication stamps the local
+origin; manual pulls use registered peer IDs and verify hashes before admission.
+Duplicate receipt is idempotent; full stores refuse admission rather than evict.
+The origin is unauthenticated. Nothing is applied to `statemap.Map` or
+`statemap.PeerStore`, and no trust updates are inferred from receipt.
+This is the objects-and-memory milestone, not a gossip membership protocol:
+no discovery, periodic dissemination, durability, or version-ordering of mutable
+state exists here. See [the operational example](README.md#experimental-gossip-objects-memory-only-milestone).
+
 ### Trust mechanics
 
 `Descriptor.Trust` is a float in `[0, 1]`. Four forces move it:
