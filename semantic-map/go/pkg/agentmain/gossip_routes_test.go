@@ -53,7 +53,7 @@ func newGossipNode(t *testing.T, id string) gossipNode {
 	store, registry := gossip.NewMemory(), peers.NewRegistry()
 	mux := http.NewServeMux()
 	registerStateRoutes(mux, state, nil, nil)
-	registerGossipRoutes(mux, id, registry, store, gossip.NewClient())
+	registerGossipRoutes(mux, id, registry, store, gossip.NewClient(), nil)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return gossipNode{srv.URL, state, store, registry}
@@ -117,7 +117,7 @@ func TestGossipRoutesReportPersistenceFailuresAndRestoreObjects(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	registry := peers.NewRegistry()
-	registerGossipRoutes(mux, "node-a", registry, store, gossip.NewClient())
+	registerGossipRoutes(mux, "node-a", registry, store, gossip.NewClient(), nil)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	body := `{"payload_type":"announcement","payload":{"test":"durable"}}`
@@ -167,7 +167,7 @@ func TestGossipRoutesReportPersistenceFailuresAndRestoreObjects(t *testing.T) {
 func TestGossipRoutesRefuseInvalidRequestsAndCorruptPeers(t *testing.T) {
 	store, registry := gossip.NewMemory(), peers.NewRegistry()
 	mux := http.NewServeMux()
-	registerGossipRoutes(mux, "node-b", registry, store, gossip.NewClient())
+	registerGossipRoutes(mux, "node-b", registry, store, gossip.NewClient(), nil)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	data, err := gossip.Encode("node-a", "announcement", json.RawMessage(`true`))

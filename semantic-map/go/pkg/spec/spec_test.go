@@ -98,6 +98,43 @@ func TestGossipIntervalIsExplicitAndBounded(t *testing.T) {
 	}
 }
 
+func TestGossipMembershipConfiguration(t *testing.T) {
+	const config = `node: {addr: "127.0.0.1:8080"}
+gossip:
+  enabled: true
+  interval: 1s
+  membership:
+    enabled: true
+    site: lab
+    bind_addr: 127.0.0.1
+    allowed_cidrs: [127.0.0.0/8]
+    seeds: ["127.0.0.1:7946"]
+`
+	got, err := Parse([]byte(config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Gossip.Membership.Enabled || got.Gossip.Membership.MaxActivePeers != 4 {
+		t.Fatal("membership settings or defaults were lost")
+	}
+	doc, err := got.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Parse(doc)
+	if err != nil || !reflect.DeepEqual(got.Gossip.Membership, reloaded.Gossip.Membership) {
+		t.Fatalf("membership settings did not round-trip: %v", err)
+	}
+	for _, doc := range []string{
+		"gossip: {membership: {enabled: true}}",
+		"gossip: {enabled: true, membership: {enabled: true}}",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Fatalf("invalid membership accepted: %s", doc)
+		}
+	}
+}
+
 func TestEnvironmentIsExpanded(t *testing.T) {
 	t.Setenv("KEY", "s3cret")
 	got, err := Parse([]byte("explain:\n  api_key: ${KEY}\n"))

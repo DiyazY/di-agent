@@ -1,6 +1,6 @@
 // Package gossip provides immutable, content-addressed objects kept separately
 // from the agent's local semantic map, with bounded pull-based dissemination
-// over explicitly registered peers. It does not perform discovery.
+// over registered peers or opt-in site-scoped discovery.
 package gossip
 
 import (

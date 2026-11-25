@@ -44,8 +44,18 @@ func gossipError(w http.ResponseWriter, err error) {
 }
 
 func registerGossipRoutes(mux *http.ServeMux, originID string, registry *peers.Registry,
-	store *gossip.Memory, client *gossip.Client) {
+	store *gossip.Memory, client *gossip.Client, membership *gossip.Membership) {
+	allowed := func(w http.ResponseWriter, r *http.Request) bool {
+		if membership != nil && !membership.AllowInbound(r.RemoteAddr, r.Header.Get("X-Di-Gossip-Site")) {
+			writeError(w, http.StatusForbidden, "gossip request is outside the configured site or CIDRs")
+			return false
+		}
+		return true
+	}
 	mux.HandleFunc("GET /gossip/objects", func(w http.ResponseWriter, r *http.Request) {
+		if !allowed(w, r) {
+			return
+		}
 		writeJSON(w, store.Inventory())
 	})
 	mux.HandleFunc("POST /gossip/objects", func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +81,9 @@ func registerGossipRoutes(mux *http.ServeMux, originID string, registry *peers.R
 		writeJSON(w, map[string]any{"hash": hash, "added": added})
 	})
 	mux.HandleFunc("GET /gossip/objects/{hash}", func(w http.ResponseWriter, r *http.Request) {
+		if !allowed(w, r) {
+			return
+		}
 		hash := r.PathValue("hash")
 		if err := gossip.ValidateHash(hash); err != nil {
 			gossipError(w, err)

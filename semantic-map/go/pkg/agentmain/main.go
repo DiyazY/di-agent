@@ -394,6 +394,7 @@ func Main() {
 	registerGroupsRoute(mux, grp)
 	registerPeerStateRoutes(mux, state, peerState, peerFetcher)
 	var gossipExchange *gossip.Exchange
+	var gossipMembership *gossip.Membership
 	if cfg.Gossip.Enabled {
 		store := gossip.NewMemory()
 		if cfg.Gossip.StorageDir != "" {
@@ -406,7 +407,16 @@ func Main() {
 			log.Printf("gossip: memory-only object store")
 		}
 		client := gossip.NewClient()
-		registerGossipRoutes(mux, cfg.Node.ID, sm.Peers(), store, client)
+		if cfg.Gossip.Membership.Enabled {
+			gossipMembership, err = gossip.NewMembership(cfg.Gossip.Membership, cfg.Node.ID, cfg.Node.Addr)
+			if err != nil {
+				log.Fatalf("gossip membership: %v", err)
+			}
+			client = gossip.NewMembershipClient(gossipMembership)
+			log.Printf("gossip membership: site=%s bind=%s:%d",
+				cfg.Gossip.Membership.Site, cfg.Gossip.Membership.BindAddr, cfg.Gossip.Membership.BindPort)
+		}
+		registerGossipRoutes(mux, cfg.Node.ID, sm.Peers(), store, client, gossipMembership)
 		gossipExchange = gossip.NewExchange(store, client)
 		log.Printf("gossip: object exchange enabled; interval=%s (0s is manual-only)", cfg.Gossip.Interval)
 	}
@@ -484,7 +494,11 @@ func Main() {
 	go pace.Run(ctx)
 	startSaveLoop(ctx, state, cfg.Persist.File, cfg.Persist.Interval, pace)
 	startPeerStateLoop(ctx, peerFetcher, cfg.Peers.StatePoll)
-	gossipDone := startGossipLoop(ctx, gossipExchange, sm.Peers(), cfg.Gossip.Interval)
+	var membershipDone <-chan struct{}
+	if gossipMembership != nil {
+		membershipDone = gossipMembership.Run(ctx)
+	}
+	gossipDone := startGossipLoop(ctx, gossipExchange, sm.Peers(), cfg.Gossip.Interval, gossipMembership)
 	startAdmissionLoop(ctx, admit.tracker, cfg.Loops.Relief.Interval)
 
 	// A nil *Supervisor in the interface would not compare equal to nil, and the loop
@@ -510,6 +524,12 @@ func Main() {
 	cancel()
 	if gossipDone != nil {
 		<-gossipDone
+	}
+	if gossipMembership != nil {
+		<-membershipDone
+		if err := gossipMembership.Close(); err != nil {
+			log.Printf("gossip membership: shutdown: %v", err)
+		}
 	}
 
 	// The final save happens HERE, synchronously, not in the save loop. Cancelling the

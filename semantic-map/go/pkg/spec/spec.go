@@ -25,6 +25,7 @@ import (
 
 	"github.com/DiyazY/di-agent/internal/minimal"
 	"github.com/DiyazY/di-agent/pkg/autonomy"
+	"github.com/DiyazY/di-agent/pkg/gossip"
 )
 
 // Redaction is what a secret is replaced by when a spec is shown.
@@ -52,9 +53,10 @@ type Spec struct {
 // Gossip enables experimental object exchange. A zero interval leaves it
 // manual-only; an empty storage directory keeps objects in memory.
 type Gossip struct {
-	Enabled    bool          `yaml:"enabled"`
-	Interval   time.Duration `yaml:"interval"`
-	StorageDir string        `yaml:"storage_dir"`
+	Enabled    bool                    `yaml:"enabled"`
+	Interval   time.Duration           `yaml:"interval"`
+	StorageDir string                  `yaml:"storage_dir"`
+	Membership gossip.MembershipConfig `yaml:"membership"`
 }
 
 // Groups says how the node's subjects are grouped: pods by a label an operator sets,
@@ -586,6 +588,8 @@ func Default() Spec {
 		},
 		Persist: Persist{File: DefaultStateFile, Interval: time.Minute},
 		Peers:   Peers{URLs: []string{}, StatePoll: 30 * time.Second, StateStale: 90 * time.Second},
+		Gossip: Gossip{Membership: gossip.MembershipConfig{BindPort: 7946, MaxActivePeers: 4,
+			Seeds: []string{}, AllowedCIDRs: []string{}}},
 		Explain: Explain{
 			Provider: "none", URL: "http://localhost:11434/v1", Model: "qwen2.5:7b-instruct",
 			KeepAlive: "30m", Sessions: true,
@@ -884,6 +888,14 @@ func (s Spec) Validate() error {
 	}
 	if s.Gossip.StorageDir != "" && strings.TrimSpace(s.Gossip.StorageDir) == "" {
 		errs = append(errs, errors.New("gossip.storage_dir must not contain only whitespace"))
+	}
+	if s.Gossip.Membership.Enabled {
+		if !s.Gossip.Enabled || s.Gossip.Interval <= 0 {
+			errs = append(errs, errors.New("gossip.membership requires gossip.enabled: true and a positive gossip.interval"))
+		}
+		if err := s.Gossip.Membership.Validate(s.Node.Addr); err != nil {
+			errs = append(errs, fmt.Errorf("gossip.%w", err))
+		}
 	}
 
 	if !slices.Contains([]string{"off", "suggest", "rules", "bounded", "full"}, s.Loops.Review.Level) {

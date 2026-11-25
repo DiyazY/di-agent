@@ -13,7 +13,7 @@ import (
 // startGossipLoop returns a completion signal so shutdown can wait for the last
 // in-flight exchange. Zero interval preserves manual-only mode.
 func startGossipLoop(ctx context.Context, exchange *gossip.Exchange, registry *peers.Registry,
-	every time.Duration) <-chan struct{} {
+	every time.Duration, membership *gossip.Membership) <-chan struct{} {
 	if exchange == nil || every <= 0 {
 		return nil
 	}
@@ -25,14 +25,21 @@ func startGossipLoop(ctx context.Context, exchange *gossip.Exchange, registry *p
 			if ctx.Err() != nil {
 				return
 			}
-			descriptors, err := registry.List()
-			var result gossip.RoundResult
-			if err == nil {
-				urls := make([]string, 0, len(descriptors))
+			var urls, known []string
+			var err error
+			if membership != nil {
+				urls, known = membership.SelectActive()
+			} else {
+				var descriptors []*peers.Descriptor
+				descriptors, err = registry.List()
 				for _, peer := range descriptors {
 					urls = append(urls, peer.URL)
 				}
-				result, err = exchange.Round(ctx, urls)
+				known = urls
+			}
+			var result gossip.RoundResult
+			if err == nil {
+				result, err = exchange.RoundWithKnownPeers(ctx, urls, known)
 			}
 			if ctx.Err() != nil {
 				return

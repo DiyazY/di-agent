@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -16,7 +17,33 @@ import (
 // Client retrieves exact wire bytes; redirects are refused so a registered
 // endpoint cannot redirect the exchange to an unrelated destination.
 type Client struct {
-	http *http.Client
+	http  *http.Client
+	allow func(string) bool
+	site  string
+}
+
+// NewMembershipClient limits requests to the current active membership set.
+func NewMembershipClient(m *Membership) *Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if err := allowedAddress(address, m.cidrs); err != nil {
+				return nil, fmt.Errorf("gossip destination: %w", err)
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
+	return &Client{
+		site: m.delegate.site,
+		allow: func(peerURL string) bool {
+			return slices.Contains(m.Active(), peerURL)
+		},
+		http: &http.Client{Timeout: 5 * time.Second, Transport: transport,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			}},
+	}
 }
 
 func NewClient() *Client {
@@ -89,10 +116,16 @@ func (c *Client) get(ctx context.Context, peerURL, path string, limit int64) ([]
 		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("gossip peer URL must be an HTTP(S) endpoint without credentials, query or fragment")
 	}
+	if c.allow != nil && !c.allow(strings.TrimRight(peerURL, "/")) {
+		return nil, fmt.Errorf("gossip peer %s is not an active site member", peerURL)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		strings.TrimRight(peerURL, "/")+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("gossip fetch: %w", err)
+	}
+	if c.site != "" {
+		req.Header.Set("X-Di-Gossip-Site", c.site)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

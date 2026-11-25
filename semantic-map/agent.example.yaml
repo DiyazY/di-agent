@@ -76,6 +76,14 @@ gossip:
     enabled: false
     interval: 0s
     storage_dir: ""
+    membership:
+        enabled: false
+        site: ""
+        bind_addr: ""
+        bind_port: 7946
+        seeds: []
+        allowed_cidrs: []
+        max_active_peers: 4
 domain:
     path: ""
 explain:
