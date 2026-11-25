@@ -144,12 +144,6 @@ jobs:
           cache: npm
           cache-dependency-path: poc2/playground/package-lock.json
 
-      - name: Cache Cypress binary
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/Cypress
-          key: cypress-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('poc2/playground/package-lock.json') }}
-
       - name: Install dependencies
         working-directory: poc2/playground
         run: npm ci
@@ -230,8 +224,8 @@ jobs:
           context: poc2/system/telemetry-writer
           load: true
           tags: smoke/telemetry-writer:test
-          cache-from: type=gha,scope=kind-${{ matrix.credentials }}-telemetry-writer,timeout=3m
-          cache-to: type=gha,mode=max,scope=kind-${{ matrix.credentials }}-telemetry-writer,timeout=3m,ignore-error=true
+          cache-from: type=gha,scope=kind-telemetry-writer,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-telemetry-writer,timeout=3m,ignore-error=true
 
       - name: Build dataset-collector image
         uses: docker/build-push-action@v6
@@ -239,8 +233,8 @@ jobs:
           context: poc2/system/dataset-collector
           load: true
           tags: smoke/dataset-collector:test
-          cache-from: type=gha,scope=kind-${{ matrix.credentials }}-dataset-collector,timeout=3m
-          cache-to: type=gha,mode=max,scope=kind-${{ matrix.credentials }}-dataset-collector,timeout=3m,ignore-error=true
+          cache-from: type=gha,scope=kind-dataset-collector,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-dataset-collector,timeout=3m,ignore-error=true
 
       - name: Build worker agent binary
         working-directory: semantic-map/go
@@ -258,8 +252,8 @@ jobs:
           context: semantic-map
           load: true
           tags: smoke/di-agent:test
-          cache-from: type=gha,scope=kind-${{ matrix.credentials }}-di-agent,timeout=3m
-          cache-to: type=gha,mode=max,scope=kind-${{ matrix.credentials }}-di-agent,timeout=3m,ignore-error=true
+          cache-from: type=gha,scope=kind-di-agent,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-di-agent,timeout=3m,ignore-error=true
 
       - name: Load images into kind
         run: |
@@ -342,12 +336,29 @@ jobs:
       - name: Test Kafka telemetry through agent and InfluxDB
         run: python3 poc2/scripts/e2e_telemetry.py
 
-      - name: Build and load replay and playground images
+      - name: Build replay-streamer image
         if: matrix.credentials == 'demo'
-        run: |
-          docker build -t smoke/replay-streamer:test poc2/system/replay-streamer
-          docker build -t smoke/playground:test poc2/playground
-          kind load docker-image smoke/replay-streamer:test smoke/playground:test --name di-agent-smoke
+        uses: docker/build-push-action@v6
+        with:
+          context: poc2/system/replay-streamer
+          load: true
+          tags: smoke/replay-streamer:test
+          cache-from: type=gha,scope=kind-replay-streamer,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-replay-streamer,timeout=3m,ignore-error=true
+
+      - name: Build playground image
+        if: matrix.credentials == 'demo'
+        uses: docker/build-push-action@v6
+        with:
+          context: poc2/playground
+          load: true
+          tags: smoke/playground:test
+          cache-from: type=gha,scope=kind-playground,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-playground,timeout=3m,ignore-error=true
+
+      - name: Load replay and playground images into kind
+        if: matrix.credentials == 'demo'
+        run: kind load docker-image smoke/replay-streamer:test smoke/playground:test --name di-agent-smoke
 
       - name: Install PostgreSQL and load the replay fixture
         if: matrix.credentials == 'demo'

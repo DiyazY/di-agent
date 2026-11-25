@@ -315,15 +315,10 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push to `main` and every PR: `go.mod` tidy, `go build ./...`, `go vet ./...`, and `go test -race ./...`. Run `go test -race ./...` locally first; it is the slowest gate and the one that catches real bugs.
 
-CI caches Go, pip and npm dependencies, as well as the Cypress binary used by
-the stubbed playground suite. The Cypress key includes the lockfile hash and
-runner OS and architecture. Cold or evicted caches still run normal installs
-and tests; any savings require measurement in Actions.
-
-Kind smoke builds use Buildx layer caches scoped by service and credential
-matrix entry, and load images locally before importing them into Kind. Cache
-exports are best effort; GitHub's branch cache visibility and eviction rules
-still apply. Cache transfers and extra setup can outweigh the savings.
+CI uses Go, pip and npm dependency caches. Kind smoke images use Buildx with
+GitHub Actions layer caches. In one warm-cache run, the three demo image builds
+took 14s versus 50s cold, and the full demo job took 3m47s versus 4m42s; results
+vary with runner and cache availability.
 
 ### Public/private boundary
 
