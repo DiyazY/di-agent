@@ -1798,22 +1798,29 @@ The origin is unauthenticated. Nothing is applied to `statemap.Map` or
 `gossip.interval` defaults to zero, preserving manual-only exchange. A positive
 interval (at least one second) runs `pkg/gossip.Exchange` through
 `pkg/agentmain/gossip_loop.go`: it pulls validated inventories from a rotating
-subset of registered URLs and fetches only missing objects. Each sequential round
+subset of registered or discovered URLs and fetches only missing objects. Each sequential round
 checks at most two peers, attempts at most eight object fetches (including failed
 ones), and gives network requests a five-second deadline; synchronous durable
 writes can take longer. Inventories are bounded to 16 KiB and 128
 unique valid hashes. Per-peer cursors keep corrupt leading hashes from starving
-later content; removed peers' cursors are discarded. Newly admitted objects are
+later content; cursors remain across active-set rotations and are discarded when
+peers leave. Newly admitted objects are
 advertised by the same inventory endpoint, allowing A -> B -> C propagation
-without C knowing A. The loop reads the live registry, uses positive interval
+without C knowing A. The loop reads the live registry or discovery set, uses positive interval
 jitter, reports failures/recovery, and is cancelled and awaited at shutdown.
 Repeated full-inventory pulls also reconcile missed inventories and failed
 fetches after a temporary interruption. Recovery requires reachable configured
 pull paths, available capacity, and at least one retained copy.
 
-This is pull-based object dissemination, not a gossip membership protocol:
-no discovery, locality policy, authenticated origin, or
-version-ordering of mutable state exists here. See
+Optional `pkg/gossip.Membership` uses memberlist over TCP and UDP with explicit
+seed addresses, site labels and allowed CIDRs. It keeps discovery separate from
+the general peer registry, bounds the rotating object-exchange active set, and
+checks the site and immediate source CIDR on gossip GETs. Memberlist candidate
+count and protocol traffic are not capped by the active-set limit. Seed retries
+allow a node to reconnect after an outage. These checks do not authenticate or
+encrypt membership or HTTP traffic; this is for isolated trusted networks, not
+a security boundary. No authenticated origin or version-ordering of mutable state
+exists here. See
 [the object exchange reference](README.md#experimental-gossip-objects).
 
 ### Trust mechanics

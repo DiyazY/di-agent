@@ -1299,9 +1299,16 @@ See `scenarios/` for five seed scenario files to drive a `script` collector with
 | `node.ingest_scope`          | `self`  | `self` ingests only this machine's samples. `any` aggregates every machine's telemetry into one map — correct for replaying a testbed into a single daemon, wrong for a deployment. |
 | `peers.state_poll`       | `30s`   | How often to fetch each peer's map. `0s` disables polling, leaving `GET /state/cluster` to report only what a manual refresh collected. |
 | `peers.state_stale`      | `90s`   | How old a peer's snapshot may be before the cluster view marks it history. Nothing is deleted at this age: during a partition the last snapshot is all this agent has about that node. |
-| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange; no discovery. See [gossip objects](#experimental-gossip-objects). |
-| `gossip.interval`        | `0s` | `0s` preserves manual-only exchange. A positive interval (at least `1s`, requiring `gossip.enabled: true`) enables bounded periodic pulls from registered peers. |
+| `gossip.enabled`         | `false` | Expose experimental content-addressed object exchange. See [gossip objects](#experimental-gossip-objects). |
+| `gossip.interval`        | `0s` | `0s` preserves manual-only exchange. A positive interval (at least `1s`, requiring `gossip.enabled: true`) enables bounded periodic pulls from registered or discovered peers. |
 | `gossip.storage_dir`     | `""` | Existing dedicated directory for durable gossip objects; empty keeps them only in memory. Requires `gossip.enabled: true`. |
+| `gossip.membership.enabled` | `false` | Enable site-scoped memberlist discovery; requires enabled gossip and a positive interval. |
+| `gossip.membership.site` | `""` | Shared site label, 1–63 ASCII letters, digits, `.`, `_` or `-`. |
+| `gossip.membership.bind_addr` | `""` | Specific literal IP to bind and advertise, inside an allowed CIDR. `node.addr` must listen on this IP or a wildcard. |
+| `gossip.membership.bind_port` | `7946` | Memberlist TCP and UDP port, 1–65535. |
+| `gossip.membership.seeds` | `[]` | Up to 16 seed addresses as literal `IP:port` values inside the allowed CIDRs. |
+| `gossip.membership.allowed_cidrs` | `[]` | Required nonempty list of CIDRs limiting member addresses and gossip network destinations. |
+| `gossip.membership.max_active_peers` | `4` | Maximum discovered peers selected for object exchange, from 1 to 32. |
 
 **Explain layer** (all optional; `POST /explain` returns 501 unless `explain.provider` is set). Full walkthrough in [§8](#8-natural-language-explain-explain).
 
@@ -1559,8 +1566,8 @@ These endpoints decide *where work goes*. What a peer knows about its own system
 Set `gossip.enabled: true` on each participating agent to expose the object
 exchange below. It is off by default. With `gossip.interval: 0s` (the default),
 exchange remains manual-only. A positive interval enables periodic pull-based
-gossip over registered peers, **not** discovery, a membership/failure-detection
-protocol, or automatic semantic-state replication.
+gossip over registered peers by default. Optional site-scoped discovery is
+described below. Neither mode automatically replicates semantic state.
 
 An object is an immutable JSON envelope:
 
@@ -1612,7 +1619,7 @@ endpoints are unauthenticated: use only an isolated trusted network.
 
 With a positive interval, the loop performs an immediate round, then waits the
 configured interval plus 0-10% positive jitter. Rounds do not overlap. Each
-round reads the current peer registry, checks at most two peers, and fetches at
+round reads the current peer registry or discovered active set, checks at most two peers, and fetches at
 most eight missing objects, including failed attempts. Inventories are limited
 to 16 KiB and 128 unique hashes, and network requests share a five-second round
 deadline. Durable filesystem writes may take longer.
@@ -1622,6 +1629,34 @@ in-flight requests and waits for the loop to finish.
 
 Objects can propagate through intermediate peers. Delivery requires reachable
 configured pull paths and available storage; there is no cluster-wide guarantee.
+
+#### Site-scoped discovery
+
+Discovery is off by default. Enable `gossip.membership.enabled` alongside
+`gossip.enabled` and a positive `gossip.interval`; configure a shared `site`,
+an explicit `bind_addr`, nonempty `allowed_cidrs`, and seed `IP:port` addresses.
+Each node needs a distinct `node.id`, a reachable HTTP listener on `node.addr`,
+and TCP and UDP connectivity on its membership port. An initial seed may have
+an empty seed list. Other nodes retry their seeds one at a time every 10 seconds,
+including after failures. Addresses must be literal IPs; discovery advertises
+the membership bind IP and the port from `node.addr`, so NAT or a different
+HTTP advertising address is not supported.
+
+Memberlist maintains discovered candidates separately from `/peers`, semantic
+state polling, and scheduling. A rotating set of at most `max_active_peers`
+is eligible for object exchange, while the existing two-peer and eight-fetch
+per-round limits still apply. The limit does not cap the number of memberlist
+members or their protocol traffic. In discovery mode manual fetch still uses a
+registered peer ID, but an outbound fetch requires its URL to exactly match a
+currently active discovered member. Gossip inventory and object GETs also require a matching
+`X-Di-Gossip-Site` header and an immediate source IP in an allowed CIDR.
+Publishing and other HTTP routes are unchanged.
+
+Site labels, CIDR checks and content hashes do **not** authenticate peers or
+encrypt traffic. Memberlist and the agent's HTTP API are unauthenticated; a
+participant can claim a site or origin. Use only an isolated trusted network
+and enforce network boundaries externally, including both membership and HTTP
+ports.
 
 ### `mapctl peers`
 
