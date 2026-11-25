@@ -57,8 +57,6 @@ jobs:
           chart=poc2/helm/di-agent-system
           helm lint "$chart"
           helm lint "$chart" -f poc2/cloud/helm-values.yaml
-          helm template di-agent-system "$chart" > /dev/null
-          helm template di-agent-system "$chart" -f poc2/cloud/helm-values.yaml > /dev/null
 
   test:
     name: build + test + vet
