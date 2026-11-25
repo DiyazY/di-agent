@@ -5,7 +5,7 @@ COPY package*.json ./
 # Cypress is used only by local E2E tests. Keep its npm package available for
 # local development, but do not download its browser binary into the build
 # stage; it is not copied into the final nginx image.
-RUN CYPRESS_INSTALL_BINARY=0 npm install
+RUN CYPRESS_INSTALL_BINARY=0 npm ci
 COPY . .
 RUN npm run build
 
