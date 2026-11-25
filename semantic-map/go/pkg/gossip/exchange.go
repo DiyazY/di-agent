@@ -40,13 +40,19 @@ type RoundResult struct {
 // Round is sequential, including concurrent callers. Failed fetches consume the
 // attempt budget too, so corrupt advertisements cannot make a round unbounded.
 func (e *Exchange) Round(ctx context.Context, peerURLs []string) (RoundResult, error) {
+	return e.RoundWithKnownPeers(ctx, peerURLs, peerURLs)
+}
+
+// RoundWithKnownPeers preserves inventory cursors for known peers outside this
+// round's active subset, and discards cursors when peers leave.
+func (e *Exchange) RoundWithKnownPeers(ctx context.Context, peerURLs, knownURLs []string) (RoundResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, RoundTimeout)
 	defer cancel()
 
-	present := make(map[string]bool, len(peerURLs))
-	for _, url := range peerURLs {
+	present := make(map[string]bool, len(knownURLs))
+	for _, url := range knownURLs {
 		present[url] = true
 	}
 	for url := range e.offsets {

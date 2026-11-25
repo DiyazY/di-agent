@@ -164,17 +164,20 @@ func TestCorruptAdvertisementsConsumeBudgetWithoutStarvingOtherObjects(t *testin
 	defer srv.Close()
 	local := NewMemory()
 	exchange := NewExchange(local, NewClient())
-	result, err := exchange.Round(context.Background(), []string{srv.URL})
+	known := []string{srv.URL}
+	result, err := exchange.RoundWithKnownPeers(context.Background(), known, known)
 	if !errors.Is(err, ErrHashMismatch) || result.Attempted != MaxFetchesPerRound ||
 		requests.Load() != MaxFetchesPerRound || result.Added != 0 {
 		t.Fatalf("corrupt round: %+v err=%v", result, err)
 	}
-	result, err = exchange.Round(context.Background(), []string{srv.URL})
+	if _, err := exchange.RoundWithKnownPeers(context.Background(), nil, known); err != nil {
+		t.Fatal(err)
+	}
+	result, err = exchange.RoundWithKnownPeers(context.Background(), known, known)
 	if !errors.Is(err, ErrHashMismatch) || result.Attempted > MaxFetchesPerRound ||
 		requests.Load() > MaxFetchesPerRound*2 || !local.Has(healthyHash) {
 		t.Fatalf("healthy object starved behind corrupt hashes: %+v err=%v", result, err)
 	}
-
 }
 
 func TestRoundDeadlineAndPeerRotationDoNotStarveAHealthyPeer(t *testing.T) {
