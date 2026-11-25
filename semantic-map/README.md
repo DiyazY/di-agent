@@ -375,29 +375,34 @@ Three stable queries across all profiles:
 
 ### `GET /cost?task=<type>&node=<id>`
 
-Estimates the cost of executing a task on a given node.
+Estimates the cost of executing a task on this node. `node` may be omitted; under the default `ingest-scope=self`, any other node id than this agent's own answers `409`, naming that node's agent when it is a registered peer. The response uses the Go field names, as do `/recommend` and `/simulate`.
 
 ```json
 {
-  "cpu_cost": 0.12,
-  "energy_cost": 0.034,
-  "latency_estimate": 7.4,
-  "confidence": 0.62,
-  "rationale": "task=pod-scheduling node=node_1 path=[SC→RC(0.58), RC→PS(0.41)]",
-  "graph_path_used": ["SC→RC(0.58)", "RC→PS(0.41)"]
+  "CPUCost": 0.12,
+  "ResourceCost": 0.41,
+  "EnergyCost": 0,
+  "LatencyEstimate": 0.33,
+  "Confidence": 0.62,
+  "Rationale": "...",
+  "GraphPathUsed": ["..."],
+  "ResourceSensitivity": 0.58,
+  "PressureSensitivity": 0.41,
+  "DecisionID": "...",
+  "Caveats": null
 }
 ```
 
 ### `POST /recommend`
 
-Finds the best peer for task offloading. Returns `InsufficientTrustError` if no peer meets the minimum trust threshold.
+Finds the best peer for task offloading. Answers `409` if no peer qualifies and `502` if a peer query failed. The body is an `OffloadContext` with Go field names; a snake_case key such as `task_type` is ignored, not rejected.
 
 ```json
 // request
-{"task_type":"pod-scheduling","source_node_id":"node_1","data_size_bytes":2048,"latency_budget_ms":500}
+{"TaskType":"pod-scheduling","SourceNodeID":"node_1","DataSizeBytes":2048,"LatencyBudgetMs":500}
 
 // response
-{"peer_id":"node_2","expected_savings":0.018,"rationale":"...","graph_path_used":["..."]}
+{"PeerID":"node_2","ExpectedSavings":0.018,"Rationale":"...","GraphPathUsed":["..."]}
 ```
 
 ### `POST /simulate`
@@ -405,22 +410,23 @@ Finds the best peer for task offloading. Returns `InsufficientTrustError` if no 
 Pre-flight simulation before committing an offload. Read-only — never modifies state.
 
 ```json
-// request
-{"context":{...},"target_node_id":"node_2"}
+// request: the wrapper keys are snake_case, the context inside is an OffloadContext
+{"context":{"TaskType":"pod-scheduling"},"target_node_id":"node_2"}
 
 // response
 {
-  "expected_latency": 8.1,
-  "expected_energy": 0.029,
-  "confidence": 0.55,
-  "p95_latency": 12.4,
-  "p95_energy": null,
-  "risk_flags": [],
-  "graph_path_used": ["..."]
+  "ExpectedLatency": 8.1,
+  "ExpectedResourceCost": 0.4,
+  "ExpectedEnergy": 0,
+  "Confidence": 0.55,
+  "GraphPathUsed": ["..."],
+  "P95Latency": null,
+  "P95ResourceCost": null,
+  "RiskFlags": null
 }
 ```
 
-`p95_*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward).
+`P95*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward). An empty `Caveats` or `RiskFlags` is `null`, not `[]`.
 
 ### `POST /tasks` · `POST /offers` · `GET /tasks`
 
@@ -696,7 +702,7 @@ composition candidate withdrawn before a cycle reached it is still confirmed by 
 
 ### Full endpoint table
 
-The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)).
+The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)). `POST /recommend` and `POST /simulate` require it too, and answer `400` with that JSON error without it.
 
 | Verb | Path                                | Body / params                                            | Since    |
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |

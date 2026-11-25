@@ -183,7 +183,7 @@ Then update the MetricType catalogue in [ARCHITECTURE §5](semantic-map/ARCHITEC
 
 ### 4.3 Swap a contract implementation
 
-Five contracts, all swappable: `Collector` (above), `Ontology`, `Reasoner`, `Proposer`, `Tuner`. Agent code never imports an implementation directly — it takes the interface.
+Seven contracts, all swappable: the five in `pkg/contracts` — `Collector` (above), `Ontology`, `Reasoner`, `Proposer`, `Tuner` — plus `runtime.Runtime` and `actuators.Actuator`. Agent code never imports an implementation directly — it takes the interface.
 
 `Storage` and `Updater` used to be here and were deleted rather than reimplemented: they held a second model of the relations the state model already holds, learning from the same telemetry into a different structure. The state model itself (`pkg/statemap`) is deliberately *not* a contract — one implementation, and it is the agent's single model, so an interface there would invite exactly the second implementation that removal eliminated. [ARCHITECTURE §2](semantic-map/ARCHITECTURE.md#2-contract-architecture) has the reasoning.
 

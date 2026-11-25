@@ -48,11 +48,9 @@ package agentmain
 //                                                                          200 x-ndjson (stream:true)
 // /ui/...                           GET     —                              200 (embedded HTML; only with node.ui)
 //
-// Endpoints above the divider are pre-existing and keep their original
-// plain-text http.Error format. Endpoints below were added in the Phase 1
-// HTTP-API expansion and emit JSON errors via writeError; their POST
-// handlers gate on requireJSON for CSRF mitigation (path-only candidate
-// endpoints excepted).
+// Endpoints above the divider are pre-existing; those below were added in the
+// Phase 1 HTTP-API expansion. Error format and the requireJSON guard follow the
+// convention on registerRoutes.
 
 import (
 	"bytes"
@@ -77,10 +75,15 @@ import (
 // point for the daemon's URL surface; main only constructs the mux, the
 // SemanticMap, and the http.Server.
 //
-// Convention: the EXISTING endpoints (/cost, /recommend, /simulate, /candidates)
-// keep their original http.Error plain-text error format to minimize diff. Every NEW endpoint added in this expansion uses
-// writeError to emit a JSON {"error":"..."} body, and every new POST
-// handler calls requireJSON at the top as a lightweight CSRF mitigation.
+// Convention: an API endpoint's error is a JSON body with an "error" field,
+// usually written by writeError, and every POST that takes a body calls
+// requireJSON at the top as a lightweight CSRF mitigation. /recommend and
+// /simulate take the guard too: /recommend moves peer trust, so a cross-origin
+// form post must not reach it. Plain-text http.Error responses remain in three
+// places: a body that fails to decode on /recommend and /simulate, every error of
+// GET /candidates, and GET /config's 500. One status is not an error body at all:
+// a forgotten property's 410 is its tombstone record {id, retired_at, forgotten}.
+// Outside the API, the console's /ui/ 404s are the mux's plain text.
 func registerRoutes(mux *http.ServeMux, sm *semmap.SemanticMap, explainer explain.Explainer) {
 	registerExistingRoutes(mux, sm)
 	registerReadRoutes(mux, sm)
@@ -150,8 +153,15 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, result)
 	})
 
-	// POST /recommend  {"task_type":"...","source_node_id":"...","data_size_bytes":1024,"latency_budget_ms":500}
+	// POST /recommend  {"TaskType":"...","SourceNodeID":"...","DataSizeBytes":1024,"LatencyBudgetMs":500}
+	// OffloadContext has no JSON tags, so the keys are its Go field names.
+	// Not a read: the peers it queries are rewarded or penalised, so it takes the
+	// same CSRF guard as the mutations below.
 	mux.HandleFunc("POST /recommend", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var ctx types.OffloadContext
 		if err := json.NewDecoder(r.Body).Decode(&ctx); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -165,8 +175,12 @@ func registerExistingRoutes(mux *http.ServeMux, sm *semmap.SemanticMap) {
 		writeJSON(w, result)
 	})
 
-	// POST /simulate  {"context":{...},"target_node_id":"node_2"}
+	// POST /simulate  {"context":{"TaskType":"..."},"target_node_id":"node_2"}
 	mux.HandleFunc("POST /simulate", func(w http.ResponseWriter, r *http.Request) {
+		if err := requireJSON(r); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var req struct {
 			Context      types.OffloadContext `json:"context"`
 			TargetNodeID string               `json:"target_node_id"`
@@ -254,8 +268,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // writeError emits a JSON-encoded error response with the given status code.
-// Used by every new endpoint added in the HTTP expansion; existing endpoints
-// keep plain-text http.Error for diff minimization.
+// It is the error format of the API endpoints, apart from the exceptions listed
+// on registerRoutes.
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
