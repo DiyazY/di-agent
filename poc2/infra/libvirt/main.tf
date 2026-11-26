@@ -9,8 +9,8 @@ resource "libvirt_pool" "pool" {
 
 # Download Ubuntu 22.04 (Jammy) cloud image
 resource "libvirt_volume" "ubuntu_base" {
-  name   = "ubuntu-jammy-base.qcow2"
-  pool   = libvirt_pool.pool.name
+  name = "ubuntu-jammy-base.qcow2"
+  pool = libvirt_pool.pool.name
   target = {
     format = {
       type = "qcow2"
@@ -26,9 +26,9 @@ resource "libvirt_volume" "ubuntu_base" {
 
 # Create boot disk for VM (uses base image as backing store)
 resource "libvirt_volume" "vm_disk" {
-  count  = var.vm_count
-  name   = "vm${count.index + 1}-disk"
-  pool   = libvirt_pool.pool.name
+  count = var.vm_count
+  name  = "vm${count.index + 1}-disk"
+  pool  = libvirt_pool.pool.name
   target = {
     format = {
       type = "qcow2"
@@ -39,7 +39,7 @@ resource "libvirt_volume" "vm_disk" {
   capacity_unit = "GiB"
 
   backing_store = {
-    path   = libvirt_volume.ubuntu_base.path
+    path = libvirt_volume.ubuntu_base.path
     format = {
       type = "qcow2"
     }
@@ -52,9 +52,9 @@ resource "libvirt_cloudinit_disk" "vm_init" {
   name  = "vm${count.index + 1}-cloudinit"
 
   # User-data: Configure root password, enable SSH, install packages
-  user_data      = file("${path.module}/config/cloud_init.yml")
+  user_data = file("${path.module}/config/cloud_init.yml")
   # Meta-data: Instance identification
-  meta_data      = templatefile("${path.module}/config/metadata.yml", {
+  meta_data = templatefile("${path.module}/config/metadata.yml", {
     instance_id = "vm-${count.index + 1}"
     hostname    = "${var.vm_hostname}${count.index + 1}"
   })
@@ -63,9 +63,9 @@ resource "libvirt_cloudinit_disk" "vm_init" {
 
 # Upload cloud-init ISO for VM1 to a volume
 resource "libvirt_volume" "vm_cloudinit" {
-  count  = var.vm_count
-  name = "vm${count.index + 1}-cloudinit.iso"
-  pool = libvirt_pool.pool.name
+  count = var.vm_count
+  name  = "vm${count.index + 1}-cloudinit.iso"
+  pool  = libvirt_pool.pool.name
   # Format will be auto-detected as "iso"
 
   create = {
@@ -77,16 +77,16 @@ resource "libvirt_volume" "vm_cloudinit" {
 
 # Virtual Machines
 resource "libvirt_domain" "vm1" {
-  count  = var.vm_count
-  name   = "${var.vm_hostname}${count.index + 1}"
-  memory = 2
+  count       = var.vm_count
+  name        = "${var.vm_hostname}${count.index + 1}"
+  memory      = 2
   memory_unit = "GiB"
-  vcpu   = count.index == 0 ? 2 : 1 # First Control plane node gets 2 vCPUs, worker nodes get 1 vCPU
-  type = "kvm"
+  vcpu        = count.index == 0 ? 2 : 1 # First Control plane node gets 2 vCPUs, worker nodes get 1 vCPU
+  type        = "kvm"
 
   # Boot configuration
   os = {
-    type    = "hvm"
+    type         = "hvm"
     type_arch    = "x86_64"
     type_machine = "q35"
   }
@@ -140,8 +140,8 @@ resource "libvirt_domain" "vm1" {
     interfaces = [
       # Network interface connected to default network
       {
-        model = { 
-          type = "virtio" 
+        model = {
+          type = "virtio"
         }
         source = {
           network = {

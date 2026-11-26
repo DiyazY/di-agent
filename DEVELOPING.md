@@ -315,6 +315,13 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push to `main` and every PR: `go.mod` tidy, `go build ./...`, `go vet ./...`, and `go test -race ./...`. Run `go test -race ./...` locally first; it is the slowest gate and the one that catches real bugs.
 
+The infrastructure job runs `terraform fmt -check -diff -recursive`,
+`terraform init -backend=false`, and `terraform validate` for both Terraform
+roots, plus `helm lint` with default and cloud values. It uses no credentials
+and does not plan or deploy. The separate kind job exercises the chart in a
+temporary Kubernetes cluster. Branch protection determines whether the checks
+are required for merge.
+
 CI uses Go, pip and npm dependency caches. Kind smoke images use Buildx with
 GitHub Actions layer caches. In one warm-cache run, the three demo image builds
 took 14s versus 50s cold, and the full demo job took 3m47s versus 4m42s; results

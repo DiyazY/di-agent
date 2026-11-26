@@ -68,23 +68,30 @@ When migrating, remove the old Helm Deployment `di-agent`, if present, and the s
 
 The libvirt Terraform root moved from `poc2/` to `poc2/infra/libvirt/`.
 Fresh labs need no migration. For an existing lab, stop any Terraform runs,
-back up the local state securely, and move `terraform.tfstate` and
+record the currently selected workspace with `terraform workspace show` from
+the old root, back up the local state securely, and move `terraform.tfstate` and
 `terraform.tfstate.backup` (if present) to the new root. Move
 `terraform.tfstate.d/` if you use named workspaces, along with any local
 `.tfvars` files and `.terraform.lock.hcl`. Do not overwrite state already
 present at the destination, commit state, or reuse old saved plans.
 
-From `poc2/`, verify the migration before applying:
+From `poc2/`, initialize the new root and select the recorded workspace,
+replacing `YOUR_WORKSPACE` with its name (including `default` if selected).
+If `TF_WORKSPACE` is set, unset it before selecting; it overrides the selected
+workspace.
 
 ```bash
 terraform -chdir=infra/libvirt init
+terraform -chdir=infra/libvirt workspace select YOUR_WORKSPACE
+terraform -chdir=infra/libvirt workspace show
 terraform -chdir=infra/libvirt state list
 terraform -chdir=infra/libvirt plan
 ```
 
-Make sure Terraform sees the existing lab and does not propose unexpected
-creations or replacements. `make provision` and `make teardown` use the new
-root automatically.
+Confirm the workspace and resource list match the existing lab, and the plan
+does not propose unexpected creations, replacements, or deletions. Repeat the
+workspace check before provisioning or teardown: both use the new root, and
+`make teardown` destroys its selected workspace without a confirmation prompt.
 
 ## Required secrets and configuration
 

@@ -19,6 +19,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  infrastructure-check:
+    name: Terraform and Helm checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+
+      - name: Check and validate Terraform roots
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_INPUT: "false"
+        run: |
+          set -euo pipefail
+          for root in poc2/cloud/eks poc2/infra/libvirt; do
+            terraform fmt -check -diff -recursive "$root"
+            terraform -chdir="$root" init -backend=false -input=false -no-color
+            terraform -chdir="$root" validate -no-color
+          done
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Lint and render Helm profiles
+        run: |
+          set -euo pipefail
+          chart=poc2/helm/di-agent-system
+          helm lint "$chart"
+          helm lint "$chart" -f poc2/cloud/helm-values.yaml
+
   test:
     name: build + test + vet
     runs-on: ubuntu-latest
