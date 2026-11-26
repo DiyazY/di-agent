@@ -315,6 +315,11 @@ Some changes require a doc update **in the same commit**. From the repo-root `CL
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on every push to `main` and every PR: `go.mod` tidy, `go build ./...`, `go vet ./...`, and `go test -race ./...`. Run `go test -race ./...` locally first; it is the slowest gate and the one that catches real bugs.
 
+CI uses Go, pip and npm dependency caches. Kind smoke images use Buildx with
+GitHub Actions layer caches. In one warm-cache run, the three demo image builds
+took 14s versus 50s cold, and the full demo job took 3m47s versus 4m42s; results
+vary with runner and cache availability.
+
 ### Public/private boundary
 
 This repository is **public**. The `mega-research` repository is **private**. Implementation code, compliance suites, and artifacts a reader needs to reproduce or extend published work belong here. Raw experimental data, analysis scripts, manuscript drafts, reviewer correspondence, and intermediate results stay private.

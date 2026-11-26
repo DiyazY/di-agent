@@ -22,6 +22,7 @@ jobs:
   test:
     name: build + test + vet
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     defaults:
       run:
@@ -79,6 +80,7 @@ jobs:
   demo:
     name: dev.sh demo (smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: test
 
     defaults:
@@ -102,6 +104,7 @@ jobs:
   system-tests:
     name: poc2/system pytest suite
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -128,6 +131,7 @@ jobs:
   playground-tests:
     name: poc2/playground Cypress suite
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -177,6 +181,7 @@ jobs:
   kind-smoke-test:
     name: kind Helm smoke test (di-agent-system chart, ${{ matrix.credentials }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -210,17 +215,45 @@ jobs:
           go-version-file: semantic-map/go/go.mod
           cache-dependency-path: semantic-map/go/go.sum
 
-      - name: Build chart-managed images
+      - name: Set up Docker Buildx for smoke images
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build telemetry-writer image
+        uses: docker/build-push-action@v6
+        with:
+          context: poc2/system/telemetry-writer
+          load: true
+          tags: smoke/telemetry-writer:test
+          cache-from: type=gha,scope=kind-telemetry-writer,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-telemetry-writer,timeout=3m,ignore-error=true
+
+      - name: Build dataset-collector image
+        uses: docker/build-push-action@v6
+        with:
+          context: poc2/system/dataset-collector
+          load: true
+          tags: smoke/dataset-collector:test
+          cache-from: type=gha,scope=kind-dataset-collector,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-dataset-collector,timeout=3m,ignore-error=true
+
+      - name: Build worker agent binary
+        working-directory: semantic-map/go
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
         run: |
-          set -euo pipefail
-          declare -A contexts=(
-            [telemetry-writer]=poc2/system/telemetry-writer
-            [dataset-collector]=poc2/system/dataset-collector
-          )
-          for service in "${!contexts[@]}"; do
-            docker build -t "smoke/${service}:test" "${contexts[$service]}"
-          done
-          CGO_ENABLED=0 REGISTRY=smoke TAG=test bash poc2/scripts/build-push-images.sh --build-only di-agent
+          mkdir -p cmd/agent/tmp
+          go build -o cmd/agent/tmp/di-agent-poc ./cmd/agent/
+
+      - name: Build worker agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: semantic-map
+          load: true
+          tags: smoke/di-agent:test
+          cache-from: type=gha,scope=kind-di-agent,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-di-agent,timeout=3m,ignore-error=true
 
       - name: Load images into kind
         run: |
@@ -303,12 +336,29 @@ jobs:
       - name: Test Kafka telemetry through agent and InfluxDB
         run: python3 poc2/scripts/e2e_telemetry.py
 
-      - name: Build and load replay and playground images
+      - name: Build replay-streamer image
         if: matrix.credentials == 'demo'
-        run: |
-          docker build -t smoke/replay-streamer:test poc2/system/replay-streamer
-          docker build -t smoke/playground:test poc2/playground
-          kind load docker-image smoke/replay-streamer:test smoke/playground:test --name di-agent-smoke
+        uses: docker/build-push-action@v6
+        with:
+          context: poc2/system/replay-streamer
+          load: true
+          tags: smoke/replay-streamer:test
+          cache-from: type=gha,scope=kind-replay-streamer,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-replay-streamer,timeout=3m,ignore-error=true
+
+      - name: Build playground image
+        if: matrix.credentials == 'demo'
+        uses: docker/build-push-action@v6
+        with:
+          context: poc2/playground
+          load: true
+          tags: smoke/playground:test
+          cache-from: type=gha,scope=kind-playground,timeout=3m
+          cache-to: type=gha,mode=max,scope=kind-playground,timeout=3m,ignore-error=true
+
+      - name: Load replay and playground images into kind
+        if: matrix.credentials == 'demo'
+        run: kind load docker-image smoke/replay-streamer:test smoke/playground:test --name di-agent-smoke
 
       - name: Install PostgreSQL and load the replay fixture
         if: matrix.credentials == 'demo'
@@ -390,6 +440,7 @@ jobs:
   build-push-images:
     name: build + push images (${{ matrix.service }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [test, system-tests, kind-smoke-test, playground-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
