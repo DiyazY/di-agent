@@ -541,8 +541,8 @@ func newCoordinationAgent(t *testing.T, name string, peerURLs ...string) *coordi
 // talk to a remote peer: GET /cost, GET /healthz, POST /offers. The agent
 // daemon's full route set lives in pkg/agentmain and cannot be
 // imported by tests in this package — so we re-wire just what the scenario
-// requires. The wire shapes match the daemon exactly so peers.Client works
-// against either implementation.
+// requires. The response shapes match the daemon, but the stand-in does not
+// enforce the daemon's node-local /cost guard.
 func registerScenarioHTTP(mux *http.ServeMux, sm *semmap.SemanticMap) {
 	enter := map[string]float64{}
 	for _, l := range spec.Default().Loops.Relief.Levers {

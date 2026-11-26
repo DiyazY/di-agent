@@ -82,7 +82,7 @@ var ErrNotImplemented = contractError("operation not implemented by this ontolog
 //     produce a rationale must return ErrNoRationale.
 //   - Pure simulation: SimulateOutcome never writes to the state model or any contract.
 //   - Trust filtering: RecommendPeer never returns a peer below the minimum
-//     trust threshold; returns ErrInsufficientTrust if no peer qualifies.
+//     trust threshold; reports peer query failures separately from no qualifying peer.
 type ReasonerContract interface {
 	CostOfAction(taskType, nodeID string) (*types.ActionCost, error)
 	RecommendPeer(ctx *types.OffloadContext) (*types.PeerRecommendation, error)
@@ -93,6 +93,7 @@ type ReasonerContract interface {
 var (
 	ErrNoRationale       = contractError("reasoner must provide a non-empty rationale")
 	ErrInsufficientTrust = contractError("no peer meets the minimum trust threshold")
+	ErrPeerCostQuery     = contractError("peer cost query failed")
 )
 
 // ErrNoDomainModel is returned by an operation that is defined over a domain model

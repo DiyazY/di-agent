@@ -183,7 +183,7 @@ Then update the MetricType catalogue in [ARCHITECTURE §5](semantic-map/ARCHITEC
 
 ### 4.3 Swap a contract implementation
 
-Five contracts, all swappable: `Collector` (above), `Ontology`, `Reasoner`, `Proposer`, `Tuner`. Agent code never imports an implementation directly — it takes the interface.
+Seven contracts, all swappable: the five in `pkg/contracts` — `Collector` (above), `Ontology`, `Reasoner`, `Proposer`, `Tuner` — plus `runtime.Runtime` and `actuators.Actuator`. Agent code never imports an implementation directly — it takes the interface.
 
 `Storage` and `Updater` used to be here and were deleted rather than reimplemented: they held a second model of the relations the state model already holds, learning from the same telemetry into a different structure. The state model itself (`pkg/statemap`) is deliberately *not* a contract — one implementation, and it is the agent's single model, so an interface there would invite exactly the second implementation that removal eliminated. [ARCHITECTURE §2](semantic-map/ARCHITECTURE.md#2-contract-architecture) has the reasoning.
 
@@ -255,6 +255,8 @@ Then update the endpoint table in README §2 and the header comment at the top o
 go test -race ./...           # what CI runs; use before pushing
 go test -v -run TestScenario ./internal/minimal/tests/    # narrated end-to-end flows
 go test -v -run TestEvolution ./internal/minimal/tests/   # long-form convergence stories
+go build -o /tmp/di-agent-peer-e2e ./cmd/agent
+python3 ../tests/peer_e2e.py /tmp/di-agent-peer-e2e  # three real agent processes
 (cd ../sdk/python && python3 -m unittest test_di_collector)  # the Python collector SDK, stdlib only; CI runs it too
 ```
 
@@ -319,6 +321,11 @@ roots, plus `helm lint` with default and cloud values. It uses no credentials
 and does not plan or deploy. The separate kind job exercises the chart in a
 temporary Kubernetes cluster. Branch protection determines whether the checks
 are required for merge.
+
+CI uses Go, pip and npm dependency caches. Kind smoke images use Buildx with
+GitHub Actions layer caches. In one warm-cache run, the three demo image builds
+took 14s versus 50s cold, and the full demo job took 3m47s versus 4m42s; results
+vary with runner and cache availability.
 
 ### Public/private boundary
 

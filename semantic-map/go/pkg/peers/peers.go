@@ -2,12 +2,15 @@
 //
 // A Registry holds Descriptors for known remote agents, each tagged with a
 // trust score in [0,1] that the reasoner uses to weight offload candidates.
-// A Client speaks HTTP to remote agents (their /cost, /healthz, /offers
-// endpoints) so RecommendPeer can rank live peers by trust-weighted savings.
+// A Client speaks HTTP to remote agents through their /cost, /state and /offers
+// endpoints: /cost lets RecommendPeer rank live peers by trust-weighted savings,
+// /state feeds the peer state poll, and /offers carries an admission offer. It
+// can also probe /healthz, which the agent does not call yet.
 //
 // Design choice (v1): Registry and Client are concrete types, not contract
-// interfaces. The contract surface stays at five (Storage, Ontology, Updater,
-// Reasoner, Proposer, Collector). When a second implementation arrives — e.g.
+// interfaces. The contract surface stays at seven: the five in pkg/contracts
+// (Ontology, Reasoner, Proposer, Tuner, Collector) plus runtime.Runtime and
+// actuators.Actuator. When a second implementation arrives — e.g.
 // SQLite-backed peer state for richer profiles, or a gossip-based registry —
 // we promote the surface to pkg/contracts at that point.
 //
@@ -46,7 +49,8 @@ import (
 // filters peers below the configured minimum and weights savings by trust
 // when ranking candidates.
 //
-// LastSeen is updated by the reasoner whenever a successful HTTP probe lands;
+// LastSeen is updated whenever a successful HTTP probe lands, by the reasoner's
+// /cost query or the peer state poll;
 // it remains zero until first contact. LastPenalised is stamped when the agent
 // itself penalised the peer (Penalise); it stays zero for a trust an operator set,
 // which is how the reasoner tells a penalty that may expire from a floor that stays.
@@ -149,7 +153,7 @@ func (r *Registry) Remove(id string) error {
 }
 
 // Get returns a copy of the descriptor with the given ID, or (nil, nil) when
-// the ID is not registered. The nil-on-miss convention matches StorageContract.
+// the ID is not registered: a miss is not an error.
 func (r *Registry) Get(id string) (*Descriptor, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -310,8 +314,9 @@ func (r *Registry) MarkSeen(id string, when time.Time) error {
 // ── Client — outbound HTTP to peers ───────────────────────────────────────────
 
 // Client makes HTTP calls to remote agents. It is intentionally tiny: one
-// http.Client, a default timeout, and three methods that mirror the daemon's
-// /cost, /healthz, and /offers endpoints.
+// http.Client, a default timeout, and four methods that mirror the daemon's
+// /cost, /state, /healthz and /offers endpoints; Health is not called by the
+// agent yet.
 type Client struct {
 	http    *http.Client
 	Timeout time.Duration
@@ -339,11 +344,21 @@ type ActionCost struct {
 	GraphPathUsed   []string `json:"GraphPathUsed"`
 }
 
-// Cost asks the peer at peerURL what it would cost to run taskType for
-// sourceNodeID. Returns the peer's ActionCost on 2xx; otherwise wraps the
-// HTTP status, transport error, or JSON decode failure.
-func (c *Client) Cost(ctx context.Context, peerURL, taskType, sourceNodeID string) (*ActionCost, error) {
-	u := strings.TrimRight(peerURL, "/") + "/cost?task=" + escapeQuery(taskType) + "&node=" + escapeQuery(sourceNodeID)
+// CostStatusError reports a non-success response from a peer's cost endpoint.
+type CostStatusError struct {
+	PeerURL    string
+	StatusCode int
+	Body       string
+}
+
+func (e *CostStatusError) Error() string {
+	return fmt.Sprintf("peers.Client.Cost: peer %s returned %d: %s", e.PeerURL, e.StatusCode, e.Body)
+}
+
+// Cost asks the peer at peerURL what it would cost to run taskType locally.
+// It returns a CostStatusError for a non-2xx response.
+func (c *Client) Cost(ctx context.Context, peerURL, taskType string) (*ActionCost, error) {
+	u := strings.TrimRight(peerURL, "/") + "/cost?task=" + escapeQuery(taskType)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("peers.Client.Cost: %w", err)
@@ -355,7 +370,7 @@ func (c *Client) Cost(ctx context.Context, peerURL, taskType, sourceNodeID strin
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("peers.Client.Cost: peer %s returned %d: %s", peerURL, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &CostStatusError{PeerURL: peerURL, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	var out ActionCost
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

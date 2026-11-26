@@ -375,29 +375,34 @@ Three stable queries across all profiles:
 
 ### `GET /cost?task=<type>&node=<id>`
 
-Estimates the cost of executing a task on a given node.
+Estimates the cost of executing a task on this node. `node` may be omitted; under the default `ingest-scope=self`, any other node id than this agent's own answers `409`, naming that node's agent when it is a registered peer. The response uses the Go field names, as do `/recommend` and `/simulate`.
 
 ```json
 {
-  "cpu_cost": 0.12,
-  "energy_cost": 0.034,
-  "latency_estimate": 7.4,
-  "confidence": 0.62,
-  "rationale": "task=pod-scheduling node=node_1 path=[SC→RC(0.58), RC→PS(0.41)]",
-  "graph_path_used": ["SC→RC(0.58)", "RC→PS(0.41)"]
+  "CPUCost": 0.12,
+  "ResourceCost": 0.41,
+  "EnergyCost": 0,
+  "LatencyEstimate": 0.33,
+  "Confidence": 0.62,
+  "Rationale": "...",
+  "GraphPathUsed": ["..."],
+  "ResourceSensitivity": 0.58,
+  "PressureSensitivity": 0.41,
+  "DecisionID": "...",
+  "Caveats": null
 }
 ```
 
 ### `POST /recommend`
 
-Finds the best peer for task offloading. Returns `InsufficientTrustError` if no peer meets the minimum trust threshold.
+Finds the best peer for task offloading. Answers `409` if no peer qualifies and `502` if a peer query failed. The body is an `OffloadContext` with Go field names; a snake_case key such as `task_type` is ignored, not rejected.
 
 ```json
 // request
-{"task_type":"pod-scheduling","source_node_id":"node_1","data_size_bytes":2048,"latency_budget_ms":500}
+{"TaskType":"pod-scheduling","SourceNodeID":"node_1","DataSizeBytes":2048,"LatencyBudgetMs":500}
 
 // response
-{"peer_id":"node_2","expected_savings":0.018,"rationale":"...","graph_path_used":["..."]}
+{"PeerID":"node_2","ExpectedSavings":0.018,"Rationale":"...","GraphPathUsed":["..."]}
 ```
 
 ### `POST /simulate`
@@ -405,22 +410,23 @@ Finds the best peer for task offloading. Returns `InsufficientTrustError` if no 
 Pre-flight simulation before committing an offload. Read-only — never modifies state.
 
 ```json
-// request
-{"context":{...},"target_node_id":"node_2"}
+// request: the wrapper keys are snake_case, the context inside is an OffloadContext
+{"context":{"TaskType":"pod-scheduling"},"target_node_id":"node_2"}
 
 // response
 {
-  "expected_latency": 8.1,
-  "expected_energy": 0.029,
-  "confidence": 0.55,
-  "p95_latency": 12.4,
-  "p95_energy": null,
-  "risk_flags": [],
-  "graph_path_used": ["..."]
+  "ExpectedLatency": 8.1,
+  "ExpectedResourceCost": 0.4,
+  "ExpectedEnergy": 0,
+  "Confidence": 0.55,
+  "GraphPathUsed": ["..."],
+  "P95Latency": null,
+  "P95ResourceCost": null,
+  "RiskFlags": null
 }
 ```
 
-`p95_*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward).
+`P95*` is `null` on `edge-minimal` — requires Gaussian descriptors (`edge-standard` upward). An empty `Caveats` or `RiskFlags` is `null`, not `[]`.
 
 ### `POST /tasks` · `POST /offers` · `GET /tasks`
 
@@ -696,13 +702,13 @@ composition candidate withdrawn before a cycle reached it is still confirmed by 
 
 ### Full endpoint table
 
-The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)).
+The five summaries above are the original control-plane queries. Phase 1 of the control-surface work added 14 endpoints for graph introspection, ontology mutations, candidate review, meta probes, and the embedded UI. All Phase 1 endpoints return JSON on both success and failure; mutation POSTs require `Content-Type: application/json` (lightweight CSRF mitigation — see [ARCHITECTURE.md §9](ARCHITECTURE.md#9-control-surface)). `POST /recommend` and `POST /simulate` require it too, and answer `400` with that JSON error without it.
 
 | Verb | Path                                | Body / params                                            | Since    |
 | ---- | ----------------------------------- | -------------------------------------------------------- | -------- |
 | POST | `/ingest-sample`                    | `MetricSampleRequest`                                    | replay   |
 | GET  | `/cost`                             | `?task=&node=`                                           | existing |
-| POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered — an ordinary state, not a fault |
+| POST | `/recommend`                        | `OffloadContext`                                         | existing | `409` when no peer qualifies or none are registered; `502` if no peer qualifies and a peer cost query failed |
 | POST | `/simulate`                         | `{context, target_node_id}`                              | existing |
 | GET  | `/candidates`                       | `?status=all\|pending\|confirmed\|rejected\|deferred` (default pending) | existing |
 | GET  | `/graph`                            | —                                                        | Phase 1  |
@@ -1573,11 +1579,11 @@ For every call, the reasoner:
 
 1. Lists peers from the registry. Empty → `ErrInsufficientTrust` ("no peers registered").
 2. Skips any peer below `--min-trust` (default `0.5`), unless the agent itself penalised it under the floor 10 or more minutes ago; a peer an operator set under the floor is not queried again.
-3. For each survivor: `GET /cost` on the peer URL; on success `Reward` (+0.05, capped 1.0) and `MarkSeen`, and record `savings = my ResourceCost − peer ResourceCost`; on failure log and `Penalise` (−0.05, clamped at 0), stamped with the time.
+3. For each survivor: `GET /cost` on the peer URL; on success `Reward` (+0.05, capped 1.0) and `MarkSeen`, and record `savings = my ResourceCost − peer ResourceCost`; on failure log and skip it. Penalise transport, server and decode failures (−0.05, clamped at 0), but not 4xx responses.
 4. Picks the peer maximizing `savings × peer.Trust` — trust-weighted savings.
-5. If no peer beats local cost → `ErrInsufficientTrust` with rationale.
+5. If no peer beats local cost → `ErrPeerCostQuery` if a query failed, otherwise `ErrInsufficientTrust`, with rationale.
 
-Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on HTTP failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, and recommended only once its reward lifts it back to the floor; one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
+Trust dynamics in v1 are simple: default `0.5` on registration; manual override via `POST /peers/{id}/trust`; automatic `-0.05` penalty on transport, server or decode failure and `+0.05` reward on a successful `/cost`; a peer the agent itself pushed under `--min-trust` is queried again after 10 minutes, and recommended only once its reward lifts it back to the floor; one an operator set under it is not. Richer schemes (per-outcome updates after `/offers`, decay over time, signed identities) are deferred.
 
 ### Demo scenario
 

@@ -219,8 +219,8 @@ func TestClient_CostSuccessDecodesActionCost(t *testing.T) {
 		if q := r.URL.Query().Get("task"); q != "pod-scheduling" {
 			t.Errorf("task=%q", q)
 		}
-		if q := r.URL.Query().Get("node"); q != "node_A" {
-			t.Errorf("node=%q", q)
+		if _, ok := r.URL.Query()["node"]; ok {
+			t.Errorf("unexpected node query: %q", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ActionCost{
@@ -235,7 +235,7 @@ func TestClient_CostSuccessDecodesActionCost(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(2 * time.Second)
-	cost, err := c.Cost(context.Background(), srv.URL, "pod-scheduling", "node_A")
+	cost, err := c.Cost(context.Background(), srv.URL, "pod-scheduling")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestClient_CostNon200ReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(2 * time.Second)
-	if _, err := c.Cost(context.Background(), srv.URL, "x", "y"); err == nil {
+	if _, err := c.Cost(context.Background(), srv.URL, "x"); err == nil {
 		t.Error("expected error on 500; got nil")
 	}
 }
@@ -262,7 +262,7 @@ func TestClient_CostNon200ReturnsError(t *testing.T) {
 func TestClient_CostTransportErrorReturnsError(t *testing.T) {
 	c := NewClient(200 * time.Millisecond)
 	// Bind to a closed port — connect refused.
-	if _, err := c.Cost(context.Background(), "http://127.0.0.1:1", "x", "y"); err == nil {
+	if _, err := c.Cost(context.Background(), "http://127.0.0.1:1", "x"); err == nil {
 		t.Error("expected transport error on closed port; got nil")
 	}
 }
@@ -400,7 +400,7 @@ func TestClient_CostContextCancellation(t *testing.T) {
 	c := NewClient(0) // no client timeout — rely on ctx
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := c.Cost(ctx, srv.URL, "x", "y"); err == nil {
+	if _, err := c.Cost(ctx, srv.URL, "x"); err == nil {
 		t.Error("expected error on context timeout; got nil")
 	}
 }
